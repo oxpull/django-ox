@@ -1,0 +1,119 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "django-ox"
+version = "0.1.0"
+description = "Database-backed worker backend for Django's Tasks framework."
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = ["Django>=6.0"]
+authors = [{ name = "Oxpull" }]
+keywords = [
+    "django",
+    "tasks",
+    "background-tasks",
+    "task-queue",
+    "queue",
+    "worker",
+    "database",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Framework :: Django",
+    "Framework :: Django :: 6.0",
+    "Framework :: Django :: 6.1",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/oxpull/django-ox"
+Repository = "https://github.com/oxpull/django-ox"
+Changelog = "https://github.com/oxpull/django-ox/blob/main/CHANGELOG.md"
+Issues = "https://github.com/oxpull/django-ox/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-django>=4.9",
+    "pytest-cov>=6.0",
+    "ruff>=0.14",
+    "mypy>=1.16",
+    "django-stubs>=6.0",
+    "psycopg[binary]>=3.2",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/django_ox",
+    "/LICENSE",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/pyproject.toml",
+]
+exclude = ["**/__pycache__", "**/*.pyc", "/.gitignore"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/django_ox"]
+exclude = ["**/__pycache__", "**/*.pyc"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "tests.settings"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+extend-exclude = ["benchmarks", "site", ".contract-ref"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # import sorting
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "C4",  # comprehensions
+    "SIM", # simplify
+    "RUF", # ruff-specific
+    "DJ",  # flake8-django
+    "T20", # stray print()
+]
+ignore = [
+    # locked_by uses NULL as a distinct "unlocked" state; an empty-string
+    # default would need a migration for zero gain.
+    "DJ001",
+    # Django's declarative class-attribute style (Meta.indexes, migration
+    # dependencies/operations) is not a mutable-default bug.
+    "RUF012",
+]
+
+[tool.mypy]
+files = ["src"]
+strict = true
+plugins = ["mypy_django_plugin.main"]
+
+[tool.django-stubs]
+django_settings_module = "tests.settings"
+
+[tool.coverage.run]
+source = ["django_ox"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+# Measured 93.5% on SQLite (2026-08-16); the margin absorbs small drift
+# without letting coverage rot.
+fail_under = 91

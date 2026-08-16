@@ -1,0 +1,1522 @@
+{
+  "date": "2026-08-16",
+  "started_at": "2026-08-15T22:59:35+00:00",
+  "invocation": "soak.py --smoke --seed 42",
+  "seed": 42,
+  "parameters": {
+    "lock_timeout_s": 15.0,
+    "reap_interval_s": 7.5,
+    "reclaim_bound_s": 37.5,
+    "overdue_after_s": 27.5,
+    "worker_poll_interval_s": 0.2,
+    "sample_interval_s": 5.0,
+    "task_mix": [
+      [
+        "quick",
+        70
+      ],
+      [
+        "medium",
+        15
+      ],
+      [
+        "slow",
+        5
+      ],
+      [
+        "flaky_once",
+        5
+      ],
+      [
+        "doomed",
+        5
+      ]
+    ]
+  },
+  "environment": {
+    "cpu": "Apple M1 Max",
+    "memory_bytes": 68719476736,
+    "logical_cpus": "10",
+    "macos": "26.5.2",
+    "python": "3.12.13",
+    "postgres_server": "16.14 (Debian 16.14-1.pgdg13+1)",
+    "packages": {
+      "Django": "6.0.8",
+      "django-ox": "0.1.0",
+      "psycopg": "3.3.4"
+    }
+  },
+  "scenarios": [
+    {
+      "config": {
+        "name": "steady",
+        "kind": "load",
+        "duration": 30.0,
+        "producers": 2,
+        "rate": 5.0,
+        "workers": 2,
+        "concurrency": 2,
+        "chaos": null,
+        "drain_timeout": 90.0
+      },
+      "seed": 42,
+      "started_at": "2026-08-15T22:59:35+00:00",
+      "load_seconds": 30.6,
+      "wall_seconds": 35.3,
+      "kills": 0,
+      "drained": true,
+      "producers": [
+        {
+          "returncode": 0,
+          "log": "soak-steady-producer0.log",
+          "enqueued": 150,
+          "by_type": {
+            "quick": 105,
+            "slow": 7,
+            "flaky_once": 7,
+            "medium": 25,
+            "doomed": 6
+          }
+        },
+        {
+          "returncode": 0,
+          "log": "soak-steady-producer1.log",
+          "enqueued": 150,
+          "by_type": {
+            "flaky_once": 9,
+            "slow": 5,
+            "quick": 96,
+            "medium": 29,
+            "doomed": 11
+          }
+        }
+      ],
+      "events": [
+        {
+          "at": "2026-08-15T22:59:35+00:00",
+          "event": "worker_started",
+          "slot": 0,
+          "gen": 1,
+          "pid": 45936
+        },
+        {
+          "at": "2026-08-15T22:59:35+00:00",
+          "event": "worker_started",
+          "slot": 1,
+          "gen": 1,
+          "pid": 45937
+        },
+        {
+          "at": "2026-08-15T23:00:10+00:00",
+          "event": "worker_stopping",
+          "slot": 0,
+          "gen": 1,
+          "pid": 45936
+        },
+        {
+          "at": "2026-08-15T23:00:10+00:00",
+          "event": "worker_stopping",
+          "slot": 1,
+          "gen": 1,
+          "pid": 45937
+        }
+      ],
+      "rss": [
+        {
+          "slot": 0,
+          "gen": 1,
+          "samples": 8,
+          "first_kb": 13184,
+          "last_kb": 57664,
+          "max_kb": 57664,
+          "first_at_s": 0.0,
+          "last_at_s": 35.1
+        },
+        {
+          "slot": 1,
+          "gen": 1,
+          "samples": 8,
+          "first_kb": 13040,
+          "last_kb": 57392,
+          "max_kb": 57392,
+          "first_at_s": 0.0,
+          "last_at_s": 35.1
+        }
+      ],
+      "samples": [
+        {
+          "t": "2026-08-15T22:59:35+00:00",
+          "elapsed_s": 0.0,
+          "READY": 0,
+          "RUNNING": 0,
+          "SUCCESSFUL": 0,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 0,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 1,
+              "pid": 45936,
+              "rss_kb": 13184
+            },
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 45937,
+              "rss_kb": 13040
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T22:59:40+00:00",
+          "elapsed_s": 5.1,
+          "READY": 3,
+          "RUNNING": 4,
+          "SUCCESSFUL": 41,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 101,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 1,
+              "pid": 45936,
+              "rss_kb": 57440
+            },
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 45937,
+              "rss_kb": 57136
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T22:59:45+00:00",
+          "elapsed_s": 10.2,
+          "FAILED": 2,
+          "RUNNING": 3,
+          "SUCCESSFUL": 88,
+          "READY": 7,
+          "overdue_running": 0,
+          "ledger_rows": 215,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 1,
+              "pid": 45936,
+              "rss_kb": 57488
+            },
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 45937,
+              "rss_kb": 57184
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T22:59:50+00:00",
+          "elapsed_s": 15.3,
+          "FAILED": 3,
+          "RUNNING": 4,
+          "SUCCESSFUL": 135,
+          "READY": 8,
+          "overdue_running": 0,
+          "ledger_rows": 336,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 1,
+              "pid": 45936,
+              "rss_kb": 57488
+            },
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 45937,
+              "rss_kb": 57248
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T22:59:55+00:00",
+          "elapsed_s": 20.3,
+          "RUNNING": 3,
+          "FAILED": 10,
+          "SUCCESSFUL": 184,
+          "READY": 3,
+          "overdue_running": 0,
+          "ledger_rows": 465,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 1,
+              "pid": 45936,
+              "rss_kb": 57584
+            },
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 45937,
+              "rss_kb": 57280
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:00:00+00:00",
+          "elapsed_s": 25.4,
+          "RUNNING": 2,
+          "FAILED": 12,
+          "SUCCESSFUL": 233,
+          "READY": 5,
+          "overdue_running": 0,
+          "ledger_rows": 583,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 1,
+              "pid": 45936,
+              "rss_kb": 57632
+            },
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 45937,
+              "rss_kb": 57328
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:00:06+00:00",
+          "elapsed_s": 30.6,
+          "RUNNING": 1,
+          "FAILED": 16,
+          "SUCCESSFUL": 281,
+          "READY": 2,
+          "overdue_running": 0,
+          "ledger_rows": 695,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 1,
+              "pid": 45936,
+              "rss_kb": 57648
+            },
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 45937,
+              "rss_kb": 57392
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:00:10+00:00",
+          "elapsed_s": 35.1,
+          "SUCCESSFUL": 283,
+          "FAILED": 17,
+          "READY": 0,
+          "RUNNING": 0,
+          "overdue_running": 0,
+          "ledger_rows": 700,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 1,
+              "pid": 45936,
+              "rss_kb": 57664
+            },
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 45937,
+              "rss_kb": 57392
+            }
+          ]
+        }
+      ],
+      "analysis": {
+        "status_counts": {
+          "SUCCESSFUL": 283,
+          "FAILED": 17
+        },
+        "per_type": {
+          "doomed": {
+            "FAILED": 17
+          },
+          "flaky_once": {
+            "SUCCESSFUL": 16
+          },
+          "medium": {
+            "SUCCESSFUL": 54
+          },
+          "quick": {
+            "SUCCESSFUL": 201
+          },
+          "slow": {
+            "SUCCESSFUL": 12
+          }
+        },
+        "enqueued_by_producers": 300,
+        "task_rows": 300,
+        "executions": 350,
+        "ledger_rows": 700,
+        "completions_histogram": {
+          "1": 283
+        },
+        "double_completed": [],
+        "interrupted_executions": 0,
+        "reclaim_delays_s": [],
+        "reclaim_bound_s": 37.5,
+        "claim_window_missing_starts": 0,
+        "max_overdue_running": 0,
+        "max_ready_backlog": 8,
+        "latency_first_attempt": {
+          "all": {
+            "count": 267,
+            "p50_s": 0.304,
+            "p95_s": 0.782,
+            "p99_s": 1.866,
+            "max_s": 2.007
+          },
+          "medium": {
+            "count": 54,
+            "p50_s": 0.437,
+            "p95_s": 0.664,
+            "p99_s": 0.782,
+            "max_s": 0.782
+          },
+          "quick": {
+            "count": 201,
+            "p50_s": 0.268,
+            "p95_s": 0.441,
+            "p99_s": 0.606,
+            "max_s": 0.795
+          },
+          "slow": {
+            "count": 12,
+            "p50_s": 1.711,
+            "p95_s": 2.007,
+            "p99_s": 2.007,
+            "max_s": 2.007
+          }
+        },
+        "assertions": [
+          {
+            "assertion": "every enqueued task has a row",
+            "passed": true,
+            "observed": "producers reported 300, table has 300"
+          },
+          {
+            "assertion": "all tasks terminal after drain",
+            "passed": true,
+            "observed": "drained=True, non-terminal rows=0"
+          },
+          {
+            "assertion": "no lock older than 27.5s in any live sample",
+            "passed": true,
+            "observed": "max overdue RUNNING rows across 8 samples: 0"
+          },
+          {
+            "assertion": "attempts never exceed max_attempts",
+            "passed": true,
+            "observed": "violations: 0"
+          },
+          {
+            "assertion": "attempts == len(worker_ids) on every row",
+            "passed": true,
+            "observed": "violations: 0"
+          },
+          {
+            "assertion": "every SUCCESSFUL task has >= 1 ledger completion",
+            "passed": true,
+            "observed": "phantom successes: 0"
+          },
+          {
+            "assertion": "exactly-once completions without chaos",
+            "passed": true,
+            "observed": "double-completed tasks: 0"
+          },
+          {
+            "assertion": "interrupted executions re-executed or abandoned",
+            "passed": true,
+            "observed": "interrupted: 0, re-executed: 0, abandoned: 0, unresolved: 0"
+          },
+          {
+            "assertion": "re-execution within 37.5s of interrupted start",
+            "passed": true,
+            "observed": "no interrupted executions were re-executed"
+          },
+          {
+            "assertion": "all doomed tasks FAILED with attempts == max_attempts",
+            "passed": true,
+            "observed": "doomed: 17, failed: 17"
+          },
+          {
+            "assertion": "no organic failures outside doomed",
+            "passed": true,
+            "observed": "unexplained FAILED rows: 0, flaky_once FAILED (chaos-consumed attempts): 0"
+          },
+          {
+            "assertion": "no unexpected worker exits",
+            "passed": true,
+            "observed": "unexpected exits: 0"
+          }
+        ]
+      }
+    },
+    {
+      "config": {
+        "name": "chaos",
+        "kind": "load",
+        "duration": 45.0,
+        "producers": 2,
+        "rate": 5.0,
+        "workers": 2,
+        "concurrency": 2,
+        "chaos": {
+          "min_gap": 8.0,
+          "max_gap": 14.0,
+          "restart_min": 1.0,
+          "restart_max": 3.0
+        },
+        "drain_timeout": 120.0
+      },
+      "seed": 42,
+      "started_at": "2026-08-15T23:00:10+00:00",
+      "load_seconds": 45.6,
+      "wall_seconds": 61.6,
+      "kills": 4,
+      "drained": true,
+      "producers": [
+        {
+          "returncode": 0,
+          "log": "soak-chaos-producer0.log",
+          "enqueued": 225,
+          "by_type": {
+            "quick": 156,
+            "slow": 13,
+            "flaky_once": 12,
+            "medium": 35,
+            "doomed": 9
+          }
+        },
+        {
+          "returncode": 0,
+          "log": "soak-chaos-producer1.log",
+          "enqueued": 225,
+          "by_type": {
+            "flaky_once": 13,
+            "slow": 11,
+            "quick": 139,
+            "medium": 48,
+            "doomed": 14
+          }
+        }
+      ],
+      "events": [
+        {
+          "at": "2026-08-15T23:00:10+00:00",
+          "event": "worker_started",
+          "slot": 0,
+          "gen": 1,
+          "pid": 46052
+        },
+        {
+          "at": "2026-08-15T23:00:10+00:00",
+          "event": "worker_started",
+          "slot": 1,
+          "gen": 1,
+          "pid": 46053
+        },
+        {
+          "at": "2026-08-15T23:00:23+00:00",
+          "event": "worker_killed",
+          "slot": 0,
+          "gen": 1,
+          "pid": 46052
+        },
+        {
+          "at": "2026-08-15T23:00:26+00:00",
+          "event": "worker_started",
+          "slot": 0,
+          "gen": 2,
+          "pid": 46095
+        },
+        {
+          "at": "2026-08-15T23:00:33+00:00",
+          "event": "worker_killed",
+          "slot": 0,
+          "gen": 2,
+          "pid": 46095
+        },
+        {
+          "at": "2026-08-15T23:00:35+00:00",
+          "event": "worker_started",
+          "slot": 0,
+          "gen": 3,
+          "pid": 46121
+        },
+        {
+          "at": "2026-08-15T23:00:45+00:00",
+          "event": "worker_killed",
+          "slot": 0,
+          "gen": 3,
+          "pid": 46121
+        },
+        {
+          "at": "2026-08-15T23:00:47+00:00",
+          "event": "worker_started",
+          "slot": 0,
+          "gen": 4,
+          "pid": 46160
+        },
+        {
+          "at": "2026-08-15T23:00:53+00:00",
+          "event": "worker_killed",
+          "slot": 0,
+          "gen": 4,
+          "pid": 46160
+        },
+        {
+          "at": "2026-08-15T23:00:55+00:00",
+          "event": "worker_started",
+          "slot": 0,
+          "gen": 5,
+          "pid": 46181
+        },
+        {
+          "at": "2026-08-15T23:01:12+00:00",
+          "event": "worker_stopping",
+          "slot": 0,
+          "gen": 5,
+          "pid": 46181
+        },
+        {
+          "at": "2026-08-15T23:01:12+00:00",
+          "event": "worker_stopping",
+          "slot": 1,
+          "gen": 1,
+          "pid": 46053
+        }
+      ],
+      "rss": [
+        {
+          "slot": 0,
+          "gen": 1,
+          "samples": 3,
+          "first_kb": 12416,
+          "last_kb": 57376,
+          "max_kb": 57376,
+          "first_at_s": 0.0,
+          "last_at_s": 10.4
+        },
+        {
+          "slot": 0,
+          "gen": 2,
+          "samples": 2,
+          "first_kb": 57328,
+          "last_kb": 57488,
+          "max_kb": 57488,
+          "first_at_s": 15.9,
+          "last_at_s": 21.1
+        },
+        {
+          "slot": 0,
+          "gen": 3,
+          "samples": 2,
+          "first_kb": 57456,
+          "last_kb": 57696,
+          "max_kb": 57696,
+          "first_at_s": 26.2,
+          "last_at_s": 31.3
+        },
+        {
+          "slot": 0,
+          "gen": 4,
+          "samples": 1,
+          "first_kb": 57312,
+          "last_kb": 57312,
+          "max_kb": 57312,
+          "first_at_s": 41.7,
+          "last_at_s": 41.7
+        },
+        {
+          "slot": 0,
+          "gen": 5,
+          "samples": 4,
+          "first_kb": 56928,
+          "last_kb": 57200,
+          "max_kb": 57200,
+          "first_at_s": 46.9,
+          "last_at_s": 61.4
+        },
+        {
+          "slot": 1,
+          "gen": 1,
+          "samples": 13,
+          "first_kb": 12336,
+          "last_kb": 57488,
+          "max_kb": 57488,
+          "first_at_s": 0.0,
+          "last_at_s": 61.4
+        }
+      ],
+      "samples": [
+        {
+          "t": "2026-08-15T23:00:10+00:00",
+          "elapsed_s": 0.0,
+          "READY": 0,
+          "RUNNING": 0,
+          "SUCCESSFUL": 0,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 0,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 1,
+              "pid": 46052,
+              "rss_kb": 12416
+            },
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 46053,
+              "rss_kb": 12336
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:00:15+00:00",
+          "elapsed_s": 5.2,
+          "RUNNING": 3,
+          "SUCCESSFUL": 41,
+          "READY": 6,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 101,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 1,
+              "pid": 46052,
+              "rss_kb": 57328
+            },
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 46053,
+              "rss_kb": 57200
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:00:21+00:00",
+          "elapsed_s": 10.4,
+          "FAILED": 2,
+          "RUNNING": 4,
+          "SUCCESSFUL": 90,
+          "READY": 6,
+          "overdue_running": 0,
+          "ledger_rows": 217,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 1,
+              "pid": 46052,
+              "rss_kb": 57376
+            },
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 46053,
+              "rss_kb": 57232
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:00:26+00:00",
+          "elapsed_s": 15.9,
+          "FAILED": 6,
+          "RUNNING": 4,
+          "SUCCESSFUL": 133,
+          "READY": 15,
+          "overdue_running": 0,
+          "ledger_rows": 338,
+          "rss": [
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 46053,
+              "rss_kb": 57280
+            },
+            {
+              "slot": 0,
+              "gen": 2,
+              "pid": 46095,
+              "rss_kb": 57328
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:00:31+00:00",
+          "elapsed_s": 21.1,
+          "RUNNING": 4,
+          "FAILED": 10,
+          "SUCCESSFUL": 191,
+          "READY": 3,
+          "overdue_running": 0,
+          "ledger_rows": 480,
+          "rss": [
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 46053,
+              "rss_kb": 57344
+            },
+            {
+              "slot": 0,
+              "gen": 2,
+              "pid": 46095,
+              "rss_kb": 57488
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:00:36+00:00",
+          "elapsed_s": 26.2,
+          "RUNNING": 5,
+          "FAILED": 12,
+          "SUCCESSFUL": 237,
+          "READY": 6,
+          "overdue_running": 0,
+          "ledger_rows": 595,
+          "rss": [
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 46053,
+              "rss_kb": 57376
+            },
+            {
+              "slot": 0,
+              "gen": 3,
+              "pid": 46121,
+              "rss_kb": 57456
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:00:42+00:00",
+          "elapsed_s": 31.3,
+          "FAILED": 16,
+          "RUNNING": 4,
+          "SUCCESSFUL": 285,
+          "READY": 5,
+          "overdue_running": 0,
+          "ledger_rows": 712,
+          "rss": [
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 46053,
+              "rss_kb": 57424
+            },
+            {
+              "slot": 0,
+              "gen": 3,
+              "pid": 46121,
+              "rss_kb": 57696
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:00:47+00:00",
+          "elapsed_s": 36.5,
+          "FAILED": 17,
+          "READY": 8,
+          "RUNNING": 6,
+          "SUCCESSFUL": 331,
+          "overdue_running": 0,
+          "ledger_rows": 819,
+          "rss": [
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 46053,
+              "rss_kb": 57472
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:00:52+00:00",
+          "elapsed_s": 41.7,
+          "FAILED": 19,
+          "READY": 4,
+          "RUNNING": 6,
+          "SUCCESSFUL": 385,
+          "overdue_running": 0,
+          "ledger_rows": 942,
+          "rss": [
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 46053,
+              "rss_kb": 57488
+            },
+            {
+              "slot": 0,
+              "gen": 4,
+              "pid": 46160,
+              "rss_kb": 57312
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:00:57+00:00",
+          "elapsed_s": 46.9,
+          "FAILED": 20,
+          "RUNNING": 5,
+          "SUCCESSFUL": 422,
+          "READY": 3,
+          "overdue_running": 0,
+          "ledger_rows": 1032,
+          "rss": [
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 46053,
+              "rss_kb": 57488
+            },
+            {
+              "slot": 0,
+              "gen": 5,
+              "pid": 46181,
+              "rss_kb": 56928
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:01:02+00:00",
+          "elapsed_s": 52.1,
+          "FAILED": 23,
+          "RUNNING": 4,
+          "SUCCESSFUL": 423,
+          "READY": 0,
+          "overdue_running": 0,
+          "ledger_rows": 1039,
+          "rss": [
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 46053,
+              "rss_kb": 57488
+            },
+            {
+              "slot": 0,
+              "gen": 5,
+              "pid": 46181,
+              "rss_kb": 57136
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:01:08+00:00",
+          "elapsed_s": 57.4,
+          "FAILED": 23,
+          "RUNNING": 2,
+          "SUCCESSFUL": 425,
+          "READY": 0,
+          "overdue_running": 0,
+          "ledger_rows": 1043,
+          "rss": [
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 46053,
+              "rss_kb": 57488
+            },
+            {
+              "slot": 0,
+              "gen": 5,
+              "pid": 46181,
+              "rss_kb": 57152
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:01:12+00:00",
+          "elapsed_s": 61.4,
+          "SUCCESSFUL": 427,
+          "FAILED": 23,
+          "READY": 0,
+          "RUNNING": 0,
+          "overdue_running": 0,
+          "ledger_rows": 1047,
+          "rss": [
+            {
+              "slot": 1,
+              "gen": 1,
+              "pid": 46053,
+              "rss_kb": 57488
+            },
+            {
+              "slot": 0,
+              "gen": 5,
+              "pid": 46181,
+              "rss_kb": 57200
+            }
+          ]
+        }
+      ],
+      "analysis": {
+        "status_counts": {
+          "SUCCESSFUL": 427,
+          "FAILED": 23
+        },
+        "per_type": {
+          "doomed": {
+            "FAILED": 23
+          },
+          "flaky_once": {
+            "SUCCESSFUL": 25
+          },
+          "medium": {
+            "SUCCESSFUL": 83
+          },
+          "quick": {
+            "SUCCESSFUL": 295
+          },
+          "slow": {
+            "SUCCESSFUL": 24
+          }
+        },
+        "enqueued_by_producers": 450,
+        "task_rows": 450,
+        "executions": 526,
+        "ledger_rows": 1047,
+        "completions_histogram": {
+          "1": 427
+        },
+        "double_completed": [],
+        "interrupted_executions": 5,
+        "reclaim_delays_s": [
+          15.22,
+          15.43,
+          17.58,
+          17.78,
+          18.62
+        ],
+        "reclaim_bound_s": 37.5,
+        "claim_window_missing_starts": 1,
+        "max_overdue_running": 0,
+        "max_ready_backlog": 15,
+        "latency_first_attempt": {
+          "all": {
+            "count": 396,
+            "p50_s": 0.398,
+            "p95_s": 1.69,
+            "p99_s": 2.252,
+            "max_s": 3.108
+          },
+          "medium": {
+            "count": 80,
+            "p50_s": 0.474,
+            "p95_s": 1.243,
+            "p99_s": 1.76,
+            "max_s": 1.76
+          },
+          "quick": {
+            "count": 292,
+            "p50_s": 0.317,
+            "p95_s": 1.09,
+            "p99_s": 1.521,
+            "max_s": 1.597
+          },
+          "slow": {
+            "count": 24,
+            "p50_s": 1.751,
+            "p95_s": 2.756,
+            "p99_s": 3.108,
+            "max_s": 3.108
+          }
+        },
+        "assertions": [
+          {
+            "assertion": "every enqueued task has a row",
+            "passed": true,
+            "observed": "producers reported 450, table has 450"
+          },
+          {
+            "assertion": "all tasks terminal after drain",
+            "passed": true,
+            "observed": "drained=True, non-terminal rows=0"
+          },
+          {
+            "assertion": "no lock older than 27.5s in any live sample",
+            "passed": true,
+            "observed": "max overdue RUNNING rows across 13 samples: 0"
+          },
+          {
+            "assertion": "attempts never exceed max_attempts",
+            "passed": true,
+            "observed": "violations: 0"
+          },
+          {
+            "assertion": "attempts == len(worker_ids) on every row",
+            "passed": true,
+            "observed": "violations: 0"
+          },
+          {
+            "assertion": "every SUCCESSFUL task has >= 1 ledger completion",
+            "passed": true,
+            "observed": "phantom successes: 0"
+          },
+          {
+            "assertion": "double completions only from killed workers",
+            "passed": true,
+            "observed": "double-completed tasks: 0, unattributed to a kill: 0"
+          },
+          {
+            "assertion": "interrupted executions re-executed or abandoned",
+            "passed": true,
+            "observed": "interrupted: 5, re-executed: 5, abandoned: 0, unresolved: 0"
+          },
+          {
+            "assertion": "re-execution within 37.5s of interrupted start",
+            "passed": true,
+            "observed": "max delay 18.6s over 5 reclaims"
+          },
+          {
+            "assertion": "all doomed tasks FAILED with attempts == max_attempts",
+            "passed": true,
+            "observed": "doomed: 23, failed: 23"
+          },
+          {
+            "assertion": "no organic failures outside doomed",
+            "passed": true,
+            "observed": "unexplained FAILED rows: 0, flaky_once FAILED (chaos-consumed attempts): 0"
+          },
+          {
+            "assertion": "no unexpected worker exits",
+            "passed": true,
+            "observed": "unexpected exits: 0"
+          }
+        ]
+      }
+    },
+    {
+      "config": {
+        "name": "crash-window",
+        "kind": "crash_window",
+        "tasks": 4,
+        "hold_seconds": 5.0,
+        "concurrency": 2,
+        "restart_delay": 3.0,
+        "timeout": 120.0
+      },
+      "seed": 42,
+      "started_at": "2026-08-15T23:01:12+00:00",
+      "load_seconds": 25.9,
+      "wall_seconds": 25.9,
+      "kills": 1,
+      "drained": true,
+      "running_at_kill": 2,
+      "producers": [
+        {
+          "enqueued": 4,
+          "by_type": {
+            "slow_hold": 4
+          },
+          "returncode": 0
+        }
+      ],
+      "events": [
+        {
+          "at": "2026-08-15T23:01:12+00:00",
+          "event": "worker_started",
+          "slot": 0,
+          "gen": 1,
+          "pid": 46227
+        },
+        {
+          "at": "2026-08-15T23:01:13+00:00",
+          "event": "worker_killed",
+          "slot": 0,
+          "gen": 1,
+          "pid": 46227
+        },
+        {
+          "at": "2026-08-15T23:01:16+00:00",
+          "event": "worker_started",
+          "slot": 0,
+          "gen": 2,
+          "pid": 46251
+        },
+        {
+          "at": "2026-08-15T23:01:38+00:00",
+          "event": "worker_stopping",
+          "slot": 0,
+          "gen": 2,
+          "pid": 46251
+        }
+      ],
+      "rss": [
+        {
+          "slot": 0,
+          "gen": 1,
+          "samples": 1,
+          "first_kb": 56992,
+          "last_kb": 56992,
+          "max_kb": 56992,
+          "first_at_s": 1.1,
+          "last_at_s": 1.1
+        },
+        {
+          "slot": 0,
+          "gen": 2,
+          "samples": 11,
+          "first_kb": 8960,
+          "last_kb": 57056,
+          "max_kb": 57056,
+          "first_at_s": 4.2,
+          "last_at_s": 25.5
+        }
+      ],
+      "samples": [
+        {
+          "t": "2026-08-15T23:01:13+00:00",
+          "elapsed_s": 1.1,
+          "RUNNING": 2,
+          "READY": 2,
+          "SUCCESSFUL": 0,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 2,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 1,
+              "pid": 46227,
+              "rss_kb": 56992
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:01:16+00:00",
+          "elapsed_s": 4.2,
+          "RUNNING": 2,
+          "READY": 2,
+          "SUCCESSFUL": 0,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 2,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 2,
+              "pid": 46251,
+              "rss_kb": 8960
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:01:19+00:00",
+          "elapsed_s": 6.8,
+          "RUNNING": 4,
+          "READY": 0,
+          "SUCCESSFUL": 0,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 4,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 2,
+              "pid": 46251,
+              "rss_kb": 56912
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:01:21+00:00",
+          "elapsed_s": 8.8,
+          "RUNNING": 4,
+          "READY": 0,
+          "SUCCESSFUL": 0,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 4,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 2,
+              "pid": 46251,
+              "rss_kb": 56912
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:01:23+00:00",
+          "elapsed_s": 10.8,
+          "SUCCESSFUL": 2,
+          "RUNNING": 2,
+          "READY": 0,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 6,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 2,
+              "pid": 46251,
+              "rss_kb": 56928
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:01:25+00:00",
+          "elapsed_s": 12.8,
+          "SUCCESSFUL": 2,
+          "RUNNING": 2,
+          "READY": 0,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 6,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 2,
+              "pid": 46251,
+              "rss_kb": 56992
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:01:27+00:00",
+          "elapsed_s": 14.8,
+          "SUCCESSFUL": 2,
+          "RUNNING": 2,
+          "READY": 0,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 6,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 2,
+              "pid": 46251,
+              "rss_kb": 57008
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:01:30+00:00",
+          "elapsed_s": 17.4,
+          "SUCCESSFUL": 2,
+          "RUNNING": 2,
+          "READY": 0,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 6,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 2,
+              "pid": 46251,
+              "rss_kb": 57008
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:01:32+00:00",
+          "elapsed_s": 20.0,
+          "SUCCESSFUL": 2,
+          "RUNNING": 2,
+          "READY": 0,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 8,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 2,
+              "pid": 46251,
+              "rss_kb": 57040
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:01:34+00:00",
+          "elapsed_s": 22.1,
+          "SUCCESSFUL": 2,
+          "RUNNING": 2,
+          "READY": 0,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 8,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 2,
+              "pid": 46251,
+              "rss_kb": 57040
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:01:36+00:00",
+          "elapsed_s": 24.1,
+          "SUCCESSFUL": 2,
+          "RUNNING": 2,
+          "READY": 0,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 8,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 2,
+              "pid": 46251,
+              "rss_kb": 57040
+            }
+          ]
+        },
+        {
+          "t": "2026-08-15T23:01:38+00:00",
+          "elapsed_s": 25.5,
+          "SUCCESSFUL": 4,
+          "READY": 0,
+          "RUNNING": 0,
+          "FAILED": 0,
+          "overdue_running": 0,
+          "ledger_rows": 10,
+          "rss": [
+            {
+              "slot": 0,
+              "gen": 2,
+              "pid": 46251,
+              "rss_kb": 57056
+            }
+          ]
+        }
+      ],
+      "analysis": {
+        "status_counts": {
+          "SUCCESSFUL": 4
+        },
+        "per_type": {
+          "slow_hold": {
+            "SUCCESSFUL": 4
+          }
+        },
+        "enqueued_by_producers": 4,
+        "task_rows": 4,
+        "executions": 6,
+        "ledger_rows": 10,
+        "completions_histogram": {
+          "1": 4
+        },
+        "double_completed": [],
+        "interrupted_executions": 2,
+        "reclaim_delays_s": [
+          19.94,
+          19.94
+        ],
+        "reclaim_bound_s": 37.5,
+        "claim_window_missing_starts": 0,
+        "max_overdue_running": 0,
+        "max_ready_backlog": 2,
+        "latency_first_attempt": {
+          "all": {
+            "count": 2,
+            "p50_s": 9.57,
+            "p95_s": 9.57,
+            "p99_s": 9.57,
+            "max_s": 9.57
+          },
+          "slow_hold": {
+            "count": 2,
+            "p50_s": 9.57,
+            "p95_s": 9.57,
+            "p99_s": 9.57,
+            "max_s": 9.57
+          }
+        },
+        "assertions": [
+          {
+            "assertion": "every enqueued task has a row",
+            "passed": true,
+            "observed": "producers reported 4, table has 4"
+          },
+          {
+            "assertion": "all tasks terminal after drain",
+            "passed": true,
+            "observed": "drained=True, non-terminal rows=0"
+          },
+          {
+            "assertion": "no lock older than 27.5s in any live sample",
+            "passed": true,
+            "observed": "max overdue RUNNING rows across 12 samples: 0"
+          },
+          {
+            "assertion": "attempts never exceed max_attempts",
+            "passed": true,
+            "observed": "violations: 0"
+          },
+          {
+            "assertion": "attempts == len(worker_ids) on every row",
+            "passed": true,
+            "observed": "violations: 0"
+          },
+          {
+            "assertion": "every SUCCESSFUL task has >= 1 ledger completion",
+            "passed": true,
+            "observed": "phantom successes: 0"
+          },
+          {
+            "assertion": "double completions only from killed workers",
+            "passed": true,
+            "observed": "double-completed tasks: 0, unattributed to a kill: 0"
+          },
+          {
+            "assertion": "interrupted executions re-executed or abandoned",
+            "passed": true,
+            "observed": "interrupted: 2, re-executed: 2, abandoned: 0, unresolved: 0"
+          },
+          {
+            "assertion": "re-execution within 37.5s of interrupted start",
+            "passed": true,
+            "observed": "max delay 19.9s over 2 reclaims"
+          },
+          {
+            "assertion": "kill interrupted the expected number of in-flight tasks",
+            "passed": true,
+            "observed": "expected 2, observed 2"
+          },
+          {
+            "assertion": "all doomed tasks FAILED with attempts == max_attempts",
+            "passed": true,
+            "observed": "doomed: 0, failed: 0"
+          },
+          {
+            "assertion": "no organic failures outside doomed",
+            "passed": true,
+            "observed": "unexplained FAILED rows: 0, flaky_once FAILED (chaos-consumed attempts): 0"
+          },
+          {
+            "assertion": "no unexpected worker exits",
+            "passed": true,
+            "observed": "unexpected exits: 0"
+          }
+        ]
+      }
+    }
+  ],
+  "total_load_seconds": 102.1,
+  "total_wall_seconds": 122.8,
+  "finished_at": "2026-08-15T23:01:38+00:00"
+}

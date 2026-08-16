@@ -1,0 +1,29 @@
+{
+  "note": "Increment 4 re-measure, 1 run per cell",
+  "e2e": [
+    {
+      "backend": "plow",
+      "concurrency": 1,
+      "seconds": 22.59538508299738,
+      "tasks_per_sec": 88.51364969676767
+    },
+    {
+      "backend": "plow",
+      "concurrency": 4,
+      "seconds": 5.022518916986883,
+      "tasks_per_sec": 398.2065638888311
+    },
+    {
+      "backend": "tasksdb",
+      "concurrency": 1,
+      "seconds": 28.030585209140554,
+      "tasks_per_sec": 71.35063307018704
+    },
+    {
+      "backend": "tasksdb",
+      "concurrency": 4,
+      "seconds": 5.360495749861002,
+      "tasks_per_sec": 373.09982011493247
+    }
+  ]
+}

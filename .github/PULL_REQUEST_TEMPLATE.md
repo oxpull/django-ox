@@ -1,0 +1,3 @@
+- **What and why:**
+- **Tests:** ran on SQLite and PostgreSQL (see CONTRIBUTING.md); new behavior is covered.
+- **Changelog:** entry added, or not user-visible.

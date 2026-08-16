@@ -1,0 +1,53 @@
+site_name: django-ox
+site_description: Database-backed worker backend for Django's Tasks framework.
+site_url: ""
+
+exclude_docs: |
+  requirements.txt
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+theme:
+  name: material
+  font: false
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: brown
+      accent: deep orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: brown
+      accent: deep orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - navigation.footer
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: !relative $config_dir
+
+nav:
+  - Home: index.md
+  - Configuration: configuration.md
+  - Recurring tasks: recurring-tasks.md
+  - Production: production.md
+  - Monitoring: monitoring.md
+  - Benchmarks: benchmarks.md
+  - API stability: stability.md
+  - Pro: pro.md
+  - Changelog: changelog.md

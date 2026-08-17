@@ -11,10 +11,10 @@ dist/
 site/
 benchmarks/logs/
 
-# Working notes and local scratch. Not part of the package.
-BUILD-NOTES.md
-RELEASE-CHECKLIST.md
-.contract-ref/
-results-raw-*-prefix.json
-results-raw-*-postfix1.json
-results-raw-*-inc4.json
+# Working notes and local scratch. Not part of the package. Published
+# benchmark data is committed under benchmarks/ by its dated filename; anything
+# matching these patterns is a local run that has not been reviewed.
+*-NOTES.md
+*CHECKLIST*
+.scratch/
+results-raw-*-[a-z]*[0-9].json

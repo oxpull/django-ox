@@ -1,8 +1,7 @@
 # Monitoring
 
-The queue and the result store are one database table, so observability
-does not need an agent or an exporter process: metrics are queries.
-django-ox packages the useful ones three ways:
+The queue and the result store are one database table. That means metrics are
+just queries, with no agent or exporter process to run. There are three ways in:
 
 - **`django_ox.stats`**, plain functions returning queue metrics.
 - **`manage.py ox_health`**, the same numbers as an exit code, for cron
@@ -12,10 +11,9 @@ django-ox packages the useful ones three ways:
 
 ## Queue statistics
 
-`django_ox.stats` is a small module of read-only functions. Each one is a
-single ORM query over the task table: no extra state, no signals, safe to
-call from a request, a shell, or a metrics collector, on both PostgreSQL
-and SQLite.
+`django_ox.stats` is a small module of read-only functions. Each one is a single
+ORM query over the task table. No extra state, no signals. Safe to call from a
+request, a shell or a metrics collector, on every tested database.
 
 ```python
 from datetime import timedelta
@@ -45,16 +43,15 @@ stats.last_claim_age()  # time since a worker last claimed
 Every function except `queue_stats()` accepts a `queue_name` keyword to
 scope the metric to one queue.
 
-**Backlog depth (`ready_count`) and backlog age (`oldest_ready_age`) are
-the two numbers worth alerting on.** Depth alone can look healthy while
-one poisoned task starves the queue; age alone can look healthy during a
-flood of fresh work.
+**Alert on two numbers: backlog depth (`ready_count`) and backlog age
+(`oldest_ready_age`).** Neither works alone. Depth looks fine while one poisoned
+task starves the queue. Age looks fine during a flood of fresh work.
 
 ## Health checks: ox_health
 
-`ox_health` turns thresholds on those metrics into an exit code: 0 when
-every enabled check passes, non-zero with a one-line reason on stderr
-otherwise. With no flags it checks only that the database answers.
+`ox_health` turns thresholds on those metrics into an exit code. Zero when every
+enabled check passes. Non-zero with a one-line reason on stderr when one fails.
+With no flags, it checks only that the database answers.
 
 ```
 python manage.py ox_health --max-backlog 1000 --max-age 600
@@ -74,17 +71,17 @@ and probe logs:
 OK: backlog=3 oldest_age=12s last_claim_age=2s
 ```
 
-Choosing checks:
+Which check goes where:
 
-- `--max-backlog` and `--max-age` measure the queue as a whole and belong
-  in fleet-level alerting (cron, a monitoring agent), not in a per-worker
-  probe: one worker's probe failing over a shared backlog restarts a
-  healthy worker without helping the backlog.
-- `--worker-timeout` is the closest thing to a worker liveness check the
-  table offers. Claiming is the only trace workers leave, so it is
-  meaningful on queues with steady traffic and will false-alarm on queues
-  that are legitimately idle. For bursty queues prefer `--max-age`, which
-  only fires when work exists and is not being picked up.
+- **`--max-backlog` and `--max-age` measure the whole queue.** Put them in
+  fleet-level alerting, from cron or a monitoring agent. Do not put them in a
+  per-worker probe: a shared backlog would fail every worker's probe and restart
+  healthy workers without shifting the backlog.
+- **`--worker-timeout` is the closest thing to a liveness check here.** Claiming
+  is the only trace a worker leaves, so it works on queues with steady traffic
+  and will false-alarm on ones that are legitimately idle.
+- **For bursty queues, prefer `--max-age`.** It only fires when work exists and
+  is not being picked up.
 
 As a Kubernetes liveness probe on the worker container, for a queue with
 steady traffic:
@@ -108,12 +105,13 @@ From cron, for alerting on the queue itself:
 
 ## Log events
 
-The worker logs through the standard library logger named `django_ox`.
-No logging dependency is added and no format is imposed; configure
-handlers and formatters in `LOGGING` as usual. Lifecycle events carry an
-`extra` dictionary with stable keys, so a JSON formatter that serializes
-record attributes gets consistent fields to index. The human-readable
-message text is not part of the contract; the keys are.
+The worker logs through the standard library logger named `django_ox`. No
+logging dependency, no imposed format. Configure handlers and formatters in
+`LOGGING` as usual.
+
+Lifecycle events carry an `extra` dictionary with stable keys, so a JSON
+formatter that serialises record attributes gets consistent fields to index.
+The message text is not part of the contract. The keys are.
 
 | Event | Level | When |
 | --- | --- | --- |
@@ -155,13 +153,12 @@ them. Everything a dashboard usually wants survives at INFO.
   `failure_rate` rising above your normal baseline. Throughput is better
   as a dashboard line than an alert: its healthy value depends entirely
   on offered load.
-- **Prometheus.** There is no bundled exporter (see [Pro](pro.md)). The
-  stats functions slot directly into any Django metrics setup: with
-  django-prometheus, register a small custom collector whose `collect()`
-  calls `queue_stats()`, `ready_count()` and `oldest_ready_age()` and
-  yields gauges; or render the same numbers from a plain Django view in
-  the Prometheus text format and point a scrape job at it. Label by
-  `queue_name`.
+- **Prometheus.** No exporter ships with the core; that is a
+  [Pro](pro.md) feature. The stats functions drop into any Django metrics setup
+  though. Either register a custom collector with django-prometheus, whose
+  `collect()` calls `queue_stats()`, `ready_count()` and `oldest_ready_age()`
+  and yields gauges, or render the same numbers from a plain Django view in the
+  Prometheus text format and point a scrape job at it. Label by `queue_name`.
 - **journald.** Under systemd, WARNING and above maps onto journal
   priorities, so `journalctl -u ox-worker -p warning` shows exactly
   retries, reclaims and failures. Pair it with `ox_health` in a timer for

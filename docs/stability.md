@@ -34,10 +34,10 @@ contract.
 ### Not public
 
 Everything else is an implementation detail and may change in any release
-without notice: the `django_ox.worker.Worker` class internals, the cron
+without notice. That covers the `django_ox.worker.Worker` internals, the cron
 parser (`django_ox.cron`), the row-to-dataclass conversion
-(`django_ox.results`), the schedule loader (`django_ox.schedules`), and
-any name prefixed with an underscore. The exact SQL a claim emits and the
+(`django_ox.results`), the schedule loader (`django_ox.schedules`), and any name
+starting with an underscore. The exact SQL a claim emits and the
 model's non-schema helper methods are not part of the contract.
 
 ## Versioning
@@ -69,9 +69,9 @@ dropped outright:
 - A deprecated surface keeps working for **at least one full minor release**
   (pre-1.0) or one major release (post-1.0) before it is removed.
 
-Security fixes are exempt: a surface that cannot be kept without leaving a
-vulnerability open may change in a patch release, documented in the
-changelog and, where relevant, a security advisory.
+Security fixes are exempt. A surface that cannot be kept without leaving a
+vulnerability open may change in a patch release. That is documented in the
+changelog, and in a security advisory where relevant.
 
 ## Supported Python and Django
 

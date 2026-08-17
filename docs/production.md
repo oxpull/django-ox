@@ -54,9 +54,9 @@ On SIGTERM or SIGINT the worker:
 2. Waits for in-flight tasks to finish, however long they take.
 3. Closes its database connections and exits with code 0.
 
-A second signal during the drain forces an immediate exit (code 130);
-whatever was running is abandoned mid-flight and is later reclaimed by the
-reaper on a surviving worker, counting as a failed attempt for the task.
+A second signal during the drain forces an immediate exit, code 130. Whatever
+was running is abandoned mid-flight. The reaper on a surviving worker reclaims
+it later, and it counts as a failed attempt.
 
 This maps directly onto rolling deploys: send SIGTERM, wait, start the new
 version. The only tuning point is the supervisor's kill escalation
@@ -72,11 +72,9 @@ concurrent workers safe:
   `UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING`
   statement, so workers never block each other on the head of the queue.
   On other databases with `SKIP LOCKED` support (MySQL 8+), the worker
-  uses `SELECT ... FOR UPDATE SKIP LOCKED` in a short transaction. On
-  databases without it, including SQLite, claiming falls back to an
-  optimistic compare-and-set UPDATE, which is atomic everywhere but can
-  make workers retry against each other for the head of the queue under
-  contention.
+  uses `SELECT ... FOR UPDATE SKIP LOCKED` in a short transaction. Databases without it, SQLite included, fall back to an optimistic
+compare-and-set UPDATE. That is atomic everywhere, but under contention workers
+can retry against each other for the head of the queue.
 - **Recurring schedules need no dedicated node.** Every worker dispatches;
   a unique constraint guarantees each tick fires once. See
   [Recurring tasks](recurring-tasks.md#many-workers-one-tick).
@@ -89,16 +87,15 @@ Workers can also be split by queue: run
 
 `--concurrency N` is a thread pool inside one process. That fits the
 common Django task profile: email, HTTP calls to third parties, ORM work.
-For CPU-bound tasks the GIL makes threads the wrong tool; run multiple
-worker processes with `--concurrency 1` instead, which is also the natural
-shape under systemd template units or one-container-per-worker setups.
+For CPU-bound tasks the GIL makes threads the wrong tool. Run multiple worker
+processes with `--concurrency 1` instead. That is also the natural shape for
+systemd template units, or one container per worker.
 
 ## The reaper
 
-Workers die: OOM kills, node failures, `kill -9`. Any task a dead worker
-was running stays RUNNING with a stale lock until the reaper, which runs
-inside every worker on an interval derived from the lock timeout, returns
-it to the queue:
+Workers die: OOM kills, node failures, `kill -9`. When a worker dies mid-task, its task stays RUNNING behind a stale lock. The
+reaper returns it to the queue. It runs inside every worker, on an interval
+derived from the lock timeout:
 
 - A RUNNING task whose lock is older than `LOCK_TIMEOUT` (default 300
   seconds, per-worker override `--lock-timeout`) is put back to READY, or

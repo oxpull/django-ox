@@ -22,11 +22,10 @@ three runs, and edges or ties concurrency 4. In-transaction enqueue
 latency is a tie at roughly half a millisecond for both; run-to-run drift
 on the machine is larger than the difference between the backends.
 
-A diagnostic cell at a non-default `--interval 0.1` produced the same
-throughput as the defaults (87.8 / 86.6 / 88.5 tasks/sec), confirming
-that the poll interval does not bound throughput: when tasks are in
-flight, the worker wakes on task completion rather than on the polling
-clock.
+A diagnostic cell at a non-default `--interval 0.1` produced the same throughput
+as the defaults: 87.8, 86.6 and 88.5 tasks/sec. So the poll interval does not
+bound throughput. With tasks in flight, the worker wakes on task completion
+rather than on the polling clock.
 
 ## Where the numbers come from
 
@@ -43,10 +42,10 @@ Two properties of the worker's claim path drive the end-to-end results:
   poll interval, so `--interval` only governs how often an idle worker
   checks for new work.
 
-The benchmark harness gates releases: both properties above are proven by
-the published cells (the single-statement claim by the concurrency-1 rows,
-the completion wake-up by the diagnostic cell), and any regression in
-either shows up as a changed number, not a changed claim.
+The harness gates releases. Both properties above are proven by published cells:
+the single-statement claim by the concurrency-1 rows, the completion wake-up by
+the diagnostic cell. A regression in either shows up as a changed number rather
+than a changed claim.
 
 ## How to read these numbers
 

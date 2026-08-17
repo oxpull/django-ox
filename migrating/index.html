@@ -10,11 +10,13 @@
       
       
       
-        <link rel="canonical" href="https://oxpull.github.io/django-ox/changelog/">
+        <link rel="canonical" href="https://oxpull.github.io/django-ox/migrating/">
       
       
-        <link rel="prev" href="../pro/">
+        <link rel="prev" href="../recurring-tasks/">
       
+      
+        <link rel="next" href="../production/">
       
       
         
@@ -25,7 +27,7 @@
     
     
       
-        <title>Changelog - django-ox</title>
+        <title>Migrating - django-ox</title>
       
     
     
@@ -62,16 +64,16 @@
 
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="django-ox">
-  <meta property="og:title" content="Changelog - django-ox">
+  <meta property="og:title" content="Migrating - django-ox">
   <meta property="og:description" content="Database-backed worker backend for Django's Tasks framework.">
-  <meta property="og:url" content="https://oxpull.github.io/django-ox/changelog/">
+  <meta property="og:url" content="https://oxpull.github.io/django-ox/migrating/">
   <meta property="og:image" content="https://oxpull.github.io/django-ox/assets/social-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="django-ox: Django 6 shipped Tasks, the production worker is missing.">
 
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Changelog - django-ox">
+  <meta name="twitter:title" content="Migrating - django-ox">
   <meta name="twitter:description" content="Database-backed worker backend for Django's Tasks framework.">
   <meta name="twitter:image" content="https://oxpull.github.io/django-ox/assets/social-card.png">
 
@@ -96,7 +98,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#changelog" class="md-skip">
+        <a href="#migrating-to-django-ox" class="md-skip">
           Skip to content
         </a>
       
@@ -131,7 +133,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Changelog
+              Migrating
             
           </span>
         </div>
@@ -354,10 +356,37 @@
       
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../migrating/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrating
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -373,6 +402,70 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#from-another-djangotasks-backend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From another django.tasks backend
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#from-celery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From Celery
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#from-huey" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From huey
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#switching-over" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Switching over
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -516,37 +609,10 @@
       
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Changelog
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
         
   
   
@@ -562,93 +628,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#011-2026-08-17" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        0.1.1 - 2026-08-17
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="0.1.1 - 2026-08-17">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#changed" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Changed
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#010-2026-08-16" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        0.1.0 - 2026-08-16
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="0.1.0 - 2026-08-16">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#added" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Added
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#security" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Security
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -680,69 +659,46 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#011-2026-08-17" class="md-nav__link">
+  <a href="#from-another-djangotasks-backend" class="md-nav__link">
     <span class="md-ellipsis">
       
-        0.1.1 - 2026-08-17
+        From another django.tasks backend
       
     </span>
   </a>
-  
-    <nav class="md-nav" aria-label="0.1.1 - 2026-08-17">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#changed" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Changed
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#010-2026-08-16" class="md-nav__link">
+  <a href="#from-celery" class="md-nav__link">
     <span class="md-ellipsis">
       
-        0.1.0 - 2026-08-16
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="0.1.0 - 2026-08-16">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#added" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Added
+        From Celery
       
     </span>
   </a>
   
 </li>
-        
-          <li class="md-nav__item">
-  <a href="#security" class="md-nav__link">
+      
+        <li class="md-nav__item">
+  <a href="#from-huey" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Security
+        From huey
       
     </span>
   </a>
   
 </li>
-        
-      </ul>
-    </nav>
+      
+        <li class="md-nav__item">
+  <a href="#switching-over" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Switching over
+      
+    </span>
+  </a>
   
 </li>
       
@@ -766,91 +722,222 @@
   
 
 
-<h1 id="changelog">Changelog</h1>
-<p>All notable changes to this project will be documented in this file.</p>
-<p>The format is based on <a href="https://keepachangelog.com/en/1.1.0/">Keep a Changelog</a>,
-and this project adheres to <a href="https://semver.org/spec/v2.0.0.html">Semantic Versioning</a>.</p>
-<h2 id="011-2026-08-17"><a href="https://github.com/oxpull/django-ox/releases/tag/v0.1.1">0.1.1</a> - 2026-08-17</h2>
-<p>The worker, the public API and the database schema are unchanged. This
-release updates the packaging metadata and the project description that
-appears on the package page.</p>
-<h3 id="changed">Changed</h3>
-<ul>
-<li>Packaging metadata now carries a <code>Documentation</code> URL, so the
-  documentation site is linked directly from the package page.</li>
-<li>README now carries release and CI status badges, a link to the
-  documentation site, and a scope statement: what the core covers, what is
-  deliberately outside it, and which features belong to the commercial
-  tier.</li>
-</ul>
-<h2 id="010-2026-08-16"><a href="https://github.com/oxpull/django-ox/releases/tag/v0.1.0">0.1.0</a> - 2026-08-16</h2>
-<p>Initial release.</p>
-<h3 id="added">Added</h3>
-<ul>
-<li><code>OxBackend</code>, a database-backed backend for Django's Tasks framework
-  (<code>django.tasks</code>, Django 6.0+). Tasks are stored in the application database;
-  no broker required.</li>
-<li>Transactional enqueue: <code>enqueue()</code> is a single INSERT on the caller's
-  connection, so a task enqueued inside <code>transaction.atomic()</code> commits or
-  rolls back with the business data.</li>
-<li><code>ox_worker</code> management command: claims tasks with
-  <code>SELECT ... FOR UPDATE SKIP LOCKED</code> where supported (PostgreSQL, MySQL 8+)
-  and an atomic compare-and-set UPDATE elsewhere (including SQLite).
-  Configurable via <code>--backend</code>, <code>--queues</code>, <code>--concurrency</code> (thread pool),
-  <code>--interval</code>, and <code>--lock-timeout</code>.</li>
-<li>Retries with exponential backoff (<code>MAX_ATTEMPTS</code>, <code>BACKOFF_INITIAL</code>,
-  <code>BACKOFF_MAX</code>), keeping the full traceback of every attempt.</li>
-<li>Reaper: tasks whose worker died are returned to the queue after
-  <code>LOCK_TIMEOUT</code> and count as a failed attempt.</li>
-<li>Graceful drain: on SIGTERM/SIGINT the worker stops claiming, finishes
-  in-flight tasks, then exits; a second signal forces an immediate exit.</li>
-<li>Priorities (-100 to 100, higher first) and deferred tasks (<code>run_after</code>),
-  with the corresponding <code>supports_*</code> flags declared on the backend.</li>
-<li>Result store: <code>get_result()</code>, <code>refresh()</code>, and the async variants, with
-  status, return value, and per-attempt errors readable from the database.</li>
-<li><code>ox_prune</code> management command: batched deletion of finished task rows
-  (<code>--older-than</code>, <code>--include-failed</code>, <code>--batch-size</code>, <code>--dry-run</code>).</li>
-<li><code>django_ox.stats</code>: read-only queue metrics as plain ORM queries, on
-  both supported databases: per-queue status counts, backlog depth and
-  age, throughput and failure rate over a trailing window, and time
-  since the last task claim.</li>
-<li><code>ox_health</code> management command: exits non-zero with a one-line reason
-  when the database is unreachable or a <code>--max-backlog</code>, <code>--max-age</code> or
-  <code>--worker-timeout</code> threshold is breached; built for cron alerting and
-  container probes.</li>
-<li>Structured logging: worker lifecycle events (claim, start, success,
-  retry, failure, reclaim, dispatch, shutdown) log to the <code>django_ox</code>
-  logger with stable extra keys (<code>event</code>, <code>task_id</code>, <code>queue</code>, <code>attempt</code>,
-  <code>duration_ms</code>, ...) for JSON log handlers.</li>
-<li>Recurring tasks: cron schedules declared in the <code>TASKS</code> setting
-  (<code>SCHEDULES</code> option), dispatched by the workers themselves; a unique
-  constraint on (schedule, tick) makes each tick fire exactly once across
-  any number of workers. Five-field cron syntax plus <code>@hourly</code>-style
-  shortcuts; misconfigured schedules fail at startup and in
-  <code>manage.py check</code>. On recovery after downtime, only the latest missed
-  tick fires.</li>
-<li>System check <code>django_ox.E003</code>: a schedule name defined on more than
-  one backend is rejected, at worker startup and in <code>manage.py check</code>,
-  because the tick log is keyed by schedule name alone and shared names
-  would let the backends suppress each other's ticks.</li>
-<li>Strict cron validation: expressions that can never fire and step values
-  larger than a field's range (such as <code>*/61</code> in the minute field) are
-  rejected at parse time rather than misfiring silently. Schedule
-  dispatch is robust to clock skew between workers: a tick row dated in
-  the future cannot suppress ticks that are due.</li>
-</ul>
-<h3 id="security">Security</h3>
-<ul>
-<li>A stored <code>task_path</code> must resolve to a <code>django.tasks</code> Task (a function
-  registered with <code>@task</code>). A row naming any other importable callable is
-  rejected as an un-runnable task instead of being executed, so the
-  worker never invokes an arbitrary dotted path pulled from the table.
-  <code>SECURITY.md</code> documents the full trust model, the JSON-only
-  serialization, and the guidance to keep secrets out of task arguments.</li>
-<li>An API stability and deprecation policy (<code>docs/stability.md</code>) covers
-  the public API surface, the pre-1.0 SemVer rule, the deprecation
-  window, and the supported Python and Django matrix.</li>
-</ul>
+<h1 id="migrating-to-django-ox">Migrating to django-ox</h1>
+<p>Your task code stays the same. django-ox implements Django's <code>django.tasks</code> API,
+so <code>@task</code> functions and <code>.enqueue()</code> calls do not change.</p>
+<p>Three things do change: the backend in your <code>TASKS</code> setting, the worker command,
+and the table the queue lives in.</p>
+<p>Find your section below, then read <a href="#switching-over">Switching over</a>. That last
+part is where migrations go wrong.</p>
+<h2 id="from-another-djangotasks-backend">From another <code>django.tasks</code> backend</h2>
+<p>Configuration only. Here it is with <code>django-tasks-db</code>, the most common one:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># before</span>
+<span class="n">INSTALLED_APPS</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;django_tasks_db&quot;</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
+
+<span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django_tasks_db.DatabaseBackend&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;QUEUES&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;default&quot;</span><span class="p">],</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="c1"># after</span>
+<span class="n">INSTALLED_APPS</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;django_ox&quot;</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
+
+<span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django_ox.backend.OxBackend&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;QUEUES&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;default&quot;</span><span class="p">],</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Run <code>python manage.py migrate django_ox</code> to create the table.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Before</th>
+<th>After</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Worker</td>
+<td><code>manage.py db_worker</code></td>
+<td><code>manage.py ox_worker</code></td>
+</tr>
+<tr>
+<td>Clean up finished rows</td>
+<td><code>manage.py prune_db_task_results</code></td>
+<td><code>manage.py ox_prune --older-than 7d</code></td>
+</tr>
+</tbody>
+</table>
+<p>Nothing else moves. Same decorator, same <code>.enqueue()</code>, same result API.</p>
+<h2 id="from-celery">From Celery</h2>
+<p>Celery needs a broker and its own workers. django-ox uses the database you
+already have, so there is no broker to run.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># before</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">celery</span><span class="w"> </span><span class="kn">import</span> <span class="n">shared_task</span>
+
+
+<span class="nd">@shared_task</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">send_confirmation</span><span class="p">(</span><span class="n">order_id</span><span class="p">):</span> <span class="o">...</span>
+
+
+<span class="n">send_confirmation</span><span class="o">.</span><span class="n">delay</span><span class="p">(</span><span class="n">order_id</span><span class="o">=</span><span class="mi">42</span><span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="c1"># after</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>
+
+
+<span class="nd">@task</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">send_confirmation</span><span class="p">(</span><span class="n">order_id</span><span class="p">):</span> <span class="o">...</span>
+
+
+<span class="n">send_confirmation</span><span class="o">.</span><span class="n">enqueue</span><span class="p">(</span><span class="n">order_id</span><span class="o">=</span><span class="mi">42</span><span class="p">)</span>
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th>Celery</th>
+<th>django-ox</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Broker URL (Redis, RabbitMQ)</td>
+<td>none. The queue is a table on your default database.</td>
+</tr>
+<tr>
+<td><code>celery -A proj worker</code></td>
+<td><code>manage.py ox_worker</code></td>
+</tr>
+<tr>
+<td><code>celery -A proj beat</code></td>
+<td>nothing to run. Schedules go in <code>TASKS</code> and every worker dispatches them. See <a href="../recurring-tasks/">Recurring tasks</a>.</td>
+</tr>
+<tr>
+<td><code>.delay(...)</code>, <code>.apply_async(...)</code></td>
+<td><code>.enqueue(...)</code></td>
+</tr>
+<tr>
+<td><code>apply_async(countdown=..., eta=...)</code></td>
+<td><code>run_after</code></td>
+</tr>
+<tr>
+<td><code>autoretry_for</code>, <code>self.retry</code></td>
+<td>automatic. Tune with <code>MAX_ATTEMPTS</code>, <code>BACKOFF_INITIAL</code>, <code>BACKOFF_MAX</code>.</td>
+</tr>
+<tr>
+<td>Result backend</td>
+<td>the same table, read through the standard result API.</td>
+</tr>
+<tr>
+<td>Flower</td>
+<td>the <a href="../monitoring/">stats API and <code>ox_health</code></a></td>
+</tr>
+</tbody>
+</table>
+<p>One difference in behaviour is worth reading before you switch. With a broker,
+<code>enqueue</code> leaves your process immediately. If the surrounding transaction then
+rolls back, a worker can pick up an order that no longer exists. The usual fix
+is to wrap every call in <code>transaction.on_commit()</code>.</p>
+<p>Here the enqueue is an <code>INSERT</code> on your own connection. It commits or rolls back
+with the row it belongs to, so there is nothing to wrap.</p>
+<p><strong>Not supported:</strong> Celery's chains, groups and chords, and routing across
+multiple brokers. Queues, priorities and <code>run_after</code> are what exist today.
+Chains are on the <a href="../pro/">Oxpull Pro</a> roadmap.</p>
+<h2 id="from-huey">From huey</h2>
+<p>Closer to django-ox than Celery is, since huey can already store tasks in
+SQLite or Postgres. What changes is the API, and where schedules live.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># before</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">huey.contrib.djhuey</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span><span class="p">,</span> <span class="n">periodic_task</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">huey</span><span class="w"> </span><span class="kn">import</span> <span class="n">crontab</span>
+
+
+<span class="nd">@task</span><span class="p">()</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">send_confirmation</span><span class="p">(</span><span class="n">order_id</span><span class="p">):</span> <span class="o">...</span>
+
+
+<span class="nd">@periodic_task</span><span class="p">(</span><span class="n">crontab</span><span class="p">(</span><span class="n">minute</span><span class="o">=</span><span class="s2">&quot;0&quot;</span><span class="p">,</span> <span class="n">hour</span><span class="o">=</span><span class="s2">&quot;3&quot;</span><span class="p">))</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">nightly_report</span><span class="p">():</span> <span class="o">...</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="c1"># after</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>
+
+
+<span class="nd">@task</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">send_confirmation</span><span class="p">(</span><span class="n">order_id</span><span class="p">):</span> <span class="o">...</span>
+
+
+<span class="nd">@task</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">nightly_report</span><span class="p">():</span> <span class="o">...</span>
+</code></pre></div>
+<p>The schedule moves off the function and into settings:</p>
+<div class="highlight"><pre><span></span><code><span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django_ox.backend.OxBackend&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;OPTIONS&quot;</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">&quot;SCHEDULES&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;nightly-report&quot;</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="s2">&quot;task&quot;</span><span class="p">:</span> <span class="s2">&quot;reports.tasks.nightly_report&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;cron&quot;</span><span class="p">:</span> <span class="s2">&quot;0 3 * * *&quot;</span><span class="p">,</span>
+                <span class="p">},</span>
+            <span class="p">},</span>
+        <span class="p">},</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Schedules in settings deploy with your code, so there are no rows to edit by
+hand. A typo fails at <code>manage.py check</code> instead of at dispatch time.</p>
+<table>
+<thead>
+<tr>
+<th>huey</th>
+<th>django-ox</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>manage.py run_huey</code></td>
+<td><code>manage.py ox_worker</code></td>
+</tr>
+<tr>
+<td><code>@periodic_task(crontab(...))</code></td>
+<td>a <code>SCHEDULES</code> entry, same five-field cron syntax</td>
+</tr>
+<tr>
+<td><code>.schedule(delay=...)</code></td>
+<td><code>run_after</code></td>
+</tr>
+<tr>
+<td><code>retries</code>, <code>retry_delay</code></td>
+<td><code>MAX_ATTEMPTS</code> and the backoff options</td>
+</tr>
+<tr>
+<td><code>huey.immediate</code> in tests</td>
+<td>Django's <code>ImmediateBackend</code> or <code>DummyBackend</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="switching-over">Switching over</h2>
+<p>The two systems use different tables. Neither reads the other's rows. So if you
+flip the setting and deploy, anything still queued in the old table has nothing
+left to run it.</p>
+<ol>
+<li><strong>Stop enqueueing to the old system.</strong> Leave its workers running.</li>
+<li><strong>Let it drain.</strong> Watch until pending work hits zero. Check scheduled tasks
+   too: a job due in six hours still counts.</li>
+<li><strong>Deploy django-ox.</strong> Run <code>migrate django_ox</code>, then switch <code>TASKS</code>.</li>
+<li><strong>Start <code>ox_worker</code></strong> and check it picks up work. <code>manage.py ox_health</code> will
+   tell you, and the worker logs every claim to the <code>django_ox</code> logger.</li>
+<li><strong>Retire the old worker,</strong> then its tables and broker.</li>
+</ol>
+<p>No drain window available? Run both. Old workers keep serving the old table
+while new work goes to django-ox. They cannot see each other's rows.</p>
+<p>Both systems run tasks at least once, so your tasks should already be
+idempotent. Worth confirming before you start rather than halfway through.</p>
 
 
 
@@ -880,7 +967,7 @@ appears on the package page.</p>
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../pro/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Pro">
+          <a href="../recurring-tasks/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Recurring tasks">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
@@ -890,11 +977,27 @@ appears on the package page.</p>
                 Previous
               </span>
               <div class="md-ellipsis">
-                Pro
+                Recurring tasks
               </div>
             </div>
           </a>
         
+        
+          
+          <a href="../production/" class="md-footer__link md-footer__link--next" aria-label="Next: Production">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Production
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
         
       </nav>
     

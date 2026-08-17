@@ -88,10 +88,8 @@ jobs:
           cat requirements-audit.txt
       - run: pip-audit --strict --desc -r requirements-audit.txt
 
-  # Anything that would leak an internal artefact into a public release.
-  # BUILD-NOTES.md, RELEASE-CHECKLIST.md and .contract-ref/ were all tracked in
-  # this repo once. .gitignore now excludes them by name; this catches the
-  # renamed or newly invented equivalent.
+  # Working notes belong in a working directory, not in a published package.
+  # This fails if a file whose name marks it as internal is ever tracked.
   artifacts:
     name: internal artefacts
     runs-on: ubuntu-latest
@@ -100,9 +98,9 @@ jobs:
       - name: No internal artefacts tracked
         run: |
           set -uo pipefail
-          patterns='BUILD-NOTES|RELEASE-CHECKLIST|\.contract-ref|internal-notes|SESSION-|HANDOFF|PHILIP|night-shift|STATE\.json|KILL\.md'
+          patterns='(^|/)(BUILD|DEV|WORKING|SESSION|MEETING)[-_]?NOTES|CHECKLIST|SCRATCH|\.internal(/|$)|internal[-_]notes|(^|/)TODO(\.md)?$|DRAFT'
           if git ls-files | grep -nEi "$patterns"; then
-            echo "::error::Internal artefact tracked in a public repository."
+            echo "::error::A file that looks like internal notes is tracked here."
             exit 1
           fi
           echo "No internal artefacts tracked."

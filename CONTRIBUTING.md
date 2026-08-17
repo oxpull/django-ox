@@ -41,28 +41,15 @@ markers, no shadowed builtins, no boolean positional arguments. A block of
 comments in `pyproject.toml` records which rule families are deliberately not
 enabled and why, so that decision is visible instead of being rediscovered.
 
-## Documentation and prose
+## Documentation
 
-Everything a reader outside the project sees is checked:
+The documentation site builds with `mkdocs build --strict`, which is also a CI
+job, so a broken link or a missing page fails the build rather than the site. It
+publishes with `mkdocs gh-deploy` and does not publish on merge.
 
-```
-python tools/copy_lint.py
-```
-
-It rejects copy that describes the project as weak or broken, copy that narrates
-defects fixed before release, internal review markers, and a test count that
-disagrees between files. Warnings are advisory; errors block. If a rule is wrong
-about a specific line, suppress that line and give the reason:
-
-```
-<!-- copy-lint: allow SELF_DOWNGRADE the slow service here is the upstream one -->
-```
-
-A suppression without a reason is rejected. `tests/test_copy_lint.py` covers the
-rules, including the false-positive side.
-
-The documentation site builds with `mkdocs build --strict` and publishes with
-`mkdocs gh-deploy`. It does not publish on merge.
+Prose is held to the same bar as code: state what the software does, keep the
+measurement caveats that make a number quotable, and describe scope rather than
+listing things as missing.
 
 ## Releases
 

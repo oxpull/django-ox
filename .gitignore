@@ -11,7 +11,7 @@ dist/
 site/
 benchmarks/logs/
 
-# Internal artifacts — never publish
+# Working notes and local scratch. Not part of the package.
 BUILD-NOTES.md
 RELEASE-CHECKLIST.md
 .contract-ref/

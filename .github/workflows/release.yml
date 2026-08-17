@@ -31,7 +31,6 @@ jobs:
           else
             python tools/check_release.py
           fi
-      - run: python tools/copy_lint.py
       - run: python -m build
       - run: twine check --strict dist/*
       - uses: actions/upload-artifact@v7

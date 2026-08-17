@@ -68,8 +68,7 @@ away, however long the work behind it takes.
 
 ```python
 @task
-def process_payment_event(event_id):
-    ...
+def process_payment_event(event_id): ...
 
 
 @csrf_exempt

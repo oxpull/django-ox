@@ -932,8 +932,7 @@ all four. After <code>MAX_ATTEMPTS</code> the task is <code>FAILED</code> and st
 <p>Do the minimum in the request, then hand off. The sender gets its <code>200</code> straight
 away, however long the work behind it takes.</p>
 <div class="highlight"><pre><span></span><code><span class="nd">@task</span>
-<span class="k">def</span><span class="w"> </span><span class="nf">process_payment_event</span><span class="p">(</span><span class="n">event_id</span><span class="p">):</span>
-    <span class="o">...</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">process_payment_event</span><span class="p">(</span><span class="n">event_id</span><span class="p">):</span> <span class="o">...</span>
 
 
 <span class="nd">@csrf_exempt</span>

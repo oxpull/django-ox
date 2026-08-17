@@ -54,6 +54,52 @@ jobs:
       - run: python -m pip install --group dev -e . "Django~=${{ matrix.django-version }}.0"
       - run: python -m pytest -q
 
+  # MySQL 8 takes the generic `SELECT ... FOR UPDATE SKIP LOCKED` claim path,
+  # the same branch every non-PostgreSQL database with SKIP LOCKED uses. The
+  # README says the claim path works there, so it is tested rather than assumed.
+  #
+  # A leaner matrix than the other two on purpose: the corners, oldest and
+  # newest supported combination, rather than the full grid. The claim path is
+  # shared with PostgreSQL and already covered six ways there, so the value here
+  # is proving the MySQL adapter and its SQL dialect work at all.
+  #
+  # PyMySQL rather than mysqlclient: no system headers, no compile step, and
+  # tests/settings_mysql.py already registers it under the expected name.
+  test-mysql:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: "3.12"
+            django-version: "6.0"
+          - python-version: "3.14"
+            django-version: "6.1"
+    name: mysql py${{ matrix.python-version }} dj${{ matrix.django-version }}
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: ox
+          MYSQL_DATABASE: oxtest
+        ports:
+          - 33069:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pox"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DJANGO_SETTINGS_MODULE: tests.settings_mysql
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --group dev -e . "Django~=${{ matrix.django-version }}.0" PyMySQL
+      - run: python -m pytest -q
+
   lint:
     runs-on: ubuntu-latest
     steps:

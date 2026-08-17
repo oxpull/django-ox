@@ -121,7 +121,7 @@ task bodies so that running twice is harmless (upserts, idempotency keys,
 
 ## PostgreSQL or SQLite
 
-Both are fully supported and both run the complete test suite (191 tests
+Both are fully supported and both run the full worker suite (191 tests
 each). Guidance:
 
 - **PostgreSQL** is the production recommendation. It gets the

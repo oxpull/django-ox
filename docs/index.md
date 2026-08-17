@@ -57,7 +57,7 @@ queue. Details in [Production](production.md).
 - [Monitoring](monitoring.md): a queue-stats API, an `ox_health` command
   for probes and cron alerting, and structured log events.
 
-The test suite is 191 tests, green on both SQLite and PostgreSQL 16.
+The worker is covered by 191 tests, green on both SQLite and PostgreSQL 16.
 
 ## Install
 

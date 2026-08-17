@@ -359,6 +359,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../patterns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Common patterns
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../migrating/" class="md-nav__link">
         
   
@@ -891,7 +918,7 @@ concurrent workers safe:</p>
   contention.</li>
 <li><strong>Recurring schedules need no dedicated node.</strong> Every worker dispatches;
   a unique constraint guarantees each tick fires once. See
-  <a href="../recurring-tasks/#multi-worker-behavior">Recurring tasks</a>.</li>
+  <a href="../recurring-tasks/#many-workers-one-tick">Recurring tasks</a>.</li>
 </ul>
 <p>Workers can also be split by queue: run
 <code>ox_worker --queues emails --concurrency 8</code> next to

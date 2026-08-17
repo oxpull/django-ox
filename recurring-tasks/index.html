@@ -16,7 +16,7 @@
         <link rel="prev" href="../configuration/">
       
       
-        <link rel="next" href="../migrating/">
+        <link rel="next" href="../patterns/">
       
       
         
@@ -415,6 +415,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#day-of-month-and-day-of-week-combine-with-or" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Day-of-month and day-of-week combine with OR
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#timezones" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -431,10 +442,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#multi-worker-behavior" class="md-nav__link">
+  <a href="#many-workers-one-tick" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Multi-worker behavior
+        Many workers, one tick
       
     </span>
   </a>
@@ -452,21 +463,37 @@
   
 </li>
       
-        <li class="md-nav__item">
-  <a href="#validation" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Validation
-      
-    </span>
-  </a>
-  
-</li>
-      
     </ul>
   
 </nav>
       
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../patterns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Common patterns
+  
+
+    
+  </span>
+  
+  
+
+      </a>
     </li>
   
 
@@ -710,6 +737,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#day-of-month-and-day-of-week-combine-with-or" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Day-of-month and day-of-week combine with OR
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#timezones" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -726,10 +764,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#multi-worker-behavior" class="md-nav__link">
+  <a href="#many-workers-one-tick" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Multi-worker behavior
+        Many workers, one tick
       
     </span>
   </a>
@@ -741,17 +779,6 @@
     <span class="md-ellipsis">
       
         Missed ticks
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#validation" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Validation
       
     </span>
   </a>
@@ -779,11 +806,10 @@
 
 
 <h1 id="recurring-tasks">Recurring tasks</h1>
-<p>django-ox runs cron-style recurring tasks without a separate scheduler
-process. Schedules are declared in settings, next to the backend they
-enqueue through, so they are versioned and deployed with the code that
-defines the tasks. The database holds only a dispatch log; there are no
-schedule rows to edit by hand.</p>
+<p>django-ox runs cron-style schedules with no separate scheduler process. You
+declare them in settings, next to the backend they enqueue through, so they are
+versioned and deployed with your code. The database holds a dispatch log and
+nothing else. There are no schedule rows to edit by hand.</p>
 <div class="highlight"><pre><span></span><code><span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
     <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span>
         <span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django_ox.backend.OxBackend&quot;</span><span class="p">,</span>
@@ -804,17 +830,16 @@ schedule rows to edit by hand.</p>
     <span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
-<p>Each tick enqueues a normal task instance, which workers claim and execute
-through the ordinary queue. Retries, backoff, priorities and the result
-store all apply unchanged.</p>
+<p>Each tick enqueues an ordinary task. Workers claim it through the normal queue,
+so retries, backoff, priorities and the result store all work as usual.</p>
 <h2 id="schedule-keys">Schedule keys</h2>
-<p>Schedule names are the dictionary keys: non-empty strings, at most 128
-characters. Schedule names must be unique across all configured backends,
-not just within one; the dispatch log is keyed by name alone, so a name
-shared between two backends is rejected at startup and by <code>manage.py
-check</code> (<code>django_ox.E003</code>) instead of letting the backends suppress each
-other's ticks. Each entry accepts exactly these keys (anything else is
-rejected at startup):</p>
+<p>The dictionary keys are the schedule names. They must be non-empty strings of at
+most 128 characters.</p>
+<p><strong>Names must be unique across every backend, not just within one.</strong> The dispatch
+log is keyed by name alone, so two backends sharing a name would suppress each
+other's ticks. A duplicate is rejected at worker startup and by
+<code>manage.py check</code>, as <code>django_ox.E003</code>.</p>
+<p>Each entry accepts exactly these keys. Anything else is rejected at startup:</p>
 <table>
 <thead>
 <tr>
@@ -856,12 +881,11 @@ rejected at startup):</p>
 </tr>
 </tbody>
 </table>
-<p>A schedule always enqueues through the backend it is declared under, even
-if the task was declared with a different backend alias.</p>
+<p>A schedule enqueues through the backend it is declared under. That holds even if
+the task itself was declared against a different backend alias.</p>
 <h2 id="cron-syntax">Cron syntax</h2>
-<p>Expressions use the classic five fields, in order: minute (0-59), hour
-(0-23), day of month (1-31), month (1-12), day of week (0-7, where both 0
-and 7 mean Sunday). The parser supports vixie cron syntax:</p>
+<p>Five fields, in order: minute (0-59), hour (0-23), day of month (1-31), month
+(1-12), day of week (0-7, where 0 and 7 both mean Sunday).</p>
 <table>
 <thead>
 <tr>
@@ -884,7 +908,7 @@ and 7 mean Sunday). The parser supports vixie cron syntax:</p>
 <tr>
 <td>List</td>
 <td><code>1,15</code></td>
-<td>Any listed value. Elements can themselves be ranges or steps.</td>
+<td>Any listed value. Elements can be ranges or steps.</td>
 </tr>
 <tr>
 <td>Range</td>
@@ -899,98 +923,76 @@ and 7 mean Sunday). The parser supports vixie cron syntax:</p>
 <tr>
 <td>Value with step</td>
 <td><code>5/15</code></td>
-<td>From the value to the field maximum, stepping: <code>5/15</code> in the minute field means minutes 5, 20, 35, 50.</td>
+<td>From that value to the field maximum. In the minute field, <code>5/15</code> means 5, 20, 35, 50.</td>
 </tr>
 <tr>
 <td>Month names</td>
 <td><code>jan</code>, <code>DEC</code></td>
-<td>Case-insensitive three-letter names in the month field.</td>
+<td>Case-insensitive, three letters, month field only.</td>
 </tr>
 <tr>
 <td>Weekday names</td>
 <td><code>sun</code>, <code>Mon-Fri</code></td>
-<td>Case-insensitive three-letter names in the day-of-week field.</td>
+<td>Case-insensitive, three letters, day-of-week field only.</td>
 </tr>
 </tbody>
 </table>
-<p>The <code>@</code> shortcuts are also accepted in place of a full expression:
-<code>@hourly</code> (<code>0 * * * *</code>), <code>@daily</code> and <code>@midnight</code> (<code>0 0 * * *</code>), <code>@weekly</code>
-(<code>0 0 * * 0</code>), <code>@monthly</code> (<code>0 0 1 * *</code>), <code>@yearly</code> and <code>@annually</code>
-(<code>0 0 1 1 *</code>).</p>
-<p><strong>Day-of-month and day-of-week combine with OR</strong>, as in vixie cron: when
-both fields are restricted, a day matches if either field matches. So
-<code>0 0 1,15 * mon</code> fires on the 1st, the 15th, and every Monday, not only on
-Mondays that fall on the 1st or 15th. One divergence from vixie: a stepped
-star such as <code>*/2</code> counts as a restricted field here, following the
-Python-ecosystem (croniter-style) interpretation, so <code>0 0 */2 * 1</code> fires
-on every odd day of the month and on every Monday, where vixie would
-require the day to satisfy both fields.</p>
-<p>Expressions that can never fire, such as <code>0 0 30 2 *</code> (February 30th), are
-rejected when the configuration loads, not discovered as a schedule that
-silently never runs.</p>
+<p>Shortcuts work in place of a full expression: <code>@hourly</code>, <code>@daily</code> and
+<code>@midnight</code>, <code>@weekly</code>, <code>@monthly</code>, <code>@yearly</code> and <code>@annually</code>.</p>
+<p>Expressions that can never fire are rejected when the configuration loads. So
+<code>0 0 30 2 *</code> (February 30th) is a startup error, not a schedule that silently
+never runs.</p>
+<h3 id="day-of-month-and-day-of-week-combine-with-or">Day-of-month and day-of-week combine with OR</h3>
+<p>This follows vixie cron. When both fields are restricted, a day matches if
+<em>either</em> one matches.</p>
+<p><code>0 0 1,15 * mon</code> fires on the 1st, on the 15th, and every Monday. It does not
+fire only on Mondays that land on the 1st or 15th.</p>
+<p>One deliberate divergence from vixie: a stepped star like <code>*/2</code> counts as
+restricted here, which follows the croniter interpretation common in Python. So
+<code>0 0 */2 * 1</code> fires on every odd day of the month <em>and</em> every Monday. Vixie
+would require both.</p>
 <h3 id="timezones">Timezones</h3>
-<p>Cron fields describe wall-clock time in your project's current timezone
-(<code>TIME_ZONE</code>, with <code>USE_TZ = True</code>); <code>0 3 * * *</code> means 03:00 local, year
-round. With <code>USE_TZ = False</code> everything is naive local time. Around DST
-transitions, a tick whose wall-clock time does not exist or is ambiguous
-resolves via zoneinfo fold handling and shifts rather than erroring. If a
-job must not run inside a transition window, schedule it outside your
-zone's transition hours.</p>
-<p>On the fall-back day, a schedule whose wall-clock time
-falls inside the repeated hour (for example <code>30 1 * * *</code> in a zone that
-replays 01:00-02:00) can fire twice, once per pass of that hour. That is
-at most one duplicate run per year and is consistent with the at-least-once
-delivery the rest of the system already assumes; hourly and more frequent
-jobs in the repeated hour intentionally fire on each pass. Changing
-<code>TIME_ZONE</code> to a zone whose wall clock is behind the old one can likewise
-re-fire the same wall-clock label once on the day of the change, because
-ticks are stored as distinct UTC instants.</p>
-<h2 id="multi-worker-behavior">Multi-worker behavior</h2>
-<p>Every running worker doubles as the scheduler: alongside its polling, each
-worker checks (about once a second by default) whether any schedule has a
-tick due. Coordination is a database unique constraint on
-(schedule name, tick time). Each worker derives identical tick datetimes
-from the cron expression, and dispatch wraps the tick-log INSERT and the
-task enqueue in one transaction. When several workers race the same tick,
-exactly one INSERT commits; the losers hit the constraint and their
-transactions roll back, task row included. Each tick therefore fires
-exactly once, with any number of workers, and dispatching survives as long
-as at least one worker is running.</p>
-<p>Scheduling is a property of the workers you already run; it adds nothing
-extra to deploy, monitor, or fail over.</p>
+<p>Cron fields are wall-clock time in your project's timezone. With <code>USE_TZ = True</code>,
+<code>0 3 * * *</code> means 03:00 local all year. With <code>USE_TZ = False</code> it is naive local
+time.</p>
+<p>Across a DST transition, a tick whose wall-clock time is missing or ambiguous is
+resolved by zoneinfo fold handling. It shifts rather than raising. If a job must
+not land inside a transition window, schedule it outside your zone's transition
+hours.</p>
+<p><strong>On the fall-back day a schedule can fire twice.</strong> Take <code>30 1 * * *</code> in a zone
+that replays 01:00 to 02:00: it fires once per pass. That is at most one extra
+run per year, and it is consistent with the at-least-once delivery the rest of
+the system already assumes. Hourly and more frequent schedules in the repeated
+hour fire on each pass by design.</p>
+<p>Changing <code>TIME_ZONE</code> to a zone behind the old one can also re-fire one
+wall-clock label on the day you change it, because ticks are stored as distinct
+UTC instants.</p>
+<h2 id="many-workers-one-tick">Many workers, one tick</h2>
+<p>Every worker is also the scheduler. Alongside its polling, each one checks about
+once a second whether a tick is due.</p>
+<p>Coordination is a database unique constraint on (schedule name, tick time). It
+works like this:</p>
+<ol>
+<li>Every worker derives the same tick datetimes from the cron expression.</li>
+<li>Dispatch wraps the tick-log <code>INSERT</code> and the task enqueue in one transaction.</li>
+<li>When workers race the same tick, exactly one <code>INSERT</code> commits.</li>
+<li>The losers hit the constraint and roll back, task row included.</li>
+</ol>
+<p>So each tick fires exactly once, whatever the worker count, and dispatch keeps
+working as long as one worker is alive. Scheduling is a property of the workers
+you already run. There is nothing extra to deploy, monitor or fail over.</p>
 <h2 id="missed-ticks">Missed ticks</h2>
-<p>The policy, stated plainly:</p>
-<ul>
-<li><strong>If every worker was down when a tick passed, the latest missed tick
-  fires once on recovery. Older missed ticks are skipped.</strong> A nightly job
-  that was due during an unlucky deploy window still runs when workers
-  come back, but a weekend of downtime for a five-minute schedule does not
-  replay hundreds of stale runs.</li>
-<li><strong>A newly deployed schedule does not fire for times before it existed.</strong>
-  The first time a worker sees a schedule with no tick history, it records
-  the current tick as an anchor without enqueueing anything; the schedule
-  first fires at its next tick after deployment.</li>
-<li>The recovery baseline is each schedule's most recent tick row, which is
-  why <code>ox_prune</code> always preserves it (see
-  <a href="../configuration/#ox_prune">Configuration</a>).</li>
-</ul>
-<p>If your recurring job genuinely needs every interval processed, encode the
-interval in the task's arguments or derive it from your data inside the
-task; the scheduler guarantees at most one enqueue per tick, not a replay
-of history.</p>
-<h2 id="validation">Validation</h2>
-<p>Misconfigured schedules fail fast, in two places: the worker refuses to
-start, and <code>manage.py check</code> reports <code>django_ox.E002</code>. Checked at load
-time: the task path imports and is a <code>django.tasks</code> Task, the cron
-expression parses and can fire, <code>args</code>/<code>kwargs</code> are JSON-serializable, and
-<code>queue_name</code>/<code>priority</code> overrides pass the backend's own task validation.
-A schedule name that appears on more than one backend is reported
-separately as <code>django_ox.E003</code>.</p>
-<p>One caveat: the <code>task_enqueued</code> signal fires inside the dispatch
-transaction. If the tick loses the unique-constraint race and rolls back,
-the signal has already fired for a task that never committed. Django core
-gives no guidance on signals inside rolled-back transactions; treat
-<code>task_enqueued</code> as advisory if you listen to it.</p>
+<p><strong>If every worker was down when a tick passed, the most recent missed tick fires
+once on recovery. Older ones are skipped.</strong></p>
+<p>A nightly job due during an unlucky deploy still runs when workers return. A
+weekend of downtime on a five-minute schedule does not replay hundreds of stale
+runs.</p>
+<p><strong>A new schedule never fires for times before it existed.</strong> The first time a
+worker sees a schedule with no history, it records the current tick as an anchor
+and enqueues nothing. The schedule first fires at its next tick.</p>
+<p>The recovery baseline is each schedule's most recent tick row, which is why
+<code>ox_prune</code> always keeps it. See
+<a href="../configuration/#ox_prune">Configuration</a>.</p>
 
 
 
@@ -1037,13 +1039,13 @@ gives no guidance on signals inside rolled-back transactions; treat
         
         
           
-          <a href="../migrating/" class="md-footer__link md-footer__link--next" aria-label="Next: Migrating">
+          <a href="../patterns/" class="md-footer__link md-footer__link--next" aria-label="Next: Common patterns">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Migrating
+                Common patterns
               </div>
             </div>
             <div class="md-footer__button md-icon">

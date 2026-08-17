@@ -38,6 +38,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/oxpull/django-ox"
+Documentation = "https://oxpull.github.io/django-ox/"
 Repository = "https://github.com/oxpull/django-ox"
 Changelog = "https://github.com/oxpull/django-ox/blob/main/CHANGELOG.md"
 Issues = "https://github.com/oxpull/django-ox/issues"

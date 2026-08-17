@@ -79,7 +79,7 @@ concurrent workers safe:
   contention.
 - **Recurring schedules need no dedicated node.** Every worker dispatches;
   a unique constraint guarantees each tick fires once. See
-  [Recurring tasks](recurring-tasks.md#multi-worker-behavior).
+  [Recurring tasks](recurring-tasks.md#many-workers-one-tick).
 
 Workers can also be split by queue: run
 `ox_worker --queues emails --concurrency 8` next to

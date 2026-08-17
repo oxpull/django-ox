@@ -1,10 +1,9 @@
 # Recurring tasks
 
-django-ox runs cron-style recurring tasks without a separate scheduler
-process. Schedules are declared in settings, next to the backend they
-enqueue through, so they are versioned and deployed with the code that
-defines the tasks. The database holds only a dispatch log; there are no
-schedule rows to edit by hand.
+django-ox runs cron-style schedules with no separate scheduler process. You
+declare them in settings, next to the backend they enqueue through, so they are
+versioned and deployed with your code. The database holds a dispatch log and
+nothing else. There are no schedule rows to edit by hand.
 
 ```python
 TASKS = {
@@ -28,19 +27,20 @@ TASKS = {
 }
 ```
 
-Each tick enqueues a normal task instance, which workers claim and execute
-through the ordinary queue. Retries, backoff, priorities and the result
-store all apply unchanged.
+Each tick enqueues an ordinary task. Workers claim it through the normal queue,
+so retries, backoff, priorities and the result store all work as usual.
 
 ## Schedule keys
 
-Schedule names are the dictionary keys: non-empty strings, at most 128
-characters. Schedule names must be unique across all configured backends,
-not just within one; the dispatch log is keyed by name alone, so a name
-shared between two backends is rejected at startup and by `manage.py
-check` (`django_ox.E003`) instead of letting the backends suppress each
-other's ticks. Each entry accepts exactly these keys (anything else is
-rejected at startup):
+The dictionary keys are the schedule names. They must be non-empty strings of at
+most 128 characters.
+
+**Names must be unique across every backend, not just within one.** The dispatch
+log is keyed by name alone, so two backends sharing a name would suppress each
+other's ticks. A duplicate is rejected at worker startup and by
+`manage.py check`, as `django_ox.E003`.
+
+Each entry accepts exactly these keys. Anything else is rejected at startup:
 
 | Key | Required | Meaning |
 | --- | --- | --- |
@@ -51,114 +51,96 @@ rejected at startup):
 | `queue_name` | no | Queue override; defaults to the task's own queue. |
 | `priority` | no | Priority override, -100 to 100. |
 
-A schedule always enqueues through the backend it is declared under, even
-if the task was declared with a different backend alias.
+A schedule enqueues through the backend it is declared under. That holds even if
+the task itself was declared against a different backend alias.
 
 ## Cron syntax
 
-Expressions use the classic five fields, in order: minute (0-59), hour
-(0-23), day of month (1-31), month (1-12), day of week (0-7, where both 0
-and 7 mean Sunday). The parser supports vixie cron syntax:
+Five fields, in order: minute (0-59), hour (0-23), day of month (1-31), month
+(1-12), day of week (0-7, where 0 and 7 both mean Sunday).
 
 | Form | Example | Meaning |
 | --- | --- | --- |
 | Any | `*` | Every value. |
 | Value | `30` | That value. |
-| List | `1,15` | Any listed value. Elements can themselves be ranges or steps. |
+| List | `1,15` | Any listed value. Elements can be ranges or steps. |
 | Range | `9-17` | Every value in the range, inclusive. Descending ranges are rejected. |
 | Step | `*/15`, `1-10/2` | Every Nth value across the range. |
-| Value with step | `5/15` | From the value to the field maximum, stepping: `5/15` in the minute field means minutes 5, 20, 35, 50. |
-| Month names | `jan`, `DEC` | Case-insensitive three-letter names in the month field. |
-| Weekday names | `sun`, `Mon-Fri` | Case-insensitive three-letter names in the day-of-week field. |
+| Value with step | `5/15` | From that value to the field maximum. In the minute field, `5/15` means 5, 20, 35, 50. |
+| Month names | `jan`, `DEC` | Case-insensitive, three letters, month field only. |
+| Weekday names | `sun`, `Mon-Fri` | Case-insensitive, three letters, day-of-week field only. |
 
-The `@` shortcuts are also accepted in place of a full expression:
-`@hourly` (`0 * * * *`), `@daily` and `@midnight` (`0 0 * * *`), `@weekly`
-(`0 0 * * 0`), `@monthly` (`0 0 1 * *`), `@yearly` and `@annually`
-(`0 0 1 1 *`).
+Shortcuts work in place of a full expression: `@hourly`, `@daily` and
+`@midnight`, `@weekly`, `@monthly`, `@yearly` and `@annually`.
 
-**Day-of-month and day-of-week combine with OR**, as in vixie cron: when
-both fields are restricted, a day matches if either field matches. So
-`0 0 1,15 * mon` fires on the 1st, the 15th, and every Monday, not only on
-Mondays that fall on the 1st or 15th. One divergence from vixie: a stepped
-star such as `*/2` counts as a restricted field here, following the
-Python-ecosystem (croniter-style) interpretation, so `0 0 */2 * 1` fires
-on every odd day of the month and on every Monday, where vixie would
-require the day to satisfy both fields.
+Expressions that can never fire are rejected when the configuration loads. So
+`0 0 30 2 *` (February 30th) is a startup error, not a schedule that silently
+never runs.
 
-Expressions that can never fire, such as `0 0 30 2 *` (February 30th), are
-rejected when the configuration loads, not discovered as a schedule that
-silently never runs.
+### Day-of-month and day-of-week combine with OR
+
+This follows vixie cron. When both fields are restricted, a day matches if
+*either* one matches.
+
+`0 0 1,15 * mon` fires on the 1st, on the 15th, and every Monday. It does not
+fire only on Mondays that land on the 1st or 15th.
+
+One deliberate divergence from vixie: a stepped star like `*/2` counts as
+restricted here, which follows the croniter interpretation common in Python. So
+`0 0 */2 * 1` fires on every odd day of the month *and* every Monday. Vixie
+would require both.
 
 ### Timezones
 
-Cron fields describe wall-clock time in your project's current timezone
-(`TIME_ZONE`, with `USE_TZ = True`); `0 3 * * *` means 03:00 local, year
-round. With `USE_TZ = False` everything is naive local time. Around DST
-transitions, a tick whose wall-clock time does not exist or is ambiguous
-resolves via zoneinfo fold handling and shifts rather than erroring. If a
-job must not run inside a transition window, schedule it outside your
-zone's transition hours.
+Cron fields are wall-clock time in your project's timezone. With `USE_TZ = True`,
+`0 3 * * *` means 03:00 local all year. With `USE_TZ = False` it is naive local
+time.
 
-On the fall-back day, a schedule whose wall-clock time
-falls inside the repeated hour (for example `30 1 * * *` in a zone that
-replays 01:00-02:00) can fire twice, once per pass of that hour. That is
-at most one duplicate run per year and is consistent with the at-least-once
-delivery the rest of the system already assumes; hourly and more frequent
-jobs in the repeated hour intentionally fire on each pass. Changing
-`TIME_ZONE` to a zone whose wall clock is behind the old one can likewise
-re-fire the same wall-clock label once on the day of the change, because
-ticks are stored as distinct UTC instants.
+Across a DST transition, a tick whose wall-clock time is missing or ambiguous is
+resolved by zoneinfo fold handling. It shifts rather than raising. If a job must
+not land inside a transition window, schedule it outside your zone's transition
+hours.
 
-## Multi-worker behavior
+**On the fall-back day a schedule can fire twice.** Take `30 1 * * *` in a zone
+that replays 01:00 to 02:00: it fires once per pass. That is at most one extra
+run per year, and it is consistent with the at-least-once delivery the rest of
+the system already assumes. Hourly and more frequent schedules in the repeated
+hour fire on each pass by design.
 
-Every running worker doubles as the scheduler: alongside its polling, each
-worker checks (about once a second by default) whether any schedule has a
-tick due. Coordination is a database unique constraint on
-(schedule name, tick time). Each worker derives identical tick datetimes
-from the cron expression, and dispatch wraps the tick-log INSERT and the
-task enqueue in one transaction. When several workers race the same tick,
-exactly one INSERT commits; the losers hit the constraint and their
-transactions roll back, task row included. Each tick therefore fires
-exactly once, with any number of workers, and dispatching survives as long
-as at least one worker is running.
+Changing `TIME_ZONE` to a zone behind the old one can also re-fire one
+wall-clock label on the day you change it, because ticks are stored as distinct
+UTC instants.
 
-Scheduling is a property of the workers you already run; it adds nothing
-extra to deploy, monitor, or fail over.
+## Many workers, one tick
+
+Every worker is also the scheduler. Alongside its polling, each one checks about
+once a second whether a tick is due.
+
+Coordination is a database unique constraint on (schedule name, tick time). It
+works like this:
+
+1. Every worker derives the same tick datetimes from the cron expression.
+2. Dispatch wraps the tick-log `INSERT` and the task enqueue in one transaction.
+3. When workers race the same tick, exactly one `INSERT` commits.
+4. The losers hit the constraint and roll back, task row included.
+
+So each tick fires exactly once, whatever the worker count, and dispatch keeps
+working as long as one worker is alive. Scheduling is a property of the workers
+you already run. There is nothing extra to deploy, monitor or fail over.
 
 ## Missed ticks
 
-The policy, stated plainly:
+**If every worker was down when a tick passed, the most recent missed tick fires
+once on recovery. Older ones are skipped.**
 
-- **If every worker was down when a tick passed, the latest missed tick
-  fires once on recovery. Older missed ticks are skipped.** A nightly job
-  that was due during an unlucky deploy window still runs when workers
-  come back, but a weekend of downtime for a five-minute schedule does not
-  replay hundreds of stale runs.
-- **A newly deployed schedule does not fire for times before it existed.**
-  The first time a worker sees a schedule with no tick history, it records
-  the current tick as an anchor without enqueueing anything; the schedule
-  first fires at its next tick after deployment.
-- The recovery baseline is each schedule's most recent tick row, which is
-  why `ox_prune` always preserves it (see
-  [Configuration](configuration.md#ox_prune)).
+A nightly job due during an unlucky deploy still runs when workers return. A
+weekend of downtime on a five-minute schedule does not replay hundreds of stale
+runs.
 
-If your recurring job genuinely needs every interval processed, encode the
-interval in the task's arguments or derive it from your data inside the
-task; the scheduler guarantees at most one enqueue per tick, not a replay
-of history.
+**A new schedule never fires for times before it existed.** The first time a
+worker sees a schedule with no history, it records the current tick as an anchor
+and enqueues nothing. The schedule first fires at its next tick.
 
-## Validation
-
-Misconfigured schedules fail fast, in two places: the worker refuses to
-start, and `manage.py check` reports `django_ox.E002`. Checked at load
-time: the task path imports and is a `django.tasks` Task, the cron
-expression parses and can fire, `args`/`kwargs` are JSON-serializable, and
-`queue_name`/`priority` overrides pass the backend's own task validation.
-A schedule name that appears on more than one backend is reported
-separately as `django_ox.E003`.
-
-One caveat: the `task_enqueued` signal fires inside the dispatch
-transaction. If the tick loses the unique-constraint race and rolls back,
-the signal has already fired for a task that never committed. Django core
-gives no guidance on signals inside rolled-back transactions; treat
-`task_enqueued` as advisory if you listen to it.
+The recovery baseline is each schedule's most recent tick row, which is why
+`ox_prune` always keeps it. See
+[Configuration](configuration.md#ox_prune).

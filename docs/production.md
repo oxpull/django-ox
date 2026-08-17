@@ -1,10 +1,10 @@
 # Production
 
 The worker is a plain foreground process: `manage.py ox_worker`, run
-under whatever supervises your other processes. Always run it under a
-supervisor with restart enabled (`Restart=always` below): a transient
-database error terminates the run loop, and the supervisor restart is what
-turns that into a blip instead of an outage. This page covers systemd,
+under whatever supervises your other processes. It treats a lost database
+connection as fatal rather than retrying blind, and relies on the
+supervisor to restart it. Run it under `Restart=always` (as in the unit
+below). This page covers systemd,
 scaling, shutdown, the reaper, and monitoring.
 
 ## Running under systemd
@@ -121,7 +121,7 @@ task bodies so that running twice is harmless (upserts, idempotency keys,
 
 ## PostgreSQL or SQLite
 
-Both are fully supported and both run the complete test suite (189 tests
+Both are fully supported and both run the complete test suite (191 tests
 each). Guidance:
 
 - **PostgreSQL** is the production recommendation. It gets the

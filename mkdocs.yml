@@ -1,6 +1,7 @@
 site_name: django-ox
 site_description: Database-backed worker backend for Django's Tasks framework.
-site_url: ""
+site_url: https://oxpull.github.io/django-ox/
+repo_url: https://github.com/oxpull/django-ox
 
 exclude_docs: |
   requirements.txt

@@ -57,7 +57,7 @@ queue. Details in [Production](production.md).
 - [Monitoring](monitoring.md): a queue-stats API, an `ox_health` command
   for probes and cron alerting, and structured log events.
 
-The test suite is 189 tests, run green on SQLite and PostgreSQL 16.
+The test suite is 191 tests, green on both SQLite and PostgreSQL 16.
 
 ## Install
 
@@ -133,18 +133,22 @@ That is the whole integration. Next steps:
 - [Production](production.md) for systemd units, scaling and shutdown
   semantics.
 
-## Current limitations
+## Scope
 
-Stated up front rather than discovered later:
+The core is deliberately small: a durable queue, a worker, recurring
+schedules, and monitoring, with nothing extra to operate. Design
+decisions worth knowing before you commit:
 
-- No task revocation or cancellation after enqueue.
-- No multi-database routing: tasks are stored on the default database for
-  the model.
-- No rate limiting, batching, or dashboard. See [Pro](pro.md) for what is
-  planned there.
+- Enqueued tasks run; there is no revocation or cancellation API after
+  enqueue.
+- Tasks are stored on the default database for the model; multi-database
+  routing is not part of the current scope.
 - Worker concurrency is a thread pool, which fits I/O-bound tasks. For
   CPU-bound work, run multiple worker processes with `--concurrency 1`
   instead. See [Production](production.md#threads-and-processes).
+
+Batches, unique tasks, rate limiting, and metrics export are on the
+[Pro roadmap](pro.md).
 
 ## License
 

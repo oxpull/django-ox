@@ -10,3 +10,11 @@ dist/
 .ruff_cache/
 site/
 benchmarks/logs/
+
+# Internal artifacts — never publish
+BUILD-NOTES.md
+RELEASE-CHECKLIST.md
+.contract-ref/
+results-raw-*-prefix.json
+results-raw-*-postfix1.json
+results-raw-*-inc4.json

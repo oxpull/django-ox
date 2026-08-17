@@ -21,7 +21,7 @@ PostgreSQL 16, which exercises the `SELECT ... FOR UPDATE SKIP LOCKED`
 claim path:
 
 ```
-docker run -d --name plow-pg -e POSTGRES_PASSWORD=plow -p 54329:5432 postgres:16
+docker run -d --name ox-pg -e POSTGRES_PASSWORD=ox -p 54329:5432 postgres:16
 DJANGO_SETTINGS_MODULE=tests.settings_postgres .venv/bin/python -m pytest
 ```
 

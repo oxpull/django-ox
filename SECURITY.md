@@ -55,8 +55,8 @@ backup, or those log records can read them.
 - Tracebacks are standard `traceback.format_exception()` output: stack
   frames and the exception message, without local-variable values.
 
-Encrypting arguments at rest is on the django-ox Pro roadmap (see the Pro
-page); the plaintext posture above is what the open-source package does.
+Encrypting arguments at rest is on the Oxpull Pro roadmap; the plaintext
+posture above is what the open-source package does.
 
 ## SQL
 
@@ -78,5 +78,5 @@ Report vulnerabilities privately via GitHub security advisories:
 [Report a vulnerability](https://github.com/oxpull/django-ox/security/advisories/new).
 Do not open a public issue for anything security-sensitive.
 
-You will get an acknowledgement within a few days. Please include a
+You will get an acknowledgement within three business days. Please include a
 reproduction or a clear description of the affected code path.

@@ -5,9 +5,9 @@ and stays that way. The durable queue, transactional enqueue, retries,
 reaper, graceful drain, priorities, deferred tasks, recurring tasks and
 pruning are the free tier, permanently.
 
-**django-ox Pro** is a planned paid tier for the problems that only show
-up at scale. None of it is shipped yet; this page is what is on the
-roadmap, so you can decide whether to follow along.
+**django-ox Pro** is a paid tier in development for the problems that
+only show up at scale. This page is the roadmap, so you can decide
+whether to follow along.
 
 ## Planned features
 
@@ -15,10 +15,10 @@ roadmap, so you can decide whether to follow along.
 - **Unique tasks**: deduplicate enqueues so a job cannot be queued twice.
 - **Rate limiting**: per-queue and per-task throughput caps.
 - **Metrics export**: Prometheus and OpenTelemetry.
+- **Email support** from the maintainers.
 
 Further out, after launch: workflows and chains (tasks that depend on tasks),
 a web dashboard, and encrypted task payloads for teams that need them.
-- **Email support** from the maintainers.
 
 Delivery will be a license-keyed private package index: `pip install`
 with your key, no vendoring, no source access ceremony.
@@ -35,6 +35,4 @@ If any of the above would earn its keep in your deployment, join the
 waitlist and say which feature. That ordering decides what gets built
 first.
 
-[Join the Pro waitlist](#){ .md-button }
-
-<!-- TODO: replace the href above with the live waitlist URL before publishing. -->
+[Join the Pro waitlist](https://oxpull.github.io/){ .md-button }

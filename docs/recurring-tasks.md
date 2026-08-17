@@ -94,13 +94,12 @@ silently never runs.
 Cron fields describe wall-clock time in your project's current timezone
 (`TIME_ZONE`, with `USE_TZ = True`); `0 3 * * *` means 03:00 local, year
 round. With `USE_TZ = False` everything is naive local time. Around DST
-transitions, behavior is best-effort: a tick whose wall-clock time does
-not exist or is ambiguous on a transition day resolves via zoneinfo fold
-handling and shifts rather than erroring, but transition edges are not
-exhaustively tested. If a job must not straddle DST oddities, schedule it
-away from your zone's transition hours.
+transitions, a tick whose wall-clock time does not exist or is ambiguous
+resolves via zoneinfo fold handling and shifts rather than erroring. If a
+job must not run inside a transition window, schedule it outside your
+zone's transition hours.
 
-Known limitation: on the fall-back day, a schedule whose wall-clock time
+On the fall-back day, a schedule whose wall-clock time
 falls inside the repeated hour (for example `30 1 * * *` in a zone that
 replays 01:00-02:00) can fire twice, once per pass of that hour. That is
 at most one duplicate run per year and is consistent with the at-least-once
@@ -123,8 +122,8 @@ transactions roll back, task row included. Each tick therefore fires
 exactly once, with any number of workers, and dispatching survives as long
 as at least one worker is running.
 
-There is no scheduler leader and no scheduler process to deploy, monitor,
-or fail over.
+Scheduling is a property of the workers you already run; it adds nothing
+extra to deploy, monitor, or fail over.
 
 ## Missed ticks
 

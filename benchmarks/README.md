@@ -21,8 +21,8 @@ django-ox tasks use Django core's `django.tasks.task`, django-tasks-db
 tasks use the `django_tasks` package's `task` (that is how each backend is
 meant to be driven; django-tasks-db predates and does not use the Django
 6.0 core module). This means the comparison is between the two *stacks*
-(framework + backend), not the backend classes in isolation. Both stacks
-present the same public API.
+(framework + backend) rather than the backend classes in isolation. Both
+stacks present the same public API.
 
 | Metric | Definition |
 | --- | --- |
@@ -46,20 +46,19 @@ whichever ran last.
   threads in one process: 4 processes get 4 CPUs' worth of Python and 4
   separate DB connections, while ox's threads share one interpreter (and
   its GIL). Read the concurrency-4 rows with that asymmetry in mind; it is
-  the fairest available mapping, not a perfect one.
+  the fairest mapping the two designs allow.
 
 ### Diagnostic row (ox only, clearly non-default)
 
 The defaults-only end-to-end rows are the comparison. In addition, the
 harness runs one extra ox configuration per run: concurrency 1 with
-`--interval 0.1` instead of the default 1.0. This exists because ox's
-worker loop sleeps its full poll interval whenever its single executor slot
-is momentarily busy, capping concurrency-1 throughput near 1/interval for
-fast tasks. The diagnostic row confirms that diagnosis empirically. It is
-recorded under a separate `e2e_diagnostic` key, labeled non-default, and
-must never be presented as ox's headline number. The published results
-also include one single-shot probe at `--interval 0.01`, run through the
-same `run_e2e` code path and reported with its method in the results file.
+`--interval 0.1` instead of the default 1.0. The worker is designed to
+wake on task completion whenever tasks are in flight, so `--interval`
+should only govern how often an idle worker checks for new work; the
+diagnostic row proves that property empirically on every run by matching
+the default-interval cell. It is recorded under a separate
+`e2e_diagnostic` key, labeled non-default, and is never presented as ox's
+headline number.
 
 ### Warmup
 
@@ -100,8 +99,7 @@ results:
 
 ## Reproducing
 
-Prerequisites: Docker Desktop, and the experiment venv at `../../.venv`
-relative to this directory (i.e. `<package root>/../.venv`) with:
+Prerequisites: Docker Desktop and a Python 3.12+ virtualenv with:
 
 ```
 pip install -e ..            # django-ox, from the package root
@@ -111,7 +109,7 @@ pip install django-tasks-db psycopg[binary]
 Then, from this `benchmarks/` directory:
 
 ```
-../../.venv/bin/python bench.py
+python bench.py
 ```
 
 The script starts Docker Desktop if needed, creates the `ox-bench`
@@ -128,16 +126,16 @@ docker --context desktop-linux rm -f ox-bench
 osascript -e 'quit app "Docker"'
 ```
 
-The published `results-<date>.md` is written by a person from the raw JSON;
-the JSON is the source of truth and ships alongside it.
+The published `results-<date>.md` is derived from the raw JSON; the JSON
+is the source of truth and ships alongside it.
 
 ## Limitations
 
 Read these before quoting any number.
 
 - **Single machine, single run day.** One Mac, one OS state, no controlled
-  thermal or background-load environment. Numbers are indicative of
-  relative behavior on this hardware, not absolute performance claims.
+  thermal or background-load environment. Numbers describe relative
+  behavior on this hardware; absolute performance elsewhere will differ.
 - **Localhost database.** PostgreSQL runs in Docker on the same machine
   with sub-millisecond round trips. Real deployments have network latency
   between app and database, which would compress the relative differences
@@ -158,7 +156,7 @@ Read these before quoting any number.
   boot per worker process is inside the timed window for both backends (4x
   for tasksdb's 4-process configuration, which is a real cost of a
   process-per-worker model, but worth knowing when reading the numbers).
-- **Different stacks, not just backends.** ox rides Django 6.0 core
+- **Whole stacks compared.** ox rides Django 6.0 core
   `django.tasks`; tasks-db rides the external `django_tasks` package. Any
   overhead difference between those frameworks is included in the totals.
 - **Single producer.** Enqueue metrics use one process on one connection.
@@ -173,20 +171,20 @@ forced crash-restart of a worker holding claimed tasks. Every task
 execution writes phase rows with a per-execution nonce to a `soak_ledger`
 side table, so at-least-once vs exactly-once behavior is measured from
 side effects and asserted from the database afterwards. It runs against
-the standing `plow-pg` container (port 54329, the same one
-`tests/settings_postgres.py` uses) with its own `soak_ox` database and the
-`soaksite/` settings module. Methodology, parameters, and results:
+the same PostgreSQL 16 container the test suite uses (`ox-pg`, port 54329;
+see CONTRIBUTING.md for the docker run command) with its own `soak_ox`
+database and the `soaksite/` settings module. Methodology, parameters, and results:
 [SOAK-2026-08-16.md](SOAK-2026-08-16.md), raw data in
 `soak-results-raw-<date>.json`.
 
 ## Files
 
-- `bench.py` — orchestrator plus per-measurement subprocess roles. The
+- `bench.py`: orchestrator plus per-measurement subprocess roles. The
   orchestrator never imports Django; each measurement is a fresh process.
-- `benchsite/` — minimal settings and task modules for each backend.
-- `results-raw-<date>.json` — every number the harness produced, including
+- `benchsite/`: minimal settings and task modules for each backend.
+- `results-raw-<date>.json`: every number the harness produced, including
   all 500 individual latency samples per run.
-- `results-<date>.md` — the human-written results document.
-- `soak.py` / `soaksite/` — soak and chaos harness (see above).
-- `SOAK-<date>.md` / `soak-results-raw-<date>.json` — its results.
-- `logs/` — stdout/stderr of every producer and worker process.
+- `results-<date>.md`: the human-written results document.
+- `soak.py` / `soaksite/`: soak and chaos harness (see above).
+- `SOAK-<date>.md` / `soak-results-raw-<date>.json`: its results.
+- `logs/`: stdout/stderr of every producer and worker process.

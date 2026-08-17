@@ -125,7 +125,7 @@ message text is not part of the contract; the keys are.
 | `task_failed` | ERROR | The task reached FAILED, out of attempts. |
 | `task_reclaimed` | WARNING | The reaper reclaimed a stuck task from a dead worker. |
 | `schedule_dispatched` | INFO | A recurring tick enqueued its task. |
-| `worker_error` | ERROR | The execution wrapper itself raised (a bug, not a task failure). |
+| `worker_error` | ERROR | The execution wrapper itself raised (an internal worker error, not a task failure). |
 | `worker_draining` | INFO | Shutdown began with tasks still in flight. |
 | `worker_stopped` | INFO | The run loop exited. |
 

@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-08-13
+## [0.1.0] - 2026-08-16
 
 Initial release.
 
@@ -57,29 +57,22 @@ Initial release.
   one backend is rejected, at worker startup and in `manage.py check`,
   because the tick log is keyed by schedule name alone and shared names
   would let the backends suppress each other's ticks.
-
-### Fixed
-
-Findings from a pre-release adversarial review:
-
-- A tick row dated in the future (for example written by a worker with a
-  fast clock) no longer suppresses schedule dispatch fleet-wide; ticks
-  that are due now fire regardless, and the unique constraint still
-  protects the future instant itself.
-- Cron step values larger than the field's range (such as `*/61` in the
-  minute field, which silently collapsed to minute 0) are rejected at
-  parse time.
+- Strict cron validation: expressions that can never fire and step values
+  larger than a field's range (such as `*/61` in the minute field) are
+  rejected at parse time rather than misfiring silently. Schedule
+  dispatch is robust to clock skew between workers: a tick row dated in
+  the future cannot suppress ticks that are due.
 
 ### Security
 
-- A stored `task_path` is now required to resolve to a `django.tasks` Task
-  (a function registered with `@task`). A row naming any other importable
-  callable is rejected as an un-runnable task instead of being executed, so
-  the worker never invokes an arbitrary dotted path pulled from the table.
+- A stored `task_path` must resolve to a `django.tasks` Task (a function
+  registered with `@task`). A row naming any other importable callable is
+  rejected as an un-runnable task instead of being executed, so the
+  worker never invokes an arbitrary dotted path pulled from the table.
   `SECURITY.md` documents the full trust model, the JSON-only
   serialization, and the guidance to keep secrets out of task arguments.
-- Added an API stability and deprecation policy (`docs/stability.md`):
-  the public API surface, the pre-1.0 SemVer rule, the deprecation window,
-  and the supported Python and Django matrix.
+- An API stability and deprecation policy (`docs/stability.md`) covers
+  the public API surface, the pre-1.0 SemVer rule, the deprecation
+  window, and the supported Python and Django matrix.
 
 [0.1.0]: https://github.com/oxpull/django-ox/releases/tag/v0.1.0

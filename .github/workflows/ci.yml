@@ -35,7 +35,7 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_PASSWORD: plow
+          POSTGRES_PASSWORD: ox
         ports:
           - 54329:5432
         options: >-

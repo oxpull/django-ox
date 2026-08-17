@@ -1,4 +1,4 @@
 # Documentation build dependencies. Not runtime dependencies.
 # pip install -r docs/requirements.txt && mkdocs build
 mkdocs>=1.6.1,<2
-mkdocs-material>=9.7,<10
+mkdocs-material>=9.7.7,<10

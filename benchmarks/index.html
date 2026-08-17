@@ -814,11 +814,10 @@ nothing was discarded.</p>
 three runs, and edges or ties concurrency 4. In-transaction enqueue
 latency is a tie at roughly half a millisecond for both; run-to-run drift
 on the machine is larger than the difference between the backends.</p>
-<p>A diagnostic cell at a non-default <code>--interval 0.1</code> produced the same
-throughput as the defaults (87.8 / 86.6 / 88.5 tasks/sec), confirming
-that the poll interval does not bound throughput: when tasks are in
-flight, the worker wakes on task completion rather than on the polling
-clock.</p>
+<p>A diagnostic cell at a non-default <code>--interval 0.1</code> produced the same throughput
+as the defaults: 87.8, 86.6 and 88.5 tasks/sec. So the poll interval does not
+bound throughput. With tasks in flight, the worker wakes on task completion
+rather than on the polling clock.</p>
 <h2 id="where-the-numbers-come-from">Where the numbers come from</h2>
 <p>Two properties of the worker's claim path drive the end-to-end results:</p>
 <ul>
@@ -833,10 +832,10 @@ clock.</p>
   poll interval, so <code>--interval</code> only governs how often an idle worker
   checks for new work.</li>
 </ul>
-<p>The benchmark harness gates releases: both properties above are proven by
-the published cells (the single-statement claim by the concurrency-1 rows,
-the completion wake-up by the diagnostic cell), and any regression in
-either shows up as a changed number, not a changed claim.</p>
+<p>The harness gates releases. Both properties above are proven by published cells:
+the single-statement claim by the concurrency-1 rows, the completion wake-up by
+the diagnostic cell. A regression in either shows up as a changed number rather
+than a changed claim.</p>
 <h2 id="how-to-read-these-numbers">How to read these numbers</h2>
 <ul>
 <li><strong>No-op task bodies.</strong> The tasks do nothing, so these numbers measure

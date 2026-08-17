@@ -814,10 +814,10 @@ announced in the <a href="../changelog/">changelog</a>.</p>
 contract.</p>
 <h3 id="not-public">Not public</h3>
 <p>Everything else is an implementation detail and may change in any release
-without notice: the <code>django_ox.worker.Worker</code> class internals, the cron
+without notice. That covers the <code>django_ox.worker.Worker</code> internals, the cron
 parser (<code>django_ox.cron</code>), the row-to-dataclass conversion
-(<code>django_ox.results</code>), the schedule loader (<code>django_ox.schedules</code>), and
-any name prefixed with an underscore. The exact SQL a claim emits and the
+(<code>django_ox.results</code>), the schedule loader (<code>django_ox.schedules</code>), and any name
+starting with an underscore. The exact SQL a claim emits and the
 model's non-schema helper methods are not part of the contract.</p>
 <h2 id="versioning">Versioning</h2>
 <p>django-ox follows <a href="https://semver.org/">Semantic Versioning</a>. Before 1.0,
@@ -844,9 +844,9 @@ dropped outright:</p>
 <li>A deprecated surface keeps working for <strong>at least one full minor release</strong>
   (pre-1.0) or one major release (post-1.0) before it is removed.</li>
 </ul>
-<p>Security fixes are exempt: a surface that cannot be kept without leaving a
-vulnerability open may change in a patch release, documented in the
-changelog and, where relevant, a security advisory.</p>
+<p>Security fixes are exempt. A surface that cannot be kept without leaving a
+vulnerability open may change in a patch release. That is documented in the
+changelog, and in a security advisory where relevant.</p>
 <h2 id="supported-python-and-django">Supported Python and Django</h2>
 <p>Each django-ox release is tested against the matrix below in CI (SQLite
 and PostgreSQL); these are the supported combinations.</p>

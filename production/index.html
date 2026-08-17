@@ -896,9 +896,9 @@ instances; every worker generates its own unique id.</p>
 <li>Waits for in-flight tasks to finish, however long they take.</li>
 <li>Closes its database connections and exits with code 0.</li>
 </ol>
-<p>A second signal during the drain forces an immediate exit (code 130);
-whatever was running is abandoned mid-flight and is later reclaimed by the
-reaper on a surviving worker, counting as a failed attempt for the task.</p>
+<p>A second signal during the drain forces an immediate exit, code 130. Whatever
+was running is abandoned mid-flight. The reaper on a surviving worker reclaims
+it later, and it counts as a failed attempt.</p>
 <p>This maps directly onto rolling deploys: send SIGTERM, wait, start the new
 version. The only tuning point is the supervisor's kill escalation
 (<code>TimeoutStopSec</code> above) relative to your longest task.</p>
@@ -911,11 +911,9 @@ concurrent workers safe:</p>
   <code>UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING</code>
   statement, so workers never block each other on the head of the queue.
   On other databases with <code>SKIP LOCKED</code> support (MySQL 8+), the worker
-  uses <code>SELECT ... FOR UPDATE SKIP LOCKED</code> in a short transaction. On
-  databases without it, including SQLite, claiming falls back to an
-  optimistic compare-and-set UPDATE, which is atomic everywhere but can
-  make workers retry against each other for the head of the queue under
-  contention.</li>
+  uses <code>SELECT ... FOR UPDATE SKIP LOCKED</code> in a short transaction. Databases without it, SQLite included, fall back to an optimistic
+compare-and-set UPDATE. That is atomic everywhere, but under contention workers
+can retry against each other for the head of the queue.</li>
 <li><strong>Recurring schedules need no dedicated node.</strong> Every worker dispatches;
   a unique constraint guarantees each tick fires once. See
   <a href="../recurring-tasks/#many-workers-one-tick">Recurring tasks</a>.</li>
@@ -926,14 +924,13 @@ concurrent workers safe:</p>
 <h3 id="threads-and-processes">Threads and processes</h3>
 <p><code>--concurrency N</code> is a thread pool inside one process. That fits the
 common Django task profile: email, HTTP calls to third parties, ORM work.
-For CPU-bound tasks the GIL makes threads the wrong tool; run multiple
-worker processes with <code>--concurrency 1</code> instead, which is also the natural
-shape under systemd template units or one-container-per-worker setups.</p>
+For CPU-bound tasks the GIL makes threads the wrong tool. Run multiple worker
+processes with <code>--concurrency 1</code> instead. That is also the natural shape for
+systemd template units, or one container per worker.</p>
 <h2 id="the-reaper">The reaper</h2>
-<p>Workers die: OOM kills, node failures, <code>kill -9</code>. Any task a dead worker
-was running stays RUNNING with a stale lock until the reaper, which runs
-inside every worker on an interval derived from the lock timeout, returns
-it to the queue:</p>
+<p>Workers die: OOM kills, node failures, <code>kill -9</code>. When a worker dies mid-task, its task stays RUNNING behind a stale lock. The
+reaper returns it to the queue. It runs inside every worker, on an interval
+derived from the lock timeout:</p>
 <ul>
 <li>A RUNNING task whose lock is older than <code>LOCK_TIMEOUT</code> (default 300
   seconds, per-worker override <code>--lock-timeout</code>) is put back to READY, or

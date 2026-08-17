@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "django-ox"
-version = "0.1.0"
+version = "0.1.1"
 description = "Database-backed worker backend for Django's Tasks framework."
 readme = "README.md"
 license = "BSD-3-Clause"
@@ -91,6 +91,19 @@ select = [
     "RUF", # ruff-specific
     "DJ",  # flake8-django
     "T20", # stray print()
+    # Below: enabled to hold the line on the things that make a codebase read
+    # as unreviewed. Each was verified to have zero findings in src/ before
+    # being turned on, so they are regression guards, not a backlog.
+    "ERA", # commented-out code left in place
+    "TD",  # TODO markers without structure
+    "FIX", # FIXME/HACK/XXX left behind
+    "S",   # flake8-bandit: security defects in shipped code
+    "RET", # tangled return flow
+    "PTH", # os.path where pathlib belongs
+    "A",   # shadowing a builtin
+    "ISC", # implicit string concatenation, usually an editing accident
+    "PIE", # unnecessary and duplicated code
+    "FBT", # boolean positional arguments
 ]
 ignore = [
     # locked_by uses NULL as a distinct "unlocked" state; an empty-string
@@ -100,6 +113,24 @@ ignore = [
     # dependencies/operations) is not a mutable-default bug.
     "RUF012",
 ]
+
+# Deliberately NOT enabled, with reasons, so nobody re-litigates this by
+# turning them on and then blanket-ignoring the fallout:
+#   ARG  - Django fixes the signatures. `handle(self, *args, **options)` and a
+#          signal handler's `frame` are required parameters we cannot consume.
+#   SLF  - `_meta` and `_default_manager` are the documented Django access
+#          path, not private-member abuse.
+#   N818 - `TaskAbandoned` is public API as of 0.1.0. Renaming it for a suffix
+#          convention would be a breaking change for cosmetics.
+#   TRY, PL, C901 - 50 findings across working, soak-tested worker code. Worth
+#          a pass on its own merits, not worth touching that code to satisfy a
+#          linter days before an announcement. Tracked as post-launch work.
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert, use throwaway credentials, and write to temp paths on purpose.
+"tests/**" = ["S101", "S105", "S106", "S108", "S311"]
+# Benchmark and maintenance scripts are operator tools, not shipped code.
+"tools/**" = ["T20"]
 
 [tool.mypy]
 files = ["src"]

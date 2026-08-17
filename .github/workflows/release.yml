@@ -13,6 +13,12 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install build twine
+      # Last gate before the upload becomes permanent: the tag must match the
+      # declared version, the changelog entry must exist, and the project URLs
+      # must be complete. 0.1.0 published without its Documentation URL because
+      # nothing checked this, and PyPI metadata cannot be edited afterwards.
+      - run: python tools/check_release.py --tag "${GITHUB_REF_NAME}"
+      - run: python tools/copy_lint.py
       - run: python -m build
       - run: twine check --strict dist/*
       - uses: actions/upload-artifact@v4

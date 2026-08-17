@@ -76,3 +76,44 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install --group dev -e .
       - run: mypy --strict src/
+
+  # Everything a stranger reads before deciding to install or buy. Blocks on
+  # self-downgrading claims, published development history, build-assistant
+  # attribution, internal markers, brand drift and disagreeing numbers.
+  copy:
+    name: external copy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python tools/copy_lint.py
+
+  # The docs site deploys by hand (`mkdocs gh-deploy`), so nothing else would
+  # catch a broken docs build until it was already live.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r docs/requirements.txt
+      - run: mkdocs build --strict
+
+  # A published release is immutable, so the metadata is checked on every push
+  # rather than for the first time at tag.
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip build twine
+      - run: python tools/check_release.py
+      - run: python -m build
+      # Catches a README that would fail to render on the package page.
+      - run: twine check --strict dist/*

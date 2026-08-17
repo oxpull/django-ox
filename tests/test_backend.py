@@ -1,6 +1,6 @@
-import os
 import uuid
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from django.db import transaction
@@ -132,7 +132,7 @@ def test_non_task_path_is_not_executed(worker):
     db_task.refresh_from_db()
     assert db_task.status == OxTask.Status.FAILED
     assert db_task.errors[-1]["exception_class_path"] == "builtins.ImportError"
-    assert not os.path.exists("/tmp/django-ox-should-never-exist")
+    assert not Path("/tmp/django-ox-should-never-exist").exists()
 
 
 def test_non_task_path_get_result_raises(worker):

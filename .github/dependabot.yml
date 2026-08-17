@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # Runtime dependency is Django alone, so this is low-volume by construction.
+  # It exists so a security release of Django shows up as a PR rather than being
+  # noticed later.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-tooling:
+        patterns: ["pytest*", "ruff", "mypy", "django-stubs", "psycopg*"]
+
+  # Pinned action SHAs go stale quietly and are a supply-chain surface.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

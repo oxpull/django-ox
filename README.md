@@ -1,4 +1,4 @@
-# django-ox
+<img src="https://oxpull.github.io/django-ox/assets/lockup.png" alt="django-ox" width="380">
 
 [![PyPI](https://img.shields.io/pypi/v/django-ox)](https://pypi.org/project/django-ox/)
 [![CI](https://github.com/oxpull/django-ox/actions/workflows/ci.yml/badge.svg)](https://github.com/oxpull/django-ox/actions/workflows/ci.yml)

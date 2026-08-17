@@ -1,0 +1,38 @@
+/* Brand palette. Same tokens as the Oxpull site, so the docs, the waitlist
+   page and the wordmarks are one system rather than three. Material's named
+   palettes have no spruce, hence `primary: custom` in mkdocs.yml plus these
+   overrides. */
+
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #1f6b4b;
+  --md-primary-fg-color--light: #2c8a62;
+  --md-primary-fg-color--dark: #16513a;
+  --md-accent-fg-color: #1f6b4b;
+  --md-accent-fg-color--transparent: rgba(31, 107, 75, 0.1);
+  --md-typeset-a-color: #1f6b4b;
+}
+
+[data-md-color-scheme="slate"] {
+  /* Dark header keeps the code-panel colour rather than a tinted green bar:
+     the panel is the motif the ad and the site hero already use. */
+  --md-primary-fg-color: #16201b;
+  --md-primary-fg-color--light: #2b3a32;
+  --md-primary-fg-color--dark: #0b100d;
+  --md-accent-fg-color: #7fd3a6;
+  --md-accent-fg-color--transparent: rgba(127, 211, 166, 0.12);
+  --md-typeset-a-color: #7fd3a6;
+  /* Material's slate is a blue-grey, which leaves the green-black header
+     looking like it came from a different site. Match the body to the dark
+     paper the waitlist page uses. */
+  --md-default-bg-color: #111713;
+  --md-code-bg-color: #0b100d;
+  --md-default-fg-color--lightest: #27312a;
+  --md-default-fg-color--lighter: #3a4740;
+}
+
+/* The mark carries its own dark panel, so it needs no extra padding on the
+   header bar, but it does need to not be shrunk into mush. */
+.md-header__button.md-logo img {
+  height: 1.4rem;
+  width: 1.4rem;
+}

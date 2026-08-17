@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-08-17
+
+The worker, the public API and the database schema are unchanged. This
+release updates the packaging metadata and the project description that
+appears on the package page.
+
+### Changed
+
+- Packaging metadata now carries a `Documentation` URL, so the
+  documentation site is linked directly from the package page.
+- README now carries release and CI status badges, a link to the
+  documentation site, and a scope statement: what the core covers, what is
+  deliberately outside it, and which features belong to the commercial
+  tier.
+
 ## [0.1.0] - 2026-08-16
 
 Initial release.
@@ -75,4 +90,5 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[0.1.1]: https://github.com/oxpull/django-ox/releases/tag/v0.1.1
 [0.1.0]: https://github.com/oxpull/django-ox/releases/tag/v0.1.0

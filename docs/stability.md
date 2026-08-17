@@ -86,6 +86,7 @@ and PostgreSQL); these are the supported combinations.
 
 The support floor tracks Django's own: when a Python or Django version
 reaches end of life upstream, a later django-ox minor release may drop it,
-announced in the changelog. Databases: PostgreSQL and SQLite are tested in
-CI; other databases that provide `SELECT ... FOR UPDATE SKIP LOCKED` (such
-as MySQL 8+) use the same claim path but are not part of the tested matrix.
+announced in the changelog. Databases: PostgreSQL, SQLite and MySQL 8 are
+tested in CI. MariaDB 10.6+ uses the same claim path, since Django's own
+floor guarantees `SELECT ... FOR UPDATE SKIP LOCKED` there, but it is not
+part of the tested matrix.

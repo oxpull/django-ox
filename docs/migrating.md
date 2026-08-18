@@ -178,3 +178,25 @@ while new work goes to django-ox. They cannot see each other's rows.
 
 Both systems run tasks at least once, so your tasks should already be
 idempotent. Worth confirming before you start rather than halfway through.
+
+## Migrating away
+
+Task functions are portable. django-ox adds nothing to the producer side, so
+tasks stay ordinary `django.tasks` tasks and moving to another backend is a
+settings change and a drain, run in the same order as above with the roles
+reversed.
+
+One behaviour does not travel, and it is worth deciding about on the way in
+rather than on the way out. Enqueueing inside `transaction.atomic()` ties the
+task to that transaction, so it disappears on rollback. A broker-based backend
+cannot do this: the enqueue leaves your process the moment you call it. Code
+that depends on a rollback removing a task will behave differently once the
+queue lives in a broker, and it will do so quietly.
+
+If you want to keep that option open, wrap enqueues in
+`transaction.on_commit()`, the way a broker-based backend requires. django-ox
+runs correctly either way, and the task is enqueued after the commit instead of
+inside it. You give up the guarantee and keep the portability.
+
+If you would rather have the guarantee, take it, and write the dependency down
+somewhere the next person will find it.

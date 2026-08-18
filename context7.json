@@ -1,0 +1,22 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "django-ox",
+  "description": "Database-backed worker backend for Django's Tasks framework (django.tasks, Django 6.0+). Stores background tasks in the database you already run and executes them with a worker process, with no broker to provision.",
+  "folders": [],
+  "excludeFolders": [
+    "tests",
+    ".github"
+  ],
+  "excludeFiles": [],
+  "rules": [
+    "Requires Django 6.0 or later and Python 3.12 or later.",
+    "Add django_ox to INSTALLED_APPS and set BACKEND to django_ox.backend.OxBackend in the TASKS setting.",
+    "Run python manage.py migrate django_ox before starting a worker.",
+    "Start a worker with the ox_worker management command. It is a separate process from the web server, and tasks only execute while a worker is running.",
+    "Tasks are ordinary django.tasks tasks. django-ox adds nothing to learn on the producer side, so task functions stay portable across django.tasks backends.",
+    "enqueue() is a single INSERT on the default database connection. A task enqueued inside transaction.atomic() becomes visible to workers only when that transaction commits, and disappears on rollback, so transaction.on_commit() is not needed.",
+    "Workers claim tasks with SELECT FOR UPDATE SKIP LOCKED on PostgreSQL and MySQL 8 or later, and with an atomic compare-and-set on databases without SKIP LOCKED, including SQLite.",
+    "Execution is at-least-once, so tasks should be written to be idempotent.",
+    "Use ox_health to check worker and queue health, and ox_prune to delete finished task rows older than a cutoff."
+  ]
+}

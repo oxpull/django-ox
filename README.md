@@ -11,10 +11,22 @@ Documentation: <https://oxpull.github.io/django-ox/>
 
 Django 6.0 ships the Tasks API but no production backend: the built-in
 `ImmediateBackend` and `DummyBackend` are for development and testing only.
-django-ox stores tasks in your existing database and runs them with a
-separate worker process, so you get a durable queue without adding a broker.
+django-ox stores background tasks in the database you already run and executes
+them with a worker process. There is no broker to provision, secure, upgrade or
+back up.
 
-## Durability model
+## One fewer service to run
+
+A broker-based task queue adds a second datastore to your deployment. Redis or
+RabbitMQ has to be provisioned, monitored, secured and upgraded, and it has to
+be running before a single task executes. For an application that already
+depends on a database, that is a full operational surface added for one feature.
+
+django-ox uses the database you already run. A deployment is your application,
+a worker process, and one migration. Backups already cover the queue, because
+the queue is a table.
+
+## Transactional enqueue
 
 `enqueue()` is a single INSERT on your default database connection, so it
 participates in the caller's open transaction. A task enqueued inside

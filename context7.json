@@ -7,9 +7,24 @@
   "folders": [],
   "excludeFolders": [
     "tests",
-    ".github"
+    ".github",
+    "archive",
+    "archived",
+    "old",
+    "deprecated",
+    "legacy",
+    "superseded"
   ],
-  "excludeFiles": [],
+  "excludeFiles": [
+    "CHANGELOG.md",
+    "changelog.md",
+    "LICENSE.md",
+    "license.md",
+    "CODE_OF_CONDUCT.md",
+    "code_of_conduct.md",
+    "NEWS.md",
+    "SECURITY.md"
+  ],
   "rules": [
     "Requires Django 6.0 or later and Python 3.12 or later.",
     "Add django_ox to INSTALLED_APPS and set BACKEND to django_ox.backend.OxBackend in the TASKS setting.",

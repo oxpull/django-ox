@@ -19,6 +19,21 @@ TASKS = {
 }
 ```
 
+## The smallest working entry
+
+Every option has a default. This is enough to run tasks:
+
+```python
+TASKS = {
+    "default": {
+        "BACKEND": "django_ox.backend.OxBackend",
+    }
+}
+```
+
+That gives you the `default` queue, three attempts, and a five second first
+retry. Add options when you have a reason to.
+
 ## Backend entry
 
 | Key | Default | Meaning |
@@ -66,6 +81,45 @@ Two intervals are derived rather than flagged:
 - Schedule dispatch (when `SCHEDULES` is configured) runs every
   `max(1, min(interval, 30))` seconds, about once a second at the default
   polling interval.
+
+### Routing a queue to its own worker
+
+Declare every queue on the backend, then give each worker a subset. Slow work
+stops blocking fast work without a second backend or a second database.
+
+```python
+TASKS = {
+    "default": {
+        "BACKEND": "django_ox.backend.OxBackend",
+        "QUEUES": ["default", "emails", "exports"],
+    }
+}
+```
+
+```
+python manage.py ox_worker --queues default,emails --concurrency 4
+python manage.py ox_worker --queues exports --concurrency 1 --lock-timeout 3600
+```
+
+The exports worker runs one task at a time and tolerates hour-long jobs. The
+other worker keeps short work moving at four at a time. A queue with no worker
+assigned to it accumulates tasks and never runs them, so make sure every queue
+in `QUEUES` is covered by some worker.
+
+### Tasks that run longer than the lock timeout
+
+`LOCK_TIMEOUT` is how long a claimed task may go quiet before the reaper decides
+its worker died. A task that legitimately runs longer than the timeout will be
+reclaimed and run again while the first copy is still going. Set the timeout
+above your slowest task rather than near it:
+
+```
+python manage.py ox_worker --queues exports --lock-timeout 7200
+```
+
+If one queue holds work far slower than the rest, give it its own worker with
+its own timeout, as above, rather than raising the global value and delaying
+recovery for everything else.
 
 If you embed the worker programmatically, `django_ox.worker.Worker`
 accepts `reap_interval`, `schedule_interval`, `backoff_initial` and

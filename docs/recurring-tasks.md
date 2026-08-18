@@ -51,6 +51,26 @@ Each entry accepts exactly these keys. Anything else is rejected at startup:
 | `queue_name` | no | Queue override; defaults to the task's own queue. |
 | `priority` | no | Priority override, -100 to 100. |
 
+### Overriding the queue and priority
+
+A schedule can put its task somewhere other than the task's own queue, which is
+useful when a nightly job would otherwise sit behind interactive work:
+
+```python
+"SCHEDULES": {
+    "nightly-export": {
+        "task": "exports.tasks.rebuild",
+        "cron": "0 2 * * *",
+        "queue_name": "exports",
+        "priority": -50,
+        "kwargs": {"full": True},
+    },
+}
+```
+
+The queue must be listed in that backend's `QUEUES`, and some worker must be
+processing it. Priority runs from -100 to 100, and lower runs later.
+
 A schedule enqueues through the backend it is declared under. That holds even if
 the task itself was declared against a different backend alias.
 
@@ -72,6 +92,25 @@ Five fields, in order: minute (0-59), hour (0-23), day of month (1-31), month
 
 Shortcuts work in place of a full expression: `@hourly`, `@daily` and
 `@midnight`, `@weekly`, `@monthly`, `@yearly` and `@annually`.
+
+### Common schedules
+
+```python
+"SCHEDULES": {
+    # Every fifteen minutes.
+    "warm-cache":     {"task": "core.tasks.warm_cache",    "cron": "*/15 * * * *"},
+    # 03:00 every day.
+    "nightly-report": {"task": "reports.tasks.build",      "cron": "0 3 * * *"},
+    # Every weekday at 09:30.
+    "weekday-digest": {"task": "core.tasks.digest",        "cron": "30 9 * * mon-fri"},
+    # 00:00 on the 1st and 15th.
+    "twice-monthly":  {"task": "billing.tasks.invoice",    "cron": "0 0 1,15 * *"},
+    # Top of every hour.
+    "hourly-sync":    {"task": "sync.tasks.pull",          "cron": "@hourly"},
+    # 02:15 on the first of the month.
+    "monthly-prune":  {"task": "core.tasks.prune_archive", "cron": "15 2 1 * *"},
+}
+```
 
 Expressions that can never fire are rejected when the configuration loads. So
 `0 0 30 2 *` (February 30th) is a startup error, not a schedule that silently
@@ -140,6 +179,30 @@ runs.
 **A new schedule never fires for times before it existed.** The first time a
 worker sees a schedule with no history, it records the current tick as an anchor
 and enqueues nothing. The schedule first fires at its next tick.
+
+## Checking a schedule is live
+
+`manage.py check` validates every schedule without starting a worker. It reports
+a bad task path, an unparseable or never-firing cron expression, arguments that
+are not JSON-serializable, and duplicate names across backends:
+
+```
+python manage.py check
+```
+
+To see what has actually dispatched, read the tick log:
+
+```python
+from django_ox.models import OxScheduleTick
+
+OxScheduleTick.objects.filter(schedule_name="nightly-report").order_by(
+    "-scheduled_for"
+)[:5]
+```
+
+Each row is one dispatched tick. A row whose `task` is `None` is the anchor
+written the first time a worker saw the schedule; it enqueued nothing and marks
+the tick before the first real fire.
 
 The recovery baseline is each schedule's most recent tick row, which is why
 `ox_prune` always keeps it. See

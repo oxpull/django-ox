@@ -46,6 +46,43 @@ To run several workers on one host, use a template unit
 `ox-worker@1`, `ox-worker@2`, and so on. No flag distinguishes the
 instances; every worker generates its own unique id.
 
+## Running in containers
+
+The worker is a foreground process that exits 0 on SIGTERM, so it needs no
+special entrypoint. The setting that matters is the grace period: give the
+runtime longer than your slowest task before it escalates to SIGKILL.
+
+```yaml
+services:
+  worker:
+    image: myapp:latest
+    command: python manage.py ox_worker --concurrency 4
+    stop_grace_period: 5m
+    restart: unless-stopped
+    depends_on:
+      - db
+    healthcheck:
+      test: ["CMD", "python", "manage.py", "ox_health"]
+      interval: 60s
+      timeout: 15s
+      start_period: 30s
+```
+
+Docker's default grace period is 10 seconds, which will kill a worker mid-task
+and leave the reaper to clean up. `stop_grace_period` is the container
+equivalent of `TimeoutStopSec`. On Kubernetes it is
+`terminationGracePeriodSeconds` on the pod spec.
+
+With no flags, `ox_health` checks that the database answers, which is what a
+per-container probe should test. Queue-wide checks belong in fleet alerting
+rather than in a probe: see
+[which check goes where](monitoring.md#health-checks-ox_health), and the
+liveness probe example there for queues with steady traffic.
+
+Run migrations before rolling workers, as an init container or a job, not from
+the worker itself. Several workers starting at once would race the same
+migration.
+
 ## Graceful shutdown
 
 On SIGTERM or SIGINT the worker:

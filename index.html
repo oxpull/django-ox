@@ -334,10 +334,21 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#why-a-database-queue" class="md-nav__link">
+  <a href="#one-fewer-service-to-run" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Why a database queue
+        One fewer service to run
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transactional-enqueue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transactional enqueue
       
     </span>
   </a>
@@ -704,10 +715,21 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#why-a-database-queue" class="md-nav__link">
+  <a href="#one-fewer-service-to-run" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Why a database queue
+        One fewer service to run
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transactional-enqueue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transactional enqueue
       
     </span>
   </a>
@@ -794,11 +816,21 @@
 (<code>django.tasks</code>, Django 6.0+).</p>
 <p>Django 6.0 ships the Tasks API but no production backend: the built-in
 <code>ImmediateBackend</code> runs tasks inline and <code>DummyBackend</code> runs nothing.
-django-ox stores tasks in the database you already have and executes them
-with a separate worker process. You get a durable queue with retries,
-priorities, scheduling and a result store, without adding Redis, RabbitMQ,
-or any other broker to your stack.</p>
-<h2 id="why-a-database-queue">Why a database queue</h2>
+django-ox stores background tasks in the database you already run and executes
+them with a worker process. You get a durable queue with retries, priorities,
+scheduling and a result store, and no broker to provision, secure, upgrade or
+back up.</p>
+<h2 id="one-fewer-service-to-run">One fewer service to run</h2>
+<p>A broker-based task queue adds a second datastore to your deployment. Redis or
+RabbitMQ has to be provisioned, monitored, secured and upgraded, and it has to
+be running before a single task executes. For an application that already
+depends on a database, that is a full operational surface added for one
+feature.</p>
+<p>django-ox uses the database you already run. A deployment is your application,
+a worker process, and one migration. Backups already cover the queue, because
+the queue is a table, and there is no second datastore that can fail on its
+own.</p>
+<h2 id="transactional-enqueue">Transactional enqueue</h2>
 <p>The queue lives in your database, so enqueueing a task is a single INSERT
 on your default connection. That gives you a guarantee no broker-based
 queue can offer: <strong>the task and your data commit or roll back together.</strong></p>

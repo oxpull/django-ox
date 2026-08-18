@@ -150,3 +150,21 @@ jobs:
       - run: python -m build
       # Catches a README that would fail to render on the package page.
       - run: twine check --strict dist/*
+
+  # The one context branch protection requires. Requiring a single summary
+  # job instead of every matrix leg means the protection rule survives
+  # matrix changes: add a Python or database to the grid and the rule
+  # still reads "ci-ok", with the new legs pulled in through needs.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [test-sqlite, test-postgres, test-mysql, lint, types, docs, packaging]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every required job succeeded
+        run: |
+          set -euo pipefail
+          echo '${{ toJSON(needs) }}'
+          [ "${{ contains(needs.*.result, 'failure') }}" = "false" ]
+          [ "${{ contains(needs.*.result, 'cancelled') }}" = "false" ]
+          [ "${{ contains(needs.*.result, 'skipped') }}" = "false" ]

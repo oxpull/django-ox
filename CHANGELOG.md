@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-08-18
+
+The worker, the public API and the database schema are unchanged. This
+release updates the project description that appears on the package page,
+and the documentation that ships with it.
+
+### Changed
+
+- README now leads with what the backend removes from a deployment: the
+  queue lives in the database the application already runs, so there is no
+  broker to provision, secure, upgrade or back up. The transactional
+  guarantee follows it rather than opening.
+
+### Added
+
+- Migration guidance now covers moving *away* from django-ox as well as to
+  it: which behaviour carries over to a broker-backed backend, which does
+  not, and how to keep the option open.
+- Worked examples for routing a queue to its own worker, choosing a lock
+  timeout for long tasks, overriding a schedule's queue and priority,
+  verifying that a schedule is live, and running the worker in containers.
+- `context7.json`, so documentation indexers read the project description,
+  the supported versions and the setup steps rather than inferring them.
+
 ## [0.1.1] - 2026-08-17
 
 The worker, the public API and the database schema are unchanged. This
@@ -90,5 +114,6 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[0.1.2]: https://github.com/oxpull/django-ox/releases/tag/v0.1.2
 [0.1.1]: https://github.com/oxpull/django-ox/releases/tag/v0.1.1
 [0.1.0]: https://github.com/oxpull/django-ox/releases/tag/v0.1.0

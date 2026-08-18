@@ -1,7 +1,7 @@
 {
   "$schema": "https://context7.com/schema/context7.json",
   "projectTitle": "django-ox",
-  "description": "Database-backed worker backend for Django's Tasks framework (django.tasks, Django 6.0+). Stores background tasks in the database you already run and executes them with a worker process, with no broker to provision.",
+  "description": "Database-backed worker backend for Django's Tasks framework (django.tasks, Django 6.0+). Background tasks run on the database you already have. No broker to provision, secure or back up.",
   "folders": [],
   "excludeFolders": [
     "tests",

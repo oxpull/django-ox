@@ -32,7 +32,11 @@ from urllib.parse import urlparse
 REPO = Path(__file__).resolve().parent.parent
 
 EXPECTED_URL_KEYS = {"Homepage", "Documentation", "Repository", "Changelog", "Issues"}
-ALLOWED_HOSTS = {"github.com", "oxpull.github.io", "pypi.org"}
+# The hosts a project URL may point at. This is an allowlist on purpose: a
+# release is permanent, so a URL that drifts to an unexpected host has to
+# fail here rather than ship. oxpull.com became the canonical site on
+# 2026-08-19; oxpull.github.io stays because it still serves and redirects.
+ALLOWED_HOSTS = {"github.com", "oxpull.com", "oxpull.github.io", "pypi.org"}
 
 
 def fail(message: str) -> str:

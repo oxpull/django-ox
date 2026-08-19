@@ -153,8 +153,8 @@ them. Everything a dashboard usually wants survives at INFO.
   `failure_rate` rising above your normal baseline. Throughput is better
   as a dashboard line than an alert: its healthy value depends entirely
   on offered load.
-- **Prometheus.** No exporter ships with the core; that is a
-  [Pro](pro.md) feature. The stats functions drop into any Django metrics setup
+- **Prometheus.** No exporter ships with django-ox, and none ships in
+  [Pro](pro.md) either. The stats functions drop into any Django metrics setup
   though. Either register a custom collector with django-prometheus, whose
   `collect()` calls `queue_stats()`, `ready_count()` and `oldest_ready_age()`
   and yields gauges, or render the same numbers from a plain Django view in the

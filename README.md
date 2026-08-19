@@ -233,9 +233,10 @@ schedules, monitoring, and nothing else to operate. Outside the current
 scope: task revocation after enqueue, and multi-database routing (tasks
 are stored on the default database for the model).
 
-Batches, unique tasks, rate limiting, and metrics export are planned in
-[Oxpull Pro](https://oxpull.com/django-ox/pro/); the waitlist is at
-<https://oxpull.com/>.
+Batches and unique tasks ship in [Oxpull Pro](https://oxpull.com/django-ox/pro/);
+the waitlist is at <https://oxpull.com/>. Metrics stay in this package:
+`django_ox.stats` and `ox_health` are free and stay free. Rate limiting is in
+neither tier.
 
 ## Stability
 

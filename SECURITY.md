@@ -55,8 +55,8 @@ backup, or those log records can read them.
 - Tracebacks are standard `traceback.format_exception()` output: stack
   frames and the exception message, without local-variable values.
 
-Encrypting arguments at rest is on the Oxpull Pro roadmap; the plaintext
-posture above is what the open-source package does.
+Encrypting arguments at rest is not offered in either tier today; the plaintext
+posture above is what both packages do.
 
 ## SQL
 

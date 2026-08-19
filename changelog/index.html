@@ -606,6 +606,45 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#012-2026-08-18" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.1.2 - 2026-08-18
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="0.1.2 - 2026-08-18">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#added" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#011-2026-08-17" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -618,7 +657,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#changed" class="md-nav__link">
+  <a href="#changed_1" class="md-nav__link">
     <span class="md-ellipsis">
       
         Changed
@@ -646,7 +685,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#added" class="md-nav__link">
+  <a href="#added_1" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -707,6 +746,45 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#012-2026-08-18" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.1.2 - 2026-08-18
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="0.1.2 - 2026-08-18">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#added" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#011-2026-08-17" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -719,7 +797,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#changed" class="md-nav__link">
+  <a href="#changed_1" class="md-nav__link">
     <span class="md-ellipsis">
       
         Changed
@@ -747,7 +825,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#added" class="md-nav__link">
+  <a href="#added_1" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -797,11 +875,33 @@
 <p>All notable changes to this project will be documented in this file.</p>
 <p>The format is based on <a href="https://keepachangelog.com/en/1.1.0/">Keep a Changelog</a>,
 and this project adheres to <a href="https://semver.org/spec/v2.0.0.html">Semantic Versioning</a>.</p>
+<h2 id="012-2026-08-18"><a href="https://github.com/oxpull/django-ox/releases/tag/v0.1.2">0.1.2</a> - 2026-08-18</h2>
+<p>The worker, the public API and the database schema are unchanged. This
+release updates the project description that appears on the package page,
+and the documentation that ships with it.</p>
+<h3 id="changed">Changed</h3>
+<ul>
+<li>README now leads with what the backend removes from a deployment: the
+  queue lives in the database the application already runs, so there is no
+  broker to provision, secure, upgrade or back up. The transactional
+  guarantee follows it rather than opening.</li>
+</ul>
+<h3 id="added">Added</h3>
+<ul>
+<li>Migration guidance now covers moving <em>away</em> from django-ox as well as to
+  it: which behaviour carries over to a broker-backed backend, which does
+  not, and how to keep the option open.</li>
+<li>Worked examples for routing a queue to its own worker, choosing a lock
+  timeout for long tasks, overriding a schedule's queue and priority,
+  verifying that a schedule is live, and running the worker in containers.</li>
+<li><code>context7.json</code>, so documentation indexers read the project description,
+  the supported versions and the setup steps rather than inferring them.</li>
+</ul>
 <h2 id="011-2026-08-17"><a href="https://github.com/oxpull/django-ox/releases/tag/v0.1.1">0.1.1</a> - 2026-08-17</h2>
 <p>The worker, the public API and the database schema are unchanged. This
 release updates the packaging metadata and the project description that
 appears on the package page.</p>
-<h3 id="changed">Changed</h3>
+<h3 id="changed_1">Changed</h3>
 <ul>
 <li>Packaging metadata now carries a <code>Documentation</code> URL, so the
   documentation site is linked directly from the package page.</li>
@@ -812,7 +912,7 @@ appears on the package page.</p>
 </ul>
 <h2 id="010-2026-08-16"><a href="https://github.com/oxpull/django-ox/releases/tag/v0.1.0">0.1.0</a> - 2026-08-16</h2>
 <p>Initial release.</p>
-<h3 id="added">Added</h3>
+<h3 id="added_1">Added</h3>
 <ul>
 <li><code>OxBackend</code>, a database-backed backend for Django's Tasks framework
   (<code>django.tasks</code>, Django 6.0+). Tasks are stored in the application database;

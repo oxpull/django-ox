@@ -781,22 +781,22 @@ part is where migrations go wrong.</p>
 <h2 id="from-another-djangotasks-backend">From another <code>django.tasks</code> backend</h2>
 <p>Configuration only. Here it is with <code>django-tasks-db</code>, the most common one:</p>
 <div class="highlight"><pre><span></span><code><span class="c1"># before</span>
-<span class="n">INSTALLED_APPS</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;django_tasks_db&quot;</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
+<span class="n">INSTALLED_APPS</span> <span class="o">=</span> <span class="p">[</span><span class="s2">"django_tasks_db"</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
 
 <span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
-    <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span>
-        <span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django_tasks_db.DatabaseBackend&quot;</span><span class="p">,</span>
-        <span class="s2">&quot;QUEUES&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;default&quot;</span><span class="p">],</span>
+    <span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"django_tasks_db.DatabaseBackend"</span><span class="p">,</span>
+        <span class="s2">"QUEUES"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"default"</span><span class="p">],</span>
     <span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><span class="c1"># after</span>
-<span class="n">INSTALLED_APPS</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;django_ox&quot;</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
+<span class="n">INSTALLED_APPS</span> <span class="o">=</span> <span class="p">[</span><span class="s2">"django_ox"</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
 
 <span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
-    <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span>
-        <span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django_ox.backend.OxBackend&quot;</span><span class="p">,</span>
-        <span class="s2">&quot;QUEUES&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;default&quot;</span><span class="p">],</span>
+    <span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"django_ox.backend.OxBackend"</span><span class="p">,</span>
+        <span class="s2">"QUEUES"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"default"</span><span class="p">],</span>
     <span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
@@ -909,7 +909,7 @@ SQLite or Postgres. What changes is the API, and where schedules live.</p>
 <span class="k">def</span><span class="w"> </span><span class="nf">send_confirmation</span><span class="p">(</span><span class="n">order_id</span><span class="p">):</span> <span class="o">...</span>
 
 
-<span class="nd">@periodic_task</span><span class="p">(</span><span class="n">crontab</span><span class="p">(</span><span class="n">minute</span><span class="o">=</span><span class="s2">&quot;0&quot;</span><span class="p">,</span> <span class="n">hour</span><span class="o">=</span><span class="s2">&quot;3&quot;</span><span class="p">))</span>
+<span class="nd">@periodic_task</span><span class="p">(</span><span class="n">crontab</span><span class="p">(</span><span class="n">minute</span><span class="o">=</span><span class="s2">"0"</span><span class="p">,</span> <span class="n">hour</span><span class="o">=</span><span class="s2">"3"</span><span class="p">))</span>
 <span class="k">def</span><span class="w"> </span><span class="nf">nightly_report</span><span class="p">():</span> <span class="o">...</span>
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><span class="c1"># after</span>
@@ -925,13 +925,13 @@ SQLite or Postgres. What changes is the API, and where schedules live.</p>
 </code></pre></div>
 <p>The schedule moves off the function and into settings:</p>
 <div class="highlight"><pre><span></span><code><span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
-    <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span>
-        <span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django_ox.backend.OxBackend&quot;</span><span class="p">,</span>
-        <span class="s2">&quot;OPTIONS&quot;</span><span class="p">:</span> <span class="p">{</span>
-            <span class="s2">&quot;SCHEDULES&quot;</span><span class="p">:</span> <span class="p">{</span>
-                <span class="s2">&quot;nightly-report&quot;</span><span class="p">:</span> <span class="p">{</span>
-                    <span class="s2">&quot;task&quot;</span><span class="p">:</span> <span class="s2">&quot;reports.tasks.nightly_report&quot;</span><span class="p">,</span>
-                    <span class="s2">&quot;cron&quot;</span><span class="p">:</span> <span class="s2">&quot;0 3 * * *&quot;</span><span class="p">,</span>
+    <span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"django_ox.backend.OxBackend"</span><span class="p">,</span>
+        <span class="s2">"OPTIONS"</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">"SCHEDULES"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">"nightly-report"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="s2">"task"</span><span class="p">:</span> <span class="s2">"reports.tasks.nightly_report"</span><span class="p">,</span>
+                    <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"0 3 * * *"</span><span class="p">,</span>
                 <span class="p">},</span>
             <span class="p">},</span>
         <span class="p">},</span>

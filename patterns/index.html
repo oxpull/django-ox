@@ -895,7 +895,7 @@ broker.</p>
 <span class="nd">@task</span>
 <span class="k">def</span><span class="w"> </span><span class="nf">send_welcome_email</span><span class="p">(</span><span class="n">user_id</span><span class="p">):</span>
     <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">pk</span><span class="o">=</span><span class="n">user_id</span><span class="p">)</span>
-    <span class="n">send_mail</span><span class="p">(</span><span class="s2">&quot;Welcome&quot;</span><span class="p">,</span> <span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">[</span><span class="n">user</span><span class="o">.</span><span class="n">email</span><span class="p">])</span>
+    <span class="n">send_mail</span><span class="p">(</span><span class="s2">"Welcome"</span><span class="p">,</span> <span class="s2">"..."</span><span class="p">,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">[</span><span class="n">user</span><span class="o">.</span><span class="n">email</span><span class="p">])</span>
 
 
 <span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
@@ -915,14 +915,14 @@ exponential backoff.</p>
 <div class="highlight"><pre><span></span><code><span class="nd">@task</span>
 <span class="k">def</span><span class="w"> </span><span class="nf">sync_to_crm</span><span class="p">(</span><span class="n">order_id</span><span class="p">):</span>
     <span class="n">order</span> <span class="o">=</span> <span class="n">Order</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">pk</span><span class="o">=</span><span class="n">order_id</span><span class="p">)</span>
-    <span class="n">response</span> <span class="o">=</span> <span class="n">httpx</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;https://crm.example.com/orders&quot;</span><span class="p">,</span> <span class="n">json</span><span class="o">=</span><span class="n">order</span><span class="o">.</span><span class="n">payload</span><span class="p">)</span>
+    <span class="n">response</span> <span class="o">=</span> <span class="n">httpx</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">"https://crm.example.com/orders"</span><span class="p">,</span> <span class="n">json</span><span class="o">=</span><span class="n">order</span><span class="o">.</span><span class="n">payload</span><span class="p">)</span>
     <span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>  <span class="c1"># a 5xx raises, so the task retries</span>
 </code></pre></div>
 <p>Tune the envelope on the backend, not per task:</p>
-<div class="highlight"><pre><span></span><code><span class="s2">&quot;OPTIONS&quot;</span><span class="p">:</span> <span class="p">{</span>
-    <span class="s2">&quot;MAX_ATTEMPTS&quot;</span><span class="p">:</span> <span class="mi">5</span><span class="p">,</span>
-    <span class="s2">&quot;BACKOFF_INITIAL&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>   <span class="c1"># seconds before the second attempt</span>
-    <span class="s2">&quot;BACKOFF_MAX&quot;</span><span class="p">:</span> <span class="mi">600</span><span class="p">,</span>      <span class="c1"># ceiling</span>
+<div class="highlight"><pre><span></span><code><span class="s2">"OPTIONS"</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">"MAX_ATTEMPTS"</span><span class="p">:</span> <span class="mi">5</span><span class="p">,</span>
+    <span class="s2">"BACKOFF_INITIAL"</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>   <span class="c1"># seconds before the second attempt</span>
+    <span class="s2">"BACKOFF_MAX"</span><span class="p">:</span> <span class="mi">600</span><span class="p">,</span>      <span class="c1"># ceiling</span>
 <span class="p">}</span>
 </code></pre></div>
 <p>Every attempt keeps its own traceback, so a task that failed four times shows
@@ -945,19 +945,19 @@ away, however long the work behind it takes.</p>
 failed to record, or record one that never gets processed.</p>
 <h2 id="run-a-job-and-check-on-it-later">Run a job and check on it later</h2>
 <p><code>enqueue()</code> returns a result you can look up by id.</p>
-<div class="highlight"><pre><span></span><code><span class="n">result</span> <span class="o">=</span> <span class="n">build_report</span><span class="o">.</span><span class="n">enqueue</span><span class="p">(</span><span class="n">month</span><span class="o">=</span><span class="s2">&quot;2026-08&quot;</span><span class="p">)</span>
-<span class="n">request</span><span class="o">.</span><span class="n">session</span><span class="p">[</span><span class="s2">&quot;report_task_id&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">id</span>
+<div class="highlight"><pre><span></span><code><span class="n">result</span> <span class="o">=</span> <span class="n">build_report</span><span class="o">.</span><span class="n">enqueue</span><span class="p">(</span><span class="n">month</span><span class="o">=</span><span class="s2">"2026-08"</span><span class="p">)</span>
+<span class="n">request</span><span class="o">.</span><span class="n">session</span><span class="p">[</span><span class="s2">"report_task_id"</span><span class="p">]</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">id</span>
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">TaskResultStatus</span>
 
-<span class="n">result</span> <span class="o">=</span> <span class="n">build_report</span><span class="o">.</span><span class="n">get_result</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">session</span><span class="p">[</span><span class="s2">&quot;report_task_id&quot;</span><span class="p">])</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">build_report</span><span class="o">.</span><span class="n">get_result</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">session</span><span class="p">[</span><span class="s2">"report_task_id"</span><span class="p">])</span>
 <span class="n">result</span><span class="o">.</span><span class="n">refresh</span><span class="p">()</span>
 
 <span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">status</span> <span class="o">==</span> <span class="n">TaskResultStatus</span><span class="o">.</span><span class="n">SUCCESSFUL</span><span class="p">:</span>
     <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">return_value</span><span class="p">)</span>
 <span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">status</span> <span class="o">==</span> <span class="n">TaskResultStatus</span><span class="o">.</span><span class="n">FAILED</span><span class="p">:</span>
-    <span class="k">return</span> <span class="n">render</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="s2">&quot;report_failed.html&quot;</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;errors&quot;</span><span class="p">:</span> <span class="n">result</span><span class="o">.</span><span class="n">errors</span><span class="p">})</span>
-<span class="k">return</span> <span class="n">render</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="s2">&quot;report_pending.html&quot;</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;attempts&quot;</span><span class="p">:</span> <span class="n">result</span><span class="o">.</span><span class="n">attempts</span><span class="p">})</span>
+    <span class="k">return</span> <span class="n">render</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="s2">"report_failed.html"</span><span class="p">,</span> <span class="p">{</span><span class="s2">"errors"</span><span class="p">:</span> <span class="n">result</span><span class="o">.</span><span class="n">errors</span><span class="p">})</span>
+<span class="k">return</span> <span class="n">render</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="s2">"report_pending.html"</span><span class="p">,</span> <span class="p">{</span><span class="s2">"attempts"</span><span class="p">:</span> <span class="n">result</span><span class="o">.</span><span class="n">attempts</span><span class="p">})</span>
 </code></pre></div>
 <p><code>refresh()</code> re-reads from the database, so call it before checking status.
 <code>status</code> is one of <code>READY</code>, <code>RUNNING</code>, <code>SUCCESSFUL</code> or <code>FAILED</code>, and
@@ -977,11 +977,11 @@ the task.</p>
 <h2 id="keep-slow-work-off-the-fast-queue">Keep slow work off the fast queue</h2>
 <p>Give slow tasks their own queue and run a separate worker for it, so a batch of
 report builds cannot delay password resets.</p>
-<div class="highlight"><pre><span></span><code><span class="nd">@task</span><span class="p">(</span><span class="n">queue_name</span><span class="o">=</span><span class="s2">&quot;reports&quot;</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><span class="nd">@task</span><span class="p">(</span><span class="n">queue_name</span><span class="o">=</span><span class="s2">"reports"</span><span class="p">)</span>
 <span class="k">def</span><span class="w"> </span><span class="nf">build_report</span><span class="p">(</span><span class="n">month</span><span class="p">):</span> <span class="o">...</span>
 
 
-<span class="nd">@task</span><span class="p">(</span><span class="n">queue_name</span><span class="o">=</span><span class="s2">&quot;emails&quot;</span><span class="p">,</span> <span class="n">priority</span><span class="o">=</span><span class="mi">50</span><span class="p">)</span>
+<span class="nd">@task</span><span class="p">(</span><span class="n">queue_name</span><span class="o">=</span><span class="s2">"emails"</span><span class="p">,</span> <span class="n">priority</span><span class="o">=</span><span class="mi">50</span><span class="p">)</span>
 <span class="k">def</span><span class="w"> </span><span class="nf">send_password_reset</span><span class="p">(</span><span class="n">user_id</span><span class="p">):</span> <span class="o">...</span>
 </code></pre></div>
 <div class="highlight"><pre><span></span><code>python manage.py ox_worker --queues emails --concurrency 4
@@ -991,11 +991,11 @@ python manage.py ox_worker --queues reports --concurrency 1
 than across queues. List every queue you use in the backend's <code>QUEUES</code>, or set
 <code>QUEUES: []</code> to accept any name.</p>
 <h2 id="clean-up-on-a-schedule">Clean up on a schedule</h2>
-<div class="highlight"><pre><span></span><code><span class="s2">&quot;OPTIONS&quot;</span><span class="p">:</span> <span class="p">{</span>
-    <span class="s2">&quot;SCHEDULES&quot;</span><span class="p">:</span> <span class="p">{</span>
-        <span class="s2">&quot;expire-carts&quot;</span><span class="p">:</span> <span class="p">{</span>
-            <span class="s2">&quot;task&quot;</span><span class="p">:</span> <span class="s2">&quot;shop.tasks.expire_abandoned_carts&quot;</span><span class="p">,</span>
-            <span class="s2">&quot;cron&quot;</span><span class="p">:</span> <span class="s2">&quot;*/30 * * * *&quot;</span><span class="p">,</span>
+<div class="highlight"><pre><span></span><code><span class="s2">"OPTIONS"</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">"SCHEDULES"</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">"expire-carts"</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">"task"</span><span class="p">:</span> <span class="s2">"shop.tasks.expire_abandoned_carts"</span><span class="p">,</span>
+            <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"*/30 * * * *"</span><span class="p">,</span>
         <span class="p">},</span>
     <span class="p">},</span>
 <span class="p">}</span>
@@ -1019,9 +1019,9 @@ again.</p>
         <span class="n">order</span> <span class="o">=</span> <span class="n">Order</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">select_for_update</span><span class="p">()</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">pk</span><span class="o">=</span><span class="n">order_id</span><span class="p">)</span>
         <span class="k">if</span> <span class="n">order</span><span class="o">.</span><span class="n">charged_at</span><span class="p">:</span>
             <span class="k">return</span>  <span class="c1"># a previous attempt already did this</span>
-        <span class="n">charge</span><span class="p">(</span><span class="n">order</span><span class="p">,</span> <span class="n">idempotency_key</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;order-</span><span class="si">{</span><span class="n">order</span><span class="o">.</span><span class="n">pk</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="n">charge</span><span class="p">(</span><span class="n">order</span><span class="p">,</span> <span class="n">idempotency_key</span><span class="o">=</span><span class="sa">f</span><span class="s2">"order-</span><span class="si">{</span><span class="n">order</span><span class="o">.</span><span class="n">pk</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
         <span class="n">order</span><span class="o">.</span><span class="n">charged_at</span> <span class="o">=</span> <span class="n">timezone</span><span class="o">.</span><span class="n">now</span><span class="p">()</span>
-        <span class="n">order</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">update_fields</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;charged_at&quot;</span><span class="p">])</span>
+        <span class="n">order</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">update_fields</span><span class="o">=</span><span class="p">[</span><span class="s2">"charged_at"</span><span class="p">])</span>
 </code></pre></div>
 <p>Guard on state you have written, not on a flag you set in memory. The row lock
 serialises concurrent attempts, and the idempotency key covers the gap where the
@@ -1035,10 +1035,10 @@ one, as above.</p>
 <p>Point the test settings at Django's own backends. No django-ox tables, no worker
 process.</p>
 <div class="highlight"><pre><span></span><code><span class="c1"># runs tasks inline, so an assertion right after enqueue sees the effect</span>
-<span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django.tasks.backends.immediate.ImmediateBackend&quot;</span><span class="p">}}</span>
+<span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"django.tasks.backends.immediate.ImmediateBackend"</span><span class="p">}}</span>
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><span class="c1"># records tasks without running them, for asserting what was enqueued</span>
-<span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django.tasks.backends.dummy.DummyBackend&quot;</span><span class="p">}}</span>
+<span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"django.tasks.backends.dummy.DummyBackend"</span><span class="p">}}</span>
 </code></pre></div>
 <p>Keep django-ox in the settings you use for integration tests, where the point is
 to exercise claiming and retries for real.</p>

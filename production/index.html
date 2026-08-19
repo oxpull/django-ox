@@ -484,6 +484,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#running-in-containers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running in containers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#graceful-shutdown" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -747,6 +758,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#running-in-containers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running in containers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#graceful-shutdown" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -889,6 +911,36 @@ journalctl -u ox-worker -f
 (<code>ox-worker@.service</code> with the same <code>[Service]</code> body) and start
 <code>ox-worker@1</code>, <code>ox-worker@2</code>, and so on. No flag distinguishes the
 instances; every worker generates its own unique id.</p>
+<h2 id="running-in-containers">Running in containers</h2>
+<p>The worker is a foreground process that exits 0 on SIGTERM, so it needs no
+special entrypoint. The setting that matters is the grace period: give the
+runtime longer than your slowest task before it escalates to SIGKILL.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">worker</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">myapp:latest</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">python manage.py ox_worker --concurrency 4</span>
+<span class="w">    </span><span class="nt">stop_grace_period</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5m</span>
+<span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
+<span class="w">    </span><span class="nt">depends_on</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">db</span>
+<span class="w">    </span><span class="nt">healthcheck</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">test</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"CMD"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"python"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"manage.py"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"ox_health"</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">60s</span>
+<span class="w">      </span><span class="nt">timeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">15s</span>
+<span class="w">      </span><span class="nt">start_period</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30s</span>
+</code></pre></div>
+<p>Docker's default grace period is 10 seconds, which will kill a worker mid-task
+and leave the reaper to clean up. <code>stop_grace_period</code> is the container
+equivalent of <code>TimeoutStopSec</code>. On Kubernetes it is
+<code>terminationGracePeriodSeconds</code> on the pod spec.</p>
+<p>With no flags, <code>ox_health</code> checks that the database answers, which is what a
+per-container probe should test. Queue-wide checks belong in fleet alerting
+rather than in a probe: see
+<a href="../monitoring/#health-checks-ox_health">which check goes where</a>, and the
+liveness probe example there for queues with steady traffic.</p>
+<p>Run migrations before rolling workers, as an init container or a job, not from
+the worker itself. Several workers starting at once would race the same
+migration.</p>
 <h2 id="graceful-shutdown">Graceful shutdown</h2>
 <p>On SIGTERM or SIGINT the worker:</p>
 <ol>

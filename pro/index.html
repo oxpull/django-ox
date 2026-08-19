@@ -581,10 +581,32 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#planned-features" class="md-nav__link">
+  <a href="#what-pro-adds" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Planned features
+        What Pro adds
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-pro-is-not" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What Pro is not
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delivery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delivery
       
     </span>
   </a>
@@ -675,10 +697,32 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#planned-features" class="md-nav__link">
+  <a href="#what-pro-adds" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Planned features
+        What Pro adds
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-pro-is-not" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What Pro is not
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delivery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delivery
       
     </span>
   </a>
@@ -728,33 +772,45 @@
 
 
 <h1 id="pro">Pro</h1>
-<p>Everything documented on this site is free, open source (BSD 3-Clause),
-and stays that way. The durable queue, transactional enqueue, retries,
-reaper, graceful drain, priorities, deferred tasks, recurring tasks and
-pruning are the free tier, permanently.</p>
-<p><strong>django-ox Pro</strong> is a paid tier in development for the problems that
-only show up at scale. This page is the roadmap, so you can decide
-whether to follow along.</p>
-<h2 id="planned-features">Planned features</h2>
+<p>Everything documented on this site is free, open source (BSD 3-Clause), and
+stays that way. The durable queue, transactional enqueue, retries, reaper,
+graceful drain, priorities, deferred tasks, recurring tasks and pruning are
+the free tier, permanently. Nothing that works today moves behind the paid
+tier.</p>
+<p><strong>Oxpull Pro</strong> is a paid add-on for two problems that show up once a queue is
+carrying real volume. Both are built and tested. It is not on sale yet: the
+purchase and delivery path is still being set up, and the waitlist below is
+how to hear when it opens.</p>
+<h2 id="what-pro-adds">What Pro adds</h2>
 <ul>
-<li><strong>Batches</strong>: enqueue N tasks, track them as one unit.</li>
-<li><strong>Unique tasks</strong>: deduplicate enqueues so a job cannot be queued twice.</li>
-<li><strong>Rate limiting</strong>: per-queue and per-task throughput caps.</li>
-<li><strong>Metrics export</strong>: Prometheus and OpenTelemetry.</li>
-<li><strong>Email support</strong> from the maintainers.</li>
+<li><strong>Unique tasks.</strong> Deduplicate at enqueue time, so the same job cannot be
+  queued twice. The lock is written in the same transaction as the task, so
+  the two commit or roll back together, and a lock whose task died is
+  released rather than stranded.</li>
+<li><strong>Batches.</strong> Enqueue a group, read its progress as a count, and fire a
+  callback once every member has settled. Completion is computed by querying
+  the task rows rather than by counting signals, so a worker dying mid-task
+  cannot strand a batch: the reconciler picks it up on the next tick.</li>
 </ul>
-<p>Further out, after launch: workflows and chains (tasks that depend on tasks),
-a web dashboard, and encrypted task payloads for teams that need them.</p>
-<p>Delivery will be a license-keyed private package index: <code>pip install</code>
-with your key, no vendoring, no source access ceremony.</p>
+<p>Both run on the databases the free tier supports: SQLite, PostgreSQL, MySQL
+and MariaDB. Batches are tested to 100,000 members in a single batch.</p>
+<h2 id="what-pro-is-not">What Pro is not</h2>
+<p>Rate limiting, workflows and chains, a web dashboard and encrypted payloads
+are not in Pro and are not dated. Metrics stay free: the stats API and the
+health command are in the open source package and remain there.</p>
+<h2 id="delivery">Delivery</h2>
+<p>Pro will install from a private package index using credentials issued per
+company. There is no licence key and no runtime check. A licence check is one
+more thing of ours that can break your production, so we did not build one.
+The credential controls access to the index rather than to code you have
+already installed, so if it lapses, what is deployed keeps running.</p>
 <h2 id="pricing">Pricing</h2>
-<p>Launch pricing will be <strong>$399 per year, per company</strong>, flat, self-serve.
-One license covers your whole organization and all environments.
-Seven-day money-back.</p>
+<p>Planned at <strong>$399 per year, per company</strong>, flat. One licence to cover a whole
+organisation and every environment, with a seven-day money-back period.</p>
 <h2 id="waitlist">Waitlist</h2>
-<p>If any of the above would earn its keep in your deployment, join the
-waitlist and say which feature. That ordering decides what gets built
-first.</p>
+<p>If Pro would earn its keep in your deployment, join the waitlist and say which
+of the two features matters to you. That ordering decides what gets built
+after these.</p>
 <p><a class="md-button" href="https://oxpull.github.io/">Join the Pro waitlist</a></p>
 
 

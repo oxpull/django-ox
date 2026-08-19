@@ -50,4 +50,4 @@ If Pro would earn its keep in your deployment, join the waitlist and say which
 of the two features matters to you. That ordering decides what gets built
 after these.
 
-[Join the Pro waitlist](https://oxpull.github.io/){ .md-button }
+[Join the Pro waitlist](https://oxpull.com/){ .md-button }

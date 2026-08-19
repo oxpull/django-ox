@@ -1,4 +1,4 @@
-<img src="https://oxpull.github.io/django-ox/assets/lockup.png" alt="django-ox" width="380">
+<img src="https://oxpull.com/django-ox/assets/lockup.png" alt="django-ox" width="380">
 
 [![PyPI](https://img.shields.io/pypi/v/django-ox)](https://pypi.org/project/django-ox/)
 [![CI](https://github.com/oxpull/django-ox/actions/workflows/ci.yml/badge.svg)](https://github.com/oxpull/django-ox/actions/workflows/ci.yml)
@@ -7,7 +7,7 @@
 
 A database-backed worker backend for Django's Tasks framework (`django.tasks`, Django 6.0+).
 
-Documentation: <https://oxpull.github.io/django-ox/>
+Documentation: <https://oxpull.com/django-ox/>
 
 Django 6.0 ships the Tasks API but no production backend: the built-in
 `ImmediateBackend` and `DummyBackend` are for development and testing only.
@@ -234,14 +234,14 @@ scope: task revocation after enqueue, and multi-database routing (tasks
 are stored on the default database for the model).
 
 Batches, unique tasks, rate limiting, and metrics export are planned in
-[Oxpull Pro](https://oxpull.github.io/django-ox/pro/); the waitlist is at
-<https://oxpull.github.io/>.
+[Oxpull Pro](https://oxpull.com/django-ox/pro/); the waitlist is at
+<https://oxpull.com/>.
 
 ## Stability
 
 What counts as public API, the pre-1.0 versioning and deprecation policy,
 and the supported Python and Django versions are documented in
-[the stability policy](https://oxpull.github.io/django-ox/stability/).
+[the stability policy](https://oxpull.com/django-ox/stability/).
 
 ## License
 

@@ -221,6 +221,7 @@ to exercise claiming and retries for real.
 
 ## Not in the core
 
-Batches, unique or deduplicated tasks, rate limiting and metrics export are not
-part of django-ox. They are the [Oxpull Pro](pro.md) feature set. Chains and
-workflows are on that roadmap and do not exist yet in either tier.
+Batches and unique or deduplicated tasks are not part of django-ox. They are the
+[Oxpull Pro](pro.md) feature set. Metrics are in the free tier: `django_ox.stats`
+and `manage.py ox_health` ship in the core. Rate limiting, chains and workflows
+do not exist in either tier.

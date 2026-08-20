@@ -22,8 +22,9 @@ how to hear when it opens.
   the task rows rather than by counting signals, so a worker dying mid-task
   cannot strand a batch: the reconciler picks it up on the next tick.
 
-Both run on the databases the free tier supports: SQLite, PostgreSQL, MySQL
-and MariaDB. Batches are tested to 100,000 members in a single batch.
+Both run on the databases the free tier tests in CI: SQLite, PostgreSQL and
+MySQL 8. MariaDB 10.6+ takes the same claim path but is not part of the tested
+matrix. Batches are tested to 100,000 members in a single batch.
 
 ## What Pro is not
 
@@ -50,4 +51,4 @@ If Pro would earn its keep in your deployment, join the waitlist and say which
 of the two features matters to you. That ordering decides what gets built
 after these.
 
-[Join the Pro waitlist](https://oxpull.com/){ .md-button }
+[Join the Pro waitlist](https://oxpull.com/#waitlist){ .md-button }

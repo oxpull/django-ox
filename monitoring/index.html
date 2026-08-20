@@ -768,8 +768,8 @@ request, a shell or a metrics collector, on every tested database.</p>
 <span class="kn">from</span><span class="w"> </span><span class="nn">django_ox</span><span class="w"> </span><span class="kn">import</span> <span class="n">stats</span>
 
 <span class="n">stats</span><span class="o">.</span><span class="n">queue_stats</span><span class="p">()</span>
-<span class="c1"># [QueueStats(queue_name="default", ready=3, running=1, failed=0, successful=214),</span>
-<span class="c1">#  QueueStats(queue_name="emails", ready=0, running=0, failed=2, successful=560)]</span>
+<span class="c1"># [QueueStats(queue_name=&quot;default&quot;, ready=3, running=1, failed=0, successful=214),</span>
+<span class="c1">#  QueueStats(queue_name=&quot;emails&quot;, ready=0, running=0, failed=2, successful=560)]</span>
 
 <span class="n">stats</span><span class="o">.</span><span class="n">ready_count</span><span class="p">()</span>  <span class="c1"># tasks eligible to run right now</span>
 <span class="n">stats</span><span class="o">.</span><span class="n">oldest_ready_age</span><span class="p">()</span>  <span class="c1"># timedelta, or None when nothing waits</span>
@@ -881,7 +881,7 @@ steady traffic:</p>
 <div class="highlight"><pre><span></span><code><span class="nt">livenessProbe</span><span class="p">:</span>
 <span class="w">  </span><span class="nt">exec</span><span class="p">:</span>
 <span class="w">    </span><span class="nt">command</span><span class="p">:</span>
-<span class="w">      </span><span class="p p-Indicator">[</span><span class="s">"python"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"manage.py"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"ox_health"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"--worker-timeout"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"300"</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="p p-Indicator">[</span><span class="s">&quot;python&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;manage.py&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;ox_health&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;--worker-timeout&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;300&quot;</span><span class="p p-Indicator">]</span>
 <span class="w">  </span><span class="nt">periodSeconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">60</span>
 <span class="w">  </span><span class="nt">timeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10</span>
 <span class="w">  </span><span class="nt">failureThreshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
@@ -1044,8 +1044,8 @@ them. Everything a dashboard usually wants survives at INFO.</p>
   <code>failure_rate</code> rising above your normal baseline. Throughput is better
   as a dashboard line than an alert: its healthy value depends entirely
   on offered load.</li>
-<li><strong>Prometheus.</strong> No exporter ships with the core; that is a
-  <a href="../pro/">Pro</a> feature. The stats functions drop into any Django metrics setup
+<li><strong>Prometheus.</strong> No exporter ships with django-ox, and none ships in
+  <a href="../pro/">Pro</a> either. The stats functions drop into any Django metrics setup
   though. Either register a custom collector with django-prometheus, whose
   <code>collect()</code> calls <code>queue_stats()</code>, <code>ready_count()</code> and <code>oldest_ready_age()</code>
   and yields gauges, or render the same numbers from a plain Django view in the

@@ -875,15 +875,15 @@
 <p>Everything django-ox reads lives in the standard <code>TASKS</code> setting, plus
 three management commands. A full entry with every option spelled out:</p>
 <div class="highlight"><pre><span></span><code><span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
-    <span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span>
-        <span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"django_ox.backend.OxBackend"</span><span class="p">,</span>
-        <span class="s2">"QUEUES"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"default"</span><span class="p">,</span> <span class="s2">"emails"</span><span class="p">],</span>
-        <span class="s2">"OPTIONS"</span><span class="p">:</span> <span class="p">{</span>
-            <span class="s2">"MAX_ATTEMPTS"</span><span class="p">:</span> <span class="mi">3</span><span class="p">,</span>
-            <span class="s2">"LOCK_TIMEOUT"</span><span class="p">:</span> <span class="mi">300</span><span class="p">,</span>
-            <span class="s2">"BACKOFF_INITIAL"</span><span class="p">:</span> <span class="mi">5</span><span class="p">,</span>
-            <span class="s2">"BACKOFF_MAX"</span><span class="p">:</span> <span class="mi">600</span><span class="p">,</span>
-            <span class="s2">"SCHEDULES"</span><span class="p">:</span> <span class="p">{},</span>  <span class="c1"># see the Recurring tasks page</span>
+    <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django_ox.backend.OxBackend&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;QUEUES&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;default&quot;</span><span class="p">,</span> <span class="s2">&quot;emails&quot;</span><span class="p">],</span>
+        <span class="s2">&quot;OPTIONS&quot;</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">&quot;MAX_ATTEMPTS&quot;</span><span class="p">:</span> <span class="mi">3</span><span class="p">,</span>
+            <span class="s2">&quot;LOCK_TIMEOUT&quot;</span><span class="p">:</span> <span class="mi">300</span><span class="p">,</span>
+            <span class="s2">&quot;BACKOFF_INITIAL&quot;</span><span class="p">:</span> <span class="mi">5</span><span class="p">,</span>
+            <span class="s2">&quot;BACKOFF_MAX&quot;</span><span class="p">:</span> <span class="mi">600</span><span class="p">,</span>
+            <span class="s2">&quot;SCHEDULES&quot;</span><span class="p">:</span> <span class="p">{},</span>  <span class="c1"># see the Recurring tasks page</span>
         <span class="p">},</span>
     <span class="p">}</span>
 <span class="p">}</span>
@@ -891,8 +891,8 @@ three management commands. A full entry with every option spelled out:</p>
 <h2 id="the-smallest-working-entry">The smallest working entry</h2>
 <p>Every option has a default. This is enough to run tasks:</p>
 <div class="highlight"><pre><span></span><code><span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
-    <span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span>
-        <span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"django_ox.backend.OxBackend"</span><span class="p">,</span>
+    <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django_ox.backend.OxBackend&quot;</span><span class="p">,</span>
     <span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
@@ -1019,9 +1019,9 @@ enables debug logging. <code>-v 0</code> attaches no log handler.</p>
 <p>Declare every queue on the backend, then give each worker a subset. Slow work
 stops blocking fast work without a second backend or a second database.</p>
 <div class="highlight"><pre><span></span><code><span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
-    <span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span>
-        <span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"django_ox.backend.OxBackend"</span><span class="p">,</span>
-        <span class="s2">"QUEUES"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"default"</span><span class="p">,</span> <span class="s2">"emails"</span><span class="p">,</span> <span class="s2">"exports"</span><span class="p">],</span>
+    <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django_ox.backend.OxBackend&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;QUEUES&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;default&quot;</span><span class="p">,</span> <span class="s2">&quot;emails&quot;</span><span class="p">,</span> <span class="s2">&quot;exports&quot;</span><span class="p">],</span>
     <span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>

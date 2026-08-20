@@ -792,8 +792,9 @@ how to hear when it opens.</p>
   the task rows rather than by counting signals, so a worker dying mid-task
   cannot strand a batch: the reconciler picks it up on the next tick.</li>
 </ul>
-<p>Both run on the databases the free tier supports: SQLite, PostgreSQL, MySQL
-and MariaDB. Batches are tested to 100,000 members in a single batch.</p>
+<p>Both run on the databases the free tier tests in CI: SQLite, PostgreSQL and
+MySQL 8. MariaDB 10.6+ takes the same claim path but is not part of the tested
+matrix. Batches are tested to 100,000 members in a single batch.</p>
 <h2 id="what-pro-is-not">What Pro is not</h2>
 <p>Rate limiting, workflows and chains, a web dashboard and encrypted payloads
 are not in Pro and are not dated. Metrics stay free: the stats API and the
@@ -811,7 +812,7 @@ organisation and every environment, with a seven-day money-back period.</p>
 <p>If Pro would earn its keep in your deployment, join the waitlist and say which
 of the two features matters to you. That ordering decides what gets built
 after these.</p>
-<p><a class="md-button" href="https://oxpull.com/">Join the Pro waitlist</a></p>
+<p><a class="md-button" href="https://oxpull.com/#waitlist">Join the Pro waitlist</a></p>
 
 
 

@@ -889,19 +889,19 @@ declare them in settings, next to the backend they enqueue through, so they are
 versioned and deployed with your code. The database holds a dispatch log and
 nothing else. There are no schedule rows to edit by hand.</p>
 <div class="highlight"><pre><span></span><code><span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
-    <span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span>
-        <span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"django_ox.backend.OxBackend"</span><span class="p">,</span>
-        <span class="s2">"QUEUES"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"default"</span><span class="p">,</span> <span class="s2">"emails"</span><span class="p">],</span>
-        <span class="s2">"OPTIONS"</span><span class="p">:</span> <span class="p">{</span>
-            <span class="s2">"SCHEDULES"</span><span class="p">:</span> <span class="p">{</span>
-                <span class="s2">"nightly-report"</span><span class="p">:</span> <span class="p">{</span>
-                    <span class="s2">"task"</span><span class="p">:</span> <span class="s2">"reports.tasks.build_report"</span><span class="p">,</span>
-                    <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"0 3 * * *"</span><span class="p">,</span>
-                    <span class="s2">"kwargs"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"full"</span><span class="p">:</span> <span class="kc">True</span><span class="p">},</span>
+    <span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django_ox.backend.OxBackend&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;QUEUES&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;default&quot;</span><span class="p">,</span> <span class="s2">&quot;emails&quot;</span><span class="p">],</span>
+        <span class="s2">&quot;OPTIONS&quot;</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">&quot;SCHEDULES&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;nightly-report&quot;</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="s2">&quot;task&quot;</span><span class="p">:</span> <span class="s2">&quot;reports.tasks.build_report&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;cron&quot;</span><span class="p">:</span> <span class="s2">&quot;0 3 * * *&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;kwargs&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;full&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">},</span>
                 <span class="p">},</span>
-                <span class="s2">"warm-cache"</span><span class="p">:</span> <span class="p">{</span>
-                    <span class="s2">"task"</span><span class="p">:</span> <span class="s2">"core.tasks.warm_cache"</span><span class="p">,</span>
-                    <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"*/15 * * * *"</span><span class="p">,</span>
+                <span class="s2">&quot;warm-cache&quot;</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="s2">&quot;task&quot;</span><span class="p">:</span> <span class="s2">&quot;core.tasks.warm_cache&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;cron&quot;</span><span class="p">:</span> <span class="s2">&quot;*/15 * * * *&quot;</span><span class="p">,</span>
                 <span class="p">},</span>
             <span class="p">},</span>
         <span class="p">},</span>
@@ -962,13 +962,13 @@ other's ticks. A duplicate is rejected at worker startup and by
 <h3 id="overriding-the-queue-and-priority">Overriding the queue and priority</h3>
 <p>A schedule can put its task somewhere other than the task's own queue, which is
 useful when a nightly job would otherwise sit behind interactive work:</p>
-<div class="highlight"><pre><span></span><code><span class="s2">"SCHEDULES"</span><span class="p">:</span> <span class="p">{</span>
-    <span class="s2">"nightly-export"</span><span class="p">:</span> <span class="p">{</span>
-        <span class="s2">"task"</span><span class="p">:</span> <span class="s2">"exports.tasks.rebuild"</span><span class="p">,</span>
-        <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"0 2 * * *"</span><span class="p">,</span>
-        <span class="s2">"queue_name"</span><span class="p">:</span> <span class="s2">"exports"</span><span class="p">,</span>
-        <span class="s2">"priority"</span><span class="p">:</span> <span class="o">-</span><span class="mi">50</span><span class="p">,</span>
-        <span class="s2">"kwargs"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"full"</span><span class="p">:</span> <span class="kc">True</span><span class="p">},</span>
+<div class="highlight"><pre><span></span><code><span class="s2">&quot;SCHEDULES&quot;</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">&quot;nightly-export&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;task&quot;</span><span class="p">:</span> <span class="s2">&quot;exports.tasks.rebuild&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;cron&quot;</span><span class="p">:</span> <span class="s2">&quot;0 2 * * *&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;queue_name&quot;</span><span class="p">:</span> <span class="s2">&quot;exports&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;priority&quot;</span><span class="p">:</span> <span class="o">-</span><span class="mi">50</span><span class="p">,</span>
+        <span class="s2">&quot;kwargs&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;full&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">},</span>
     <span class="p">},</span>
 <span class="p">}</span>
 </code></pre></div>
@@ -1033,19 +1033,19 @@ the task itself was declared against a different backend alias.</p>
 <p>Shortcuts work in place of a full expression: <code>@hourly</code>, <code>@daily</code> and
 <code>@midnight</code>, <code>@weekly</code>, <code>@monthly</code>, <code>@yearly</code> and <code>@annually</code>.</p>
 <h3 id="common-schedules">Common schedules</h3>
-<div class="highlight"><pre><span></span><code><span class="s2">"SCHEDULES"</span><span class="p">:</span> <span class="p">{</span>
+<div class="highlight"><pre><span></span><code><span class="s2">&quot;SCHEDULES&quot;</span><span class="p">:</span> <span class="p">{</span>
     <span class="c1"># Every fifteen minutes.</span>
-    <span class="s2">"warm-cache"</span><span class="p">:</span>     <span class="p">{</span><span class="s2">"task"</span><span class="p">:</span> <span class="s2">"core.tasks.warm_cache"</span><span class="p">,</span>    <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"*/15 * * * *"</span><span class="p">},</span>
+    <span class="s2">&quot;warm-cache&quot;</span><span class="p">:</span>     <span class="p">{</span><span class="s2">&quot;task&quot;</span><span class="p">:</span> <span class="s2">&quot;core.tasks.warm_cache&quot;</span><span class="p">,</span>    <span class="s2">&quot;cron&quot;</span><span class="p">:</span> <span class="s2">&quot;*/15 * * * *&quot;</span><span class="p">},</span>
     <span class="c1"># 03:00 every day.</span>
-    <span class="s2">"nightly-report"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"task"</span><span class="p">:</span> <span class="s2">"reports.tasks.build"</span><span class="p">,</span>      <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"0 3 * * *"</span><span class="p">},</span>
+    <span class="s2">&quot;nightly-report&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;task&quot;</span><span class="p">:</span> <span class="s2">&quot;reports.tasks.build&quot;</span><span class="p">,</span>      <span class="s2">&quot;cron&quot;</span><span class="p">:</span> <span class="s2">&quot;0 3 * * *&quot;</span><span class="p">},</span>
     <span class="c1"># Every weekday at 09:30.</span>
-    <span class="s2">"weekday-digest"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"task"</span><span class="p">:</span> <span class="s2">"core.tasks.digest"</span><span class="p">,</span>        <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"30 9 * * mon-fri"</span><span class="p">},</span>
+    <span class="s2">&quot;weekday-digest&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;task&quot;</span><span class="p">:</span> <span class="s2">&quot;core.tasks.digest&quot;</span><span class="p">,</span>        <span class="s2">&quot;cron&quot;</span><span class="p">:</span> <span class="s2">&quot;30 9 * * mon-fri&quot;</span><span class="p">},</span>
     <span class="c1"># 00:00 on the 1st and 15th.</span>
-    <span class="s2">"twice-monthly"</span><span class="p">:</span>  <span class="p">{</span><span class="s2">"task"</span><span class="p">:</span> <span class="s2">"billing.tasks.invoice"</span><span class="p">,</span>    <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"0 0 1,15 * *"</span><span class="p">},</span>
+    <span class="s2">&quot;twice-monthly&quot;</span><span class="p">:</span>  <span class="p">{</span><span class="s2">&quot;task&quot;</span><span class="p">:</span> <span class="s2">&quot;billing.tasks.invoice&quot;</span><span class="p">,</span>    <span class="s2">&quot;cron&quot;</span><span class="p">:</span> <span class="s2">&quot;0 0 1,15 * *&quot;</span><span class="p">},</span>
     <span class="c1"># Top of every hour.</span>
-    <span class="s2">"hourly-sync"</span><span class="p">:</span>    <span class="p">{</span><span class="s2">"task"</span><span class="p">:</span> <span class="s2">"sync.tasks.pull"</span><span class="p">,</span>          <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"@hourly"</span><span class="p">},</span>
+    <span class="s2">&quot;hourly-sync&quot;</span><span class="p">:</span>    <span class="p">{</span><span class="s2">&quot;task&quot;</span><span class="p">:</span> <span class="s2">&quot;sync.tasks.pull&quot;</span><span class="p">,</span>          <span class="s2">&quot;cron&quot;</span><span class="p">:</span> <span class="s2">&quot;@hourly&quot;</span><span class="p">},</span>
     <span class="c1"># 02:15 on the first of the month.</span>
-    <span class="s2">"monthly-prune"</span><span class="p">:</span>  <span class="p">{</span><span class="s2">"task"</span><span class="p">:</span> <span class="s2">"core.tasks.prune_archive"</span><span class="p">,</span> <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"15 2 1 * *"</span><span class="p">},</span>
+    <span class="s2">&quot;monthly-prune&quot;</span><span class="p">:</span>  <span class="p">{</span><span class="s2">&quot;task&quot;</span><span class="p">:</span> <span class="s2">&quot;core.tasks.prune_archive&quot;</span><span class="p">,</span> <span class="s2">&quot;cron&quot;</span><span class="p">:</span> <span class="s2">&quot;15 2 1 * *&quot;</span><span class="p">},</span>
 <span class="p">}</span>
 </code></pre></div>
 <p>Expressions that can never fire are rejected when the configuration loads. So
@@ -1108,8 +1108,8 @@ are not JSON-serializable, and duplicate names across backends:</p>
 <p>To see what has actually dispatched, read the tick log:</p>
 <div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django_ox.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">OxScheduleTick</span>
 
-<span class="n">OxScheduleTick</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">schedule_name</span><span class="o">=</span><span class="s2">"nightly-report"</span><span class="p">)</span><span class="o">.</span><span class="n">order_by</span><span class="p">(</span>
-    <span class="s2">"-scheduled_for"</span>
+<span class="n">OxScheduleTick</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">schedule_name</span><span class="o">=</span><span class="s2">&quot;nightly-report&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">order_by</span><span class="p">(</span>
+    <span class="s2">&quot;-scheduled_for&quot;</span>
 <span class="p">)[:</span><span class="mi">5</span><span class="p">]</span>
 </code></pre></div>
 <p>Each row is one dispatched tick. A row whose <code>task</code> is <code>None</code> is the anchor

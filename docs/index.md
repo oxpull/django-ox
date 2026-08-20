@@ -160,8 +160,9 @@ decisions worth knowing before you commit:
   CPU-bound work, run multiple worker processes with `--concurrency 1`
   instead. See [Production](production.md#threads-and-processes).
 
-Batches, unique tasks, rate limiting, and metrics export are on the
-[Pro roadmap](pro.md).
+Batches and unique tasks ship in [Oxpull Pro](pro.md). Metrics stay in this
+package: `django_ox.stats` and `ox_health` are free and stay free. Rate limiting
+is in neither tier.
 
 ## License
 

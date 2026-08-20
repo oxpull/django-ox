@@ -571,6 +571,15 @@ class Worker:
                 status=OxTask.Status.SUCCESSFUL,
                 duration_ms=duration_ms,
                 return_value=return_value,
+                # The errors this execution started with, which is what the
+                # row holds unless the reaper wrote its lost-lease note in
+                # the meantime. That note says the outcome was never
+                # observed, and this write is the observation, so it goes.
+                # Leaving it would hand every error reporter reading
+                # result.errors an exception nobody raised, on a task that
+                # succeeded. _handle_failure rebuilds errors from the same
+                # list, so both resolutions leave the same kind of record.
+                errors=db_task.errors,
                 finished_at=_lease_now(),
                 locked_by=None,
                 locked_at=None,

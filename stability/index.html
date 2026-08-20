@@ -802,7 +802,8 @@ announced in the <a href="../changelog/">changelog</a>.</p>
   <code>throughput</code>, <code>failure_rate</code>, <code>last_claim_age</code>) and the <code>QueueStats</code>
   dataclass.</li>
 <li><strong>The exception</strong> <code>django_ox.exceptions.TaskAbandoned</code>, recorded against
-  tasks reclaimed after a worker died.</li>
+  tasks whose worker stopped reporting with no attempts left. It records the
+  lost lease, not a cause of failure.</li>
 <li><strong>The structured-log contract</strong>: the event names and stable <code>extra</code> keys
   documented on the <a href="../monitoring/">Monitoring</a> page.</li>
 <li><strong>The database schema</strong> of <code>OxTask</code> and <code>OxScheduleTick</code>, evolved only

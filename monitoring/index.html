@@ -789,7 +789,7 @@ request, a shell or a metrics collector, on every tested database.</p>
 <tr>
 <td><code>queue_stats()</code></td>
 <td><code>list[QueueStats]</code></td>
-<td>Raw row counts per queue and status (<code>ready</code>, <code>running</code>, <code>failed</code>, <code>successful</code>), one entry per queue with any rows. The <code>ready</code> column counts every READY row, including tasks deferred to a future <code>run_after</code>.</td>
+<td>Raw row counts per queue and status (<code>ready</code>, <code>running</code>, <code>failed</code>, <code>successful</code>, <code>lost</code>), one entry per queue with any rows. The <code>ready</code> column counts every READY row, including tasks deferred to a future <code>run_after</code>. <code>lost</code> counts tasks whose worker stopped reporting with no attempts left; see <a href="../production/#the-reaper">the reaper</a>.</td>
 </tr>
 <tr>
 <td><code>ready_count()</code></td>
@@ -939,7 +939,17 @@ The message text is not part of the contract. The keys are.</p>
 <tr>
 <td><code>task_reclaimed</code></td>
 <td>WARNING</td>
-<td>The reaper reclaimed a stuck task from a dead worker.</td>
+<td>The reaper took a task back from a worker that stopped refreshing its lock.</td>
+</tr>
+<tr>
+<td><code>task_lease_lost</code></td>
+<td>WARNING</td>
+<td>A worker finished an attempt whose lease had already been reclaimed, so its write was dropped and no result was signalled.</td>
+</tr>
+<tr>
+<td><code>lease_renew_failed</code></td>
+<td>WARNING</td>
+<td>A lease renewal statement failed. The worker keeps going and tries again on the next interval.</td>
 </tr>
 <tr>
 <td><code>schedule_dispatched</code></td>
@@ -1004,7 +1014,7 @@ The message text is not part of the contract. The keys are.</p>
 </tr>
 <tr>
 <td><code>duration_ms</code></td>
-<td><code>task_succeeded</code>, <code>task_retrying</code>, <code>task_failed</code></td>
+<td><code>task_succeeded</code>, <code>task_retrying</code>, <code>task_failed</code>, <code>task_lease_lost</code></td>
 <td>Wall-clock duration of the attempt, in milliseconds.</td>
 </tr>
 <tr>
@@ -1015,7 +1025,12 @@ The message text is not part of the contract. The keys are.</p>
 <tr>
 <td><code>status</code></td>
 <td><code>task_reclaimed</code></td>
-<td>Status after reclaim: <code>READY</code> (requeued) or <code>FAILED</code> (out of attempts).</td>
+<td>Status after reclaim: <code>READY</code> (requeued) or <code>LOST</code> (out of attempts).</td>
+</tr>
+<tr>
+<td><code>dropped_status</code></td>
+<td><code>task_lease_lost</code></td>
+<td>Status the dropped write would have set: <code>SUCCESSFUL</code>, <code>FAILED</code> or <code>READY</code>.</td>
 </tr>
 <tr>
 <td><code>schedule</code></td>
@@ -1037,6 +1052,15 @@ The message text is not part of the contract. The keys are.</p>
 <p><code>task_claimed</code> and <code>task_started</code> are DEBUG because they fire once per
 attempt; run <code>ox_worker -v 2</code> (or set the logger to DEBUG) when you want
 them. Everything a dashboard usually wants survives at INFO.</p>
+<p><code>task_lease_lost</code> should be rare. It means a worker went unresponsive long
+enough for the reaper to take its task away, and the worker's own result was
+dropped when it finally finished, because the row no longer belonged to it.
+Treat a steady trickle as a signal that <code>LOCK_TIMEOUT</code> is short relative to
+how long your workers stall, rather than as noise; the
+<a href="../production/#tuning-lock_timeout">Production</a> page covers the tuning.</p>
+<p><code>throughput()</code> and <code>failure_rate()</code> count SUCCESSFUL and FAILED rows only. A
+LOST task is not an outcome, so it is in neither number; read the <code>lost</code>
+column from <code>queue_stats()</code> for it.</p>
 <h2 id="monitoring-recipes">Monitoring recipes</h2>
 <ul>
 <li><strong>Alerting.</strong> Alert on <code>ready_count</code> and <code>oldest_ready_age</code> (via

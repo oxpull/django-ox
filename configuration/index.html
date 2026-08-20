@@ -943,7 +943,7 @@ retry. Add options when you have a reason to.</p>
 <tr>
 <td><code>LOCK_TIMEOUT</code></td>
 <td><code>300</code></td>
-<td>Seconds a RUNNING task's lock may age before the reaper considers its worker dead and reclaims the task. Set it comfortably above your longest task.</td>
+<td>Seconds a RUNNING task's lock may go unrefreshed before the reaper takes the task back. A worker refreshes the lock every <code>LOCK_TIMEOUT / 3</code> seconds while it is executing, so this is a limit on how long a worker may be unresponsive, not on how long a task may run.</td>
 </tr>
 <tr>
 <td><code>BACKOFF_INITIAL</code></td>
@@ -1001,7 +1001,7 @@ jitter.</p>
 <tr>
 <td><code>--lock-timeout</code></td>
 <td>backend <code>LOCK_TIMEOUT</code>, or 300</td>
-<td>Seconds before a RUNNING task's lock is considered stale and the task is reclaimed.</td>
+<td>Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed.</td>
 </tr>
 </tbody>
 </table>
@@ -1011,6 +1011,8 @@ enables debug logging. <code>-v 0</code> attaches no log handler.</p>
 <p>Two intervals are derived rather than flagged:</p>
 <ul>
 <li>The reaper runs every <code>min(30, max(lock_timeout / 2, 1))</code> seconds.</li>
+<li>Lease renewal runs every <code>max(lock_timeout / 3, 0.1)</code> seconds, on its own
+  thread, and keeps running until the last in-flight task has drained.</li>
 <li>Schedule dispatch (when <code>SCHEDULES</code> is configured) runs every
   <code>max(1, min(interval, 30))</code> seconds, about once a second at the default
   polling interval.</li>
@@ -1033,18 +1035,21 @@ other worker keeps short work moving at four at a time. A queue with no worker
 assigned to it accumulates tasks and never runs them, so make sure every queue
 in <code>QUEUES</code> is covered by some worker.</p>
 <h3 id="tasks-that-run-longer-than-the-lock-timeout">Tasks that run longer than the lock timeout</h3>
-<p><code>LOCK_TIMEOUT</code> is how long a claimed task may go quiet before the reaper decides
-its worker died. A task that legitimately runs longer than the timeout will be
-reclaimed and run again while the first copy is still going. Set the timeout
-above your slowest task rather than near it:</p>
+<p>A long task is not by itself a problem. A worker refreshes the lock on the
+tasks it is running every <code>LOCK_TIMEOUT / 3</code> seconds, so an hour-long task on
+a healthy worker keeps its lease for the hour.</p>
+<p>What <code>LOCK_TIMEOUT</code> bounds is how long a worker may stop refreshing before its
+work is handed to somebody else. Set it above the longest pause you are
+willing to tolerate from a worker: a long garbage-collection pause, a
+throttled container, a slow database, a host that swapped. If a queue runs on
+hardware that stalls, give it its own worker with its own timeout rather than
+raising the global value and delaying recovery for everything else:</p>
 <div class="highlight"><pre><span></span><code>python manage.py ox_worker --queues exports --lock-timeout 7200
 </code></pre></div>
-<p>If one queue holds work far slower than the rest, give it its own worker with
-its own timeout, as above, rather than raising the global value and delaying
-recovery for everything else.</p>
 <p>If you embed the worker programmatically, <code>django_ox.worker.Worker</code>
-accepts <code>reap_interval</code>, <code>schedule_interval</code>, <code>backoff_initial</code> and
-<code>backoff_max</code> keyword overrides in addition to the flag equivalents.</p>
+accepts <code>reap_interval</code>, <code>renew_interval</code>, <code>schedule_interval</code>,
+<code>backoff_initial</code> and <code>backoff_max</code> keyword overrides in addition to the flag
+equivalents.</p>
 <h2 id="ox_prune">ox_prune</h2>
 <p>Finished task rows stay in the table until pruned; the queue table doubles
 as the result store, and django-ox does not guess at your retention
@@ -1070,7 +1075,7 @@ page):</p>
 <tr>
 <td><code>--include-failed</code></td>
 <td>off</td>
-<td>Also delete FAILED rows. By default they are kept, because they hold the per-attempt tracebacks.</td>
+<td>Also delete FAILED and LOST rows. By default they are kept, because they hold the per-attempt tracebacks.</td>
 </tr>
 <tr>
 <td><code>--batch-size</code></td>

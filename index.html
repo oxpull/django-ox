@@ -860,7 +860,8 @@ queue. Details in <a href="production/">Production</a>.</p>
 <ul>
 <li>Transactional enqueue, as above. No <code>on_commit</code> boilerplate.</li>
 <li>Retries with exponential backoff and the full traceback of every attempt.</li>
-<li>A reaper that reclaims tasks from dead workers.</li>
+<li>A reaper that reclaims tasks from dead workers, and a lease that keeps it
+  away from live slow ones.</li>
 <li>Graceful drain on SIGTERM: in-flight tasks finish before the worker exits.</li>
 <li>Priorities (-100 to 100) and deferred tasks (<code>run_after</code>).</li>
 <li><a href="recurring-tasks/">Recurring tasks</a>: cron schedules declared in
@@ -871,7 +872,7 @@ queue. Details in <a href="production/">Production</a>.</p>
 <li><a href="monitoring/">Monitoring</a>: a queue-stats API, an <code>ox_health</code> command
   for probes and cron alerting, and structured log events.</li>
 </ul>
-<p>The worker is covered by 191 tests, green on both SQLite and PostgreSQL 16.</p>
+<p>The worker is covered by 221 tests, green on both SQLite and PostgreSQL 16.</p>
 <h2 id="install">Install</h2>
 <p>Requires Python 3.12+ and Django 6.0+.</p>
 <div class="highlight"><pre><span></span><code>pip install django-ox

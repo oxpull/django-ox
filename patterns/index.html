@@ -961,8 +961,10 @@ failed to record, or record one that never gets processed.</p>
 </code></pre></div>
 <p><code>refresh()</code> re-reads from the database, so call it before checking status.
 <code>status</code> is one of <code>READY</code>, <code>RUNNING</code>, <code>SUCCESSFUL</code> or <code>FAILED</code>, and
-<code>is_finished</code> covers the last two. Return values are stored as JSON, so return a
-URL or an id rather than a file or a model.</p>
+<code>is_finished</code> covers the last two. A task whose worker vanished without
+reporting also reads as <code>FAILED</code>; <a href="../production/#the-reaper">the reaper</a>
+explains what that record contains. Return values are stored as JSON, so
+return a URL or an id rather than a file or a model.</p>
 <h2 id="defer-work-to-a-specific-time">Defer work to a specific time</h2>
 <p>Use <code>.using(run_after=...)</code>. It returns a copy of the task with that setting
 applied.</p>

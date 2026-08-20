@@ -213,6 +213,14 @@ four-valued API an answer for a task whose outcome nobody saw, and the
 alternative, reporting it as still running forever, hangs every caller that
 waits on it.
 
+It takes two things at once: the task's attempts spent, and its lease allowed
+to lapse. Renewal holds the lease for as long as the worker is answering, so
+what reaches this state is a worker that went unresponsive for longer than
+`LOCK_TIMEOUT` and then came back, which is the case you asked the reaper to
+act on in the first place. If your callers cannot tolerate seeing it, raise
+`LOCK_TIMEOUT` until a merely slow worker is never reclaimed; the cost is that
+a genuinely dead one takes that much longer to notice.
+
 ### Tuning LOCK_TIMEOUT
 
 Set `LOCK_TIMEOUT` above the longest gap you expect between a worker's lease

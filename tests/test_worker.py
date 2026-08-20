@@ -706,13 +706,69 @@ class TestLostState:
         db_task = OxTask.objects.get()
         assert db_task.status == OxTask.Status.SUCCESSFUL
         assert db_task.return_value == 3
-        # The reaper's note survives on the row, because a success write
-        # does not touch errors. It is a true record of what happened.
-        assert db_task.errors[-1]["exception_class_path"].endswith("TaskAbandoned")
+        # The reaper's note is gone. It said the outcome was never observed,
+        # and this write is that observation, so it no longer describes the
+        # row. What happened to the lease is still on record: worker_ids
+        # names every holder, and the reaper logged task_lease_lost.
+        assert db_task.errors == []
+        assert len(db_task.worker_ids) == len(set(db_task.worker_ids))
 
         result.refresh()
         assert result.status == TaskResultStatus.SUCCESSFUL
         assert result.return_value == 3
+
+    def test_both_resolutions_leave_the_same_kind_of_record(self, worker):
+        """
+        Whichever way a lost lease resolves, errors must mean the same thing.
+
+        The reaper's note says the outcome was never observed. Once the
+        holder reports, that is no longer true, so the note is superseded
+        either way and errors goes back to meaning what attempts raised.
+        Keeping it on a success puts an exception that was never raised in
+        front of every error reporter reading result.errors; keeping it on a
+        failure and not on a success would make the same row mean two
+        different things depending on how it ended.
+
+        The lease event itself is not lost: it is a task_lease_lost warning
+        in the log, and worker_ids on the row names every worker that held
+        the task.
+        """
+        add.enqueue(1, 2)
+        OxTask.objects.update(attempts=2)
+        succeeding = worker.claim_one()
+        reap_away(worker, succeeding)
+        assert any(
+            error["exception_class_path"].endswith("TaskAbandoned")
+            for error in OxTask.objects.get(pk=succeeding.pk).errors
+        ), "the reaper should have recorded the lost lease"
+        worker.execute(succeeding)
+        after_success = OxTask.objects.get(pk=succeeding.pk)
+
+        fail_always.enqueue()
+        OxTask.objects.filter(status=OxTask.Status.READY).update(attempts=2)
+        failing = worker.claim_one()
+        reap_away(worker, failing)
+        worker.execute(failing)
+        after_failure = OxTask.objects.get(pk=failing.pk)
+
+        assert after_success.status == OxTask.Status.SUCCESSFUL
+        assert after_failure.status == OxTask.Status.FAILED
+
+        def notes(db_task):
+            return [
+                error["exception_class_path"]
+                for error in db_task.errors
+                if error["exception_class_path"].endswith("TaskAbandoned")
+            ]
+
+        assert notes(after_success) == [], (
+            "a task that succeeded carries an exception that was never raised; "
+            "anything reading result.errors reports a failure that did not happen"
+        )
+        assert notes(after_failure) == []
+        assert [error["exception_class_path"] for error in after_failure.errors] == [
+            "builtins.ValueError"
+        ], "the real exception must survive"
 
     def test_nobody_but_the_lost_epoch_may_resolve_it(self, worker):
         stale = self._lose_the_lease(worker)

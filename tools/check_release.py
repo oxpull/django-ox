@@ -7,7 +7,7 @@ the next version. That happened once: 0.1.0 shipped without the Documentation
 URL because the URL was added to pyproject.toml after the upload, and its page
 kept rendering a superseded README. The only fix was another release.
 
-Checks:
+The source tree (`check_source`):
   1. pyproject version, `django_ox.__version__` and the newest CHANGELOG entry
      all agree.
   2. The CHANGELOG has a link reference for that version.
@@ -15,9 +15,18 @@ Checks:
   4. The README declares no version other than the one being released.
   5. On a tag build, the tag matches the declared version.
 
+The built archives (`check_dist`), which the source tree cannot show:
+  6. A wheel and an sdist exist at the declared version, and no other version
+     is staged beside them.
+  7. Both carry every migration in the source tree. A packaging rule that drops
+     one is invisible until somebody upgrades and their table lacks a column,
+     and no test that imports from the source tree can see it.
+  8. Both carry the licence and the worker module.
+
 Usage:
-    python tools/check_release.py              # consistency only
-    python tools/check_release.py --tag v0.1.1 # also assert the tag matches
+    python tools/check_release.py               # source only
+    python tools/check_release.py --tag v0.1.1  # also assert the tag matches
+    python tools/check_release.py --dist        # also open dist/
 """
 
 from __future__ import annotations
@@ -25,7 +34,9 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import tarfile
 import tomllib
+import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -43,24 +54,34 @@ def fail(message: str) -> str:
     return f"error: {message}"
 
 
-def read_pyproject_version() -> tuple[str, dict[str, str]]:
-    data = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+def read_pyproject_version(repo: Path = REPO) -> tuple[str, dict[str, str]]:
+    data = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))
     project = data["project"]
     return project["version"], project.get("urls", {})
 
 
-def read_dunder_version() -> str | None:
-    text = (REPO / "src" / "django_ox" / "__init__.py").read_text(encoding="utf-8")
+def read_dunder_version(repo: Path = REPO) -> str | None:
+    text = (repo / "src" / "django_ox" / "__init__.py").read_text(encoding="utf-8")
     match = re.search(r"^__version__\s*=\s*[\"']([^\"']+)[\"']", text, re.M)
     return match.group(1) if match else None
 
 
-def read_changelog() -> tuple[str | None, set[str]]:
-    text = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+def read_changelog(repo: Path = REPO) -> tuple[str | None, set[str]]:
+    text = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
     headings = re.findall(r"^##\s*\[([^\]]+)\]", text, re.M)
     newest = next((h for h in headings if h.lower() != "unreleased"), None)
     refs = set(re.findall(r"^\[([^\]]+)\]:\s*https?://", text, re.M))
     return newest, refs
+
+
+def read_migrations(repo: Path = REPO) -> set[str]:
+    """The migration filenames the source tree declares."""
+    directory = repo / "src" / "django_ox" / "migrations"
+    if not directory.is_dir():
+        return set()
+    return {
+        path.name for path in directory.glob("[0-9]*.py") if path.name != "__init__.py"
+    }
 
 
 def check_urls(urls: dict[str, str]) -> list[str]:
@@ -85,9 +106,9 @@ def check_urls(urls: dict[str, str]) -> list[str]:
     return problems
 
 
-def check_readme(version: str) -> list[str]:
+def check_readme(version: str, repo: Path = REPO) -> list[str]:
     """The README is the package page. A stale version in it is a public error."""
-    text = (REPO / "README.md").read_text(encoding="utf-8")
+    text = (repo / "README.md").read_text(encoding="utf-8")
     problems: list[str] = []
     for match in re.finditer(r"django-ox[=~><]=\s*([0-9]+\.[0-9]+\.[0-9]+)", text):
         if match.group(1) != version:
@@ -100,16 +121,16 @@ def check_readme(version: str) -> list[str]:
     return problems
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tag", help="git tag being built, e.g. v0.1.1")
-    args = parser.parse_args()
-
+def check_source(
+    repo: Path = REPO, tag: str | None = None
+) -> tuple[list[str], list[str]]:
+    """Everything decidable from the tree. Returns (problems, notes)."""
     problems: list[str] = []
+    notes: list[str] = []
 
-    version, urls = read_pyproject_version()
-    dunder = read_dunder_version()
-    newest, refs = read_changelog()
+    version, urls = read_pyproject_version(repo)
+    dunder = read_dunder_version(repo)
+    newest, refs = read_changelog(repo)
 
     if dunder is None:
         problems.append(fail("could not find __version__ in src/django_ox/__init__.py"))
@@ -117,6 +138,8 @@ def main() -> int:
         problems.append(
             fail(f"__version__ is {dunder} but pyproject version is {version}")
         )
+    else:
+        notes.append(f"__version__ and pyproject agree on {version}")
 
     if newest is None:
         problems.append(fail("CHANGELOG has no released version heading"))
@@ -132,16 +155,118 @@ def main() -> int:
         problems.append(
             fail(f"CHANGELOG has no link reference for [{version}] at the bottom")
         )
+    else:
+        notes.append(f"CHANGELOG has the [{version}] entry and its link reference")
 
     problems.extend(check_urls(urls))
-    problems.extend(check_readme(version))
+    problems.extend(check_readme(version, repo))
 
-    if args.tag:
+    if tag:
         expected = f"v{version}"
-        if args.tag != expected:
+        if tag != expected:
             problems.append(
-                fail(f"tag {args.tag} does not match the declared version ({expected})")
+                fail(f"tag {tag} does not match the declared version ({expected})")
             )
+        else:
+            notes.append(f"tag {tag} matches the declared version")
+
+    return problems, notes
+
+
+def _archive_members(path: Path) -> list[str] | None:
+    """Member names inside a wheel or an sdist, or None if unreadable."""
+    try:
+        if path.suffix == ".whl":
+            with zipfile.ZipFile(path) as archive:
+                return archive.namelist()
+        with tarfile.open(path, "r:gz") as archive:
+            return archive.getnames()
+    except (zipfile.BadZipFile, tarfile.TarError, OSError):
+        return None
+
+
+def check_dist(
+    dist: Path, version: str, migrations: set[str] | None = None
+) -> tuple[list[str], list[str]]:
+    """Everything only the built archive can show. Returns (problems, notes)."""
+    problems: list[str] = []
+    notes: list[str] = []
+
+    if not dist.is_dir():
+        return [fail(f"{dist} does not exist; run python -m build first")], notes
+
+    expected = read_migrations() if migrations is None else migrations
+
+    for kind, pattern in (
+        ("wheel", "django_ox-*.whl"),
+        ("sdist", "django_ox-*.tar.gz"),
+    ):
+        staged = sorted(dist.glob(pattern))
+        wanted = [p for p in staged if f"-{version}" in p.name.replace("_", "-")]
+        others = [
+            p
+            for p in staged
+            if p not in wanted and re.search(r"-([0-9]+\.[0-9]+\.[0-9]+)", p.name)
+        ]
+        if others:
+            found = re.search(r"-([0-9]+\.[0-9]+\.[0-9]+)", others[0].name)
+            seen = found.group(1) if found else "another version"
+            problems.append(
+                fail(
+                    f"{dist} holds a django_ox {kind} at {seen} as well as "
+                    f"{version}; nothing says which one would be uploaded"
+                )
+            )
+        if not wanted:
+            problems.append(fail(f"{dist} has no django_ox {kind} at {version}"))
+            continue
+
+        for path in wanted:
+            members = _archive_members(path)
+            if members is None:
+                problems.append(fail(f"{path.name} could not be opened"))
+                continue
+            notes.append(f"inspected {path.name}")
+            tails = {name.split("django_ox/", 1)[-1] for name in members}
+
+            for required in ("__init__.py", "worker.py", "models.py"):
+                if required not in tails:
+                    problems.append(
+                        fail(f"{path.name} does not contain django_ox/{required}")
+                    )
+            if not any(name.endswith("LICENSE") for name in members):
+                problems.append(fail(f"{path.name} does not carry LICENSE"))
+
+            shipped = {
+                tail.split("migrations/", 1)[-1]
+                for tail in tails
+                if tail.startswith("migrations/") and tail != "migrations/__init__.py"
+            }
+            for missing in sorted(expected - shipped):
+                problems.append(
+                    fail(
+                        f"{path.name} is missing migration {missing}. An upgrade "
+                        "against it leaves the table without the column the code "
+                        "expects, and nothing before install can see that."
+                    )
+                )
+
+    return problems, notes
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tag", help="git tag being built, e.g. v0.1.1")
+    parser.add_argument(
+        "--dist", action="store_true", help="also open the archives in dist/"
+    )
+    args = parser.parse_args()
+
+    version, _ = read_pyproject_version()
+    problems, _ = check_source(REPO, tag=args.tag)
+    if args.dist:
+        dist_problems, _ = check_dist(REPO / "dist", version)
+        problems.extend(dist_problems)
 
     for problem in problems:
         print(problem)
@@ -150,7 +275,8 @@ def main() -> int:
         print(f"\ncheck-release: {len(problems)} problem(s). A release is permanent.")
         return 1
 
-    print(f"check-release: {version} is consistent, URLs complete, changelog ready.")
+    scope = "source and archives" if args.dist else "source"
+    print(f"check-release: {version} is consistent ({scope} checked).")
     return 0
 
 

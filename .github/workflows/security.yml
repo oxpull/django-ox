@@ -19,7 +19,7 @@ jobs:
   secrets:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           # Gitleaks scans commits, not just the worktree, so it needs history.
           fetch-depth: 0
@@ -49,12 +49,12 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: github/codeql-action/init@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: github/codeql-action/init@f3712979fa5f215279b101dd0a2e3bdfb4353324  # v3
         with:
           languages: python
           queries: security-extended
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@f3712979fa5f215279b101dd0a2e3bdfb4353324  # v3
 
   # Note: there is no separate bandit job. The same rule family runs as ruff's
   # `S` selector inside the existing lint job, which is faster and one tool
@@ -64,8 +64,8 @@ jobs:
   dependencies:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip pip-audit
@@ -94,7 +94,7 @@ jobs:
     name: internal artefacts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - name: No internal artefacts tracked
         run: |
           set -uo pipefail

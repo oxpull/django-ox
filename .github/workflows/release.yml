@@ -32,6 +32,12 @@ jobs:
             python tools/check_release.py
           fi
       - run: python -m build
+      # The check above reads the source tree, which cannot show what the build
+      # actually put in the archive. This one opens it, so a packaging rule that
+      # stopped shipping a migration fails here rather than on somebody's
+      # upgrade, where the symptom is a missing column and no way back.
+      - name: Check the built archives
+        run: python tools/check_release.py --dist
       - run: twine check --strict dist/*
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:

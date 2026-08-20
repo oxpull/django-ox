@@ -68,3 +68,40 @@ class TestStructuredLogging:
         assert set(record.__dict__) >= STABLE_KEYS
         assert record.task_id == str(db_task.pk)
         assert record.status == "READY"
+
+    def test_reclaim_event_reports_lost_when_attempts_are_gone(self, worker, caplog):
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        add.enqueue(1, 2)
+        db_task = worker.claim_one()
+        OxTask.objects.filter(pk=db_task.pk).update(
+            attempts=db_task.max_attempts,
+            locked_at=timezone.now() - timedelta(seconds=worker.lock_timeout + 10),
+        )
+        assert worker.reap() == 1
+
+        (record,) = events(caplog, "task_reclaimed")
+        assert record.status == "LOST"
+        assert record.levelno == logging.WARNING
+
+    def test_lease_lost_event(self, worker, caplog):
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        add.enqueue(1, 2)
+        db_task = worker.claim_one()
+        # Another worker takes the row over while this one is still running.
+        OxTask.objects.filter(pk=db_task.pk).update(
+            status=OxTask.Status.SUCCESSFUL,
+            lease_epoch=db_task.lease_epoch + 1,
+            finished_at=timezone.now(),
+            locked_by=None,
+            locked_at=None,
+        )
+        worker.execute(db_task)
+
+        (record,) = events(caplog, "task_lease_lost")
+        assert set(record.__dict__) >= STABLE_KEYS
+        assert record.levelno == logging.WARNING
+        assert record.task_id == str(db_task.pk)
+        assert record.attempt == 1
+        assert record.dropped_status == "SUCCESSFUL"
+        assert isinstance(record.duration_ms, int)
+        assert "lost its lease" in record.getMessage()

@@ -33,13 +33,22 @@ DEFAULT_WINDOW = timedelta(minutes=5)
 
 @dataclass(frozen=True)
 class QueueStats:
-    """Per-status row counts for one queue."""
+    """
+    Per-status row counts for one queue.
+
+    lost counts rows whose worker stopped renewing its lease with no
+    attempts left. Those are settled, so they are not backlog, but nobody
+    observed how they ended, so they are neither a success nor a failure
+    and they are not folded into either column. A steady lost count means
+    workers are being reclaimed; see the Production guide on LOCK_TIMEOUT.
+    """
 
     queue_name: str
     ready: int
     running: int
     failed: int
     successful: int
+    lost: int = 0
 
 
 def _for_queue(queryset: QuerySet[OxTask], queue_name: str | None) -> QuerySet[OxTask]:
@@ -80,6 +89,7 @@ def queue_stats() -> list[QueueStats]:
             running=Count("pk", filter=Q(status=OxTask.Status.RUNNING)),
             failed=Count("pk", filter=Q(status=OxTask.Status.FAILED)),
             successful=Count("pk", filter=Q(status=OxTask.Status.SUCCESSFUL)),
+            lost=Count("pk", filter=Q(status=OxTask.Status.LOST)),
         )
         .order_by("queue_name")
     )

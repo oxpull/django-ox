@@ -40,8 +40,8 @@ class Command(BaseCommand):
             "--include-failed",
             action="store_true",
             help=(
-                "Also delete FAILED rows. Off by default: failed rows hold "
-                "the per-attempt tracebacks and only go when asked."
+                "Also delete FAILED and LOST rows. Off by default: they "
+                "hold the per-attempt tracebacks and only go when asked."
             ),
         )
         parser.add_argument(
@@ -65,7 +65,11 @@ class Command(BaseCommand):
         cutoff = timezone.now() - parse_duration(options["older_than"])
         statuses = [OxTask.Status.SUCCESSFUL]
         if options["include_failed"]:
-            statuses.append(OxTask.Status.FAILED)
+            # LOST goes with FAILED rather than with SUCCESSFUL: it is the
+            # same kind of row to keep, holding tracebacks and the note that
+            # the lease was lost, and the same kind to discard. Leaving it
+            # out of both would make it the one status that never prunes.
+            statuses += [OxTask.Status.FAILED, OxTask.Status.LOST]
         prunable = OxTask.objects.filter(status__in=statuses, finished_at__lt=cutoff)
         label = "/".join(statuses)
 

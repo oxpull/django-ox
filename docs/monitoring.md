@@ -33,7 +33,7 @@ stats.last_claim_age()  # time since a worker last claimed
 
 | Function | Returns | Semantics |
 | --- | --- | --- |
-| `queue_stats()` | `list[QueueStats]` | Raw row counts per queue and status (`ready`, `running`, `failed`, `successful`), one entry per queue with any rows. The `ready` column counts every READY row, including tasks deferred to a future `run_after`. |
+| `queue_stats()` | `list[QueueStats]` | Raw row counts per queue and status (`ready`, `running`, `failed`, `successful`, `lost`), one entry per queue with any rows. The `ready` column counts every READY row, including tasks deferred to a future `run_after`. `lost` counts tasks whose worker stopped reporting with no attempts left; see [the reaper](production.md#the-reaper). |
 | `ready_count()` | `int` | READY tasks eligible to run now, mirroring the worker's dequeue predicate: deferred tasks do not count until `run_after` passes. This is the backlog number. |
 | `oldest_ready_age()` | `timedelta \| None` | Age of the oldest task waiting to run, measured from when it became eligible (`run_after` when set, `enqueued_at` otherwise), so a task deferred by a week does not read as a week of backlog. |
 | `throughput(window)` | `float` | Tasks reaching a terminal state (SUCCESSFUL or FAILED) per minute over the trailing window (default 5 minutes). |
@@ -121,7 +121,9 @@ The message text is not part of the contract. The keys are.
 | `task_succeeded` | INFO | The task reached SUCCESSFUL. |
 | `task_retrying` | WARNING | An attempt failed with retries remaining. |
 | `task_failed` | ERROR | The task reached FAILED, out of attempts. |
-| `task_reclaimed` | WARNING | The reaper reclaimed a stuck task from a dead worker. |
+| `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. |
+| `task_lease_lost` | WARNING | A worker finished an attempt whose lease had already been reclaimed, so its write was dropped and no result was signalled. |
+| `lease_renew_failed` | WARNING | A lease renewal statement failed. The worker keeps going and tries again on the next interval. |
 | `schedule_dispatched` | INFO | A recurring tick enqueued its task. |
 | `worker_error` | ERROR | The execution wrapper itself raised (an internal worker error, not a task failure). |
 | `worker_draining` | INFO | Shutdown began with tasks still in flight. |
@@ -135,9 +137,10 @@ The message text is not part of the contract. The keys are.
 | `task_path` | task events | Dotted path of the task function. |
 | `queue` | task events | Queue name. |
 | `attempt` | task events | Attempts consumed so far, including the current one. |
-| `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed` | Wall-clock duration of the attempt, in milliseconds. |
+| `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_lease_lost` | Wall-clock duration of the attempt, in milliseconds. |
 | `exception` | `task_retrying`, `task_failed` | Exception class name of the failure. |
-| `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `FAILED` (out of attempts). |
+| `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `LOST` (out of attempts). |
+| `dropped_status` | `task_lease_lost` | Status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |
 | `schedule` | `schedule_dispatched` | Schedule name from `SCHEDULES`. |
 | `queues`, `concurrency` | `worker_started` | The worker's configuration. |
 | `pending` | `worker_draining` | In-flight tasks at shutdown. |
@@ -145,6 +148,17 @@ The message text is not part of the contract. The keys are.
 `task_claimed` and `task_started` are DEBUG because they fire once per
 attempt; run `ox_worker -v 2` (or set the logger to DEBUG) when you want
 them. Everything a dashboard usually wants survives at INFO.
+
+`task_lease_lost` should be rare. It means a worker went unresponsive long
+enough for the reaper to take its task away, and the worker's own result was
+dropped when it finally finished, because the row no longer belonged to it.
+Treat a steady trickle as a signal that `LOCK_TIMEOUT` is short relative to
+how long your workers stall, rather than as noise; the
+[Production](production.md#tuning-lock_timeout) page covers the tuning.
+
+`throughput()` and `failure_rate()` count SUCCESSFUL and FAILED rows only. A
+LOST task is not an outcome, so it is in neither number; read the `lost`
+column from `queue_stats()` for it.
 
 ## Monitoring recipes
 

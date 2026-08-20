@@ -59,7 +59,8 @@ queue. Details in [Production](production.md).
 
 - Transactional enqueue, as above. No `on_commit` boilerplate.
 - Retries with exponential backoff and the full traceback of every attempt.
-- A reaper that reclaims tasks from dead workers.
+- A reaper that reclaims tasks from dead workers, and a lease that keeps it
+  away from live slow ones.
 - Graceful drain on SIGTERM: in-flight tasks finish before the worker exits.
 - Priorities (-100 to 100) and deferred tasks (`run_after`).
 - [Recurring tasks](recurring-tasks.md): cron schedules declared in
@@ -70,7 +71,7 @@ queue. Details in [Production](production.md).
 - [Monitoring](monitoring.md): a queue-stats API, an `ox_health` command
   for probes and cron alerting, and structured log events.
 
-The worker is covered by 191 tests, green on both SQLite and PostgreSQL 16.
+The worker is covered by 221 tests, green on both SQLite and PostgreSQL 16.
 
 ## Install
 

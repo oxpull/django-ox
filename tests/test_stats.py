@@ -57,12 +57,19 @@ class TestQueueStats:
         make_task(OxTask.Status.SUCCESSFUL, queue="emails")
         make_task(OxTask.Status.SUCCESSFUL, queue="emails")
 
+        make_task(OxTask.Status.LOST)
+
         assert stats.queue_stats() == [
             stats.QueueStats(
-                queue_name="default", ready=2, running=1, failed=1, successful=0
+                queue_name="default",
+                ready=2,
+                running=1,
+                failed=1,
+                successful=0,
+                lost=1,
             ),
             stats.QueueStats(
-                queue_name="emails", ready=0, running=0, failed=0, successful=2
+                queue_name="emails", ready=0, running=0, failed=0, successful=2, lost=0
             ),
         ]
 

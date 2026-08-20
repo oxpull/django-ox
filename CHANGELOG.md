@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-20
+
+### Fixed
+
+- A worker whose task had been taken back by the reaper could still write its
+  own outcome over the row, so a task that had already finished could be moved
+  back to READY and run a second time after its result had been reported. Every
+  claim now stamps the row with a lease number, and every finish write carries
+  that number in its WHERE clause, so a write from a worker that no longer
+  holds the task matches nothing and is dropped instead of applied. No
+  completion is signalled for a dropped write.
+- The reaper no longer records a failure it did not observe. When a lock aged
+  out with no attempts left it wrote FAILED and invented a `TaskAbandoned`
+  exception to explain it, on no evidence beyond a clock. It now records the
+  task as LOST, which says the worker stopped reporting and the outcome was
+  never seen, and nothing more.
+- Lock timestamps are written and compared using the database server's clock
+  rather than each worker's own, so two hosts with drifting clocks no longer
+  produce false reclaims. This applies when `USE_TZ` is on. With `USE_TZ` off
+  the worker's clock is used instead, because the database's clock does not
+  always match what these columns hold: SQLite's is UTC while the columns carry
+  naive local time, and reading one against the other would make `ox_prune
+  --older-than` treat rows that finished seconds ago as hours old.
+- On databases without `SELECT ... FOR UPDATE SKIP LOCKED`, which includes
+  SQLite, a claim read its row back in a second statement and could come away
+  holding a lease granted to a different worker, if the reaper reclaimed the
+  row in the gap between the two. The read is now pinned to the lease the claim
+  was granted, so a worker that lost the row inside that gap comes back with
+  nothing rather than with someone else's lease.
+
+### Added
+
+- **Lease renewal.** A worker refreshes the lock on the tasks it is running,
+  one statement per interval however many are in flight, and keeps doing so
+  through a graceful drain. A long task on a healthy worker is no longer
+  reclaimed while it is still running. `LOCK_TIMEOUT` now bounds how long a
+  worker may go unresponsive, not how long a task may take. The renewal
+  interval is `LOCK_TIMEOUT / 3`, overridable as `renew_interval` when
+  embedding `Worker` directly.
+- `OxTask.Status.LOST`, a fifth value in django-ox's own status column. It
+  reads as `FAILED` through `django.tasks`, which has four statuses and gets no
+  fifth from us, and `is_finished` is true for it, so callers waiting on a
+  result still terminate. The row keeps the distinction: `queue_stats()`
+  reports a `lost` column and `ox_prune --include-failed` covers it. If the
+  worker holding a LOST task comes back and records a real outcome, that
+  outcome replaces LOST; only that one execution can.
+- `task_lease_lost` and `lease_renew_failed`, two WARNING log events. Both are
+  documented on the Monitoring page.
+
+### Changed
+
+- **A migration ships with this release.** Run `python manage.py migrate
+  django_ox` when you upgrade. It adds the `lease_epoch` column and the new
+  status choice.
+- `task_reclaimed` now reports `status` as `READY` or `LOST`, where it
+  previously reported `READY` or `FAILED`.
+- `QueueStats` has a fifth field, `lost`. It is keyword-defaulted, so existing
+  code that constructs one keeps working.
+
 ## [0.1.2] - 2026-08-18
 
 The worker, the public API and the database schema are unchanged. This
@@ -114,6 +173,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[0.2.0]: https://github.com/oxpull/django-ox/releases/tag/v0.2.0
 [0.1.2]: https://github.com/oxpull/django-ox/releases/tag/v0.1.2
 [0.1.1]: https://github.com/oxpull/django-ox/releases/tag/v0.1.1
 [0.1.0]: https://github.com/oxpull/django-ox/releases/tag/v0.1.0

@@ -105,8 +105,10 @@ return render(request, "report_pending.html", {"attempts": result.attempts})
 
 `refresh()` re-reads from the database, so call it before checking status.
 `status` is one of `READY`, `RUNNING`, `SUCCESSFUL` or `FAILED`, and
-`is_finished` covers the last two. Return values are stored as JSON, so return a
-URL or an id rather than a file or a model.
+`is_finished` covers the last two. A task whose worker vanished without
+reporting also reads as `FAILED`; [the reaper](production.md#the-reaper)
+explains what that record contains. Return values are stored as JSON, so
+return a URL or an id rather than a file or a model.
 
 ## Defer work to a specific time
 

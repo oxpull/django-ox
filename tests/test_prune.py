@@ -73,15 +73,24 @@ class TestPrune:
         assert OxTask.objects.filter(pk=young_ok.pk).exists()
         assert "Deleted 1 SUCCESSFUL task row(s)" in out
 
-    def test_include_failed_prunes_failed_too(self):
+    def test_include_failed_prunes_failed_and_lost_too(self):
         make_task(OxTask.Status.SUCCESSFUL, finished_days_ago=8)
         make_task(OxTask.Status.FAILED, finished_days_ago=8)
+        make_task(OxTask.Status.LOST, finished_days_ago=8)
         young_failed = make_task(OxTask.Status.FAILED, finished_days_ago=1)
 
         out = prune("--include-failed")
 
         assert set(OxTask.objects.values_list("pk", flat=True)) == {young_failed.pk}
-        assert "Deleted 2 SUCCESSFUL/FAILED task row(s)" in out
+        assert "Deleted 3 SUCCESSFUL/FAILED/LOST task row(s)" in out
+
+    def test_lost_rows_survive_without_include_failed(self):
+        lost = make_task(OxTask.Status.LOST, finished_days_ago=8)
+
+        out = prune()
+
+        assert set(OxTask.objects.values_list("pk", flat=True)) == {lost.pk}
+        assert "Deleted 0 SUCCESSFUL task row(s)" in out
 
     def test_ready_and_running_never_pruned(self):
         # finished_at is forced to an ancient date to prove the status

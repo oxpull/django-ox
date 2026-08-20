@@ -20,7 +20,8 @@ announced in the [changelog](changelog.md).
   `throughput`, `failure_rate`, `last_claim_age`) and the `QueueStats`
   dataclass.
 - **The exception** `django_ox.exceptions.TaskAbandoned`, recorded against
-  tasks reclaimed after a worker died.
+  tasks whose worker stopped reporting with no attempts left. It records the
+  lost lease, not a cause of failure.
 - **The structured-log contract**: the event names and stable `extra` keys
   documented on the [Monitoring](monitoring.md) page.
 - **The database schema** of `OxTask` and `OxScheduleTick`, evolved only

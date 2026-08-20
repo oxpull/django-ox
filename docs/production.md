@@ -128,25 +128,105 @@ For CPU-bound tasks the GIL makes threads the wrong tool. Run multiple worker
 processes with `--concurrency 1` instead. That is also the natural shape for
 systemd template units, or one container per worker.
 
+## The lease
+
+A worker that claims a task takes a lease on it: the row records who holds
+it, when the lock was last refreshed, and a lease number that goes up by one
+every time the task changes hands. Three things follow from that number, and
+they are worth understanding together because they are what makes recovery
+safe.
+
+**The worker keeps its own lease alive.** While a task is executing, its
+worker refreshes the lock timestamp on the rows it is running, one statement
+per interval however many are in flight, and it keeps doing so through a
+graceful drain. So a task that takes an hour does not look abandoned after
+five minutes. The reaper reclaims work from workers that stopped reporting,
+not from tasks that are merely slow.
+
+**A finish write only lands while the lease still holds.** When a worker
+records success, failure or a retry, the UPDATE carries the lease number it
+was given at claim time. If the task was taken off it in the meantime, that
+number no longer matches and the write is dropped rather than applied, and no
+completion is signalled for it. This is arithmetic rather than timing: no
+pause is long enough to get around it, so a task that finished cannot be put
+back on the queue by a straggler.
+
+**Timestamps come from the database.** With `USE_TZ` on, the lock time is
+written by the database server and compared against the database server's
+clock, so two hosts with drifting clocks do not produce false reclaims. If you
+run workers on more than one host, that is the setting which gives them one
+clock, and it is Django's default.
+
+With `USE_TZ` off the worker's clock is used instead. A database's own clock
+does not always match what these columns hold there: SQLite's is UTC while the
+columns carry naive local time, and reading one against the other would make
+`ox_prune --older-than` treat rows that finished seconds ago as hours old.
+Under that setting, keep `TIME_ZONE` and the timezone your workers run in the
+same, which is what Django assumes of it anyway.
+
 ## The reaper
 
-Workers die: OOM kills, node failures, `kill -9`. When a worker dies mid-task, its task stays RUNNING behind a stale lock. The
-reaper returns it to the queue. It runs inside every worker, on an interval
-derived from the lock timeout:
+Workers still die: OOM kills, node failures, `kill -9`. A dead worker stops
+refreshing its lock, and the reaper picks the task up. It runs inside every
+worker, on an interval derived from the lock timeout.
 
-- A RUNNING task whose lock is older than `LOCK_TIMEOUT` (default 300
-  seconds, per-worker override `--lock-timeout`) is put back to READY, or
-  marked FAILED with a `TaskAbandoned` error record if it has no attempts
-  left.
-- The attempt was already consumed when the task was claimed, so a
-  crash-looping task cannot retry forever; it fails after `MAX_ATTEMPTS`
-  like any other failure.
-- The reclaim is a compare-and-set on the lock timestamp, so a reaper
-  running late cannot stomp a task that finished or was already reclaimed.
+A RUNNING task whose lock has not been refreshed for `LOCK_TIMEOUT` (default
+300 seconds, per-worker override `--lock-timeout`) is taken back, and what
+happens next depends on whether the task has attempts left:
 
-Set `LOCK_TIMEOUT` comfortably above your longest task's runtime. A task
-that legitimately runs longer than the timeout will be reclaimed and run
-again while the original attempt is still executing.
+- **Attempts remaining.** The task goes back to READY and the lease number
+  goes up, so the old worker cannot write to it again. This is the ordinary
+  case, and it is a guess the system already absorbs: at-least-once execution
+  means the task may run twice, which is why task bodies must be idempotent.
+- **No attempts remaining.** The row is marked LOST. LOST means what it says:
+  the worker holding this task stopped reporting and nobody observed how the
+  attempt ended. The reaper does not record a failure, because it did not see
+  one. It has watched a lock go quiet, and that is all it writes down.
+
+The attempt was already consumed when the task was claimed, so a
+crash-looping task cannot retry forever; it stops after `MAX_ATTEMPTS` like
+any other task.
+
+The reclaim is a compare-and-set on the lease number, so a reaper running
+late cannot stomp a task that finished or was already reclaimed.
+
+### What LOST looks like from the outside
+
+`django.tasks` has four result statuses and django-ox does not add a fifth to
+them. A LOST task reads as `FAILED` through `get_result()`, and
+`result.errors` ends with a `TaskAbandoned` record whose text says the lease
+was lost and the outcome was never observed. `is_finished` is true, so code
+that waits for a result terminates instead of waiting for a worker that is
+not coming back.
+
+The row keeps the distinction the four statuses cannot carry. Its status
+column is LOST rather than FAILED, `queue_stats()` reports it in its own
+`lost` column, and `ox_prune --include-failed` treats it like a failed row
+for retention.
+
+One case is worth knowing about before it surprises you. If the worker
+holding a LOST task was starved rather than dead, and it comes back and
+records a success, the row becomes SUCCESSFUL and a caller reading it twice
+sees `FAILED` and then `SUCCESSFUL`. Only that one execution can do this, and
+only while the row is still LOST. It is the honest cost of giving a
+four-valued API an answer for a task whose outcome nobody saw, and the
+alternative, reporting it as still running forever, hangs every caller that
+waits on it.
+
+### Tuning LOCK_TIMEOUT
+
+Set `LOCK_TIMEOUT` above the longest gap you expect between a worker's lease
+renewals, not above your longest task. Renewal runs every `LOCK_TIMEOUT / 3`
+seconds, so two consecutive renewals can be missed before anything is
+reclaimed. The value is really a statement about how long a worker may be
+unresponsive before you want its work handed to somebody else: too low and a
+paused or overloaded worker loses tasks it was going to finish, too high and
+recovery after a real crash is slow.
+
+Watch for `task_lease_lost` in the logs. It records an attempt whose result
+was discarded because the lease had already been reclaimed, and a steady
+trickle of it means the timeout is short relative to how long your workers
+go unresponsive.
 
 **Tasks must be idempotent.** Execution is at-least-once by design: a task
 is retried both when it raises and when its worker dies mid-run. Write
@@ -155,7 +235,7 @@ task bodies so that running twice is harmless (upserts, idempotency keys,
 
 ## PostgreSQL or SQLite
 
-Both are fully supported and both run the full worker suite (191 tests
+Both are fully supported and both run the full worker suite (221 tests
 each). Guidance:
 
 - **PostgreSQL** is the production recommendation. It gets the

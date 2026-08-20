@@ -51,6 +51,38 @@ def task_from_db(db_task: OxTask) -> Task[..., Any]:
     )
 
 
+def public_status(db_status: str) -> TaskResultStatus:
+    """
+    Translate a stored status into one of django.tasks' four values.
+
+    Four of the five map straight across. The fifth, LOST, has no
+    counterpart: it says the worker holding the task stopped reporting and
+    nobody observed the outcome.
+
+    It maps to FAILED. READY and RUNNING are instructions to come back
+    later, and nothing is coming: the attempts are spent, no worker will
+    claim the row, and the only process that could still write to it is one
+    there is positive reason to think has gone. Mapping to RUNNING would
+    also leave TaskResult.is_finished permanently False, so every wait loop
+    over such a task spins forever, which is worse to hand somebody than a
+    wrong answer.
+
+    The cost, stated rather than hidden: if the process holding the lost
+    lease does come back and records a success, a caller reading the row
+    twice sees FAILED and then SUCCESSFUL. It is confined to this path, and
+    it is what the same sequence produces today, where the reaper writes a
+    real FAILED and the returning worker overwrites it. The row keeps the
+    distinction the API cannot carry: its status is LOST, not FAILED, and
+    the recorded error says the outcome was never observed rather than
+    naming a cause.
+    """
+    from .models import OxTask
+
+    if db_status == OxTask.Status.LOST:
+        return TaskResultStatus.FAILED
+    return TaskResultStatus(db_status)
+
+
 def task_result_from_db(
     db_task: OxTask, task: Task[..., Any] | None = None
 ) -> TaskResult[..., Any]:
@@ -59,7 +91,7 @@ def task_result_from_db(
     result: TaskResult[..., Any] = TaskResult(
         task=task,
         id=str(db_task.id),
-        status=TaskResultStatus(db_task.status),
+        status=public_status(db_task.status),
         enqueued_at=db_task.enqueued_at,
         started_at=db_task.started_at,
         last_attempted_at=db_task.last_attempted_at,

@@ -1,9 +1,14 @@
+import logging
 import threading
+import time
+from contextlib import contextmanager
 from datetime import timedelta
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
+from django.db import DatabaseError, connections
 from django.tasks import TaskResultStatus, default_task_backend
+from django.tasks.signals import task_finished
 from django.utils import timezone
 
 from django_ox.exceptions import TaskAbandoned
@@ -12,6 +17,29 @@ from django_ox.worker import Worker
 
 from .conftest import wait_for
 from .tasks import add, fail_always, flaky, record_interval, slow
+
+
+@contextmanager
+def collect_task_finished():
+    """Collect every task_finished TaskResult sent inside the block."""
+    received = []
+
+    def receiver(sender, task_result, **kwargs):
+        received.append(task_result)
+
+    task_finished.connect(receiver)
+    try:
+        yield received
+    finally:
+        task_finished.disconnect(receiver)
+
+
+def reap_away(worker, db_task):
+    """Age this claim past lock_timeout and let the reaper take the row."""
+    OxTask.objects.filter(pk=db_task.pk).update(
+        locked_at=timezone.now() - timedelta(seconds=worker.lock_timeout + 10)
+    )
+    assert worker.reap() == 1
 
 
 @pytest.mark.django_db
@@ -104,7 +132,9 @@ class TestClaiming:
         db_task = OxTask.objects.get()
 
         # The claim UPDATE itself wrote every per-attempt field, and the
-        # returned instance matches the row without a re-fetch.
+        # returned instance matches the row. PostgreSQL gets that from
+        # RETURNING *; elsewhere the claim reads the row back, because the
+        # timestamps it wrote were computed by the database.
         for field in (
             "status",
             "attempts",
@@ -188,20 +218,694 @@ class TestReaper:
         db_task.refresh_from_db()
         assert db_task.status == OxTask.Status.SUCCESSFUL
 
-    def test_reaper_fails_task_with_no_attempts_left(self, worker):
+    def test_reaper_requeue_bumps_the_lease_epoch(self, worker):
+        db_task = self._make_stuck(worker)
+        epoch_at_claim = db_task.lease_epoch
+
+        assert worker.reap() == 1
+
+        db_task.refresh_from_db()
+        assert db_task.lease_epoch == epoch_at_claim + 1
+
+    def test_reaper_records_a_lost_lease_and_not_a_failure(self, worker):
+        """
+        Attempts exhausted is the one case the reaper cannot requeue out of,
+        and it is the case it used to invent a verdict for. It has watched a
+        lock go quiet and nothing else, so LOST is the whole of what it may
+        write, and it announces nothing.
+        """
         db_task = self._make_stuck(worker, attempts=3)
+
+        with collect_task_finished() as finished:
+            assert worker.reap() == 1
+        assert finished == []
+
+        db_task.refresh_from_db()
+        assert db_task.status == OxTask.Status.LOST
+        assert db_task.return_value is None
+        assert db_task.finished_at is not None
+        assert db_task.locked_by is None
+
+        (error,) = db_task.errors
+        assert error["exception_class_path"] == "django_ox.exceptions.TaskAbandoned"
+        assert "stopped renewing its lease" in error["traceback"]
+        assert "never observed" in error["traceback"]
+        assert "not a cause" in error["traceback"]
+
+    def test_lost_row_keeps_its_epoch_and_is_not_reclaimed_again(self, worker):
+        """
+        The requeue bumps the epoch to fence the old worker out. LOST must
+        not, because the holder of that epoch is the only party who could
+        ever say what happened, and this is the row it would say it on.
+        """
+        db_task = self._make_stuck(worker, attempts=3)
+        epoch_at_claim = db_task.lease_epoch
 
         assert worker.reap() == 1
         db_task.refresh_from_db()
-        assert db_task.status == OxTask.Status.FAILED
+        assert db_task.lease_epoch == epoch_at_claim
 
-        result = default_task_backend.get_result(str(db_task.pk))
-        assert result.errors[-1].exception_class is TaskAbandoned
+        # LOST is settled: no reaper touches it again and no worker claims it.
+        assert worker.reap() == 0
+        assert worker.claim_one() is None
 
     def test_reaper_ignores_fresh_locks(self, worker):
         add.enqueue(1, 2)
         worker.claim_one()
         assert worker.reap() == 0
+
+
+@pytest.mark.django_db
+class TestLeaseEpoch:
+    """
+    lease_epoch names one execution. It moves in the same statement that
+    hands the row over and it never moves any other way, which is what lets
+    a finish write ask "is this still mine?" with an integer comparison
+    instead of a timing argument.
+    """
+
+    def test_every_claim_increments_it(self, worker):
+        fail_always.enqueue()
+        assert OxTask.objects.get().lease_epoch == 0
+
+        first = worker.claim_one()
+        assert first.lease_epoch == 1
+        assert OxTask.objects.get().lease_epoch == 1
+
+        worker.execute(first)  # fails, requeues for retry
+        second = worker.claim_one()
+        assert second.lease_epoch == 2
+        assert OxTask.objects.get().lease_epoch == 2
+
+    def test_a_retry_write_does_not_move_it(self, worker):
+        """
+        Only a handover moves the epoch. The retry write is the end of an
+        execution, not the start of one, so the next claim is what advances
+        it; keeping them separate is what makes the number countable.
+        """
+        fail_always.enqueue()
+        claimed = worker.claim_one()
+
+        worker.execute(claimed)
+
+        assert OxTask.objects.get().lease_epoch == claimed.lease_epoch == 1
+
+    def test_it_survives_a_reap_and_keeps_rising(self, worker):
+        add.enqueue(1, 2)
+        first = worker.claim_one()
+        reap_away(worker, first)  # requeue: +1
+        second = worker.claim_one()  # claim: +1
+
+        assert (first.lease_epoch, second.lease_epoch) == (1, 3)
+
+
+@pytest.mark.django_db
+class TestLeaseFencesTerminalWrites:
+    """
+    Every finish write is conditional on the lease epoch the claim handed
+    out. A worker that stalled long enough to be reaped holds a number
+    nobody else will ever hold again, so its UPDATE matches zero rows rather
+    than overwriting whoever owns the row now, and it must not announce a
+    completion it does not own either.
+    """
+
+    def test_stale_retry_does_not_unterminal_a_finished_task(self, worker):
+        """
+        The reported race: worker A is reaped, worker B runs the task to
+        SUCCESSFUL, and A then fails with retries left and writes READY over
+        the top. A completed task went back on the queue.
+        """
+        add.enqueue(1, 2)
+        stale = worker.claim_one()  # worker A, holding this instance
+        assert stale.attempts == 1
+
+        reap_away(worker, stale)
+
+        other = Worker(backoff_initial=0, poll_interval=0.05)
+        with collect_task_finished() as finished:
+            assert other.run_once() is True
+        assert len(finished) == 1
+        assert OxTask.objects.get().status == OxTask.Status.SUCCESSFUL
+
+        # A wakes up. Its attempt failed, and it has retries remaining.
+        with collect_task_finished() as finished:
+            worker._handle_failure(stale, RuntimeError("slow, not dead"), 12)
+        assert finished == []
+
+        db_task = OxTask.objects.get()
+        assert db_task.status == OxTask.Status.SUCCESSFUL
+        assert db_task.return_value == 3
+        assert db_task.attempts == 2
+        assert db_task.errors == []
+        assert db_task.run_after is None
+        assert db_task.locked_by is None
+
+    def test_stale_success_cannot_overwrite_a_terminal_row(self, worker):
+        add.enqueue(1, 2)
+        stale = worker.claim_one()
+
+        reap_away(worker, stale)
+        other = Worker(backoff_initial=0, poll_interval=0.05)
+        claimed = other.claim_one()
+        assert claimed is not None
+        # Whatever the other worker wrote, it owns the outcome.
+        OxTask.objects.filter(pk=claimed.pk, lease_epoch=claimed.lease_epoch).update(
+            status=OxTask.Status.FAILED,
+            errors=[
+                {"exception_class_path": "builtins.ValueError", "traceback": "theirs"}
+            ],
+            finished_at=timezone.now(),
+            locked_by=None,
+            locked_at=None,
+        )
+
+        # A's attempt now succeeds, far too late.
+        with collect_task_finished() as finished:
+            worker.execute(stale)
+        assert finished == []
+
+        db_task = OxTask.objects.get()
+        assert db_task.status == OxTask.Status.FAILED
+        assert db_task.return_value is None
+        assert db_task.attempts == 2
+        assert [e["traceback"] for e in db_task.errors] == ["theirs"]
+
+    def test_stale_final_failure_cannot_overwrite_a_terminal_row(self, worker):
+        """
+        The third write site, reached by hand.
+
+        No sequence in the product gets here today: the epoch only moves on
+        a claim or a reaper requeue, a requeue needs attempts remaining, and
+        a claim needs the row READY, so a worker on its last attempt cannot
+        have the row taken off it except by LOST, which is deliberately
+        writable (see TestLostState). The condition is on this write anyway,
+        because a site that is fenced by luck rather than by construction is
+        the one that breaks the next time the state machine grows.
+        """
+        fail_always.enqueue()
+        OxTask.objects.update(attempts=2)  # the claim below is the last attempt
+        stale = worker.claim_one()
+        assert stale.attempts == stale.max_attempts == 3
+
+        OxTask.objects.filter(pk=stale.pk).update(
+            status=OxTask.Status.SUCCESSFUL,
+            return_value="theirs",
+            lease_epoch=stale.lease_epoch + 1,
+            finished_at=timezone.now(),
+            locked_by=None,
+            locked_at=None,
+        )
+
+        with collect_task_finished() as finished:
+            worker.execute(stale)
+        assert finished == []
+
+        db_task = OxTask.objects.get()
+        assert db_task.status == OxTask.Status.SUCCESSFUL
+        assert db_task.return_value == "theirs"
+        assert db_task.errors == []
+
+    @pytest.mark.parametrize(
+        "settled", [OxTask.Status.SUCCESSFUL, OxTask.Status.FAILED, OxTask.Status.READY]
+    )
+    def test_a_settled_row_refuses_the_write_even_at_a_matching_epoch(
+        self, worker, settled
+    ):
+        """
+        The epoch is the fence, and it is sufficient only for as long as
+        every handover bumps it. The write also checks that the row is one
+        an execution could still be running, so a state machine that grows a
+        path which forgets to bump does not silently reopen this bug. This
+        is the shape the shipped reproduction writes by hand.
+        """
+        add.enqueue(1, 2)
+        stale = worker.claim_one()
+        OxTask.objects.filter(pk=stale.pk).update(
+            status=settled, locked_by=None, locked_at=None
+        )
+        assert OxTask.objects.get().lease_epoch == stale.lease_epoch
+
+        with collect_task_finished() as finished:
+            worker.execute(stale)
+        assert finished == []
+
+        db_task = OxTask.objects.get()
+        assert db_task.status == settled
+        assert db_task.return_value is None
+
+    def test_a_reclaimed_worker_can_still_write_its_new_epoch(self, worker):
+        """
+        locked_by is not enough on its own: a worker may legitimately
+        re-claim a task it was reaped off, and its stale execution must not
+        write over its own later one. They share pk, status and locked_by,
+        and differ only in the epoch.
+        """
+        add.enqueue(1, 2)
+        first = worker.claim_one()
+        reap_away(worker, first)
+
+        second = worker.claim_one()
+        assert second.locked_by == first.locked_by == worker.worker_id
+        assert (first.lease_epoch, second.lease_epoch) == (1, 3)
+
+        # The stale first execution finishes while the second is running.
+        with collect_task_finished() as finished:
+            worker._handle_failure(first, RuntimeError("slow, not dead"), 7)
+        assert finished == []
+
+        db_task = OxTask.objects.get()
+        assert db_task.status == OxTask.Status.RUNNING
+        assert db_task.attempts == 2
+        assert db_task.errors == []
+        assert db_task.locked_by == worker.worker_id
+        assert db_task.run_after is None
+
+        # The live second execution writes its outcome normally.
+        with collect_task_finished() as finished:
+            worker.execute(second)
+        assert len(finished) == 1
+        db_task.refresh_from_db()
+        assert db_task.status == OxTask.Status.SUCCESSFUL
+        assert db_task.return_value == 3
+
+    # -- a held lease still writes, and still signals -----------------------
+
+    def test_live_lease_writes_success_and_signals_once(self, worker):
+        result = add.enqueue(1, 2)
+        claimed = worker.claim_one()
+
+        with collect_task_finished() as finished:
+            worker.execute(claimed)
+
+        assert len(finished) == 1
+        assert finished[0].id == result.id
+        assert finished[0].status == TaskResultStatus.SUCCESSFUL
+        assert finished[0].return_value == 3
+
+        db_task = OxTask.objects.get()
+        assert db_task.status == OxTask.Status.SUCCESSFUL
+        assert db_task.return_value == 3
+        assert db_task.finished_at is not None
+        assert db_task.locked_by is None
+        assert db_task.locked_at is None
+        # The conditional UPDATE does not refresh the instance, so the write
+        # mirrors what it stored back onto it; the signalled TaskResult is
+        # built from that instance and must match the row.
+        assert claimed.status == db_task.status
+        assert claimed.return_value == db_task.return_value
+        assert claimed.finished_at == db_task.finished_at
+        assert claimed.locked_by is None
+        assert claimed.locked_at is None
+
+    def test_live_lease_writes_retry_with_backoff_and_does_not_signal(self):
+        worker = Worker(backoff_initial=30, poll_interval=0.05)
+        fail_always.enqueue()
+        claimed = worker.claim_one()
+
+        before = timezone.now()
+        with collect_task_finished() as finished:
+            worker.execute(claimed)
+        assert finished == []
+
+        db_task = OxTask.objects.get()
+        assert db_task.status == OxTask.Status.READY
+        assert db_task.run_after >= before + timedelta(seconds=30)
+        assert len(db_task.errors) == 1
+        assert db_task.finished_at is None
+        assert db_task.locked_by is None
+        assert claimed.run_after == db_task.run_after
+        assert claimed.status == db_task.status
+        assert claimed.errors == db_task.errors
+        assert claimed.locked_by is None
+        assert claimed.locked_at is None
+
+    def test_live_lease_writes_final_failure_and_signals_once(self, worker):
+        result = fail_always.enqueue()
+        OxTask.objects.update(attempts=2)  # the claim below is the last attempt
+        claimed = worker.claim_one()
+
+        with collect_task_finished() as finished:
+            worker.execute(claimed)
+
+        assert len(finished) == 1
+        assert finished[0].id == result.id
+        assert finished[0].status == TaskResultStatus.FAILED
+
+        db_task = OxTask.objects.get()
+        assert db_task.status == OxTask.Status.FAILED
+        assert db_task.finished_at is not None
+        assert db_task.locked_by is None
+        assert len(db_task.errors) == 1
+        assert claimed.status == db_task.status
+        assert claimed.errors == db_task.errors
+        assert claimed.finished_at == db_task.finished_at
+
+
+@pytest.mark.django_db
+class TestClaimCannotAdoptAnotherLease:
+    """
+    A claim reads its row back in a second statement, and the row can move
+    in between. If it does, the worker must come away with nothing rather
+    than with somebody else's lease: an adopted epoch defeats every fence
+    downstream, because a fence can only compare against what the instance
+    is carrying.
+
+    The gap is narrow, so it is held open deliberately here. What happens
+    inside it is not simulated: the reaper and the competing claim are the
+    shipped code paths.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _optimistic_path_only(self):
+        if connections["default"].features.has_select_for_update_skip_locked:
+            pytest.skip("no gap on this backend: RETURNING or a row lock covers it")
+
+    @staticmethod
+    def steal_row_inside_the_gap(monkeypatch, thief):
+        """Reap and re-claim the row inside the claiming worker's read gap.
+
+        Returns a dict that carries the thief's claim once the gap is used.
+        The gate closes before the nested claim rather than after it: that
+        claim re-enters this same patched method, and leaving it open turns
+        one theft into a recursion that burns every attempt on the row.
+        """
+        stolen: dict[str, object] = {}
+        used: list[bool] = []
+        real_reload = Worker._reload_claimed
+
+        def reload_after_theft(self, pk, granted_epoch):
+            if not used:
+                used.append(True)
+                reap_away(self, OxTask.objects.get(pk=pk))
+                stolen["by"] = thief.claim_one()
+            return real_reload(self, pk, granted_epoch)
+
+        monkeypatch.setattr(Worker, "_reload_claimed", reload_after_theft)
+        return stolen
+
+    def test_a_claim_reaped_mid_read_comes_back_empty(self, worker, monkeypatch):
+        add.enqueue(1, 2)
+        other = Worker(backoff_initial=0, poll_interval=0.05)
+        stolen = self.steal_row_inside_the_gap(monkeypatch, other)
+
+        mine = worker.claim_one()
+
+        assert stolen.get("by") is not None, "the competing worker never got the row"
+        assert mine is None, (
+            "the claim came back holding a lease it was never granted, so "
+            "every fence downstream would compare against that worker's epoch."
+        )
+
+    def test_the_worker_that_did_claim_it_keeps_the_lease(self, worker, monkeypatch):
+        add.enqueue(1, 2)
+        other = Worker(backoff_initial=0, poll_interval=0.05)
+        stolen = self.steal_row_inside_the_gap(monkeypatch, other)
+
+        worker.claim_one()
+
+        holder = stolen["by"]
+        row = OxTask.objects.get(pk=holder.pk)
+        assert row.locked_by == other.worker_id
+        assert row.lease_epoch == holder.lease_epoch
+        assert row.status == OxTask.Status.RUNNING
+
+
+@pytest.mark.django_db
+class TestLostState:
+    """
+    LOST is django-ox's own status and has no counterpart in
+    django.tasks.TaskResultStatus, which has four values and gets no fifth.
+    It reads as FAILED at the public boundary: nothing is going to run the
+    task again, so READY and RUNNING would be instructions to wait for
+    something that is not coming, and a caller that waits on is_finished
+    would wait forever.
+    """
+
+    def _lose_the_lease(self, worker):
+        """Claim a last attempt and let the reaper mark the row LOST."""
+        fail_always.enqueue()
+        OxTask.objects.update(attempts=2)
+        stale = worker.claim_one()
+        assert stale.attempts == stale.max_attempts == 3
+        reap_away(worker, stale)
+        assert OxTask.objects.get().status == OxTask.Status.LOST
+        return stale
+
+    def test_django_still_has_exactly_four_public_statuses(self):
+        assert {status.value for status in TaskResultStatus} == {
+            "READY",
+            "RUNNING",
+            "FAILED",
+            "SUCCESSFUL",
+        }
+        assert "LOST" not in {status.value for status in TaskResultStatus}
+
+    def test_lost_reads_as_failed_and_is_finished(self, worker):
+        stale = self._lose_the_lease(worker)
+
+        result = default_task_backend.get_result(str(stale.pk))
+        assert result.status == TaskResultStatus.FAILED
+        assert result.is_finished
+        assert result.errors[-1].exception_class is TaskAbandoned
+        with pytest.raises(ValueError, match="Task failed"):
+            _ = result.return_value
+
+    def test_lost_is_not_pending_for_completion_counting(self, worker):
+        """
+        The paid batches feature counts unfinished members as
+        (READY, RUNNING) against this column. A fifth value is therefore
+        settled by construction, which is the property that stops a batch
+        with a lost member hanging.
+        """
+        self._lose_the_lease(worker)
+
+        pending = (OxTask.Status.READY, OxTask.Status.RUNNING)
+        assert OxTask.Status.LOST not in pending
+        assert OxTask.objects.filter(status__in=pending).count() == 0
+
+    def test_the_lost_epoch_may_still_resolve_it(self, worker):
+        """
+        The documented cost of mapping LOST to FAILED. The row said FAILED
+        while the outcome was unknown; the worker that held the lease comes
+        back with the answer and the row changes to SUCCESSFUL. Only that
+        one execution can do this, and only while the row is still LOST.
+        """
+        add.enqueue(1, 2)
+        OxTask.objects.update(attempts=2)
+        stale = worker.claim_one()
+        reap_away(worker, stale)
+
+        result = default_task_backend.get_result(str(stale.pk))
+        assert result.status == TaskResultStatus.FAILED
+
+        with collect_task_finished() as finished:
+            worker.execute(stale)
+        assert len(finished) == 1
+        assert finished[0].status == TaskResultStatus.SUCCESSFUL
+
+        db_task = OxTask.objects.get()
+        assert db_task.status == OxTask.Status.SUCCESSFUL
+        assert db_task.return_value == 3
+        # The reaper's note survives on the row, because a success write
+        # does not touch errors. It is a true record of what happened.
+        assert db_task.errors[-1]["exception_class_path"].endswith("TaskAbandoned")
+
+        result.refresh()
+        assert result.status == TaskResultStatus.SUCCESSFUL
+        assert result.return_value == 3
+
+    def test_nobody_but_the_lost_epoch_may_resolve_it(self, worker):
+        stale = self._lose_the_lease(worker)
+        impostor = Worker(backoff_initial=0, poll_interval=0.05)
+
+        # Same task, same worker-shaped write, wrong epoch.
+        stale_copy = OxTask.objects.get(pk=stale.pk)
+        stale_copy.lease_epoch = stale.lease_epoch + 1
+        with collect_task_finished() as finished:
+            impostor.execute(stale_copy)
+        assert finished == []
+
+        assert OxTask.objects.get().status == OxTask.Status.LOST
+
+
+@pytest.mark.django_db
+class TestLeaseRenewalScope:
+    def test_renewal_touches_only_rows_this_worker_is_running(self, worker):
+        add.enqueue(1, 2)
+        add.enqueue(3, 4)
+        mine = worker.claim_one()
+        other = Worker(backoff_initial=0, poll_interval=0.05)
+        theirs = other.claim_one()
+
+        stale = timezone.now() - timedelta(seconds=worker.lock_timeout + 10)
+        OxTask.objects.update(locked_at=stale)
+
+        # Nothing is registered as in flight yet, so there is nothing to renew.
+        assert worker.renew_leases() == 0
+
+        worker._in_flight.add((mine.pk, mine.lease_epoch))
+        assert worker.renew_leases() == 1
+
+        assert OxTask.objects.get(pk=mine.pk).locked_at > stale
+        assert OxTask.objects.get(pk=theirs.pk).locked_at == stale
+
+    def test_renewal_stops_once_the_row_is_no_longer_held(self, worker):
+        add.enqueue(1, 2)
+        claimed = worker.claim_one()
+        worker._in_flight.add((claimed.pk, claimed.lease_epoch))
+        assert worker.renew_leases() == 1
+
+        # Reaped off us: the row is READY and belongs to nobody.
+        reap_away(worker, claimed)
+        assert worker.renew_leases() == 0
+
+    def test_renewal_loop_survives_a_database_error(self, worker, caplog):
+        """
+        Giving up on the first failed renewal would expire every live lease
+        this worker holds, so the loop logs and carries on. Two consecutive
+        misses are already inside the timeout by design.
+        """
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        worker.renew_interval = 0.02
+        attempts = []
+
+        def flaky_renew():
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise DatabaseError("connection reset")
+            return 0
+
+        worker.renew_leases = flaky_renew
+        stop = threading.Event()
+        thread = threading.Thread(target=worker._renewal_loop, args=(stop,))
+        thread.start()
+        try:
+            assert wait_for(lambda: len(attempts) >= 3)
+        finally:
+            stop.set()
+            thread.join(timeout=5)
+
+        (record,) = [
+            r for r in caplog.records if getattr(r, "event", "") == "lease_renew_failed"
+        ]
+        assert record.worker_id == worker.worker_id
+        assert record.levelno == logging.WARNING
+
+    def test_execute_registers_and_releases_the_lease(self, worker):
+        add.enqueue(1, 2)
+        claimed = worker.claim_one()
+        seen = []
+
+        original = worker._write_outcome
+
+        def spy(db_task, **kwargs):
+            seen.append(set(worker._in_flight))
+            return original(db_task, **kwargs)
+
+        worker._write_outcome = spy
+        worker.execute(claimed)
+
+        assert seen == [{(claimed.pk, claimed.lease_epoch)}]
+        assert worker._in_flight == set()
+
+
+@pytest.mark.django_db(transaction=True)
+class TestLeaseRenewalUnderTheReaper:
+    """
+    The point of renewal: the reaper stops reclaiming tasks that are merely
+    slow and reclaims only workers that actually stopped reporting.
+    """
+
+    def _hammer_the_reaper(self, reaper, seconds):
+        reaped = 0
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            reaped += reaper.reap()
+            time.sleep(0.05)
+        return reaped
+
+    def test_renewal_keeps_a_slow_task_out_of_the_reaper(self):
+        worker = Worker(
+            lock_timeout=0.4, renew_interval=0.1, poll_interval=0.05, backoff_initial=0
+        )
+        reaper = Worker(lock_timeout=0.4, poll_interval=0.05)
+        slow.enqueue(1.0)
+
+        thread = threading.Thread(target=worker.run, daemon=True)
+        thread.start()
+        try:
+            assert wait_for(
+                lambda: OxTask.objects.get().status == OxTask.Status.RUNNING
+            )
+            assert self._hammer_the_reaper(reaper, 0.9) == 0
+            assert wait_for(
+                lambda: OxTask.objects.get().status == OxTask.Status.SUCCESSFUL
+            )
+        finally:
+            worker.request_stop()
+            thread.join(timeout=5)
+
+        db_task = OxTask.objects.get()
+        assert db_task.attempts == 1
+        assert db_task.return_value == "done"
+
+    def test_without_renewal_the_same_task_is_reclaimed(self):
+        """
+        The control for the test above. Same timings, renewal pushed out of
+        reach, so the only difference is whether the worker is refreshing
+        its own lock.
+        """
+        worker = Worker(
+            lock_timeout=0.4,
+            renew_interval=1000,
+            reap_interval=1000,
+            poll_interval=0.05,
+            backoff_initial=0,
+        )
+        reaper = Worker(lock_timeout=0.4, poll_interval=0.05)
+        slow.enqueue(1.0)
+
+        thread = threading.Thread(target=worker.run, daemon=True)
+        thread.start()
+        try:
+            assert wait_for(
+                lambda: OxTask.objects.get().status == OxTask.Status.RUNNING
+            )
+            assert self._hammer_the_reaper(reaper, 0.9) >= 1
+        finally:
+            worker.request_stop()
+            thread.join(timeout=5)
+
+    def test_renewal_continues_through_a_graceful_drain(self):
+        """
+        A drain lasts as long as the slowest in-flight task. A lease that
+        expires while its task is finishing cleanly is the exact false
+        reclaim renewal exists to prevent, so the renewal thread outlives
+        the poll loop.
+        """
+        worker = Worker(
+            lock_timeout=0.4, renew_interval=0.1, poll_interval=0.05, backoff_initial=0
+        )
+        reaper = Worker(lock_timeout=0.4, poll_interval=0.05)
+        slow.enqueue(1.0)
+
+        thread = threading.Thread(target=worker.run, daemon=True)
+        thread.start()
+        try:
+            assert wait_for(
+                lambda: OxTask.objects.get().status == OxTask.Status.RUNNING
+            )
+            worker.request_stop()  # drain begins with the task still running
+            assert self._hammer_the_reaper(reaper, 0.9) == 0
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+        finally:
+            worker.request_stop()
+            thread.join(timeout=5)
+
+        db_task = OxTask.objects.get()
+        assert db_task.status == OxTask.Status.SUCCESSFUL
+        assert db_task.attempts == 1
 
 
 @pytest.mark.django_db(transaction=True)
@@ -252,7 +956,7 @@ class TestRunLoop:
             thread.join(timeout=5)
         assert not thread.is_alive()
 
-        # One close task per pool slot, each on a distinct pool thread —
+        # One close task per pool slot, each on a distinct pool thread;
         # the barrier is what guarantees the distinctness.
         assert len(closer_threads) == 2
         assert len(set(closer_threads)) == 2

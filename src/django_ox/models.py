@@ -7,9 +7,10 @@ class OxTask(models.Model):
     """
     A queued task and its result record.
 
-    Rows double as the durable queue and the result store. Status values
-    mirror django.tasks.TaskResultStatus exactly so conversion is a plain
-    value cast.
+    Rows double as the durable queue and the result store. Four of the five
+    status values mirror django.tasks.TaskResultStatus, so conversion is a
+    plain value cast; LOST is django-ox's own and is translated at the
+    boundary by django_ox.results.
     """
 
     class Status(models.TextChoices):
@@ -17,6 +18,14 @@ class OxTask(models.Model):
         RUNNING = "RUNNING"
         FAILED = "FAILED"
         SUCCESSFUL = "SUCCESSFUL"
+        # Written only by the reaper, only when a claim aged past
+        # LOCK_TIMEOUT with no attempts left. It means the worker holding
+        # the task stopped reporting and its outcome was never observed.
+        # It is not a verdict on the work: the reaper has no evidence
+        # either way, so it must not write FAILED. Settled rather than
+        # pending, so completion counting terminates; see results.py for
+        # what callers of django.tasks see.
+        LOST = "LOST"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
@@ -48,6 +57,15 @@ class OxTask(models.Model):
 
     locked_by = models.CharField(max_length=64, null=True, blank=True)
     locked_at = models.DateTimeField(null=True, blank=True)
+
+    # Fencing token. Every claim, and every reaper requeue, increments it in
+    # the same UPDATE that hands the row over, so it identifies one execution
+    # rather than merely one task. A worker carries the value it was given
+    # and puts it in the WHERE clause of its own finish write, which is why a
+    # worker that was reaped off this row cannot write over whoever holds it
+    # now: the UPDATE matches zero rows instead of a stale one. Monotonic per
+    # row; never reset, never reused.
+    lease_epoch = models.BigIntegerField(default=0)
 
     class Meta:
         indexes = [

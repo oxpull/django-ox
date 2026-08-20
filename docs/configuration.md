@@ -47,7 +47,7 @@ retry. Add options when you have a reason to.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `MAX_ATTEMPTS` | `3` | Executions a task gets before it is marked FAILED. An attempt is consumed when a worker claims the task, so a worker dying mid-run counts too and retries stay bounded. |
-| `LOCK_TIMEOUT` | `300` | Seconds a RUNNING task's lock may age before the reaper considers its worker dead and reclaims the task. Set it comfortably above your longest task. |
+| `LOCK_TIMEOUT` | `300` | Seconds a RUNNING task's lock may go unrefreshed before the reaper takes the task back. A worker refreshes the lock every `LOCK_TIMEOUT / 3` seconds while it is executing, so this is a limit on how long a worker may be unresponsive, not on how long a task may run. |
 | `BACKOFF_INITIAL` | `5` | Delay in seconds before the first retry. |
 | `BACKOFF_MAX` | `600` | Ceiling on the retry delay, in seconds. |
 | `SCHEDULES` | `{}` | Recurring task definitions. Documented on the [Recurring tasks](recurring-tasks.md) page. |
@@ -69,7 +69,7 @@ python manage.py ox_worker [options]
 | `--queues` | all configured queues | Comma-separated queue names this worker processes. |
 | `--concurrency` | `1` | Tasks executed concurrently, as a thread pool inside the process. |
 | `--interval` | `1.0` | Polling interval in seconds when idle. When tasks are in flight the worker wakes as soon as one finishes, so this does not bound throughput. |
-| `--lock-timeout` | backend `LOCK_TIMEOUT`, or 300 | Seconds before a RUNNING task's lock is considered stale and the task is reclaimed. |
+| `--lock-timeout` | backend `LOCK_TIMEOUT`, or 300 | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |
 
 The command also honors Django's standard `-v/--verbosity`: at the default
 verbosity it logs worker lifecycle and warnings to stderr, and `-v 2`
@@ -78,6 +78,8 @@ enables debug logging. `-v 0` attaches no log handler.
 Two intervals are derived rather than flagged:
 
 - The reaper runs every `min(30, max(lock_timeout / 2, 1))` seconds.
+- Lease renewal runs every `max(lock_timeout / 3, 0.1)` seconds, on its own
+  thread, and keeps running until the last in-flight task has drained.
 - Schedule dispatch (when `SCHEDULES` is configured) runs every
   `max(1, min(interval, 30))` seconds, about once a second at the default
   polling interval.
@@ -108,22 +110,25 @@ in `QUEUES` is covered by some worker.
 
 ### Tasks that run longer than the lock timeout
 
-`LOCK_TIMEOUT` is how long a claimed task may go quiet before the reaper decides
-its worker died. A task that legitimately runs longer than the timeout will be
-reclaimed and run again while the first copy is still going. Set the timeout
-above your slowest task rather than near it:
+A long task is not by itself a problem. A worker refreshes the lock on the
+tasks it is running every `LOCK_TIMEOUT / 3` seconds, so an hour-long task on
+a healthy worker keeps its lease for the hour.
+
+What `LOCK_TIMEOUT` bounds is how long a worker may stop refreshing before its
+work is handed to somebody else. Set it above the longest pause you are
+willing to tolerate from a worker: a long garbage-collection pause, a
+throttled container, a slow database, a host that swapped. If a queue runs on
+hardware that stalls, give it its own worker with its own timeout rather than
+raising the global value and delaying recovery for everything else:
 
 ```
 python manage.py ox_worker --queues exports --lock-timeout 7200
 ```
 
-If one queue holds work far slower than the rest, give it its own worker with
-its own timeout, as above, rather than raising the global value and delaying
-recovery for everything else.
-
 If you embed the worker programmatically, `django_ox.worker.Worker`
-accepts `reap_interval`, `schedule_interval`, `backoff_initial` and
-`backoff_max` keyword overrides in addition to the flag equivalents.
+accepts `reap_interval`, `renew_interval`, `schedule_interval`,
+`backoff_initial` and `backoff_max` keyword overrides in addition to the flag
+equivalents.
 
 ## ox_prune
 
@@ -140,7 +145,7 @@ python manage.py ox_prune --older-than 7d
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--older-than` | `7d` | Minimum time since the task finished. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
-| `--include-failed` | off | Also delete FAILED rows. By default they are kept, because they hold the per-attempt tracebacks. |
+| `--include-failed` | off | Also delete FAILED and LOST rows. By default they are kept, because they hold the per-attempt tracebacks. |
 | `--batch-size` | `1000` | Rows per DELETE statement, so pruning a large table never takes a long lock or builds a giant IN clause. Must be at least 1. |
 | `--dry-run` | off | Report how many rows would be deleted without deleting any. |
 

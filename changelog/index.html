@@ -606,15 +606,15 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#020-2026-08-20" class="md-nav__link">
+  <a href="#021-2026-08-20" class="md-nav__link">
     <span class="md-ellipsis">
       
-        0.2.0 - 2026-08-20
+        0.2.1 - 2026-08-20
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="0.2.0 - 2026-08-20">
+    <nav class="md-nav" aria-label="0.2.1 - 2026-08-20">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -630,6 +630,45 @@
         
           <li class="md-nav__item">
   <a href="#added" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#020-2026-08-20" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.2.0 - 2026-08-20
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="0.2.0 - 2026-08-20">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fixed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#added_1" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -679,7 +718,7 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#added_1" class="md-nav__link">
+  <a href="#added_2" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -735,7 +774,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#added_2" class="md-nav__link">
+  <a href="#added_3" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -796,15 +835,15 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#020-2026-08-20" class="md-nav__link">
+  <a href="#021-2026-08-20" class="md-nav__link">
     <span class="md-ellipsis">
       
-        0.2.0 - 2026-08-20
+        0.2.1 - 2026-08-20
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="0.2.0 - 2026-08-20">
+    <nav class="md-nav" aria-label="0.2.1 - 2026-08-20">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -820,6 +859,45 @@
         
           <li class="md-nav__item">
   <a href="#added" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#020-2026-08-20" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.2.0 - 2026-08-20
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="0.2.0 - 2026-08-20">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fixed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#added_1" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -869,7 +947,7 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#added_1" class="md-nav__link">
+  <a href="#added_2" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -925,7 +1003,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#added_2" class="md-nav__link">
+  <a href="#added_3" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -975,8 +1053,27 @@
 <p>All notable changes to this project will be documented in this file.</p>
 <p>The format is based on <a href="https://keepachangelog.com/en/1.1.0/">Keep a Changelog</a>,
 and this project adheres to <a href="https://semver.org/spec/v2.0.0.html">Semantic Versioning</a>.</p>
-<h2 id="020-2026-08-20"><a href="https://github.com/oxpull/django-ox/releases/tag/v0.2.0">0.2.0</a> - 2026-08-20</h2>
+<h2 id="021-2026-08-20"><a href="https://github.com/oxpull/django-ox/releases/tag/v0.2.1">0.2.1</a> - 2026-08-20</h2>
 <h3 id="fixed">Fixed</h3>
+<ul>
+<li>A task that succeeded after its lease was lost no longer keeps the reaper's
+  lost-lease record in <code>errors</code>. That record says the outcome was never
+  observed, and the success write is that observation, so anything reading
+  <code>result.errors</code> was handed an exception nobody raised on a task that worked.
+  A failure resolving the same way already dropped it, and the two now agree. A task that is still LOST keeps the record: it is
+  the only thing on the row that says why the result reads as failed.</li>
+</ul>
+<h3 id="added">Added</h3>
+<ul>
+<li><code>tools/check_release.py --dist</code> opens the built wheel and sdist and checks
+  that each one carries every migration in the source tree, along with the
+  licence and the package modules. A packaging rule that stops shipping a
+  migration leaves a distribution that imports and passes its tests, and fails
+  on somebody's upgrade against a column that is not there. The release
+  workflow runs it after the build.</li>
+</ul>
+<h2 id="020-2026-08-20"><a href="https://github.com/oxpull/django-ox/releases/tag/v0.2.0">0.2.0</a> - 2026-08-20</h2>
+<h3 id="fixed_1">Fixed</h3>
 <ul>
 <li>A worker whose task had been taken back by the reaper could still write its
   own outcome over the row, so a task that had already finished could be moved
@@ -1004,7 +1101,7 @@ and this project adheres to <a href="https://semver.org/spec/v2.0.0.html">Semant
   was granted, so a worker that lost the row inside that gap comes back with
   nothing rather than with someone else's lease.</li>
 </ul>
-<h3 id="added">Added</h3>
+<h3 id="added_1">Added</h3>
 <ul>
 <li><strong>Lease renewal.</strong> A worker refreshes the lock on the tasks it is running,
   one statement per interval however many are in flight, and keeps doing so
@@ -1044,7 +1141,7 @@ and the documentation that ships with it.</p>
   broker to provision, secure, upgrade or back up. The transactional
   guarantee follows it rather than opening.</li>
 </ul>
-<h3 id="added_1">Added</h3>
+<h3 id="added_2">Added</h3>
 <ul>
 <li>Migration guidance now covers moving <em>away</em> from django-ox as well as to
   it: which behaviour carries over to a broker-backed backend, which does
@@ -1070,7 +1167,7 @@ appears on the package page.</p>
 </ul>
 <h2 id="010-2026-08-16"><a href="https://github.com/oxpull/django-ox/releases/tag/v0.1.0">0.1.0</a> - 2026-08-16</h2>
 <p>Initial release.</p>
-<h3 id="added_2">Added</h3>
+<h3 id="added_3">Added</h3>
 <ul>
 <li><code>OxBackend</code>, a database-backed backend for Django's Tasks framework
   (<code>django.tasks</code>, Django 6.0+). Tasks are stored in the application database;

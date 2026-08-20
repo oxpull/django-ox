@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-20
+
+### Fixed
+
+- A task that succeeded after its lease was lost no longer keeps the reaper's
+  lost-lease record in `errors`. That record says the outcome was never
+  observed, and the success write is that observation, so anything reading
+  `result.errors` was handed an exception nobody raised on a task that worked.
+  A failure resolving the same way already dropped it, and the two now agree. A task that is still LOST keeps the record: it is
+  the only thing on the row that says why the result reads as failed.
+
+### Added
+
+- `tools/check_release.py --dist` opens the built wheel and sdist and checks
+  that each one carries every migration in the source tree, along with the
+  licence and the package modules. A packaging rule that stops shipping a
+  migration leaves a distribution that imports and passes its tests, and fails
+  on somebody's upgrade against a column that is not there. The release
+  workflow runs it after the build.
+
 ## [0.2.0] - 2026-08-20
 
 ### Fixed
@@ -173,6 +193,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[0.2.1]: https://github.com/oxpull/django-ox/releases/tag/v0.2.1
 [0.2.0]: https://github.com/oxpull/django-ox/releases/tag/v0.2.0
 [0.1.2]: https://github.com/oxpull/django-ox/releases/tag/v0.1.2
 [0.1.1]: https://github.com/oxpull/django-ox/releases/tag/v0.1.1

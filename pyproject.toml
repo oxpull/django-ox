@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "django-ox"
-version = "0.2.0"
+version = "0.2.1"
 description = "Database-backed worker backend for Django's Tasks framework."
 readme = "README.md"
 license = "BSD-3-Clause"

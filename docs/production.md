@@ -298,8 +298,8 @@ task bodies so that running twice is harmless (upserts, idempotency keys,
 
 ## PostgreSQL or SQLite
 
-Both are fully supported and both run the full worker suite (221 tests
-each). Guidance:
+Both are fully supported and both run the full worker suite in CI.
+Guidance:
 
 - **PostgreSQL** is the production recommendation. It gets the
   single-statement `SKIP LOCKED` claim path, and it handles many workers

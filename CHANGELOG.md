@@ -26,12 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running it. Each is one compare-and-set on the row's status and lease number,
   so two retries of one row requeue it once, a discard that races a claim loses
   to it, and a LOST row's missing worker cannot write over its retry. Neither
-  touches a RUNNING task.
+  touches a RUNNING task. `retry_many(selection)` and `discard_many(selection)`
+  take a queryset or a list of ids and make the same move in one conditional
+  UPDATE per thousand rows inside one transaction, returning
+  `(changed, skipped)`.
 - The task table in the Django admin, registered only when
   `django.contrib.admin` is installed: a list with status and queue filters and
   search by id or path, a read-only detail page with every attempt's traceback,
   and **Retry selected tasks** and **Discard selected tasks** actions that
-  report how many rows moved and how many were skipped. The admin does not add,
+  report how many rows moved and how many were skipped. The actions call
+  `retry_many` and `discard_many`, so a select-across of any size is a few
+  statements in one transaction rather than two queries per row. The admin does not add,
   edit or delete rows.
 - `django_ox.bulk.enqueue_many(task, calls)`, the bulk form of `enqueue()`.
   `calls` is a list of `(args, kwargs)` pairs; the rows are written with one

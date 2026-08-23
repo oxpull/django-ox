@@ -5,7 +5,9 @@ Loaded by the admin's autodiscover, so it is only imported when
 django.contrib.admin is installed; a project without the admin never sees
 this module and needs nothing from it. The list shows what a worker would
 see; the detail page is read-only, with every attempt's traceback; and two
-actions call django_ox.actions on the selected rows and report counts.
+actions call django_ox.actions.retry_many and discard_many on the selected
+rows, one conditional UPDATE per thousand rows in one transaction, and
+report counts.
 """
 
 from __future__ import annotations
@@ -147,8 +149,7 @@ class OxTaskAdmin(_ModelAdmin):
         action: Any,
         verb: str,
     ) -> None:
-        done = sum(1 for pk in queryset.values_list("pk", flat=True) if action(pk))
-        skipped = queryset.count() - done
+        done, skipped = action(queryset)
         self.message_user(request, f"{verb} {done} task(s).", messages.SUCCESS)
         if skipped:
             self.message_user(
@@ -161,7 +162,7 @@ class OxTaskAdmin(_ModelAdmin):
 
     @admin.action(description="Retry selected tasks", permissions=("retry_or_discard",))
     def retry_selected(self, request: HttpRequest, queryset: QuerySet[OxTask]) -> None:
-        self._apply(request, queryset, actions.retry, "Retried")
+        self._apply(request, queryset, actions.retry_many, "Retried")
 
     @admin.action(
         description="Discard selected tasks", permissions=("retry_or_discard",)
@@ -169,7 +170,7 @@ class OxTaskAdmin(_ModelAdmin):
     def discard_selected(
         self, request: HttpRequest, queryset: QuerySet[OxTask]
     ) -> None:
-        self._apply(request, queryset, actions.discard, "Discarded")
+        self._apply(request, queryset, actions.discard_many, "Discarded")
 
     def has_retry_or_discard_permission(self, request: HttpRequest) -> bool:
         # The model's change permission, without the change form: the

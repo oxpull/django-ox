@@ -1832,8 +1832,14 @@ actions.discard(result.id)  # True if the row was closed
 | `retry(result_id)` | FAILED, LOST | Sets the row back to READY for one more attempt, clears `run_after` so it is eligible at once, and raises `max_attempts` to `attempts + 1`. The count, `worker_ids` and every per-attempt traceback stay as they were, so the record still says what happened before. The lease number goes up, so a LOST row's last worker, if it is still alive somewhere, writes nothing over the retry. |
 | `discard(result_id)` | READY, FAILED, LOST | Marks the row DISCARDED. A READY task that is discarded never runs; a discarded FAILED or LOST task is not retried. The attempt records stay. |
 
-Both return `False` for any other state, for an id that is not in the
-table, and for a malformed id. `RUNNING` and `SUCCESSFUL` rows are never
+`retry_many(selection)` and `discard_many(selection)` make the same move
+for a queryset or a list of ids in one conditional UPDATE per thousand
+rows inside one transaction, and return `(changed, skipped)`; the admin
+actions use them, so a select-across of a hundred thousand rows is a
+hundred statements and either all lands or none does.
+
+Both single-row functions return `False` for any other state, for an id
+that is not in the table, and for a malformed id. `RUNNING` and `SUCCESSFUL` rows are never
 matched. A retry that races a second retry of the same row, or a discard
 that races a worker's claim, resolves to exactly one winner: the UPDATE
 pins the lease number it read, and the loser matches zero rows.
@@ -2003,7 +2009,9 @@ announced in the [changelog](changelog.md).
   page. A scraped name is a contract with every dashboard that reads it, so
   a rename is a breaking change. Help text is not part of the contract.
 - **The actions module** `django_ox.actions`: `retry` and `discard`, their
-  accepted states, and their return values. The admin page that calls
+  accepted states, and their return values; `retry_many` and
+  `discard_many`, the selections they accept and their `(changed, skipped)`
+  return. The admin page that calls
   them is a convenience over this module; its layout is not a contract,
   the two action names are.
 - **The bulk module** `django_ox.bulk`: `enqueue_many(task, calls)`, its
@@ -2358,12 +2366,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running it. Each is one compare-and-set on the row's status and lease number,
   so two retries of one row requeue it once, a discard that races a claim loses
   to it, and a LOST row's missing worker cannot write over its retry. Neither
-  touches a RUNNING task.
+  touches a RUNNING task. `retry_many(selection)` and `discard_many(selection)`
+  take a queryset or a list of ids and make the same move in one conditional
+  UPDATE per thousand rows inside one transaction, returning
+  `(changed, skipped)`.
 - The task table in the Django admin, registered only when
   `django.contrib.admin` is installed: a list with status and queue filters and
   search by id or path, a read-only detail page with every attempt's traceback,
   and **Retry selected tasks** and **Discard selected tasks** actions that
-  report how many rows moved and how many were skipped. The admin does not add,
+  report how many rows moved and how many were skipped. The actions call
+  `retry_many` and `discard_many`, so a select-across of any size is a few
+  statements in one transaction rather than two queries per row. The admin does not add,
   edit or delete rows.
 - `django_ox.bulk.enqueue_many(task, calls)`, the bulk form of `enqueue()`.
   `calls` is a list of `(args, kwargs)` pairs; the rows are written with one

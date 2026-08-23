@@ -26,7 +26,9 @@ announced in the [changelog](changelog.md).
   page. A scraped name is a contract with every dashboard that reads it, so
   a rename is a breaking change. Help text is not part of the contract.
 - **The actions module** `django_ox.actions`: `retry` and `discard`, their
-  accepted states, and their return values. The admin page that calls
+  accepted states, and their return values; `retry_many` and
+  `discard_many`, the selections they accept and their `(changed, skipped)`
+  return. The admin page that calls
   them is a convenience over this module; its layout is not a contract,
   the two action names are.
 - **The bulk module** `django_ox.bulk`: `enqueue_many(task, calls)`, its

@@ -294,3 +294,149 @@ class TestDiscardedIsSettled:
         result = add.enqueue(1, 2)
         actions.discard(result.id)
         assert Worker(backoff_initial=0, poll_interval=0.05).claim_one() is None
+
+
+def seed(status, count, **fields):
+    """bulk_create count rows in one status, without going through enqueue."""
+    now = timezone.now()
+    rows = [
+        OxTask(
+            task_path="tests.tasks.add",
+            args=[1, 2],
+            backend_name="default",
+            status=status,
+            attempts=fields.pop("attempts", 3 if status != OxTask.Status.READY else 0),
+            max_attempts=3,
+            enqueued_at=now,
+            lease_epoch=fields.pop("lease_epoch", 3),
+            **fields,
+        )
+        for _ in range(count)
+    ]
+    return OxTask.objects.bulk_create(rows, batch_size=1000)
+
+
+def snapshot():
+    return {
+        row["pk"]: row
+        for row in OxTask.objects.values(
+            "pk", "status", "lease_epoch", "max_attempts", "attempts", "run_after"
+        )
+    }
+
+
+@pytest.mark.django_db
+class TestMany:
+    def mixed(self):
+        seed(OxTask.Status.READY, 2)
+        seed(OxTask.Status.RUNNING, 2, locked_by="w", locked_at=timezone.now())
+        seed(OxTask.Status.FAILED, 2, run_after=timezone.now())
+        seed(OxTask.Status.SUCCESSFUL, 2)
+        seed(OxTask.Status.LOST, 2)
+        seed(OxTask.Status.DISCARDED, 2)
+        return list(OxTask.objects.values_list("pk", flat=True))
+
+    @pytest.mark.parametrize(
+        ("one", "many", "expected"),
+        [
+            (actions.retry, actions.retry_many, 4),
+            (actions.discard, actions.discard_many, 6),
+        ],
+    )
+    def test_bulk_equals_repeated_single_row(self, one, many, expected):
+        ids = self.mixed()
+        ids_with_noise = [*ids, uuid.uuid4(), "not-a-uuid", ids[0]]
+        before = snapshot()
+
+        changed, skipped = many(ids_with_noise)
+        after_many = snapshot()
+
+        # Reset and do the same selection one row at a time.
+        for pk, row in before.items():
+            OxTask.objects.filter(pk=pk).update(
+                **{k: v for k, v in row.items() if k != "pk"}
+            )
+        results = [one(pk) for pk in ids_with_noise]
+        after_one = snapshot()
+
+        assert after_many == after_one
+        assert changed == sum(results) == expected
+        # The unknown id counts as skipped; the duplicate and the malformed id
+        # are not ids at all.
+        assert skipped == len(ids) + 1 - expected
+
+    def test_many_accepts_a_queryset(self):
+        self.mixed()
+        assert actions.retry_many(OxTask.objects.all()) == (4, 8)
+        assert actions.discard_many(OxTask.objects.all()) == (6, 6)
+        assert actions.retry_many(OxTask.objects.none()) == (0, 0)
+
+    def test_retry_many_moves_what_retry_moves(self):
+        self.mixed()
+        actions.retry_many(OxTask.objects.all())
+        moved = OxTask.objects.filter(status=OxTask.Status.READY, lease_epoch=4)
+        assert moved.count() == 4
+        assert set(moved.values_list("max_attempts", flat=True)) == {4}
+        assert moved.filter(run_after__isnull=False).count() == 0
+        assert OxTask.objects.filter(lease_epoch=3).count() == 8
+
+    def test_an_error_mid_way_changes_nothing(self, monkeypatch):
+        seed(OxTask.Status.FAILED, 2500)
+        ids = list(OxTask.objects.values_list("pk", flat=True))
+        calls = []
+        original = actions.OxTask.objects.filter
+
+        def filter_then_fail(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("boom")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(actions.OxTask.objects, "filter", filter_then_fail)
+        with pytest.raises(RuntimeError):
+            actions.retry_many(ids)
+        monkeypatch.undo()
+        assert OxTask.objects.filter(status=OxTask.Status.FAILED).count() == 2500
+        assert OxTask.objects.filter(status=OxTask.Status.READY).count() == 0
+
+    def test_twenty_thousand_rows_is_one_update_per_chunk(self):
+        """
+        One SELECT for the ids, one UPDATE per UPDATE_CHUNK_SIZE ids, and the
+        transaction's own statements. Never a query per row.
+        """
+        from django.test.utils import CaptureQueriesContext
+
+        seed(OxTask.Status.FAILED, 14000)
+        seed(OxTask.Status.SUCCESSFUL, 6000)
+        with CaptureQueriesContext(connections["default"]) as ctx:
+            assert actions.retry_many(OxTask.objects.all()) == (14000, 6000)
+        updates = [q for q in ctx.captured_queries if q["sql"].startswith("UPDATE")]
+        assert len(updates) == 20000 // actions.UPDATE_CHUNK_SIZE
+        assert len(ctx) <= len(updates) + 3
+        assert OxTask.objects.filter(status=OxTask.Status.READY).count() == 14000
+
+    def test_bulk_retry_fences_the_straggler_out(self, worker):
+        stale = lose_the_lease(worker)
+
+        assert actions.retry_many([stale.pk]) == (1, 0)
+        db_task = OxTask.objects.get()
+        assert db_task.status == OxTask.Status.READY
+        assert db_task.lease_epoch == stale.lease_epoch + 1
+
+        assert (
+            worker._write_outcome(
+                stale,
+                status=OxTask.Status.SUCCESSFUL,
+                duration_ms=1,
+                return_value=3,
+            )
+            is False
+        )
+        db_task.refresh_from_db()
+        assert db_task.status == OxTask.Status.READY
+        assert db_task.return_value is None
+
+        assert worker.run_once() is True
+        db_task.refresh_from_db()
+        assert db_task.status == OxTask.Status.SUCCESSFUL
+        assert db_task.return_value == 3

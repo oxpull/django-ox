@@ -323,8 +323,14 @@ actions.discard(result.id)  # True if the row was closed
 | `retry(result_id)` | FAILED, LOST | Sets the row back to READY for one more attempt, clears `run_after` so it is eligible at once, and raises `max_attempts` to `attempts + 1`. The count, `worker_ids` and every per-attempt traceback stay as they were, so the record still says what happened before. The lease number goes up, so a LOST row's last worker, if it is still alive somewhere, writes nothing over the retry. |
 | `discard(result_id)` | READY, FAILED, LOST | Marks the row DISCARDED. A READY task that is discarded never runs; a discarded FAILED or LOST task is not retried. The attempt records stay. |
 
-Both return `False` for any other state, for an id that is not in the
-table, and for a malformed id. `RUNNING` and `SUCCESSFUL` rows are never
+`retry_many(selection)` and `discard_many(selection)` make the same move
+for a queryset or a list of ids in one conditional UPDATE per thousand
+rows inside one transaction, and return `(changed, skipped)`; the admin
+actions use them, so a select-across of a hundred thousand rows is a
+hundred statements and either all lands or none does.
+
+Both single-row functions return `False` for any other state, for an id
+that is not in the table, and for a malformed id. `RUNNING` and `SUCCESSFUL` rows are never
 matched. A retry that races a second retry of the same row, or a discard
 that races a worker's claim, resolves to exactly one winner: the UPDATE
 pins the lease number it read, and the loser matches zero rows.

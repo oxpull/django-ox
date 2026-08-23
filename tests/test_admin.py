@@ -6,6 +6,7 @@ read-only, with the two actions wired to django_ox.actions.
 import pytest
 from django.contrib.auth.models import Permission, User
 from django.urls import reverse
+from django.utils import timezone
 
 from django_ox.models import OxTask
 
@@ -148,3 +149,41 @@ class TestActions:
             follow=True,
         )
         assert OxTask.objects.get().status == OxTask.Status.FAILED
+
+    def test_select_across_is_a_few_queries_in_one_transaction(self, admin_client):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        now = timezone.now()
+        OxTask.objects.bulk_create(
+            [
+                OxTask(
+                    task_path="tests.tasks.add",
+                    args=[1, 2],
+                    backend_name="default",
+                    status=OxTask.Status.READY if i % 2 else OxTask.Status.SUCCESSFUL,
+                    enqueued_at=now,
+                )
+                for i in range(20000)
+            ],
+            batch_size=1000,
+        )
+        with CaptureQueriesContext(connection) as ctx:
+            response = admin_client.post(
+                reverse(CHANGELIST),
+                {
+                    "action": "discard_selected",
+                    "select_across": "1",
+                    "index": "0",
+                    "_selected_action": [str(OxTask.objects.first().pk)],
+                },
+                follow=True,
+            )
+        messages = [str(m) for m in response.context["messages"]]
+        assert "Discarded 10000 task(s)." in messages
+        assert "Skipped 10000 task(s) whose status did not allow it." in messages
+        # 20 UPDATEs for 20,000 rows; the rest is the admin's own requests.
+        updates = [q for q in ctx.captured_queries if q["sql"].startswith("UPDATE")]
+        assert len(updates) == 20
+        assert len(ctx) < 60
+        assert OxTask.objects.filter(status=OxTask.Status.DISCARDED).count() == 10000

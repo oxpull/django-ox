@@ -43,6 +43,7 @@ def test_command_passes_flags_to_worker(recorded_worker):
         "poll_interval": 0.5,
         "lock_timeout": 60.0,
         "worker_index": None,
+        "parent_pid": None,
     }
 
 

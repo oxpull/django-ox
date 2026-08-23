@@ -9,7 +9,7 @@ from typing import Any
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.tasks import DEFAULT_TASK_BACKEND_ALIAS
 
-from django_ox.supervisor import Supervisor
+from django_ox.supervisor import STOP_SIGNALS, Supervisor
 from django_ox.worker import Worker
 
 logger = logging.getLogger("django_ox")
@@ -93,9 +93,14 @@ class Command(BaseCommand):
                 processes=options["processes"],
                 worker_args=worker_args(options),
             )
-            signal.signal(signal.SIGTERM, supervisor.handle_signal)
-            signal.signal(signal.SIGINT, supervisor.handle_signal)
+            for signum in STOP_SIGNALS:
+                signal.signal(signum, supervisor.handle_signal)
             sys.exit(supervisor.run())
+
+        parent_pid = None
+        if options["worker_index"] is not None:
+            parent_pid = os.getppid()
+            _die_with_parent()
 
         queues = (
             [q.strip() for q in options["queues"].split(",") if q.strip()]
@@ -109,14 +114,19 @@ class Command(BaseCommand):
             poll_interval=options["interval"],
             lock_timeout=options["lock_timeout"],
             worker_index=options["worker_index"],
+            parent_pid=parent_pid,
         )
 
         def handle_signal(signum: int, frame: Any) -> None:
             if worker.stopping:
-                logger.error("Second signal received; forcing exit.")
+                logger.error(
+                    "Worker %s: second signal received; forcing exit.", worker.worker_id
+                )
                 os._exit(130)
             logger.info(
-                "Received %s; draining in-flight tasks. Signal again to force exit.",
+                "Worker %s received %s; draining in-flight tasks. "
+                "Signal again to force exit.",
+                worker.worker_id,
                 signal.Signals(signum).name,
             )
             worker.request_stop()
@@ -126,6 +136,24 @@ class Command(BaseCommand):
 
         worker.run()
         sys.exit(0)
+
+
+def _die_with_parent() -> None:
+    """
+    On Linux, ask the kernel to SIGTERM this process when its parent exits
+    (PR_SET_PDEATHSIG). The worker also polls ``os.getppid()``, which covers
+    every platform and the window before this call; this is the prompt
+    version. Best effort: anything missing or refused is ignored.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(1, signal.SIGTERM, 0, 0, 0)  # PR_SET_PDEATHSIG
+    except (OSError, AttributeError):
+        return
 
 
 def worker_args(options: dict[str, Any]) -> list[str]:

@@ -170,6 +170,7 @@ class Worker:
         backoff_initial: float | None = None,
         backoff_max: float | None = None,
         worker_index: int | None = None,
+        parent_pid: int | None = None,
     ) -> None:
         backend = task_backends[backend_alias]
         if not isinstance(backend, OxBackend):
@@ -184,6 +185,10 @@ class Worker:
         self.queues: list[str] = list(queues) if queues else sorted(backend.queues)
         self.concurrency = concurrency
         self.poll_interval = poll_interval
+        # Under a supervisor, the pid to watch: a worker whose supervisor has
+        # gone (it was SIGKILLed, or died on a signal it could not forward)
+        # is reparented, and drains rather than run on as an orphan.
+        self.parent_pid = parent_pid
         self.lock_timeout: float = (
             lock_timeout
             if lock_timeout is not None
@@ -934,6 +939,19 @@ class Worker:
         renewer.start()
         try:
             while not self._stop.is_set():
+                if self.parent_pid is not None and os.getppid() != self.parent_pid:
+                    logger.warning(
+                        "Worker %s lost its supervisor (pid %d); draining",
+                        self.worker_id,
+                        self.parent_pid,
+                        extra={
+                            "event": "worker_orphaned",
+                            "worker_id": self.worker_id,
+                            "parent_pid": self.parent_pid,
+                        },
+                    )
+                    self.request_stop()
+                    break
                 if time.monotonic() - last_reap >= self.reap_interval:
                     self.reap()
                     last_reap = time.monotonic()
@@ -967,7 +985,8 @@ class Worker:
             pending = sum(1 for f in in_flight if not f.done())
             if pending:
                 logger.info(
-                    "Draining %d in-flight task(s)",
+                    "Worker %s draining %d in-flight task(s)",
+                    self.worker_id,
                     pending,
                     extra={
                         "event": "worker_draining",

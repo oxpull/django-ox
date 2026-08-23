@@ -4,6 +4,7 @@ test database. Every test here spawns processes, so counts are small and
 polls are short.
 """
 
+import contextlib
 import logging
 import os
 import re
@@ -21,6 +22,7 @@ from django.db import connection
 
 from django_ox.models import OxTask
 from django_ox.supervisor import Supervisor, child_command
+from django_ox.worker import Worker
 
 from .conftest import wait_for
 from .tasks import add, slow
@@ -454,6 +456,100 @@ def test_child_command_reuses_the_script_by_absolute_path(tmp_path, monkeypatch)
     assert child_command([], 0, argv0=str(tmp_path / "__main__.py"))[1] == "-m"
     # A script that no longer exists falls back to the module.
     assert child_command([], 0, argv0=str(tmp_path / "gone.py"))[1] == "-m"
+
+
+class TestOrphans:
+    @needs_pgrep
+    def test_children_drain_when_the_supervisor_is_killed(self, tmp_path):
+        proc = start_worker(tmp_path, "--processes", "2", "--interval", "0.05")
+        try:
+            assert wait_for(lambda: len(child_pids(proc)) == 2, timeout=20)
+            pids = child_pids(proc)
+            assert wait_for(
+                lambda: (
+                    "starting: queues" in (tmp_path / "worker.log").read_text()
+                    and (tmp_path / "worker.log").read_text().count("starting") >= 3
+                ),
+                timeout=20,
+            )
+            os.kill(proc.pid, signal.SIGKILL)
+            assert proc.wait(timeout=5) == -signal.SIGKILL
+            assert wait_for(lambda: not any(alive(pid) for pid in pids), timeout=10)
+        finally:
+            for pid in pids:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+        log = (tmp_path / "worker.log").read_text()
+        assert log.count("lost its supervisor") == 2
+
+    @needs_pgrep
+    def test_sighup_is_a_drain(self, tmp_path):
+        proc = start_worker(tmp_path, "--processes", "2", "--interval", "0.05")
+        try:
+            assert wait_for(
+                lambda: (tmp_path / "worker.log").read_text().count("starting") >= 3,
+                timeout=20,
+            )
+            pids = child_pids(proc)
+            assert len(pids) == 2
+            proc.send_signal(signal.SIGHUP)
+            proc.wait(timeout=20)
+        finally:
+            code, log = stop_worker(proc, tmp_path)
+        assert code == 0
+        assert "Received SIGHUP; stopping 2 worker process(es)" in log
+        assert not any(alive(pid) for pid in pids)
+
+    def test_worker_drains_when_its_parent_changes(self, caplog):
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        worker = Worker(poll_interval=0.05, parent_pid=os.getppid() + 100000)
+        thread = threading.Thread(target=worker.run)
+        thread.start()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert [getattr(r, "event", None) for r in caplog.records] == [
+            "worker_orphaned"
+        ]
+
+
+class TestEscalation:
+    def test_second_signal_kills_a_stuck_child_after_the_grace(
+        self, caplog, monkeypatch
+    ):
+        caplog.set_level(logging.INFO, logger="django_ox")
+        in_process_env(monkeypatch)
+        supervisor = Supervisor(
+            processes=2,
+            worker_args=["--interval", "0.05", "--verbosity", "0"],
+            kill_grace=0.5,
+        )
+        thread, result = run_in_thread(supervisor)
+        stuck = None
+        try:
+            assert wait_for(
+                lambda: all(slot_pid(supervisor, i) for i in range(2)), timeout=20
+            )
+            time.sleep(1.0)  # let the children install their signal handlers
+            stuck = slot_pid(supervisor, 0)
+            os.kill(stuck, signal.SIGSTOP)
+            started = time.monotonic()
+            supervisor.handle_signal(signal.SIGTERM, None)
+            time.sleep(0.3)
+            assert thread.is_alive()
+            supervisor.handle_signal(signal.SIGTERM, None)
+            thread.join(timeout=10)
+            elapsed = time.monotonic() - started
+        finally:
+            if stuck is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(stuck, signal.SIGKILL)
+            thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert elapsed < 5
+        assert result == [128 + signal.SIGKILL]
+        events = [getattr(r, "event", None) for r in caplog.records]
+        assert events.count("supervisor_killed_workers") == 1
+        assert not alive(stuck)
 
 
 class TestStopRestartRace:

@@ -12,7 +12,7 @@ command is the thing an operator would type by hand, and it is what they see
 in ``ps``.
 
 The supervisor never opens a database connection. It starts the children,
-forwards SIGTERM and SIGINT to them, restarts a slot that dies while
+forwards SIGTERM, SIGINT and SIGHUP to them, restarts a slot that dies while
 the supervisor is not stopping, and exits with the children's worst exit
 code, or 1 when a slot tripped the restart cap.
 """
@@ -51,9 +51,15 @@ BACKOFF_RESET = 60.0
 RESTART_CAP = 5
 RESTART_WINDOW = 60.0
 
+# After a second stop signal the children get SIGTERM again and this long
+# to act on it, then SIGKILL.
+KILL_GRACE = 5.0
+
 # How often the supervisor polls its children. It is also the granularity of
 # the restart delay and of the response to a stop request.
 POLL_INTERVAL = 0.1
+
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
 
 def child_command(
@@ -117,6 +123,7 @@ class Supervisor:
         restart_window: float = RESTART_WINDOW,
         backoff_max: float = BACKOFF_MAX,
         backoff_reset: float = BACKOFF_RESET,
+        kill_grace: float = KILL_GRACE,
     ) -> None:
         if processes < 1:
             raise ValueError("processes must be at least 1")
@@ -127,6 +134,7 @@ class Supervisor:
         self.restart_window = restart_window
         self.backoff_max = backoff_max
         self.backoff_reset = backoff_reset
+        self.kill_grace = kill_grace
         self._children: dict[int, subprocess.Popen[bytes]] = {}
         self._started_at: dict[int, float] = {}
         self._exit_codes: dict[int, int] = {}
@@ -136,6 +144,7 @@ class Supervisor:
         self._stopping = False
         self._cap_tripped = False
         self._signals_seen = 0
+        self._kill_at: float | None = None
         # Guards the stop flag and the restart decision together, so a stop
         # requested between the two never starts a child that nobody will
         # signal. Signal handlers run on this same thread, between two
@@ -246,6 +255,21 @@ class Supervisor:
                 if now >= due:
                     self._start(index)
 
+    def _kill_overdue(self) -> None:
+        if self._kill_at is None or time.monotonic() < self._kill_at:
+            return
+        self._kill_at = None
+        alive = [index for index, proc in self._children.items() if proc.poll() is None]
+        if alive:
+            logger.error(
+                "Worker process(es) %s still running %.0fs after the second "
+                "signal; sending SIGKILL",
+                ", ".join(str(index) for index in alive),
+                self.kill_grace,
+                extra={"event": "supervisor_killed_workers", "worker_indexes": alive},
+            )
+        self._signal_children(signal.SIGKILL)
+
     # -- signals -----------------------------------------------------------
 
     def handle_signal(self, signum: int, frame: Any) -> None:
@@ -258,8 +282,15 @@ class Supervisor:
                 name,
                 len(self._children),
             )
+        elif self._kill_at is None:
+            logger.error(
+                "Second signal received; forcing worker exit, SIGKILL in %.0fs.",
+                self.kill_grace,
+            )
+            self._kill_at = time.monotonic() + self.kill_grace
         else:
-            logger.error("Second signal received; forcing worker exit.")
+            # A third signal: the operator has waited long enough.
+            self._kill_at = time.monotonic()
         self.request_stop()
         # Children treat SIGTERM and SIGINT the same way, and their second
         # signal is the force-exit, so the supervisor's count is theirs.
@@ -290,6 +321,7 @@ class Supervisor:
             while self._children or (self._restart_due and not self._stopping):
                 self._reap_exited()
                 self._start_due()
+                self._kill_overdue()
                 time.sleep(POLL_INTERVAL)
         finally:
             # Whatever path brought us here (a stop, the cap, an exception),

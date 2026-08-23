@@ -253,8 +253,10 @@ The message text is not part of the contract. The keys are.
 | `worker_stopped` | INFO | The run loop exited. |
 | `supervisor_started` | INFO | `ox_worker --processes N` started its worker processes. |
 | `worker_process_restarted` | WARNING | A worker process exited on its own and is being restarted. |
-| `supervisor_restart_cap` | ERROR | More than five restarts in a minute; the supervisor is stopping with exit code 1. |
+| `supervisor_restart_cap` | ERROR | More than five deaths of one slot in a minute; the supervisor is stopping with exit code 1. |
+| `supervisor_killed_workers` | ERROR | Worker processes still running five seconds after the second stop signal were sent SIGKILL. |
 | `supervisor_stopped` | INFO | Every worker process has exited. |
+| `worker_orphaned` | WARNING | A worker process found its supervisor gone and is draining. |
 
 | Key | Present on | Meaning |
 | --- | --- | --- |
@@ -273,7 +275,9 @@ The message text is not part of the contract. The keys are.
 | `pending` | `worker_draining` | In-flight tasks at shutdown. |
 | `processes` | `supervisor_started` | Worker processes the supervisor runs. |
 | `worker_index`, `exit_code` | `worker_process_restarted`, `supervisor_restart_cap` | Which slot exited and how. A negative code is the signal that killed it. |
-| `restarts` | `supervisor_restart_cap` | Restarts seen inside the window. |
+| `restarts` | `supervisor_restart_cap` | Deaths of that slot inside the window. |
+| `worker_indexes` | `supervisor_killed_workers` | The slots that were killed. |
+| `parent_pid` | `worker_orphaned` | The supervisor pid the worker was started under. |
 | `exit_code` | `supervisor_stopped` | The code the supervisor exits with. |
 
 `task_claimed` and `task_started` are DEBUG because they fire once per
@@ -332,10 +336,10 @@ actions.discard(result.id)  # True if the row was closed
 | `discard(result_id)` | READY, FAILED, LOST | Marks the row DISCARDED. A READY task that is discarded never runs; a discarded FAILED or LOST task is not retried. The attempt records stay. |
 
 `retry_many(selection)` and `discard_many(selection)` make the same move
-for a queryset or a list of ids in one conditional UPDATE per thousand
-rows inside one transaction, and return `(changed, skipped)`; the admin
-actions use them, so a select-across of a hundred thousand rows is a
-hundred statements and either all lands or none does.
+for a queryset or a list of ids. They run one conditional UPDATE per
+thousand rows inside one transaction and return `(changed, skipped)`. The
+admin actions use them, so a select-across of a hundred thousand rows is a
+hundred statements, and either all of it lands or none does.
 
 Both single-row functions return `False` for any other state, for an id
 that is not in the table, and for a malformed id. `RUNNING` and `SUCCESSFUL` rows are never

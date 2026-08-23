@@ -130,9 +130,9 @@ counts as well as SIGTERM and SIGINT. The sequence is:
    seconds, then SIGKILL, logged as `supervisor_killed_workers` at ERROR.
 3. A third signal sends the SIGKILL at once.
 
-Send the signal to the supervisor only: a worker that also receives the
-terminal's copy of a Ctrl-C has seen two signals, which is why the workers
-run in their own process group and why the systemd unit above sets
+Send the signal to the supervisor only. A worker that also receives the
+terminal's copy of a Ctrl-C has seen two signals. That is why each worker
+runs in its own process group, and why the systemd unit above sets
 `KillMode=mixed`.
 
 A worker whose supervisor dies without signalling it (SIGKILL, an OOM kill)
@@ -204,9 +204,9 @@ is per slot:
 - More than five deaths of one slot inside one minute stops the supervisor:
   it logs `supervisor_restart_cap` at ERROR with the slot index, drains the
   other workers, and exits 1 whatever the children's own exit codes were, so
-  `Restart=on-failure` restarts it. A worker that cannot start hands the
-  fault to the process manager and its restart policy rather than logging a
-  restart a second forever.
+  a unit on `Restart=on-failure` restarts it too. A worker that cannot stay
+  up hands the fault to the process manager and its restart policy rather
+  than logging a restart a second forever.
 - Because the count is per slot, every worker dying at once (a database
   restart, a deploy that changes a connection string) is one restart each,
   not a trip. Six workers that all die in the same second all come back a

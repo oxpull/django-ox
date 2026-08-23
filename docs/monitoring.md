@@ -1,11 +1,13 @@
 # Monitoring
 
 The queue and the result store are one database table. That means metrics are
-just queries, with no agent or exporter process to run. There are three ways in:
+just queries, with no agent or exporter process to run. There are four ways in:
 
 - **`django_ox.stats`**, plain functions returning queue metrics.
 - **`manage.py ox_health`**, the same numbers as an exit code, for cron
   alerting and container probes.
+- **A Prometheus endpoint**, the same numbers as gauges, rendered by a view
+  you mount where your scraper can reach it.
 - **Structured log events** on the `django_ox` logger, with stable extra
   keys for JSON log handlers.
 
@@ -103,6 +105,127 @@ From cron, for alerting on the queue itself:
     --max-backlog 1000 --max-age 600 || /usr/local/bin/page-someone
 ```
 
+## Prometheus
+
+`django_ox.metrics` renders the stats functions in the Prometheus text
+format, from the standard library alone. Mount the view and point a scrape
+job at it:
+
+```python
+# urls.py
+from django.urls import include, path
+
+urlpatterns = [
+    path("ox/", include("django_ox.urls")),  # GET /ox/metrics
+]
+```
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: django_ox
+    metrics_path: /ox/metrics
+    static_configs:
+      - targets: ["app.internal:8000"]
+```
+
+The response is `text/plain; version=0.0.4`. A scraper that sends
+`Accept: application/openmetrics-text` gets the OpenMetrics form of the
+same text. Each scrape is a handful of queries over the task table, one per
+metric per queue, so it costs about what `ox_health` costs.
+
+**The endpoint has no authentication of its own.** The numbers are not
+secret, but the queue names and the shape of your traffic are yours to keep,
+so put the route behind the project's policy before it goes near the public
+side of a load balancer. Two one-line ways:
+
+```python
+from django.contrib.auth.decorators import login_required
+from django_ox.views import metrics
+
+path("ox/metrics", login_required(metrics))  # session auth, for a human
+```
+
+```python
+from django.http import HttpResponseForbidden
+
+
+def from_prometheus(view):
+    def guard(request, *args, **kwargs):
+        if request.META["REMOTE_ADDR"] not in {"10.0.0.12"}:
+            return HttpResponseForbidden()
+        return view(request, *args, **kwargs)
+
+    return guard
+
+
+path("ox/metrics", from_prometheus(metrics))  # the scraper's address only
+```
+
+A network policy that only admits the scraper to the path does the same
+job without code.
+
+Every metric is a gauge, with one sample per queue that has any row:
+
+| Metric | Labels | Value |
+| --- | --- | --- |
+| `django_ox_tasks` | `queue`, `status` | Rows by status, one of `ready`, `running`, `failed`, `successful`, `lost`, `discarded`. The same numbers as `queue_stats()`, so `ready` includes deferred tasks. |
+| `django_ox_ready_tasks` | `queue` | `ready_count()`: READY tasks eligible to run now. The backlog number. |
+| `django_ox_oldest_ready_age_seconds` | `queue` | `oldest_ready_age()` in seconds. Absent when nothing waits. |
+| `django_ox_last_claim_age_seconds` | `queue` | `last_claim_age()` in seconds. Absent until a worker has claimed on that queue. |
+| `django_ox_throughput_per_minute` | `queue` | `throughput()` over the default five-minute window. |
+| `django_ox_failure_rate` | `queue` | `failure_rate()` over the same window, 0 to 1. Absent when nothing finished. |
+
+There are no counters. The table is pruned, so a monotonic count of finished
+tasks cannot be read from it; throughput and the failure rate are
+trailing-window readings instead, and `rate()` in PromQL is not the tool
+for them. Alert on `django_ox_ready_tasks` and
+`django_ox_oldest_ready_age_seconds` the same way as on the functions.
+
+The metric names and label names above are public API from the release that
+ships them; see [API stability](stability.md). The help text is not.
+
+### With an existing registry
+
+A project that already runs `prometheus_client` (on its own or through
+django-prometheus) can register the same numbers with its registry instead
+of mounting a second endpoint. `prometheus_client` is not a dependency of
+django-ox; `collector()` imports it when called and raises `ImportError`
+when it is missing.
+
+```python
+from prometheus_client import REGISTRY
+
+from django_ox import metrics
+
+REGISTRY.register(metrics.collector())
+```
+
+### OpenTelemetry
+
+django-ox does not ship an OpenTelemetry exporter. The stats functions fit
+an observable gauge callback, so a project that already has an OTel meter
+can read the queue through it in a few lines. This is the whole recipe;
+nothing in django-ox imports `opentelemetry`.
+
+```python
+from opentelemetry import metrics as otel
+from opentelemetry.metrics import Observation
+
+from django_ox import stats
+
+
+def observe_backlog(options):
+    for row in stats.queue_stats():
+        yield Observation(row.ready, {"queue": row.queue_name})
+
+
+meter = otel.get_meter("django_ox")
+meter.create_observable_gauge("django_ox.ready_tasks", callbacks=[observe_backlog])
+```
+
+The same shape reads `oldest_ready_age()` or `failure_rate()` per queue.
+
 ## Log events
 
 The worker logs through the standard library logger named `django_ox`. No
@@ -169,12 +292,9 @@ column from `queue_stats()` for it.
   `failure_rate` rising above your normal baseline. Throughput is better
   as a dashboard line than an alert: its healthy value depends entirely
   on offered load.
-- **Prometheus.** No exporter ships with django-ox, and none ships in
-  [Pro](pro.md) either. The stats functions drop into any Django metrics setup
-  though. Either register a custom collector with django-prometheus, whose
-  `collect()` calls `queue_stats()`, `ready_count()` and `oldest_ready_age()`
-  and yields gauges, or render the same numbers from a plain Django view in the
-  Prometheus text format and point a scrape job at it. Label by `queue_name`.
+- **Prometheus.** Mount `django_ox.urls` and scrape `/ox/metrics`, or
+  register `django_ox.metrics.collector()` with a registry you already run.
+  Both are covered [above](#prometheus).
 - **journald.** Under systemd, WARNING and above maps onto journal
   priorities, so `journalctl -u ox-worker -p warning` shows exactly
   retries, reclaims and failures. Pair it with `ox_health` in a timer for

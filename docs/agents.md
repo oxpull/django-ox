@@ -119,6 +119,9 @@ TASKS = {
   there is no scheduler process to start.
 - `ox_prune --older-than 7d` deletes finished rows; FAILED rows stay unless
   `--include-failed`. READY and RUNNING rows are never deleted.
+- `path("ox/", include("django_ox.urls"))` mounts `GET /ox/metrics`, the
+  queue stats as Prometheus gauges. It has no authentication of its own;
+  wrap it with `login_required` or restrict it by network.
 - Run `migrate` before rolling workers, not from the worker.
 - `django_ox.actions.retry(result_id)` requeues a FAILED or LOST task for
   one more attempt. `django_ox.actions.discard(result_id)` closes a READY,

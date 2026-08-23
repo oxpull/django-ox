@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A Prometheus endpoint. `path("ox/", include("django_ox.urls"))` mounts
+  `GET /ox/metrics`, which renders the `django_ox.stats` numbers as gauges in
+  the Prometheus text format (OpenMetrics on request), from the standard
+  library alone. The metric names are `django_ox_tasks{queue,status}`,
+  `django_ox_ready_tasks`, `django_ox_oldest_ready_age_seconds`,
+  `django_ox_last_claim_age_seconds`, `django_ox_throughput_per_minute` and
+  `django_ox_failure_rate`, and they are public API from this release. The
+  view has no authentication of its own. `django_ox.metrics.collector()`
+  returns a collector for a `prometheus_client` registry when that package is
+  installed; it is not a dependency.
 - `TASK_TIMEOUT` and `TASK_TIMEOUTS` backend options, a limit on how long one
   attempt may run. A timed-out attempt is recorded as failed with a
   `django_ox.exceptions.TaskTimeout` error, the lease number moves so nothing

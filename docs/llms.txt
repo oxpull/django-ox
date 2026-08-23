@@ -69,6 +69,14 @@ Operational facts worth getting right:
 - `python manage.py ox_health` exits 0 when the database answers, and takes
   `--max-backlog`, `--max-age` and `--worker-timeout` thresholds that turn
   queue stats into a non-zero exit for probes and cron alerting.
+- `path("ox/", include("django_ox.urls"))` exposes `GET /ox/metrics`, the
+  queue stats as Prometheus gauges (`django_ox_tasks{queue,status}`,
+  `django_ox_ready_tasks`, `django_ox_oldest_ready_age_seconds`,
+  `django_ox_last_claim_age_seconds`, `django_ox_throughput_per_minute`,
+  `django_ox_failure_rate`). The view has no authentication; wrap it or
+  restrict it by network. `django_ox.metrics.collector()` registers the same
+  gauges with an existing `prometheus_client` registry. No OpenTelemetry
+  exporter ships.
 - Finished rows stay until pruned. `python manage.py ox_prune --older-than 7d`
   deletes SUCCESSFUL and DISCARDED rows past the cutoff; FAILED and LOST rows
   are kept unless `--include-failed` is given. READY and RUNNING rows are
@@ -109,8 +117,8 @@ Operational facts worth getting right:
   containers, graceful shutdown, scaling out, the lease and the reaper,
   PostgreSQL or SQLite, pruning on a timer.
 - [Monitoring](https://oxpull.com/django-ox/monitoring/): `django_ox.stats`
-  functions, `ox_health` semantics and probe examples, log events, retry and
-  discard, the admin page.
+  functions, `ox_health` semantics and probe examples, the Prometheus
+  endpoint and metric names, log events, retry and discard, the admin page.
 - [Benchmarks](https://oxpull.com/django-ox/benchmarks/): throughput and
   latency numbers with the method that produced them.
 - [API stability](https://oxpull.com/django-ox/stability/): what is public

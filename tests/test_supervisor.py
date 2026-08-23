@@ -11,6 +11,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -78,6 +80,23 @@ def scratch_project(tmp_path: Path) -> Path:
         f"from {settings.SETTINGS_MODULE} import *  # noqa: F403\n"
     )
     return project
+
+
+def run_in_thread(supervisor: Supervisor) -> tuple[threading.Thread, list[int]]:
+    result: list[int] = []
+    thread = threading.Thread(target=lambda: result.append(supervisor.run()))
+    thread.start()
+    return thread, result
+
+
+def slot_pid(supervisor: Supervisor, index: int) -> int | None:
+    proc = supervisor._children.get(index)
+    return proc.pid if proc is not None and proc.poll() is None else None
+
+
+def in_process_env(monkeypatch) -> None:
+    for key, value in child_env().items():
+        monkeypatch.setenv(key, value)
 
 
 def stop_worker(proc: subprocess.Popen[bytes], tmp_path: Path) -> tuple[int, str]:
@@ -288,8 +307,7 @@ class TestReinvocation:
 class TestRestartCap:
     def test_over_the_cap_exits_nonzero(self, caplog, monkeypatch):
         caplog.set_level(logging.WARNING, logger="django_ox")
-        for key, value in child_env().items():
-            monkeypatch.setenv(key, value)
+        in_process_env(monkeypatch)
         # A backend alias that does not exist: every child fails at startup.
         supervisor = Supervisor(
             processes=1,
@@ -305,6 +323,108 @@ class TestRestartCap:
         assert events.count("worker_process_restarted") == 2
         assert events.count("supervisor_restart_cap") == 1
         assert {r.exit_code for r in caplog.records if hasattr(r, "exit_code")} == {1}
+
+    def test_exit_code_is_one_even_when_children_exit_zero(self, caplog, monkeypatch):
+        """A child that exits 0 on its own is a death too, and the cap exits 1."""
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        in_process_env(monkeypatch)
+        # `ox_worker --help` prints and exits 0.
+        supervisor = Supervisor(
+            processes=1,
+            worker_args=["--help"],
+            restart_delay=0.05,
+            restart_cap=2,
+        )
+
+        code = supervisor.run()
+
+        assert code == 1
+        cap = [
+            r
+            for r in caplog.records
+            if getattr(r, "event", None) == "supervisor_restart_cap"
+        ]
+        assert len(cap) == 1
+        assert cap[0].worker_index == 0
+        assert cap[0].exit_code == 0
+
+    def test_every_slot_dying_at_once_is_one_restart_each(self, monkeypatch):
+        in_process_env(monkeypatch)
+        supervisor = Supervisor(
+            processes=4,
+            worker_args=["--interval", "0.05", "--verbosity", "0"],
+            restart_delay=0.05,
+        )
+        thread, result = run_in_thread(supervisor)
+        try:
+            assert wait_for(
+                lambda: all(slot_pid(supervisor, i) for i in range(4)), timeout=20
+            )
+            before = [slot_pid(supervisor, i) for i in range(4)]
+            for pid in before:
+                os.kill(pid, signal.SIGKILL)
+            assert wait_for(
+                lambda: all(
+                    slot_pid(supervisor, i) not in (None, before[i]) for i in range(4)
+                ),
+                timeout=20,
+            )
+            assert thread.is_alive()
+            assert not supervisor.stopping
+            time.sleep(1.0)  # let the new children install their signal handlers
+        finally:
+            supervisor.request_stop()
+            supervisor._signal_children(signal.SIGTERM)
+            thread.join(timeout=20)
+        assert result == [0]
+
+    def test_one_slot_over_the_cap_stops_the_supervisor(self, caplog, monkeypatch):
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        in_process_env(monkeypatch)
+        supervisor = Supervisor(
+            processes=2,
+            worker_args=["--interval", "0.05", "--verbosity", "0"],
+            restart_delay=0.05,
+            backoff_max=0.05,
+        )
+        thread, result = run_in_thread(supervisor)
+        try:
+            for death in range(6):
+                assert wait_for(lambda: slot_pid(supervisor, 0), timeout=20)
+                pid = slot_pid(supervisor, 0)
+                os.kill(pid, signal.SIGKILL)
+                if death < 5:
+                    assert wait_for(
+                        lambda: slot_pid(supervisor, 0) not in (None, pid),  # noqa: B023
+                        timeout=20,
+                    )
+            thread.join(timeout=20)
+        finally:
+            supervisor.request_stop()
+            supervisor._signal_children(signal.SIGTERM)
+            thread.join(timeout=20)
+        assert result == [1]
+        cap = [
+            r
+            for r in caplog.records
+            if getattr(r, "event", None) == "supervisor_restart_cap"
+        ]
+        assert [r.worker_index for r in cap] == [0]
+        assert cap[0].restarts == 6
+
+    def test_backoff_doubles_and_resets(self, monkeypatch):
+        supervisor = Supervisor(
+            processes=1, worker_args=[], backoff_max=4.0, backoff_reset=10.0
+        )
+        clock = 100.0
+        supervisor._started_at[0] = clock
+        delays = [supervisor._next_delay(0, clock) for _ in range(5)]
+        assert delays == [1.0, 2.0, 4.0, 4.0, 4.0]
+        # A child that lived a long time starts over.
+        supervisor._started_at[0] = clock
+        assert supervisor._next_delay(0, clock + 10.0) == 1.0
+        # Slots back off independently.
+        assert supervisor._next_delay(1, clock) == 1.0
 
 
 def test_child_command_reinvokes_a_single_worker():
@@ -334,6 +454,40 @@ def test_child_command_reuses_the_script_by_absolute_path(tmp_path, monkeypatch)
     assert child_command([], 0, argv0=str(tmp_path / "__main__.py"))[1] == "-m"
     # A script that no longer exists falls back to the module.
     assert child_command([], 0, argv0=str(tmp_path / "gone.py"))[1] == "-m"
+
+
+class TestStopRestartRace:
+    def test_a_stop_just_before_the_restart_starts_nothing(self, monkeypatch):
+        """The reviewer's timing: the stop lands between the snapshot and Popen."""
+        in_process_env(monkeypatch)
+        supervisor = Supervisor(
+            processes=1,
+            worker_args=["--interval", "0.05", "--verbosity", "0"],
+            restart_delay=0.05,
+        )
+        original = supervisor._start
+        starts = 0
+
+        def patched(index):
+            nonlocal starts
+            starts += 1
+            if starts == 2:
+                supervisor.handle_signal(signal.SIGTERM, None)
+            original(index)
+
+        monkeypatch.setattr(supervisor, "_start", patched)
+        thread, result = run_in_thread(supervisor)
+        try:
+            assert wait_for(lambda: slot_pid(supervisor, 0), timeout=20)
+            os.kill(slot_pid(supervisor, 0), signal.SIGKILL)
+            thread.join(timeout=10)
+        finally:
+            supervisor.request_stop()
+            supervisor._signal_children(signal.SIGTERM)
+            thread.join(timeout=10)
+        assert starts == 2
+        assert supervisor._children == {}
+        assert result == [128 + signal.SIGKILL]
 
 
 def test_a_second_signal_forwards_again(monkeypatch):

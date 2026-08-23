@@ -24,6 +24,7 @@ import sys
 import time
 from collections import deque
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from django.conf import settings
@@ -49,12 +50,25 @@ RESTART_WINDOW = 60.0
 POLL_INTERVAL = 0.1
 
 
-def child_command(worker_args: list[str], index: int) -> list[str]:
-    """The argv for one slot. ``worker_args`` is every flag except --processes."""
+def child_command(
+    worker_args: list[str], index: int, argv0: str | None = None
+) -> list[str]:
+    """
+    The argv for one slot. ``worker_args`` is every flag except --processes.
+
+    The child is started the way the supervisor was: a ``manage.py`` (or any
+    other script) is re-run by absolute path, so the child has the same
+    ``sys.path[0]`` whatever the current directory; anything else (a
+    ``django-admin`` console script, ``python -m django``) becomes ``python
+    -m django`` with the settings module in the environment.
+    """
+    script = Path(sys.argv[0] if argv0 is None else argv0)
+    if script.suffix == ".py" and script.name != "__main__.py" and script.is_file():
+        entry = [sys.executable, str(script.resolve())]
+    else:
+        entry = [sys.executable, "-m", "django"]
     return [
-        sys.executable,
-        "-m",
-        "django",
+        *entry,
         "ox_worker",
         *worker_args,
         "--processes",
@@ -67,8 +81,8 @@ def child_command(worker_args: list[str], index: int) -> list[str]:
 def _child_env() -> dict[str, str]:
     env = dict(os.environ)
     # The parent found its settings somehow (manage.py sets the variable,
-    # or it was already in the environment). The child runs `-m django`,
-    # which only knows the environment.
+    # --settings, or it was already in the environment). The child may run
+    # `-m django`, which only knows the environment.
     module = getattr(settings, "SETTINGS_MODULE", None)
     if module:
         env["DJANGO_SETTINGS_MODULE"] = module
@@ -120,6 +134,7 @@ class Supervisor:
         self._children[index] = subprocess.Popen(  # noqa: S603
             child_command(self.worker_args, index),
             env=_child_env(),
+            cwd=Path.cwd(),
             process_group=0,
         )
         self._exit_codes.pop(index, None)

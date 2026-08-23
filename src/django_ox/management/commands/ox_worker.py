@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import sys
+from pathlib import Path
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
@@ -143,4 +144,10 @@ def worker_args(options: dict[str, Any]) -> list[str]:
         args += ["--queues", options["queues"]]
     if options["lock_timeout"] is not None:
         args += ["--lock-timeout", str(options["lock_timeout"])]
+    # Django consumes these before the command sees them, but leaves them in
+    # options. The child has to find the same settings from the same path.
+    if options.get("settings"):
+        args += ["--settings", options["settings"]]
+    if options.get("pythonpath"):
+        args += ["--pythonpath", str(Path(options["pythonpath"]).resolve())]
     return args

@@ -41,15 +41,43 @@ def child_env() -> dict[str, str]:
     return env
 
 
-def start_worker(tmp_path: Path, *flags: str) -> subprocess.Popen[bytes]:
+def start_worker(
+    tmp_path: Path,
+    *flags: str,
+    argv: list[str] | None = None,
+    cwd: Path = REPO,
+    env: dict[str, str] | None = None,
+) -> subprocess.Popen[bytes]:
     log = (tmp_path / "worker.log").open("wb")
     return subprocess.Popen(  # noqa: S603
-        [sys.executable, "-m", "django", "ox_worker", *flags],
-        cwd=REPO,
-        env=child_env(),
+        [*(argv or [sys.executable, "-m", "django"]), "ox_worker", *flags],
+        cwd=cwd,
+        env=child_env() if env is None else env,
         stderr=log,
         stdout=log,
     )
+
+
+def scratch_project(tmp_path: Path) -> Path:
+    """
+    A project directory with its own manage.py and settings package, the way
+    a deployment has one. The settings re-export the test settings so the
+    children reach the test database.
+    """
+    project = tmp_path / "proj"
+    (project / "scratchproj").mkdir(parents=True)
+    (project / "manage.py").write_text(
+        "import os, sys\n"
+        "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'scratchproj.settings')\n"
+        "from django.core.management import execute_from_command_line\n"
+        "execute_from_command_line(sys.argv)\n"
+    )
+    (project / "scratchproj" / "__init__.py").write_text("")
+    (project / "scratchproj" / "settings.py").write_text(
+        f"import sys\nsys.path.insert(0, {str(REPO)!r})\n"
+        f"from {settings.SETTINGS_MODULE} import *  # noqa: F403\n"
+    )
+    return project
 
 
 def stop_worker(proc: subprocess.Popen[bytes], tmp_path: Path) -> tuple[int, str]:
@@ -202,6 +230,61 @@ class TestProcessesTwo:
         assert row.worker_ids[0] == holder
 
 
+class TestReinvocation:
+    """The children start from any cwd, the way the supervisor was started."""
+
+    def _runs_two_workers(self, tmp_path, proc):
+        result = add.enqueue(1, 2)
+        try:
+            assert wait_for(
+                lambda: (
+                    OxTask.objects.get(id=result.id).status == OxTask.Status.SUCCESSFUL
+                ),
+                timeout=20,
+            )
+        finally:
+            code, log = stop_worker(proc, tmp_path)
+        assert code == 0, log
+        assert "ModuleNotFoundError" not in log
+        assert "Worker process" not in log
+        assert len(re.findall(r"Worker \S+ starting: queues=", log)) == 2
+
+    def test_absolute_manage_py_from_another_cwd(self, tmp_path):
+        project = scratch_project(tmp_path)
+        env = child_env()
+        del env["DJANGO_SETTINGS_MODULE"]
+        proc = start_worker(
+            tmp_path,
+            "--processes",
+            "2",
+            "--interval",
+            "0.05",
+            argv=[sys.executable, str(project / "manage.py")],
+            cwd=Path("/"),
+            env=env,
+        )
+        self._runs_two_workers(tmp_path, proc)
+
+    def test_pythonpath_and_settings_are_forwarded(self, tmp_path):
+        project = scratch_project(tmp_path)
+        env = child_env()
+        del env["DJANGO_SETTINGS_MODULE"]
+        proc = start_worker(
+            tmp_path,
+            "--pythonpath",
+            str(project),
+            "--settings",
+            "scratchproj.settings",
+            "--processes",
+            "2",
+            "--interval",
+            "0.05",
+            cwd=Path("/"),
+            env=env,
+        )
+        self._runs_two_workers(tmp_path, proc)
+
+
 class TestRestartCap:
     def test_over_the_cap_exits_nonzero(self, caplog, monkeypatch):
         caplog.set_level(logging.WARNING, logger="django_ox")
@@ -225,7 +308,7 @@ class TestRestartCap:
 
 
 def test_child_command_reinvokes_a_single_worker():
-    assert child_command(["--concurrency", "4"], 3) == [
+    assert child_command(["--concurrency", "4"], 3, argv0="django-admin") == [
         sys.executable,
         "-m",
         "django",
@@ -237,6 +320,20 @@ def test_child_command_reinvokes_a_single_worker():
         "--worker-index",
         "3",
     ]
+
+
+def test_child_command_reuses_the_script_by_absolute_path(tmp_path, monkeypatch):
+    script = tmp_path / "manage.py"
+    script.write_text("")
+    monkeypatch.chdir(tmp_path)
+    assert child_command([], 0, argv0="manage.py")[:2] == [
+        sys.executable,
+        str(script.resolve()),
+    ]
+    # `python -m django` has a __main__.py for argv[0]; that is not a script.
+    assert child_command([], 0, argv0=str(tmp_path / "__main__.py"))[1] == "-m"
+    # A script that no longer exists falls back to the module.
+    assert child_command([], 0, argv0=str(tmp_path / "gone.py"))[1] == "-m"
 
 
 def test_a_second_signal_forwards_again(monkeypatch):

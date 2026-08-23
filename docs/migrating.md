@@ -84,7 +84,7 @@ send_confirmation.enqueue(order_id=42)
 | `apply_async(countdown=..., eta=...)` | `run_after` |
 | `autoretry_for`, `self.retry` | automatic. Tune with `MAX_ATTEMPTS`, `BACKOFF_INITIAL`, `BACKOFF_MAX`. |
 | Result backend | the same table, read through the standard result API. |
-| Flower | the [stats API and `ox_health`](monitoring.md) |
+| Flower | the [stats API, `ox_health`, the Prometheus endpoint and the admin page](monitoring.md) |
 
 One difference in behaviour is worth reading before you switch. With a broker,
 `enqueue` leaves your process immediately. If the surrounding transaction then

@@ -88,7 +88,8 @@ coming back. The mechanics, and the one case worth knowing about, are in
   standard `django.tasks` result API.
 - A [prune command](configuration.md#ox_prune) to keep the table small.
 - [Monitoring](monitoring.md): a queue-stats API, an `ox_health` command
-  for probes and cron alerting, and structured log events.
+  for probes and cron alerting, a Prometheus endpoint, structured log
+  events, and an admin page with retry and discard.
 
 ## Install
 
@@ -989,7 +990,7 @@ send_confirmation.enqueue(order_id=42)
 | `apply_async(countdown=..., eta=...)` | `run_after` |
 | `autoretry_for`, `self.retry` | automatic. Tune with `MAX_ATTEMPTS`, `BACKOFF_INITIAL`, `BACKOFF_MAX`. |
 | Result backend | the same table, read through the standard result API. |
-| Flower | the [stats API and `ox_health`](monitoring.md) |
+| Flower | the [stats API, `ox_health`, the Prometheus endpoint and the admin page](monitoring.md) |
 
 One difference in behaviour is worth reading before you switch. With a broker,
 `enqueue` leaves your process immediately. If the surrounding transaction then
@@ -1136,7 +1137,7 @@ fewer service. The last section says where django-ox is not the right fit.
 | Priorities | -100 to 100 | Yes [^tdb-backend] | Yes; on Redis needs 5.0+ and `PriorityRedisHuey` [^huey-guide] | 0 to 255 on RabbitMQ and Redis [^celery-calling] | Not documented [^q2-configure] | Per actor; lower number runs first [^dq-guide] | Yes [^proc-index] |
 | Time limit on a running task | `TASK_TIMEOUT`, per queue in `TASK_TIMEOUTS`: `TaskTimeout` raised inside the task at the deadline, and a worker recycle when the thread does not stop. See [Production](production.md#task-timeouts) | Not documented in the README or the worker flags [^tdb-readme] [^tdb-worker] | `timeout` per task or per call; "a `TaskTimeout` is raised and returned to the caller via the result handle" [^huey-guide] | `soft_time_limit` raises `SoftTimeLimitExceeded` inside the task; `time_limit` terminates the process running it, which is replaced. "Time limits don't currently work on platforms that don't support the `SIGUSR1` signal" [^celery-workers] | `timeout`, default `None`: "the number of seconds a worker is allowed to spend on a task before it's terminated" [^q2-configure] | `time_limit` per actor, default 10 minutes, raises `TimeLimitExceeded`. "Time limits are best-effort. They cannot cancel system calls or any function that doesn't currently hold the GIL under CPython" [^dq-guide] | Not documented on the page checked [^proc-index] |
 | Worker dies mid-task | Lease renewed every `LOCK_TIMEOUT / 3`; a task whose lease goes stale for `LOCK_TIMEOUT` is put back to READY, or marked LOST when attempts are spent. See [Production](production.md#the-reaper) | Issue #5, open since 2024-06-11: the task 'remains marked as "PROCESSING", and thus is never picked up for re-processing nor marked as completed / failed' [^tdb-5] | "tasks that are mid-execution are lost and will not be retried automatically" [^huey-guide] | `acks_late` re-delivers; the worker still acknowledges "if the child process executing the task is terminated" [^celery-tasks] | Issue #327, open since 2026-05-05: worker death not reported to the monitor, `MAX_ATTEMPTS` ignored [^q2-327] | Not stated on the pages checked [^dq-guide] [^dq-cookbook] | Heartbeat every 10 s; jobs stay in `doing` until a `retry_stalled_jobs` periodic task you define picks them up [^proc-stalled] |
-| Health and metrics | `ox_health` command, `django_ox.stats`, structured log events | Issue #44, container healthchecks, open since 2026-06-08 [^tdb-44] | Signals [^huey-guide] | Flower, a separate process, with Prometheus integration [^flower] | `qmonitor`, `qinfo`, `Stat` [^q2-monitor] | Prometheus middleware; not in the default middleware list [^dq-prom] | Statistics via events [^proc-index] |
+| Health and metrics | `ox_health` command, `django_ox.stats`, a Prometheus endpoint (`/ox/metrics`), structured log events, admin retry and discard | Issue #44, container healthchecks, open since 2026-06-08 [^tdb-44] | Signals [^huey-guide] | Flower, a separate process, with Prometheus integration [^flower] | `qmonitor`, `qinfo`, `Stat` [^q2-monitor] | Prometheus middleware; not in the default middleware list [^dq-prom] | Statistics via events [^proc-index] |
 | Databases | PostgreSQL, SQLite and MySQL 8 tested in CI; MariaDB 10.6+ untested | Any Django database [^tdb-readme] | Redis, SQLite, PostgreSQL, file, memory [^huey-guide] | Broker, not a database [^celery-brokers] | Any Django database through the ORM broker [^q2-brokers] | Broker, not a database [^dq-guide] | PostgreSQL 13+ [^proc-index] |
 | Licence | BSD 3-Clause | BSD 3-Clause [^tdb-repo] | MIT [^huey-repo] | BSD 3-Clause [^celery-license] | MIT [^q2-pyproject] | LGPL 3.0 [^dq-repo] | MIT [^proc-repo] |
 
@@ -1703,6 +1704,8 @@ summary:
   depth and backlog age are the two numbers worth alerting on.
 - **`manage.py ox_health`** turns thresholds on those numbers into an
   exit code, for cron alerting and container probes.
+- **The Prometheus endpoint.** Mounting `django_ox.urls` serves the same
+  numbers as gauges at `GET /ox/metrics`.
 - **Logs.** The worker logs to the `django_ox` logger: lifecycle at
   INFO, retries and reaper reclaims at WARNING, terminal failures and
   unhandled worker errors at ERROR, each with stable extra keys for JSON
@@ -2133,7 +2136,7 @@ change list shows id, task path, queue, status, attempts, and the enqueue
 and finish times, filters on status and queue, and searches by id and
 path. The detail page is read-only and lays out every attempt's
 traceback. The two actions, **Retry selected tasks** and **Discard
-selected tasks**, call the functions above on each selected row and
+selected tasks**, call `retry_many` and `discard_many` on the selection and
 report how many moved and how many were skipped for being in a state the
 action does not accept.
 

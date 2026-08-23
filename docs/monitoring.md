@@ -379,7 +379,7 @@ change list shows id, task path, queue, status, attempts, and the enqueue
 and finish times, filters on status and queue, and searches by id and
 path. The detail page is read-only and lays out every attempt's
 traceback. The two actions, **Retry selected tasks** and **Discard
-selected tasks**, call the functions above on each selected row and
+selected tasks**, call `retry_many` and `discard_many` on the selection and
 report how many moved and how many were skipped for being in a state the
 action does not accept.
 

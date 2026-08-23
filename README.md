@@ -120,11 +120,14 @@ python manage.py ox_worker
 | `--backend` | `default` | Backend alias from the `TASKS` setting. |
 | `--queues` | all configured queues | Comma-separated queue names to process. |
 | `--concurrency` | `1` | Tasks executed concurrently (thread pool). |
+| `--processes` | `1` | Worker processes under one supervisor. Each is a full worker with its own connections, reaper and `--concurrency` thread pool; a process that dies is restarted. POSIX only. |
 | `--interval` | `1.0` | Polling interval in seconds when idle. |
-| `--lock-timeout` | backend `LOCK_TIMEOUT` | Seconds before a stuck task is reclaimed. |
+| `--lock-timeout` | backend `LOCK_TIMEOUT` | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |
 
 On SIGTERM or SIGINT the worker stops claiming, finishes in-flight tasks, then
-exits. A second signal forces an immediate exit.
+exits. A second signal forces an immediate exit. With `--processes` above 1,
+send the signal to the supervisor; it forwards once and restarts a worker that
+dies.
 
 ## Pruning
 
@@ -164,6 +167,10 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. |
 | `--max-age` | off | Fail when the oldest waiting task has waited longer than this many seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this many seconds. |
+
+Mounting `path("ox/", include("django_ox.urls"))` exposes `GET /ox/metrics`,
+the same numbers as Prometheus gauges; the view has no authentication of its
+own.
 
 When `django.contrib.admin` is installed, the task table is registered with
 it: a filterable list, a read-only detail page with every attempt's

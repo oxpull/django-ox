@@ -489,6 +489,8 @@ summary:
   depth and backlog age are the two numbers worth alerting on.
 - **`manage.py ox_health`** turns thresholds on those numbers into an
   exit code, for cron alerting and container probes.
+- **The Prometheus endpoint.** Mounting `django_ox.urls` serves the same
+  numbers as gauges at `GET /ox/metrics`.
 - **Logs.** The worker logs to the `django_ox` logger: lifecycle at
   INFO, retries and reaper reclaims at WARNING, terminal failures and
   unhandled worker errors at ERROR, each with stable extra keys for JSON

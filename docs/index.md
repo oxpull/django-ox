@@ -81,7 +81,8 @@ coming back. The mechanics, and the one case worth knowing about, are in
   standard `django.tasks` result API.
 - A [prune command](configuration.md#ox_prune) to keep the table small.
 - [Monitoring](monitoring.md): a queue-stats API, an `ox_health` command
-  for probes and cron alerting, and structured log events.
+  for probes and cron alerting, a Prometheus endpoint, structured log
+  events, and an admin page with retry and discard.
 
 ## Install
 

@@ -55,6 +55,18 @@ failed tasks retry with
 exponential backoff, and a reaper returns tasks whose worker died to the
 queue. Details in [Production](production.md).
 
+## What happens when a worker dies
+
+A worker that claims a task takes a lease on it, and the attempt is counted at
+that moment. While the task runs, the worker renews the lease every
+`LOCK_TIMEOUT / 3` seconds, so a slow task on a live worker is never reclaimed.
+If the worker is killed, the lease goes stale. After `LOCK_TIMEOUT` (default
+300 seconds) the reaper in any surviving worker takes the task back: to READY
+if attempts remain, or to LOST if they are spent. LOST reads as `FAILED`
+through the result API, so nothing waits forever on a worker that is not
+coming back. The mechanics, and the one case worth knowing about, are in
+[Production](production.md#the-lease).
+
 ## What you get
 
 - Transactional enqueue, as above. No `on_commit` boilerplate.

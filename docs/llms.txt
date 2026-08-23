@@ -83,6 +83,9 @@ Operational facts worth getting right:
   queue routing, idempotent tasks, testing without a worker.
 - [Migrating](https://oxpull.com/django-ox/migrating/): from another
   `django.tasks` backend, from Celery, from huey, and migrating away.
+- [Choosing a backend](https://oxpull.com/django-ox/choosing/): sourced
+  comparison with django-tasks-db, huey, Celery, django-q2, dramatiq and
+  procrastinate, and when not to use django-ox.
 - [Production](https://oxpull.com/django-ox/production/): systemd units,
   containers, graceful shutdown, scaling out, the lease and the reaper,
   PostgreSQL or SQLite, pruning on a timer.

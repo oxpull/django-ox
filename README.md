@@ -16,6 +16,7 @@ them with a worker process. There is no broker to provision, secure, upgrade or
 back up, and because `enqueue()` is an INSERT on your default connection, a
 task enqueued inside `transaction.atomic()` commits or rolls back with your
 data. No `transaction.on_commit()` needed.
+Comparing backends? See [Choosing a task backend](https://oxpull.com/django-ox/choosing/).
 
 ## Install
 

@@ -149,6 +149,25 @@ class OxBackend(BaseTaskBackend):
                     id="django_ox.E002",
                 )
             )
+        from .timeouts import task_timeouts_from_options
+
+        try:
+            task_timeouts_from_options(self.options, self.queues)
+        except ImproperlyConfigured as exc:
+            unknown_queue = "is not in QUEUES" in str(exc)
+            errors.append(
+                checks.Error(
+                    str(exc),
+                    hint=(
+                        "Name a queue from this backend's QUEUES, or drop the entry."
+                        if unknown_queue
+                        else "TASK_TIMEOUT, each TASK_TIMEOUTS value and "
+                        "TASK_TIMEOUT_GRACE are a positive number of seconds; the "
+                        "first two may also be None."
+                    ),
+                    id="django_ox.E005" if unknown_queue else "django_ox.E004",
+                )
+            )
         for name, other_alias in schedule_name_collisions(self.alias):
             errors.append(
                 checks.Error(

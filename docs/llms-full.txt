@@ -2250,13 +2250,15 @@ promise about compatibility, so you can pin `django-ox` with confidence.
 ## Public API
 
 These are the supported surfaces. Changes to them are versioned and
-announced in the [changelog](changelog.md).
+announced in the [changelog](changelog.md). This page, not a module's
+`__all__`, is the statement of what is public; today the two agree.
 
 - **The backend path** `django_ox.backend.OxBackend`, referenced as a
-  string in the `TASKS` setting, and every `OPTIONS` key it reads:
-  `MAX_ATTEMPTS`, `LOCK_TIMEOUT`, `BACKOFF_INITIAL`, `BACKOFF_MAX`,
-  `TASK_TIMEOUT`, `TASK_TIMEOUTS`, `TASK_TIMEOUT_GRACE`, `QUEUES`, and
-  `SCHEDULES` (with its documented per-schedule keys).
+  string in the `TASKS` setting, `QUEUES` beside `OPTIONS`, and every
+  `OPTIONS` key it reads: `MAX_ATTEMPTS`, `LOCK_TIMEOUT`,
+  `BACKOFF_INITIAL`, `BACKOFF_MAX`, `TASK_TIMEOUT`, `TASK_TIMEOUTS`,
+  `TASK_TIMEOUT_GRACE`, and `SCHEDULES` (with its documented
+  per-schedule keys).
 - **The management commands** and their flags: `ox_worker`, `ox_prune`,
   `ox_health`. `ox_worker`'s exit codes: 0 after a drain, 130 on a forced
   exit, 75 when the worker recycles itself after a stuck task thread.
@@ -2265,20 +2267,24 @@ announced in the [changelog](changelog.md).
   first other non-zero worker code.
 - **The timeout helpers** `django_ox.deadline()` and `django_ox.remaining()`,
   callable from inside a task.
-- **The metrics module** `django_ox.stats`: the functions listed in its
-  `__all__` (`queue_stats`, `ready_count`, `oldest_ready_age`,
-  `throughput`, `failure_rate`, `last_claim_age`) and the `QueueStats`
-  dataclass.
+- **The metrics module** `django_ox.stats`: `queue_stats`, `ready_count`,
+  `oldest_ready_age`, `throughput`, `failure_rate`, `last_claim_age`, the
+  `QueueStats` dataclass, and `DEFAULT_WINDOW`, the trailing window the
+  rate functions default to.
 - **The Prometheus surface**: `django_ox.metrics.render_prometheus`,
   `render_openmetrics` and `collector`, the view `django_ox.views.metrics`,
   the `django_ox.urls` module with its `metrics` route name, and the metric
   names and label names listed on the [Monitoring](monitoring.md#prometheus)
-  page. A scraped name is a contract with every dashboard that reads it, so
-  a rename is a breaking change. Help text is not part of the contract.
+  page. `METRIC_NAMES` is that list in code; `CONTENT_TYPE_PROMETHEUS` and
+  `CONTENT_TYPE_OPENMETRICS` are the content types the view serves. A
+  scraped name is a contract with every dashboard that reads it, so a
+  rename is a breaking change. Help text is not part of the contract.
 - **The actions module** `django_ox.actions`: `retry` and `discard`, their
   accepted states, and their return values; `retry_many` and
   `discard_many`, the selections they accept and their `(changed, skipped)`
-  return. The admin page that calls
+  return. `RETRYABLE_STATUSES` and `DISCARDABLE_STATUSES` are those
+  accepted states in code; `UPDATE_CHUNK_SIZE` is exported for reading and
+  its value may change. The admin page that calls
   them is a convenience over this module; its layout is not a contract,
   the two action names are.
 - **The bulk module** `django_ox.bulk`: `enqueue_many(task, calls)`, its
@@ -2305,8 +2311,10 @@ contract.
 Everything else is an implementation detail and may change in any release
 without notice. That covers the `django_ox.worker.Worker` internals, the cron
 parser (`django_ox.cron`), the row-to-dataclass conversion
-(`django_ox.results`), the schedule loader (`django_ox.schedules`), and any name
-starting with an underscore. The exact SQL a claim emits and the
+(`django_ox.results`), the schedule loader (`django_ox.schedules`), the
+supervisor behind `--processes` (`django_ox.supervisor`) and the hidden
+`--worker-index` flag it starts each child with, and any name starting
+with an underscore. The exact SQL a claim emits and the
 model's non-schema helper methods are not part of the contract.
 
 ## Versioning

@@ -29,8 +29,6 @@ __all__ = [
     "CONTENT_TYPE_OPENMETRICS",
     "CONTENT_TYPE_PROMETHEUS",
     "METRIC_NAMES",
-    "MetricFamily",
-    "collect",
     "collector",
     "render_openmetrics",
     "render_prometheus",

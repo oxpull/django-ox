@@ -101,6 +101,12 @@ def test_worker_args_carry_every_flag_but_processes():
     ]
 
 
+def test_worker_index_is_not_in_the_help():
+    """--worker-index is the supervisor's child-side flag, not an operator's."""
+    parser = ox_worker.Command().create_parser("manage.py", "ox_worker")
+    assert "worker-index" not in parser.format_help()
+
+
 def test_worker_args_forward_djangos_global_flags():
     options = {
         "backend": "default",

@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
+from django.utils import timezone
+
 from . import stats
 
 __all__ = [
@@ -77,10 +79,6 @@ class MetricFamily:
     samples: tuple[tuple[dict[str, str], float], ...]
 
 
-def _seconds(value: timedelta | None) -> float | None:
-    return None if value is None else value.total_seconds()
-
-
 def collect(window: timedelta = stats.DEFAULT_WINDOW) -> list[MetricFamily]:
     """
     Every metric family, one sample per queue, in METRIC_NAMES order.
@@ -88,8 +86,18 @@ def collect(window: timedelta = stats.DEFAULT_WINDOW) -> list[MetricFamily]:
     A queue appears once it has any row. A metric with nothing to measure
     (no eligible task, no claim yet, nothing finished in the window) has
     no sample for that queue rather than a placeholder value.
+
+    Five aggregate queries, however many queues there are: the per-status
+    counts, then one grouped query for each reading those counts cannot
+    give (eligible backlog, oldest wait, last claim, the finished window).
     """
+    now = timezone.now()
     rows = stats.queue_stats()
+    ready_by_queue = stats._ready_counts(now)
+    oldest_by_queue = stats._oldest_ready(now)
+    claims_by_queue = stats._last_claims()
+    finished_by_queue = stats._finished_counts(window)
+    minutes = window.total_seconds() / 60.0
     tasks: list[tuple[dict[str, str], float]] = []
     ready: list[tuple[dict[str, str], float]] = []
     oldest: list[tuple[dict[str, str], float]] = []
@@ -102,17 +110,17 @@ def collect(window: timedelta = stats.DEFAULT_WINDOW) -> list[MetricFamily]:
             ({"queue": row.queue_name, "status": status}, float(getattr(row, status)))
             for status in STATUSES
         )
-        ready.append((queue, float(stats.ready_count(row.queue_name))))
-        age = _seconds(stats.oldest_ready_age(row.queue_name))
-        if age is not None:
-            oldest.append((queue, age))
-        since_claim = _seconds(stats.last_claim_age(row.queue_name))
-        if since_claim is not None:
-            claim.append((queue, since_claim))
-        throughput.append((queue, stats.throughput(window, row.queue_name)))
-        rate = stats.failure_rate(window, row.queue_name)
-        if rate is not None:
-            failure.append((queue, rate))
+        ready.append((queue, float(ready_by_queue.get(row.queue_name, 0))))
+        eligible_since = oldest_by_queue.get(row.queue_name)
+        if eligible_since is not None:
+            oldest.append((queue, (now - eligible_since).total_seconds()))
+        last_claim = claims_by_queue.get(row.queue_name)
+        if last_claim is not None:
+            claim.append((queue, (now - last_claim).total_seconds()))
+        finished, failed = finished_by_queue.get(row.queue_name, (0, 0))
+        throughput.append((queue, finished / minutes))
+        if finished:
+            failure.append((queue, failed / finished))
     samples = (tasks, ready, oldest, claim, throughput, failure)
     return [
         MetricFamily(name, _HELP[name], tuple(values))
@@ -160,6 +168,10 @@ def render_openmetrics(window: timedelta = stats.DEFAULT_WINDOW) -> str:
     return render_prometheus(window) + "# EOF\n"
 
 
+def _label_names(name: str) -> list[str]:
+    return ["queue", "status"] if name == "django_ox_tasks" else ["queue"]
+
+
 class _OxCollector:
     """A prometheus_client Collector over collect(). Built by collector()."""
 
@@ -169,15 +181,14 @@ class _OxCollector:
 
     def describe(self) -> Iterator[Any]:
         # Lets a registry register the collector without querying the
-        # database, and tells it the names so duplicates are rejected.
+        # database, and tells it the names and labels so duplicates are
+        # rejected and readers of the declaration see what collect() renders.
         for name in METRIC_NAMES:
-            yield self._family_class(name, _HELP[name], labels=["queue"])
+            yield self._family_class(name, _HELP[name], labels=_label_names(name))
 
     def collect(self) -> Iterator[Any]:
         for family in collect(self._window):
-            label_names = (
-                ["queue", "status"] if family.name == "django_ox_tasks" else ["queue"]
-            )
+            label_names = _label_names(family.name)
             metric = self._family_class(family.name, family.help, labels=label_names)
             for labels, value in family.samples:
                 metric.add_metric([labels[key] for key in label_names], value)

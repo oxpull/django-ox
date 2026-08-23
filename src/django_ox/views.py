@@ -8,18 +8,18 @@ project's own policy; the Monitoring page shows how.
 from __future__ import annotations
 
 from django.http import HttpRequest, HttpResponse
-from django.views.decorators.http import require_GET
+from django.views.decorators.http import require_safe
 
 from . import metrics as exposition
 
 __all__ = ["metrics"]
 
 
-@require_GET
+@require_safe
 def metrics(request: HttpRequest) -> HttpResponse:
     """
     The queue metrics in Prometheus text format, or OpenMetrics when the
-    scraper asks for it in the Accept header.
+    scraper asks for it in the Accept header. GET and HEAD only.
     """
     accept = request.headers.get("Accept", "")
     if "application/openmetrics-text" in accept:

@@ -9,6 +9,7 @@ file on purpose.
 import ast
 import importlib
 import re
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -197,6 +198,19 @@ class TestView:
     def test_has_no_auth_of_its_own(self, client):
         assert client.get("/ox/metrics").status_code == 200
 
+    def test_answers_head(self, client):
+        """Load balancers probe with HEAD; the view is safe, so it answers."""
+        assert client.head("/ox/metrics").status_code == 200
+
+    def test_a_scrape_is_five_queries_however_many_queues(
+        self, client, django_assert_num_queries
+    ):
+        seed()
+        for n in range(8):
+            make_task(queue=f"queue-{n}")
+        with django_assert_num_queries(5):
+            assert client.get("/ox/metrics").status_code == 200
+
 
 @pytest.mark.django_db
 class TestCollector:
@@ -207,6 +221,25 @@ class TestCollector:
         monkeypatch.setattr(importlib, "import_module", refuse)
         with pytest.raises(ImportError, match="prometheus_client"):
             metrics.collector()
+
+    def test_describe_declares_the_status_label(self):
+        """describe() must promise the same labels collect() renders."""
+
+        class Family:
+            def __init__(self, name, text, labels):
+                self.name = name
+                self.labels = labels
+
+        collector = metrics._OxCollector(Family, timedelta(minutes=5))
+        described = {family.name: family.labels for family in collector.describe()}
+        assert described["django_ox_tasks"] == ["queue", "status"]
+        others = {
+            name: labels
+            for name, labels in described.items()
+            if name != "django_ox_tasks"
+        }
+        assert all(labels == ["queue"] for labels in others.values())
+        assert set(described) == set(metrics.METRIC_NAMES)
 
     def test_registers_with_prometheus_client(self):
         pytest.importorskip("prometheus_client")

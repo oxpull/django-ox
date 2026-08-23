@@ -170,3 +170,47 @@ def last_claim_age(queue_name: str | None = None) -> timedelta | None:
     if latest is None:
         return None
     return now - latest
+
+
+# Grouped forms of the readings above, one GROUP BY each, for callers that
+# need every queue at once. django_ox.metrics reads these so a scrape's cost
+# does not grow with the number of queues.
+
+
+def _ready_counts(now: datetime) -> dict[str, int]:
+    rows = _ready(None, now).values("queue_name").annotate(n=Count("pk")).order_by()
+    return {row["queue_name"]: row["n"] for row in rows}
+
+
+def _oldest_ready(now: datetime) -> dict[str, datetime]:
+    rows = (
+        _ready(None, now)
+        .values("queue_name")
+        .annotate(oldest=Min(Coalesce("run_after", "enqueued_at")))
+        .order_by()
+    )
+    return {row["queue_name"]: row["oldest"] for row in rows}
+
+
+def _last_claims() -> dict[str, datetime]:
+    rows = (
+        OxTask.objects.values("queue_name")
+        .annotate(latest=Max("last_attempted_at"))
+        .order_by()
+    )
+    return {
+        row["queue_name"]: row["latest"] for row in rows if row["latest"] is not None
+    }
+
+
+def _finished_counts(window: timedelta) -> dict[str, tuple[int, int]]:
+    rows = (
+        _finished(window, None)
+        .values("queue_name")
+        .annotate(
+            finished=Count("pk"),
+            failed=Count("pk", filter=Q(status=OxTask.Status.FAILED)),
+        )
+        .order_by()
+    )
+    return {row["queue_name"]: (row["finished"], row["failed"]) for row in rows}

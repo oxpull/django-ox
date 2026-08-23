@@ -1873,8 +1873,8 @@ scrape_configs:
 
 The response is `text/plain; version=0.0.4`. A scraper that sends
 `Accept: application/openmetrics-text` gets the OpenMetrics form of the
-same text. Each scrape is a handful of queries over the task table, one per
-metric per queue, so it costs about what `ox_health` costs.
+same text, and `HEAD` is answered for load-balancer checks. Each scrape is
+five aggregate queries over the task table, however many queues there are.
 
 **The endpoint has no authentication of its own.** The numbers are not
 secret, but the queue names and the shape of your traffic are yours to keep,

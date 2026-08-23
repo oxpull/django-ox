@@ -771,7 +771,7 @@ bind) inside one transaction, so a call of 5,000 commits all 5,000 or none,
 and inside your own `transaction.atomic()` it commits or rolls back with
 the rest of your work, as `enqueue()` does.
 
-This is the free tier's bulk insert, and it is only that. Grouping the
+This is a bulk insert and nothing more. Grouping the
 tasks, reading their progress as one number and firing a callback when the
 last one settles is a [batch](pro.md), in Oxpull Pro.
 
@@ -1124,7 +1124,8 @@ function", open since 2020-12-19 with 98 upvotes [^celery-6552].
 
 - **You need to stop a task that is already running.** django-ox can discard
   a queued task and retry a failed one, but has no way to interrupt a
-  running one. Celery (through Flower) can terminate a worker process.
+  running one. Celery can revoke and terminate a running task, from Flower
+  or the control API [^flower].
 - **The queue must live on a different database from your models.** Tasks are
   stored on the default database. Multi-database routing is outside the
   current scope, and a separate queue database would also give up the
@@ -1145,8 +1146,8 @@ Rows are re-checked each release. If a cell is out of date, open an issue with
 the link that shows it, and it will be corrected in the next release.
 
 [^tdb-readme]: https://github.com/RealOrangeOne/django-tasks-db README, checked 2026-08-23.
-[^tdb-worker]: https://github.com/RealOrangeOne/django-tasks-db/blob/main/django_tasks_db/management/commands/db_worker.py, `add_arguments`, checked 2026-08-23.
-[^tdb-backend]: https://github.com/RealOrangeOne/django-tasks-db/blob/main/django_tasks_db/backend.py, `supports_priority = True`, checked 2026-08-23.
+[^tdb-worker]: https://github.com/RealOrangeOne/django-tasks-db/blob/master/django_tasks_db/management/commands/db_worker.py, `add_arguments`, checked 2026-08-23.
+[^tdb-backend]: https://github.com/RealOrangeOne/django-tasks-db/blob/master/django_tasks_db/backend.py, `supports_priority = True`, checked 2026-08-23.
 [^tdb-5]: https://github.com/RealOrangeOne/django-tasks-db/issues/5, open, checked 2026-08-23.
 [^tdb-44]: https://github.com/RealOrangeOne/django-tasks-db/issues/44, open, checked 2026-08-23.
 [^tdb-repo]: https://github.com/RealOrangeOne/django-tasks-db, licence field, checked 2026-08-23.

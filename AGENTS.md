@@ -8,7 +8,9 @@ guidance is on the docs site: https://oxpull.com/django-ox/agents/
 - `src/django_ox/`: the package. `backend.py` (enqueue, result API),
   `worker.py` (claim, execute, lease, reaper, schedule dispatch),
   `management/commands/` (`ox_worker`, `ox_health`, `ox_prune`),
-  `schedules.py` and `cron.py` (recurring tasks), `stats.py` (queue metrics).
+  `schedules.py` and `cron.py` (recurring tasks), `stats.py` (queue metrics),
+  `actions.py` (retry, discard), `bulk.py` (`enqueue_many`), `admin.py`
+  (the admin page, imported only when `django.contrib.admin` is installed).
 - `tests/`: pytest suite. `tests/settings.py` is SQLite; `settings_postgres.py`
   and `settings_mysql.py` switch the database through `DJANGO_SETTINGS_MODULE`.
 - `docs/`: MkDocs site. `docs/llms-full.txt` is generated; do not edit it by
@@ -58,7 +60,7 @@ DJANGO_SETTINGS_MODULE=tests.settings_postgres .venv/bin/python -m pytest -q
   `python tools/build_llms_full.py`; `tests/test_llms_full.py` fails otherwise.
 - `context7.json` `rules` are facts about the shipped code. Add one only when
   it is true in `src/` and stated in the docs.
-- Comments explain why, not what. No commented-out code and no leftover work markers; ruff
-  enforces both.
+- Comments explain why, not what. No commented-out code and no leftover work
+  markers; ruff enforces both.
 - The docs site publishes by hand with `mkdocs gh-deploy`, never on merge, and
   a PyPI release cannot be edited afterwards.

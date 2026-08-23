@@ -162,7 +162,7 @@ bind) inside one transaction, so a call of 5,000 commits all 5,000 or none,
 and inside your own `transaction.atomic()` it commits or rolls back with
 the rest of your work, as `enqueue()` does.
 
-This is the free tier's bulk insert, and it is only that. Grouping the
+This is a bulk insert and nothing more. Grouping the
 tasks, reading their progress as one number and firing a callback when the
 last one settles is a [batch](pro.md), in Oxpull Pro.
 

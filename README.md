@@ -138,12 +138,12 @@ python manage.py ox_prune --older-than 7d
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--older-than` | `7d` | Minimum time since the task finished. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
-| `--include-failed` | off | Also delete FAILED rows. By default they are kept: they hold the per-attempt tracebacks. |
+| `--include-failed` | off | Also delete FAILED and LOST rows. By default they are kept: they hold the per-attempt tracebacks and can be retried. |
 | `--batch-size` | `1000` | Rows per DELETE statement, so pruning a large table never takes a long lock or builds a giant IN clause. |
 | `--dry-run` | off | Report how many rows would be deleted without deleting any. |
 
-Only SUCCESSFUL rows (and, with `--include-failed`, FAILED rows) past the
-cutoff are deleted. READY and RUNNING rows are never touched, whatever their
+Only SUCCESSFUL and DISCARDED rows (and, with `--include-failed`, FAILED and
+LOST rows) past the cutoff are deleted. READY and RUNNING rows are never touched, whatever their
 age. Old rows from the recurring-schedule tick log are cleared with the same
 cutoff, always keeping each schedule's most recent tick.
 
@@ -158,6 +158,13 @@ numbers into an exit code for cron alerting and container probes:
 python manage.py ox_health --max-backlog 1000 --max-age 600
 ```
 
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--queue` | all queues | Restrict the checks to one queue. |
+| `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. |
+| `--max-age` | off | Fail when the oldest waiting task has waited longer than this many seconds. |
+| `--worker-timeout` | off | Fail when no worker has claimed a task within this many seconds. |
+
 When `django.contrib.admin` is installed, the task table is registered with
 it: a filterable list, a read-only detail page with every attempt's
 traceback, and **Retry selected tasks** and **Discard selected tasks**
@@ -165,13 +172,6 @@ actions. The same two operations are `django_ox.actions.retry(result_id)`
 and `django_ox.actions.discard(result_id)`. A retry is one more attempt on
 a FAILED or LOST task; a discard closes a READY, FAILED or LOST task without
 running it. Neither touches a running task.
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--queue` | all queues | Restrict the checks to one queue. |
-| `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. |
-| `--max-age` | off | Fail when the oldest waiting task has waited longer than this many seconds. |
-| `--worker-timeout` | off | Fail when no worker has claimed a task within this many seconds. |
 
 Worker lifecycle events (claim, start, success, retry, failure, reclaim,
 shutdown) log to the `django_ox` logger with stable extra keys (task id,

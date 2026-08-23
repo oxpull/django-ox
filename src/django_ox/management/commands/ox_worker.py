@@ -189,6 +189,16 @@ def worker_args(options: dict[str, Any]) -> list[str]:
         args += ["--queues", options["queues"]]
     if options["lock_timeout"] is not None:
         args += ["--lock-timeout", str(options["lock_timeout"])]
+    # Django's global flags change how a command runs before handle() is
+    # reached; each child must run under the same ones it was given.
+    if options.get("skip_checks"):
+        args += ["--skip-checks"]
+    if options.get("traceback"):
+        args += ["--traceback"]
+    if options.get("no_color"):
+        args += ["--no-color"]
+    if options.get("force_color"):
+        args += ["--force-color"]
     # Django consumes these before the command sees them, but leaves them in
     # options. The child has to find the same settings from the same path.
     if options.get("settings"):

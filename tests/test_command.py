@@ -101,6 +101,25 @@ def test_worker_args_carry_every_flag_but_processes():
     ]
 
 
+def test_worker_args_forward_djangos_global_flags():
+    options = {
+        "backend": "default",
+        "queues": None,
+        "concurrency": 1,
+        "interval": 1.0,
+        "lock_timeout": None,
+        "verbosity": 1,
+        "processes": 2,
+        "skip_checks": True,
+        "traceback": True,
+        "no_color": True,
+        "force_color": False,
+    }
+    args = ox_worker.worker_args(options)
+    assert args[-3:] == ["--skip-checks", "--traceback", "--no-color"]
+    assert "--force-color" not in args
+
+
 def test_worker_args_forward_settings_and_pythonpath(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     options = {

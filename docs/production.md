@@ -157,6 +157,59 @@ clock, so two hosts with drifting clocks do not produce false reclaims. If you
 run workers on more than one host, that is the setting which gives them one
 clock, and it is Django's default.
 
+### Task timeouts
+
+`TASK_TIMEOUT` puts a limit on how long one attempt may run. It is off by
+default. With it set, a task runs on a thread of its own and the worker waits
+up to the timeout for it. When the wait runs out the worker:
+
+1. Records the attempt as failed, with a `django_ox.exceptions.TaskTimeout`
+   error whose text names the timeout. The attempt was consumed at claim
+   time, so the retry rule is the ordinary one: back to READY on the
+   backoff while attempts remain, FAILED when they are spent.
+2. Moves the lease number in the same write, the way the reaper does when
+   it takes a row off a worker that went quiet. From here on nothing that
+   execution could write matches the row.
+3. Stops renewing the lease and frees the concurrency slot.
+
+It logs `task_timed_out` at WARNING before the usual `task_retrying` or
+`task_failed` record.
+
+**The thread keeps running.** Python has no way to stop a thread, so the
+timeout is soft: the task code carries on until it returns or raises, and
+whatever it produces is then discarded. The worker made every write for
+that attempt itself and has stopped listening, so the thread has nothing to
+write to. Its side effects are real, though. A task that times out halfway
+through sending emails has sent half of them, and the retry will run it
+again. Write tasks to be safe to run twice, the same as for any other
+retry.
+
+A thread left running still holds its slot in the process: memory, a
+database connection until it finishes, and the GIL whenever it computes.
+For I/O-bound work that is fine, a stuck HTTP call eventually errors out.
+For CPU-bound work that can spin forever, a timeout does not give the CPU
+back. Run such queues as separate processes with `--concurrency 1`, under a
+supervisor that can restart them, and set `TASK_TIMEOUTS` so the timeout
+applies where the work is.
+
+**Drain does not wait for it.** On SIGTERM the worker drains the attempts
+it is still waiting on, inside their timeouts. A thread whose attempt
+already timed out is not waited for; the process exits and the thread ends
+with it. A thread abandoned this way does not get to finish its work.
+
+Set per-queue values where one number does not fit:
+
+```python
+"OPTIONS": {
+    "TASK_TIMEOUT": 60,
+    "TASK_TIMEOUTS": {"exports": 3600, "webhooks": 10},
+}
+```
+
+A queue in `TASK_TIMEOUTS` uses its own value; `None` there exempts the
+queue from the global limit. A timeout longer than `LOCK_TIMEOUT` is fine:
+the lease is renewed for as long as the worker is waiting.
+
 With `USE_TZ` off the worker's clock is used instead. A database's own clock
 does not always match what these columns hold there: SQLite's is UTC while the
 columns carry naive local time, and reading one against the other would make

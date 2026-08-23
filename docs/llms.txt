@@ -41,8 +41,9 @@ Operational facts worth getting right:
   included. All three are correct with many workers on one database.
 - Backend options live under `OPTIONS` in the `TASKS` entry: `MAX_ATTEMPTS`
   (3), `LOCK_TIMEOUT` (300 s), `BACKOFF_INITIAL` (5 s), `BACKOFF_MAX` (600 s),
-  `SCHEDULES` ({}). `QUEUES` sits beside `OPTIONS`, not inside it, and
-  defaults to `["default"]`; `[]` allows any queue name.
+  `TASK_TIMEOUT` (None), `TASK_TIMEOUTS` ({}), `SCHEDULES` ({}). `QUEUES`
+  sits beside `OPTIONS`, not inside it, and defaults to `["default"]`; `[]`
+  allows any queue name.
 - An attempt is consumed at claim time, so a dead worker's run counts. Retry
   delay after attempt n is `BACKOFF_INITIAL * 2 ** (n - 1)`, capped at
   `BACKOFF_MAX`, no jitter.
@@ -50,6 +51,12 @@ Operational facts worth getting right:
   before the reaper hands the task to another worker. The worker renews the
   lease every `LOCK_TIMEOUT / 3` seconds, so a long task on a live worker
   keeps running.
+- `TASK_TIMEOUT` (seconds, default None) bounds one attempt. A timed-out
+  attempt is recorded as failed with a `TaskTimeout` error and retried on the
+  usual backoff. The timeout is soft: the thread running the task keeps
+  running until the task returns, and its result is discarded. `TASK_TIMEOUTS
+  = {"queue": seconds}` sets per-queue values; there is no per-task value,
+  because `django.tasks` has no field for one.
 - `ox_worker --concurrency N` is a thread pool in one process, suited to
   I/O-bound tasks. For CPU-bound work run several processes with
   `--concurrency 1`. `--queues a,b` restricts a worker to named queues; a

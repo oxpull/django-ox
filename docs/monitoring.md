@@ -119,6 +119,7 @@ The message text is not part of the contract. The keys are.
 | `task_claimed` | DEBUG | A task was claimed from the queue. |
 | `task_started` | DEBUG | Execution of an attempt begins. |
 | `task_succeeded` | INFO | The task reached SUCCESSFUL. |
+| `task_timed_out` | WARNING | An attempt ran past its `TASK_TIMEOUT`. The worker recorded it as failed and left the thread running; a `task_retrying` or `task_failed` record follows. |
 | `task_retrying` | WARNING | An attempt failed with retries remaining. |
 | `task_failed` | ERROR | The task reached FAILED, out of attempts. |
 | `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. |
@@ -137,7 +138,8 @@ The message text is not part of the contract. The keys are.
 | `task_path` | task events | Dotted path of the task function. |
 | `queue` | task events | Queue name. |
 | `attempt` | task events | Attempts consumed so far, including the current one. |
-| `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_lease_lost` | Wall-clock duration of the attempt, in milliseconds. |
+| `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_timed_out`, `task_lease_lost` | Wall-clock duration of the attempt, in milliseconds. |
+| `timeout_s` | `task_timed_out` | The timeout that applied, in seconds. |
 | `exception` | `task_retrying`, `task_failed` | Exception class name of the failure. |
 | `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `LOST` (out of attempts). |
 | `dropped_status` | `task_lease_lost` | Status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |

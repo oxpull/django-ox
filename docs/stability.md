@@ -12,7 +12,8 @@ announced in the [changelog](changelog.md).
 - **The backend path** `django_ox.backend.OxBackend`, referenced as a
   string in the `TASKS` setting, and every `OPTIONS` key it reads:
   `MAX_ATTEMPTS`, `LOCK_TIMEOUT`, `BACKOFF_INITIAL`, `BACKOFF_MAX`,
-  `QUEUES`, and `SCHEDULES` (with its documented per-schedule keys).
+  `TASK_TIMEOUT`, `TASK_TIMEOUTS`, `QUEUES`, and `SCHEDULES` (with its
+  documented per-schedule keys).
 - **The management commands** and their flags: `ox_worker`, `ox_prune`,
   `ox_health`.
 - **The metrics module** `django_ox.stats`: the functions listed in its
@@ -27,9 +28,10 @@ announced in the [changelog](changelog.md).
   `(args, kwargs)` call shape, the input-order return and the
   all-or-nothing write. `INSERT_CHUNK_SIZE` is exported for reading; its
   value may change.
-- **The exception** `django_ox.exceptions.TaskAbandoned`, recorded against
-  tasks whose worker stopped reporting with no attempts left. It records the
-  lost lease, not a cause of failure.
+- **The exceptions** `django_ox.exceptions.TaskAbandoned`, recorded against
+  tasks whose worker stopped reporting with no attempts left (it records the
+  lost lease, not a cause of failure), and `django_ox.exceptions.TaskTimeout`,
+  recorded against an attempt that ran past its `TASK_TIMEOUT`.
 - **The structured-log contract**: the event names and stable `extra` keys
   documented on the [Monitoring](monitoring.md) page.
 - **The database schema** of `OxTask` and `OxScheduleTick`, evolved only

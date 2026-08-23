@@ -16,10 +16,18 @@ Operational facts worth getting right:
   "django_ox.backend.OxBackend"}}`, run `python manage.py migrate django_ox`.
 - Tasks only execute while a worker is running. Start one with
   `python manage.py ox_worker`. It is a separate foreground process from the
-  web server and exits 0 on SIGTERM after draining in-flight tasks.
+  web server. SIGTERM and SIGINT both drain in-flight tasks and exit 0; a
+  second signal forces an immediate exit with code 130.
 - Tasks are ordinary `django.tasks` tasks: `from django.tasks import task`,
   decorate with `@task`, call `.enqueue(...)`. django-ox adds nothing on the
   producer side, so task code stays portable across `django.tasks` backends.
+- The worker imports a task by its dotted path, so the module must be
+  importable in the worker process and the worker runs the same code as the
+  producer; nothing is registered and there is no autodiscovery. `async def`
+  tasks run.
+- Priority and deferral are Django API: `task.using(priority=N)` with N from
+  -100 to 100, higher first, and `task.using(run_after=...)` with a timedelta
+  or datetime.
 - `enqueue()` is a single INSERT on the default database connection. Inside
   `transaction.atomic()` the task becomes visible to workers only when the
   transaction commits and disappears on rollback. Do not wrap enqueue in
@@ -43,7 +51,9 @@ Operational facts worth getting right:
   (3), `LOCK_TIMEOUT` (300 s), `BACKOFF_INITIAL` (5 s), `BACKOFF_MAX` (600 s),
   `TASK_TIMEOUT` (None), `TASK_TIMEOUTS` ({}), `TASK_TIMEOUT_GRACE` (30 s),
   `SCHEDULES` ({}). `QUEUES` sits beside `OPTIONS`, not inside it, and
-  defaults to `["default"]`; `[]` allows any queue name.
+  defaults to `["default"]`; `[]` allows any queue name. A `QUEUES` key
+  inside `OPTIONS` is ignored without warning; the symptom is
+  `InvalidTask: Queue 'X' is not valid for backend.`
 - An attempt is consumed at claim time, so a dead worker's run counts. Retry
   delay after attempt n is `BACKOFF_INITIAL * 2 ** (n - 1)`, capped at
   `BACKOFF_MAX`, no jitter.
@@ -66,8 +76,13 @@ Operational facts worth getting right:
   I/O-bound tasks. `--processes N` runs N such workers under one supervisor,
   each with its own connections and reaper; for CPU-bound work use
   `--processes N --concurrency 1`. A worker process that dies is restarted
-  after a second. `--queues a,b` restricts a worker to named queues; a
-  queue with no worker assigned accumulates tasks and never runs them.
+  after one second, doubling to 30 s; more than five deaths of one slot in a
+  minute stops the supervisor with exit 1. `--queues a,b` restricts a worker
+  to named queues; a queue with no worker assigned accumulates tasks and
+  never runs them.
+- The worker polls; `--interval` (default 1.0 s) is the idle sleep, so a task
+  starts within one interval of its commit, and a worker with tasks in flight
+  wakes as one finishes. There is no LISTEN/NOTIFY.
 - Recurring tasks are declared in `OPTIONS["SCHEDULES"]` as `{name: {"task":
   "dotted.path", "cron": "0 3 * * *"}}`. Every worker dispatches schedules and
   a unique constraint on (schedule name, tick time) makes each tick fire once,

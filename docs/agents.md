@@ -88,11 +88,22 @@ TASKS = {
 
 ## Facts to get right
 
-- `QUEUES` sits beside `OPTIONS`, not inside it.
+- `QUEUES` sits beside `OPTIONS`, not inside it. Inside `OPTIONS` it is
+  ignored without warning; the symptom is `InvalidTask: Queue 'X' is not
+  valid for backend.`
 - Tasks are plain `django.tasks` tasks. `from django.tasks import task`,
   decorate with `@task`, call `.enqueue(...)`. Nothing is imported from
   `django_ox` in task code.
+- The worker imports a task by its dotted path, so the module must be
+  importable in the worker process and the worker runs the same code as the
+  producer; nothing is registered and there is no autodiscovery. `async def`
+  tasks run.
+- Priority and deferral are Django API: `task.using(priority=N)` with N from
+  -100 to 100, higher first, and `task.using(run_after=...)` with a timedelta
+  or datetime.
 - Tasks run only while `ox_worker` is running. It is a separate process.
+- SIGTERM and SIGINT both drain and exit 0; a second signal forces an
+  immediate exit with code 130.
 - `enqueue()` is one INSERT on the default connection. Inside
   `transaction.atomic()` the task is visible to workers only after commit and
   is gone on rollback. Do not add `transaction.on_commit()` around it.
@@ -108,6 +119,8 @@ TASKS = {
   `BACKOFF_MAX`.
 - `LOCK_TIMEOUT` bounds an unresponsive worker, not task length. The lease is
   renewed every `LOCK_TIMEOUT / 3` seconds while the task runs.
+- The worker polls; `--interval` (default 1.0 s) is the idle sleep, so a task
+  starts within one interval of its commit. There is no LISTEN/NOTIFY.
 - `TASK_TIMEOUT` bounds one attempt. At the deadline `TaskTimeout` is raised
   inside the task on its own thread (an async task is cancelled) and the
   attempt is recorded as failed and retried on the backoff. A thread that
@@ -119,7 +132,9 @@ TASKS = {
   PostgreSQL; `SELECT ... FOR UPDATE SKIP LOCKED` on MySQL 8+; an atomic
   compare-and-set UPDATE on SQLite and other databases without `SKIP LOCKED`.
 - `--concurrency N` is a thread pool in one process. `--processes N` runs N
-  such workers under one supervisor. CPU-bound work wants
+  such workers under one supervisor; a worker process that dies is restarted
+  after one second, doubling to 30 s, and more than five deaths of one slot
+  in a minute stops the supervisor with exit 1. CPU-bound work wants
   `--processes N --concurrency 1`.
 - Recurring tasks go in `OPTIONS["SCHEDULES"]`. Every worker dispatches them;
   there is no scheduler process to start.

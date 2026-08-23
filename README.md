@@ -13,7 +13,40 @@ Django 6.0 ships the Tasks API but no production backend: the built-in
 `ImmediateBackend` and `DummyBackend` are for development and testing only.
 django-ox stores background tasks in the database you already run and executes
 them with a worker process. There is no broker to provision, secure, upgrade or
-back up.
+back up, and because `enqueue()` is an INSERT on your default connection, a
+task enqueued inside `transaction.atomic()` commits or rolls back with your
+data. No `transaction.on_commit()` needed.
+
+## Install
+
+Requires Python 3.12+ and Django 6.0+.
+
+```
+pip install django-ox
+```
+
+```python
+INSTALLED_APPS = [
+    # ...
+    "django_ox",
+]
+
+TASKS = {
+    "default": {
+        "BACKEND": "django_ox.backend.OxBackend",
+    }
+}
+```
+
+```
+python manage.py migrate django_ox
+python manage.py ox_worker
+```
+
+Tasks are plain `django.tasks` tasks; django-ox adds nothing to learn on the
+producer side. The worker is a separate process, and tasks run only while one
+is running. Every option and flag is on the
+[Configuration](https://oxpull.com/django-ox/configuration/) page.
 
 ## One fewer service to run
 
@@ -40,20 +73,11 @@ it (PostgreSQL, MySQL 8+) and an atomic compare-and-set UPDATE elsewhere
 Failed tasks retry with exponential backoff up to a configurable attempt
 limit, keeping the full traceback of every attempt.
 
-## Install
+## Configuration
 
-Requires Python 3.12+ and Django 6.0+.
-
-```
-pip install django-ox
-```
+Every option has a default; add one when you have a reason to.
 
 ```python
-INSTALLED_APPS = [
-    # ...
-    "django_ox",
-]
-
 TASKS = {
     "default": {
         "BACKEND": "django_ox.backend.OxBackend",
@@ -68,16 +92,7 @@ TASKS = {
 }
 ```
 
-Then run migrations:
-
-```
-python manage.py migrate django_ox
-```
-
 ## Quickstart
-
-Tasks are plain `django.tasks` tasks; django-ox adds nothing to learn on the
-producer side.
 
 ```python
 from django.tasks import task

@@ -58,11 +58,17 @@ Operational facts worth getting right:
   `--max-backlog`, `--max-age` and `--worker-timeout` thresholds that turn
   queue stats into a non-zero exit for probes and cron alerting.
 - Finished rows stay until pruned. `python manage.py ox_prune --older-than 7d`
-  deletes SUCCESSFUL rows past the cutoff; FAILED rows are kept unless
-  `--include-failed` is given. READY and RUNNING rows are never deleted.
+  deletes SUCCESSFUL and DISCARDED rows past the cutoff; FAILED and LOST rows
+  are kept unless `--include-failed` is given. READY and RUNNING rows are
+  never deleted.
+- `django_ox.actions.retry(result_id)` puts a FAILED or LOST task back to
+  READY for one more attempt; `django_ox.actions.discard(result_id)` closes a
+  READY, FAILED or LOST task without running it. Both return a bool, and
+  neither touches a RUNNING task. With `django.contrib.admin` installed the
+  task table is registered in the admin with the same two actions.
 - Run `migrate` before rolling workers, not from the worker process.
-- Out of scope in the core: revoking a task after enqueue, and multi-database
-  routing (tasks live on the default database). For tests, point `TASKS` at
+- Out of scope in the core: stopping a task that is already running, and
+  multi-database routing (tasks live on the default database). For tests, point `TASKS` at
   `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend`.
 - Batches and unique (deduplicated) tasks are in Oxpull Pro, a separate paid
@@ -90,7 +96,8 @@ Operational facts worth getting right:
   containers, graceful shutdown, scaling out, the lease and the reaper,
   PostgreSQL or SQLite, pruning on a timer.
 - [Monitoring](https://oxpull.com/django-ox/monitoring/): `django_ox.stats`
-  functions, `ox_health` semantics and probe examples, log events.
+  functions, `ox_health` semantics and probe examples, log events, retry and
+  discard, the admin page.
 - [Benchmarks](https://oxpull.com/django-ox/benchmarks/): throughput and
   latency numbers with the method that produced them.
 - [API stability](https://oxpull.com/django-ox/stability/): what is public

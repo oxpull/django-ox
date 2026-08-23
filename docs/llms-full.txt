@@ -172,8 +172,9 @@ The core is deliberately small: a durable queue, a worker, recurring
 schedules, and monitoring, with nothing extra to operate. Design
 decisions worth knowing before you commit:
 
-- Enqueued tasks run; there is no revocation or cancellation API after
-  enqueue.
+- A queued task can be discarded before a worker claims it, and a failed
+  one retried, from the admin or with `django_ox.actions`. A running task
+  cannot be stopped from outside; it finishes or its worker dies.
 - Tasks are stored on the default database for the model; multi-database
   routing is not part of the current scope.
 - Worker concurrency is a thread pool, which fits I/O-bound tasks. For
@@ -339,12 +340,12 @@ python manage.py ox_prune --older-than 7d
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--older-than` | `7d` | Minimum time since the task finished. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
-| `--include-failed` | off | Also delete FAILED and LOST rows. By default they are kept, because they hold the per-attempt tracebacks. |
+| `--include-failed` | off | Also delete FAILED and LOST rows. By default they are kept, because they hold the per-attempt tracebacks and can be retried. |
 | `--batch-size` | `1000` | Rows per DELETE statement, so pruning a large table never takes a long lock or builds a giant IN clause. Must be at least 1. |
 | `--dry-run` | off | Report how many rows would be deleted without deleting any. |
 
-Only SUCCESSFUL rows (and, with `--include-failed`, FAILED rows) whose
-`finished_at` is past the cutoff are deleted. READY and RUNNING rows are
+Only SUCCESSFUL and DISCARDED rows (and, with `--include-failed`, FAILED and
+LOST rows) whose `finished_at` is past the cutoff are deleted. READY and RUNNING rows are
 never touched, whatever their age. Rows from the recurring-schedule tick
 log are pruned with the same cutoff, always keeping each schedule's most
 recent tick; that row anchors missed-tick recovery and deleting it would
@@ -1057,8 +1058,8 @@ date it was read. Where a project's pages do not say, the cell says so rather
 than guessing.
 
 The comparison is about fit, not ranking. A team that already runs RabbitMQ and
-needs revocation has a different answer from a team that wants one fewer
-service. The last section says where django-ox is not the right fit.
+needs to stop running tasks has a different answer from a team that wants one
+fewer service. The last section says where django-ox is not the right fit.
 
 ## The table
 
@@ -1070,7 +1071,7 @@ service. The last section says where django-ox is not the right fit.
 | Retries and backoff | Exponential backoff, `MAX_ATTEMPTS`, `BACKOFF_INITIAL`, `BACKOFF_MAX`; every attempt's traceback kept | No retry option in the README or the worker flags [^tdb-readme] [^tdb-worker] | `retries`, `retry_delay`, `retry_backoff` [^huey-guide] | `autoretry_for`, `retry_backoff`, `retry_backoff_max` (default 600 s), `retry_jitter` [^celery-tasks] | `max_attempts` (default 0, meaning unlimited) and a `retry` interval; backoff not documented [^q2-configure] | Exponential backoff; `max_retries` default 20, `min_backoff` 15 s, `max_backoff` 7 days [^dq-guide] | Retry strategy per task [^proc-index] |
 | Recurring schedules | Cron in settings; every worker dispatches, no scheduler process | None. Issue #259 open since 2026-08-10 [^tasks-259] | `periodic_task(crontab(...))` [^huey-guide] | `celery beat`, a separate process; "ensure only a single scheduler is running" [^celery-beat] | `Schedule` model, editable in admin; cron via croniter [^q2-schedules] | None built in; APScheduler recommended [^dq-cookbook] | `@app.periodic` [^proc-index] |
 | Priorities | -100 to 100 | Yes [^tdb-backend] | Yes; on Redis needs 5.0+ and `PriorityRedisHuey` [^huey-guide] | 0 to 255 on RabbitMQ and Redis [^celery-calling] | Not documented [^q2-configure] | Per actor; lower number runs first [^dq-guide] | Yes [^proc-index] |
-| Worker dies mid-task | Lease renewed every `LOCK_TIMEOUT / 3`; a task whose lease goes stale for `LOCK_TIMEOUT` is put back to READY, or marked LOST when attempts are spent. See [Production](production.md#the-reaper) | Issue #5, open since 2024-06-11: the task "remains marked as PROCESSING, and thus is never picked up for re-processing nor marked as completed / failed" [^tdb-5] | "tasks that are mid-execution are lost and will not be retried automatically" [^huey-guide] | `acks_late` re-delivers; the worker still acknowledges "if the child process executing the task is terminated" [^celery-tasks] | Issue #327, open since 2026-05-05: worker death not reported to the monitor, `MAX_ATTEMPTS` ignored [^q2-327] | Not stated on the pages checked [^dq-guide] [^dq-cookbook] | Heartbeat every 10 s; jobs stay in `doing` until a `retry_stalled_jobs` periodic task you define picks them up [^proc-stalled] |
+| Worker dies mid-task | Lease renewed every `LOCK_TIMEOUT / 3`; a task whose lease goes stale for `LOCK_TIMEOUT` is put back to READY, or marked LOST when attempts are spent. See [Production](production.md#the-reaper) | Issue #5, open since 2024-06-11: the task 'remains marked as "PROCESSING", and thus is never picked up for re-processing nor marked as completed / failed' [^tdb-5] | "tasks that are mid-execution are lost and will not be retried automatically" [^huey-guide] | `acks_late` re-delivers; the worker still acknowledges "if the child process executing the task is terminated" [^celery-tasks] | Issue #327, open since 2026-05-05: worker death not reported to the monitor, `MAX_ATTEMPTS` ignored [^q2-327] | Not stated on the pages checked [^dq-guide] [^dq-cookbook] | Heartbeat every 10 s; jobs stay in `doing` until a `retry_stalled_jobs` periodic task you define picks them up [^proc-stalled] |
 | Health and metrics | `ox_health` command, `django_ox.stats`, structured log events | Issue #44, container healthchecks, open since 2026-06-08 [^tdb-44] | Signals [^huey-guide] | Flower, a separate process, with Prometheus integration [^flower] | `qmonitor`, `qinfo`, `Stat` [^q2-monitor] | Prometheus middleware; not in the default middleware list [^dq-prom] | Statistics via events [^proc-index] |
 | Databases | PostgreSQL, SQLite and MySQL 8 tested in CI; MariaDB 10.6+ untested | Any Django database [^tdb-readme] | Redis, SQLite, PostgreSQL, file, memory [^huey-guide] | Broker, not a database [^celery-brokers] | Any Django database through the ORM broker [^q2-brokers] | Broker, not a database [^dq-guide] | PostgreSQL 13+ [^proc-index] |
 | Licence | BSD 3-Clause | BSD 3-Clause [^tdb-repo] | MIT [^huey-repo] | BSD 3-Clause [^celery-license] | MIT [^q2-pyproject] | LGPL 3.0 [^dq-repo] | MIT [^proc-repo] |
@@ -1081,8 +1082,9 @@ function", open since 2020-12-19 with 98 upvotes [^celery-6552].
 
 ## When not to use django-ox
 
-- **You need to cancel or revoke a task after enqueue.** django-ox has no
-  revocation API. huey, Celery (through Flower) and procrastinate do.
+- **You need to stop a task that is already running.** django-ox can discard
+  a queued task and retry a failed one, but has no way to interrupt a
+  running one. Celery (through Flower) can terminate a worker process.
 - **The queue must live on a different database from your models.** Tasks are
   stored on the default database. Multi-database routing is outside the
   current scope, and a separate queue database would also give up the
@@ -1346,7 +1348,9 @@ not coming back.
 The row keeps the distinction the four statuses cannot carry. Its status
 column is LOST rather than FAILED, `queue_stats()` reports it in its own
 `lost` column, and `ox_prune --include-failed` treats it like a failed row
-for retention.
+for retention. Like a failed row it can be retried or discarded, from the
+admin or with `django_ox.actions`; see
+[Retrying and discarding](monitoring.md#retrying-and-discarding).
 
 One case is worth knowing about before it surprises you. If the worker
 holding a LOST task was starved rather than dead, and it comes back and
@@ -1497,7 +1501,7 @@ stats.last_claim_age()  # time since a worker last claimed
 
 | Function | Returns | Semantics |
 | --- | --- | --- |
-| `queue_stats()` | `list[QueueStats]` | Raw row counts per queue and status (`ready`, `running`, `failed`, `successful`, `lost`), one entry per queue with any rows. The `ready` column counts every READY row, including tasks deferred to a future `run_after`. `lost` counts tasks whose worker stopped reporting with no attempts left; see [the reaper](production.md#the-reaper). |
+| `queue_stats()` | `list[QueueStats]` | Raw row counts per queue and status (`ready`, `running`, `failed`, `successful`, `lost`, `discarded`), one entry per queue with any rows. The `ready` column counts every READY row, including tasks deferred to a future `run_after`. `lost` counts tasks whose worker stopped reporting with no attempts left; see [the reaper](production.md#the-reaper). `discarded` counts tasks an operator closed without running; see [Retrying and discarding](#retrying-and-discarding). |
 | `ready_count()` | `int` | READY tasks eligible to run now, mirroring the worker's dequeue predicate: deferred tasks do not count until `run_after` passes. This is the backlog number. |
 | `oldest_ready_age()` | `timedelta \| None` | Age of the oldest task waiting to run, measured from when it became eligible (`run_after` when set, `enqueued_at` otherwise), so a task deferred by a week does not read as a week of backlog. |
 | `throughput(window)` | `float` | Tasks reaching a terminal state (SUCCESSFUL or FAILED) per minute over the trailing window (default 5 minutes). |
@@ -1643,7 +1647,63 @@ column from `queue_stats()` for it.
   active checks.
 - **Poisoned-task triage.** When `failure_rate` spikes, the rows have the
   forensics: filter FAILED rows and read `errors` (per-attempt
-  tracebacks), `attempts` and `worker_ids` to see what died where.
+  tracebacks), `attempts` and `worker_ids` to see what died where. The
+  admin page below shows the same fields, and the two actions close the
+  loop once the cause is fixed.
+
+## Retrying and discarding
+
+Two operator actions live in `django_ox.actions`. Each is one
+compare-and-set UPDATE on the row's status and lease number, so it either
+moves the row from the state it read or does nothing and says so. Neither
+touches a RUNNING row: that row belongs to the worker holding its lease,
+and only the reaper takes a lease away.
+
+```python
+from django_ox import actions
+
+actions.retry(result.id)  # True if the row was requeued
+actions.discard(result.id)  # True if the row was closed
+```
+
+| Function | Accepts | Does |
+| --- | --- | --- |
+| `retry(result_id)` | FAILED, LOST | Sets the row back to READY for one more attempt, clears `run_after` so it is eligible at once, and raises `max_attempts` to `attempts + 1`. The count, `worker_ids` and every per-attempt traceback stay as they were, so the record still says what happened before. The lease number goes up, so a LOST row's last worker, if it is still alive somewhere, writes nothing over the retry. |
+| `discard(result_id)` | READY, FAILED, LOST | Marks the row DISCARDED. A READY task that is discarded never runs; a discarded FAILED or LOST task is not retried. The attempt records stay. |
+
+Both return `False` for any other state, for an id that is not in the
+table, and for a malformed id. `RUNNING` and `SUCCESSFUL` rows are never
+matched. A retry that races a second retry of the same row, or a discard
+that races a worker's claim, resolves to exactly one winner: the UPDATE
+pins the lease number it read, and the loser matches zero rows.
+
+A retried task is one more attempt, not a fresh set. If the new attempt
+fails, the row is FAILED again with one more traceback, and can be retried
+again. A task retried while its worker is still missing gets the same
+treatment as any at-least-once task: make the body idempotent.
+
+DISCARDED is the sixth value in the row's status column and reads as
+`FAILED` through `django.tasks`, which has four statuses, so `is_finished`
+is true and callers waiting on the result return. `queue_stats()` reports
+it in its own `discarded` column, and `ox_prune` deletes discarded rows
+with successful ones.
+
+### The admin page
+
+When `django.contrib.admin` is installed, django-ox registers the task
+table with it. Nothing is added to a project without the admin. The
+change list shows id, task path, queue, status, attempts, and the enqueue
+and finish times, filters on status and queue, and searches by id and
+path. The detail page is read-only and lays out every attempt's
+traceback. The two actions, **Retry selected tasks** and **Discard
+selected tasks**, call the functions above on each selected row and
+report how many moved and how many were skipped for being in a state the
+action does not accept.
+
+The admin does not add, edit or delete rows. A hand-edited status would
+bypass the lease, and a delete could take a row from under a running
+worker; `ox_prune` is the way rows leave the table. The actions need the
+`change_oxtask` permission; viewing needs `view_oxtask`.
 
 ---
 
@@ -1775,6 +1835,10 @@ announced in the [changelog](changelog.md).
   `__all__` (`queue_stats`, `ready_count`, `oldest_ready_age`,
   `throughput`, `failure_rate`, `last_claim_age`) and the `QueueStats`
   dataclass.
+- **The actions module** `django_ox.actions`: `retry` and `discard`, their
+  accepted states, and their return values. The admin page that calls
+  them is a convenience over this module; its layout is not a contract,
+  the two action names are.
 - **The exception** `django_ox.exceptions.TaskAbandoned`, recorded against
   tasks whose worker stopped reporting with no attempts left. It records the
   lost lease, not a cause of failure.
@@ -2024,7 +2088,13 @@ TASKS = {
 - `ox_prune --older-than 7d` deletes finished rows; FAILED rows stay unless
   `--include-failed`. READY and RUNNING rows are never deleted.
 - Run `migrate` before rolling workers, not from the worker.
-- No revocation after enqueue. Tasks live on the default database.
+- `django_ox.actions.retry(result_id)` requeues a FAILED or LOST task for
+  one more attempt. `django_ox.actions.discard(result_id)` closes a READY,
+  FAILED or LOST task without running it. Neither touches a RUNNING task.
+  With `django.contrib.admin` installed, the task table appears in the admin
+  with the same two actions.
+- A running task cannot be stopped from outside. Tasks live on the default
+  database.
 - In tests use `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend` for `TASKS`.
 - Batches and unique tasks are in [Oxpull Pro](pro.md), a separate paid
@@ -2089,6 +2159,38 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- `django_ox.actions.retry(result_id)` and `django_ox.actions.discard(result_id)`.
+  A retry puts a FAILED or LOST task back to READY for one more attempt, keeping
+  its attempt count, worker ids and every traceback, and clearing the backoff so
+  it is eligible at once. A discard closes a READY, FAILED or LOST task without
+  running it. Each is one compare-and-set on the row's status and lease number,
+  so two retries of one row requeue it once, a discard that races a claim loses
+  to it, and a LOST row's missing worker cannot write over its retry. Neither
+  touches a RUNNING task.
+- The task table in the Django admin, registered only when
+  `django.contrib.admin` is installed: a list with status and queue filters and
+  search by id or path, a read-only detail page with every attempt's traceback,
+  and **Retry selected tasks** and **Discard selected tasks** actions that
+  report how many rows moved and how many were skipped. The admin does not add,
+  edit or delete rows.
+- `OxTask.Status.DISCARDED`, a sixth value in django-ox's own status column. It
+  reads as `FAILED` through `django.tasks` and `is_finished` is true for it.
+  `queue_stats()` reports it in a `discarded` column, and `ox_prune` deletes
+  discarded rows with successful ones.
+
+### Changed
+
+- **A migration ships with this release.** Run `python manage.py migrate
+  django_ox` when you upgrade. It adds the new status choice.
+- `QueueStats` has a sixth field, `discarded`, keyword-defaulted like `lost`.
+- The scope statement no longer says tasks cannot be revoked after enqueue. A
+  queued task can be discarded; a running one still cannot be stopped from
+  outside.
 
 ## [0.2.1] - 2026-08-20
 
@@ -2278,6 +2380,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[Unreleased]: https://github.com/oxpull/django-ox/compare/v0.2.1...HEAD
 [0.2.1]: https://github.com/oxpull/django-ox/releases/tag/v0.2.1
 [0.2.0]: https://github.com/oxpull/django-ox/releases/tag/v0.2.0
 [0.1.2]: https://github.com/oxpull/django-ox/releases/tag/v0.1.2

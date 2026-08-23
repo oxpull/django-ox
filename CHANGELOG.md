@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `django_ox.actions.retry(result_id)` and `django_ox.actions.discard(result_id)`.
+  A retry puts a FAILED or LOST task back to READY for one more attempt, keeping
+  its attempt count, worker ids and every traceback, and clearing the backoff so
+  it is eligible at once. A discard closes a READY, FAILED or LOST task without
+  running it. Each is one compare-and-set on the row's status and lease number,
+  so two retries of one row requeue it once, a discard that races a claim loses
+  to it, and a LOST row's missing worker cannot write over its retry. Neither
+  touches a RUNNING task.
+- The task table in the Django admin, registered only when
+  `django.contrib.admin` is installed: a list with status and queue filters and
+  search by id or path, a read-only detail page with every attempt's traceback,
+  and **Retry selected tasks** and **Discard selected tasks** actions that
+  report how many rows moved and how many were skipped. The admin does not add,
+  edit or delete rows.
+- `OxTask.Status.DISCARDED`, a sixth value in django-ox's own status column. It
+  reads as `FAILED` through `django.tasks` and `is_finished` is true for it.
+  `queue_stats()` reports it in a `discarded` column, and `ox_prune` deletes
+  discarded rows with successful ones.
+
+### Changed
+
+- **A migration ships with this release.** Run `python manage.py migrate
+  django_ox` when you upgrade. It adds the new status choice.
+- `QueueStats` has a sixth field, `discarded`, keyword-defaulted like `lost`.
+- The scope statement no longer says tasks cannot be revoked after enqueue. A
+  queued task can be discarded; a running one still cannot be stopped from
+  outside.
+
 ## [0.2.1] - 2026-08-20
 
 ### Fixed
@@ -193,6 +225,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[Unreleased]: https://github.com/oxpull/django-ox/compare/v0.2.1...HEAD
 [0.2.1]: https://github.com/oxpull/django-ox/releases/tag/v0.2.1
 [0.2.0]: https://github.com/oxpull/django-ox/releases/tag/v0.2.0
 [0.1.2]: https://github.com/oxpull/django-ox/releases/tag/v0.1.2

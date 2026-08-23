@@ -145,12 +145,12 @@ python manage.py ox_prune --older-than 7d
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--older-than` | `7d` | Minimum time since the task finished. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
-| `--include-failed` | off | Also delete FAILED and LOST rows. By default they are kept, because they hold the per-attempt tracebacks. |
+| `--include-failed` | off | Also delete FAILED and LOST rows. By default they are kept, because they hold the per-attempt tracebacks and can be retried. |
 | `--batch-size` | `1000` | Rows per DELETE statement, so pruning a large table never takes a long lock or builds a giant IN clause. Must be at least 1. |
 | `--dry-run` | off | Report how many rows would be deleted without deleting any. |
 
-Only SUCCESSFUL rows (and, with `--include-failed`, FAILED rows) whose
-`finished_at` is past the cutoff are deleted. READY and RUNNING rows are
+Only SUCCESSFUL and DISCARDED rows (and, with `--include-failed`, FAILED and
+LOST rows) whose `finished_at` is past the cutoff are deleted. READY and RUNNING rows are
 never touched, whatever their age. Rows from the recurring-schedule tick
 log are pruned with the same cutoff, always keeping each schedule's most
 recent tick; that row anchors missed-tick recovery and deleting it would

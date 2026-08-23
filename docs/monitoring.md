@@ -33,7 +33,7 @@ stats.last_claim_age()  # time since a worker last claimed
 
 | Function | Returns | Semantics |
 | --- | --- | --- |
-| `queue_stats()` | `list[QueueStats]` | Raw row counts per queue and status (`ready`, `running`, `failed`, `successful`, `lost`), one entry per queue with any rows. The `ready` column counts every READY row, including tasks deferred to a future `run_after`. `lost` counts tasks whose worker stopped reporting with no attempts left; see [the reaper](production.md#the-reaper). |
+| `queue_stats()` | `list[QueueStats]` | Raw row counts per queue and status (`ready`, `running`, `failed`, `successful`, `lost`, `discarded`), one entry per queue with any rows. The `ready` column counts every READY row, including tasks deferred to a future `run_after`. `lost` counts tasks whose worker stopped reporting with no attempts left; see [the reaper](production.md#the-reaper). `discarded` counts tasks an operator closed without running; see [Retrying and discarding](#retrying-and-discarding). |
 | `ready_count()` | `int` | READY tasks eligible to run now, mirroring the worker's dequeue predicate: deferred tasks do not count until `run_after` passes. This is the backlog number. |
 | `oldest_ready_age()` | `timedelta \| None` | Age of the oldest task waiting to run, measured from when it became eligible (`run_after` when set, `enqueued_at` otherwise), so a task deferred by a week does not read as a week of backlog. |
 | `throughput(window)` | `float` | Tasks reaching a terminal state (SUCCESSFUL or FAILED) per minute over the trailing window (default 5 minutes). |
@@ -179,4 +179,60 @@ column from `queue_stats()` for it.
   active checks.
 - **Poisoned-task triage.** When `failure_rate` spikes, the rows have the
   forensics: filter FAILED rows and read `errors` (per-attempt
-  tracebacks), `attempts` and `worker_ids` to see what died where.
+  tracebacks), `attempts` and `worker_ids` to see what died where. The
+  admin page below shows the same fields, and the two actions close the
+  loop once the cause is fixed.
+
+## Retrying and discarding
+
+Two operator actions live in `django_ox.actions`. Each is one
+compare-and-set UPDATE on the row's status and lease number, so it either
+moves the row from the state it read or does nothing and says so. Neither
+touches a RUNNING row: that row belongs to the worker holding its lease,
+and only the reaper takes a lease away.
+
+```python
+from django_ox import actions
+
+actions.retry(result.id)  # True if the row was requeued
+actions.discard(result.id)  # True if the row was closed
+```
+
+| Function | Accepts | Does |
+| --- | --- | --- |
+| `retry(result_id)` | FAILED, LOST | Sets the row back to READY for one more attempt, clears `run_after` so it is eligible at once, and raises `max_attempts` to `attempts + 1`. The count, `worker_ids` and every per-attempt traceback stay as they were, so the record still says what happened before. The lease number goes up, so a LOST row's last worker, if it is still alive somewhere, writes nothing over the retry. |
+| `discard(result_id)` | READY, FAILED, LOST | Marks the row DISCARDED. A READY task that is discarded never runs; a discarded FAILED or LOST task is not retried. The attempt records stay. |
+
+Both return `False` for any other state, for an id that is not in the
+table, and for a malformed id. `RUNNING` and `SUCCESSFUL` rows are never
+matched. A retry that races a second retry of the same row, or a discard
+that races a worker's claim, resolves to exactly one winner: the UPDATE
+pins the lease number it read, and the loser matches zero rows.
+
+A retried task is one more attempt, not a fresh set. If the new attempt
+fails, the row is FAILED again with one more traceback, and can be retried
+again. A task retried while its worker is still missing gets the same
+treatment as any at-least-once task: make the body idempotent.
+
+DISCARDED is the sixth value in the row's status column and reads as
+`FAILED` through `django.tasks`, which has four statuses, so `is_finished`
+is true and callers waiting on the result return. `queue_stats()` reports
+it in its own `discarded` column, and `ox_prune` deletes discarded rows
+with successful ones.
+
+### The admin page
+
+When `django.contrib.admin` is installed, django-ox registers the task
+table with it. Nothing is added to a project without the admin. The
+change list shows id, task path, queue, status, attempts, and the enqueue
+and finish times, filters on status and queue, and searches by id and
+path. The detail page is read-only and lays out every attempt's
+traceback. The two actions, **Retry selected tasks** and **Discard
+selected tasks**, call the functions above on each selected row and
+report how many moved and how many were skipped for being in a state the
+action does not accept.
+
+The admin does not add, edit or delete rows. A hand-edited status would
+bypass the lease, and a delete could take a row from under a running
+worker; `ox_prune` is the way rows leave the table. The actions need the
+`change_oxtask` permission; viewing needs `view_oxtask`.

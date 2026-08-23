@@ -158,6 +158,14 @@ numbers into an exit code for cron alerting and container probes:
 python manage.py ox_health --max-backlog 1000 --max-age 600
 ```
 
+When `django.contrib.admin` is installed, the task table is registered with
+it: a filterable list, a read-only detail page with every attempt's
+traceback, and **Retry selected tasks** and **Discard selected tasks**
+actions. The same two operations are `django_ox.actions.retry(result_id)`
+and `django_ox.actions.discard(result_id)`. A retry is one more attempt on
+a FAILED or LOST task; a discard closes a READY, FAILED or LOST task without
+running it. Neither touches a running task.
+
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--queue` | all queues | Restrict the checks to one queue. |
@@ -246,8 +254,8 @@ firing for a time before it existed.
 
 The core is deliberately small: a durable queue, a worker, recurring
 schedules, monitoring, and nothing else to operate. Outside the current
-scope: task revocation after enqueue, and multi-database routing (tasks
-are stored on the default database for the model).
+scope: stopping a task that is already running, and multi-database routing
+(tasks are stored on the default database for the model).
 
 Batches and unique tasks ship in [Oxpull Pro](https://oxpull.com/django-ox/pro/);
 the waitlist is at <https://oxpull.com/>. Metrics stay in this package:

@@ -202,7 +202,9 @@ not coming back.
 The row keeps the distinction the four statuses cannot carry. Its status
 column is LOST rather than FAILED, `queue_stats()` reports it in its own
 `lost` column, and `ox_prune --include-failed` treats it like a failed row
-for retention.
+for retention. Like a failed row it can be retried or discarded, from the
+admin or with `django_ox.actions`; see
+[Retrying and discarding](monitoring.md#retrying-and-discarding).
 
 One case is worth knowing about before it surprises you. If the worker
 holding a LOST task was starved rather than dead, and it comes back and

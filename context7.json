@@ -47,7 +47,7 @@
     "Recurring tasks are declared in OPTIONS[\"SCHEDULES\"] with a dotted task path and a five-field cron expression. Every running worker dispatches schedules and a unique constraint makes each tick fire once, so there is no separate scheduler process.",
     "The task function is called outside any transaction. A task that needs select_for_update() or atomic writes opens its own transaction.atomic().",
     "ox_worker --concurrency N is a thread pool inside one process. For CPU-bound tasks run several worker processes with --concurrency 1.",
-    "There is no revocation or cancellation API after enqueue, and tasks are stored on the default database.",
+    "django_ox.actions.retry and django_ox.actions.discard requeue a failed task or close a queued one; a running task cannot be stopped from outside. Tasks are stored on the default database.",
     "For tests, point TASKS at django.tasks.backends.immediate.ImmediateBackend or django.tasks.backends.dummy.DummyBackend instead of django-ox.",
     "Batches and unique tasks are not in django-ox. They are in Oxpull Pro, a separate paid package. django_ox.stats and ox_health are in the free package."
   ]

@@ -111,7 +111,13 @@ TASKS = {
 - `ox_prune --older-than 7d` deletes finished rows; FAILED rows stay unless
   `--include-failed`. READY and RUNNING rows are never deleted.
 - Run `migrate` before rolling workers, not from the worker.
-- No revocation after enqueue. Tasks live on the default database.
+- `django_ox.actions.retry(result_id)` requeues a FAILED or LOST task for
+  one more attempt. `django_ox.actions.discard(result_id)` closes a READY,
+  FAILED or LOST task without running it. Neither touches a RUNNING task.
+  With `django.contrib.admin` installed, the task table appears in the admin
+  with the same two actions.
+- A running task cannot be stopped from outside. Tasks live on the default
+  database.
 - In tests use `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend` for `TASKS`.
 - Batches and unique tasks are in [Oxpull Pro](pro.md), a separate paid

@@ -61,8 +61,8 @@ jobs:
 
   # Note: there is no separate bandit job. The same rule family runs as ruff's
   # `S` selector inside the existing lint job, which is faster and one tool
-  # fewer to keep configured. src/ was verified clean at zero findings when it
-  # was enabled; tests/ ignore the assert and temp-path rules on purpose.
+  # fewer to keep configured. src/ passes it; tests/ ignore the assert and
+  # temp-path rules on purpose.
 
   dependencies:
     runs-on: ubuntu-latest

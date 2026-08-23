@@ -82,8 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and **Retry selected tasks** and **Discard selected tasks** actions that
   report how many rows moved and how many were skipped. The actions call
   `retry_many` and `discard_many`, so a select-across of any size is a few
-  statements in one transaction rather than two queries per row. The admin does not add,
-  edit or delete rows.
+  statements in one transaction. The admin does not add, edit or delete rows.
 - `django_ox.bulk.enqueue_many(task, calls)`, the bulk form of `enqueue()`.
   `calls` is a list of `(args, kwargs)` pairs; the rows are written with one
   INSERT per 1,000 inside one transaction and the `TaskResult` list comes back
@@ -109,10 +108,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A migration ships with this release.** Run `python manage.py migrate
   django_ox` when you upgrade. It adds the new status choice.
 - `QueueStats` has a sixth field, `discarded`, keyword-defaulted like `lost`.
-- The scope statement no longer says tasks cannot be revoked after enqueue. A
-  queued task can be discarded and every attempt can be bounded with
-  `TASK_TIMEOUT`; one chosen running task still cannot be interrupted on
-  demand.
+- A queued task can now be discarded and a failed or lost one retried, and
+  every attempt can be bounded with `TASK_TIMEOUT`; interrupting one chosen
+  running task on demand stays outside scope.
 - A worker that is already draining, because it is recycling, treats the
   operator's first signal as the drain it is doing rather than as the
   force-exit; the second signal is still the force-exit.

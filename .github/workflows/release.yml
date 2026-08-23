@@ -9,6 +9,9 @@ on:
   # the two jobs is the part no other workflow covers.
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest

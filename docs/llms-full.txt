@@ -1,0 +1,2006 @@
+# django-ox documentation
+Every page of https://oxpull.com/django-ox/ in navigation order. The short index is at https://oxpull.com/django-ox/llms.txt.
+
+---
+
+# Source: https://oxpull.com/django-ox/
+
+# django-ox
+
+A database-backed worker backend for Django's Tasks framework
+(`django.tasks`, Django 6.0+).
+
+Django 6.0 ships the Tasks API but no production backend: the built-in
+`ImmediateBackend` runs tasks inline and `DummyBackend` runs nothing.
+django-ox stores background tasks in the database you already run and executes
+them with a worker process. You get a durable queue with retries, priorities,
+scheduling and a result store, and no broker to provision, secure, upgrade or
+back up.
+
+## One fewer service to run
+
+A broker-based task queue adds a second datastore to your deployment. Redis or
+RabbitMQ has to be provisioned, monitored, secured and upgraded, and it has to
+be running before a single task executes. For an application that already
+depends on a database, that is a full operational surface added for one
+feature.
+
+django-ox uses the database you already run. A deployment is your application,
+a worker process, and one migration. Backups already cover the queue, because
+the queue is a table, and there is no second datastore that can fail on its
+own.
+
+## Transactional enqueue
+
+The queue lives in your database, so enqueueing a task is a single INSERT
+on your default connection. That gives you a guarantee no broker-based
+queue can offer: **the task and your data commit or roll back together.**
+
+```python
+from django.db import transaction
+
+with transaction.atomic():
+    order = Order.objects.create(...)
+    send_confirmation.enqueue(order_id=order.pk)
+    # If anything below raises, the order AND the task vanish together.
+    charge(order)
+```
+
+With a broker, the enqueue leaves your process the moment you call it. If
+the transaction then rolls back, a worker races to process an order that
+does not exist. The standard workaround is wrapping every enqueue in
+`transaction.on_commit()`, and remembering to, everywhere, forever. With
+django-ox there is nothing to remember: a task enqueued inside
+`transaction.atomic()` becomes visible to workers only when the
+transaction commits, and disappears on rollback. There is no window where
+business data exists without its task, or a task without its data.
+
+Execution is at-least-once. Workers claim tasks atomically (`SKIP LOCKED`
+on databases that support it, with a single-statement fast path on
+PostgreSQL; an atomic compare-and-set elsewhere, including SQLite),
+failed tasks retry with
+exponential backoff, and a reaper returns tasks whose worker died to the
+queue. Details in [Production](production.md).
+
+## What you get
+
+- Transactional enqueue, as above. No `on_commit` boilerplate.
+- Retries with exponential backoff and the full traceback of every attempt.
+- A reaper that reclaims tasks from dead workers, and a lease that keeps it
+  away from live slow ones.
+- Graceful drain on SIGTERM: in-flight tasks finish before the worker exits.
+- Priorities (-100 to 100) and deferred tasks (`run_after`).
+- [Recurring tasks](recurring-tasks.md): cron schedules declared in
+  settings, no separate scheduler process.
+- A result store: status, return value and errors readable through the
+  standard `django.tasks` result API.
+- A [prune command](configuration.md#ox_prune) to keep the table small.
+- [Monitoring](monitoring.md): a queue-stats API, an `ox_health` command
+  for probes and cron alerting, and structured log events.
+
+The worker is covered by 221 tests, green on both SQLite and PostgreSQL 16.
+
+## Install
+
+Requires Python 3.12+ and Django 6.0+.
+
+```
+pip install django-ox
+```
+
+Add the app and point the Tasks framework at the backend:
+
+```python
+INSTALLED_APPS = [
+    # ...
+    "django_ox",
+]
+
+TASKS = {
+    "default": {
+        "BACKEND": "django_ox.backend.OxBackend",
+    }
+}
+```
+
+Create the tables:
+
+```
+python manage.py migrate django_ox
+```
+
+## Quickstart
+
+Tasks are plain `django.tasks` tasks. django-ox adds nothing to learn on
+the producer side.
+
+```python
+# myapp/tasks.py
+from django.tasks import task
+
+
+@task
+def send_welcome_email(user_id): ...
+```
+
+Enqueue one:
+
+```python
+from myapp.tasks import send_welcome_email
+
+result = send_welcome_email.enqueue(user_id=42)
+```
+
+Run a worker in a second terminal:
+
+```
+python manage.py ox_worker
+```
+
+Check on the result later:
+
+```python
+result.refresh()
+result.status  # READY, RUNNING, FAILED, or SUCCESSFUL
+result.return_value  # once SUCCESSFUL
+result.errors  # per-attempt tracebacks, if any
+```
+
+That is the whole integration. Next steps:
+
+- [Configuration](configuration.md) for every setting, option and command
+  flag.
+- [Recurring tasks](recurring-tasks.md) for cron schedules.
+- [Production](production.md) for systemd units, scaling and shutdown
+  semantics.
+
+## Scope
+
+The core is deliberately small: a durable queue, a worker, recurring
+schedules, and monitoring, with nothing extra to operate. Design
+decisions worth knowing before you commit:
+
+- Enqueued tasks run; there is no revocation or cancellation API after
+  enqueue.
+- Tasks are stored on the default database for the model; multi-database
+  routing is not part of the current scope.
+- Worker concurrency is a thread pool, which fits I/O-bound tasks. For
+  CPU-bound work, run multiple worker processes with `--concurrency 1`
+  instead. See [Production](production.md#threads-and-processes).
+
+Batches and unique tasks ship in [Oxpull Pro](pro.md). Metrics stay in this
+package: `django_ox.stats` and `ox_health` are free and stay free. Rate limiting
+is in neither tier.
+
+## License
+
+BSD 3-Clause.
+
+---
+
+# Source: https://oxpull.com/django-ox/configuration/
+
+# Configuration
+
+Everything django-ox reads lives in the standard `TASKS` setting, plus
+three management commands. A full entry with every option spelled out:
+
+```python
+TASKS = {
+    "default": {
+        "BACKEND": "django_ox.backend.OxBackend",
+        "QUEUES": ["default", "emails"],
+        "OPTIONS": {
+            "MAX_ATTEMPTS": 3,
+            "LOCK_TIMEOUT": 300,
+            "BACKOFF_INITIAL": 5,
+            "BACKOFF_MAX": 600,
+            "SCHEDULES": {},  # see the Recurring tasks page
+        },
+    }
+}
+```
+
+## The smallest working entry
+
+Every option has a default. This is enough to run tasks:
+
+```python
+TASKS = {
+    "default": {
+        "BACKEND": "django_ox.backend.OxBackend",
+    }
+}
+```
+
+That gives you the `default` queue, three attempts, and a five second first
+retry. Add options when you have a reason to.
+
+## Backend entry
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `BACKEND` | required | `"django_ox.backend.OxBackend"`. |
+| `QUEUES` | `["default"]` | Queue names tasks may be enqueued to. An empty list (`[]`) allows any queue name. Read by Django's Tasks framework itself. |
+| `OPTIONS` | `{}` | Backend options, below. |
+
+## OPTIONS
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `MAX_ATTEMPTS` | `3` | Executions a task gets before it is marked FAILED. An attempt is consumed when a worker claims the task, so a worker dying mid-run counts too and retries stay bounded. |
+| `LOCK_TIMEOUT` | `300` | Seconds a RUNNING task's lock may go unrefreshed before the reaper takes the task back. A worker refreshes the lock every `LOCK_TIMEOUT / 3` seconds while it is executing, so this is a limit on how long a worker may be unresponsive, not on how long a task may run. |
+| `BACKOFF_INITIAL` | `5` | Delay in seconds before the first retry. |
+| `BACKOFF_MAX` | `600` | Ceiling on the retry delay, in seconds. |
+| `SCHEDULES` | `{}` | Recurring task definitions. Documented on the [Recurring tasks](recurring-tasks.md) page. |
+
+The retry delay after attempt *n* fails is
+`BACKOFF_INITIAL * 2 ** (n - 1)`, capped at `BACKOFF_MAX`. With the
+defaults: 5 s, 10 s, 20 s, 40 s, and so on up to 600 s. There is no
+jitter.
+
+## ox_worker
+
+```
+python manage.py ox_worker [options]
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--backend` | `default` | Backend alias from the `TASKS` setting. |
+| `--queues` | all configured queues | Comma-separated queue names this worker processes. |
+| `--concurrency` | `1` | Tasks executed concurrently, as a thread pool inside the process. |
+| `--interval` | `1.0` | Polling interval in seconds when idle. When tasks are in flight the worker wakes as soon as one finishes, so this does not bound throughput. |
+| `--lock-timeout` | backend `LOCK_TIMEOUT`, or 300 | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |
+
+The command also honors Django's standard `-v/--verbosity`: at the default
+verbosity it logs worker lifecycle and warnings to stderr, and `-v 2`
+enables debug logging. `-v 0` attaches no log handler.
+
+Two intervals are derived rather than flagged:
+
+- The reaper runs every `min(30, max(lock_timeout / 2, 1))` seconds.
+- Lease renewal runs every `max(lock_timeout / 3, 0.1)` seconds, on its own
+  thread, and keeps running until the last in-flight task has drained.
+- Schedule dispatch (when `SCHEDULES` is configured) runs every
+  `max(1, min(interval, 30))` seconds, about once a second at the default
+  polling interval.
+
+### Routing a queue to its own worker
+
+Declare every queue on the backend, then give each worker a subset. Slow work
+stops blocking fast work without a second backend or a second database.
+
+```python
+TASKS = {
+    "default": {
+        "BACKEND": "django_ox.backend.OxBackend",
+        "QUEUES": ["default", "emails", "exports"],
+    }
+}
+```
+
+```
+python manage.py ox_worker --queues default,emails --concurrency 4
+python manage.py ox_worker --queues exports --concurrency 1 --lock-timeout 3600
+```
+
+The exports worker runs one task at a time and tolerates hour-long jobs. The
+other worker keeps short work moving at four at a time. A queue with no worker
+assigned to it accumulates tasks and never runs them, so make sure every queue
+in `QUEUES` is covered by some worker.
+
+### Tasks that run longer than the lock timeout
+
+A long task is not by itself a problem. A worker refreshes the lock on the
+tasks it is running every `LOCK_TIMEOUT / 3` seconds, so an hour-long task on
+a healthy worker keeps its lease for the hour.
+
+What `LOCK_TIMEOUT` bounds is how long a worker may stop refreshing before its
+work is handed to somebody else. Set it above the longest pause you are
+willing to tolerate from a worker: a long garbage-collection pause, a
+throttled container, a slow database, a host that swapped. If a queue runs on
+hardware that stalls, give it its own worker with its own timeout rather than
+raising the global value and delaying recovery for everything else:
+
+```
+python manage.py ox_worker --queues exports --lock-timeout 7200
+```
+
+If you embed the worker programmatically, `django_ox.worker.Worker`
+accepts `reap_interval`, `renew_interval`, `schedule_interval`,
+`backoff_initial` and `backoff_max` keyword overrides in addition to the flag
+equivalents.
+
+## ox_prune
+
+Finished task rows stay in the table until pruned; the queue table doubles
+as the result store, and django-ox does not guess at your retention
+needs. Run `ox_prune` on your own schedule (cron or a systemd timer;
+there is an example unit on the [Production](production.md#pruning-on-a-timer)
+page):
+
+```
+python manage.py ox_prune --older-than 7d
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--older-than` | `7d` | Minimum time since the task finished. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
+| `--include-failed` | off | Also delete FAILED and LOST rows. By default they are kept, because they hold the per-attempt tracebacks. |
+| `--batch-size` | `1000` | Rows per DELETE statement, so pruning a large table never takes a long lock or builds a giant IN clause. Must be at least 1. |
+| `--dry-run` | off | Report how many rows would be deleted without deleting any. |
+
+Only SUCCESSFUL rows (and, with `--include-failed`, FAILED rows) whose
+`finished_at` is past the cutoff are deleted. READY and RUNNING rows are
+never touched, whatever their age. Rows from the recurring-schedule tick
+log are pruned with the same cutoff, always keeping each schedule's most
+recent tick; that row anchors missed-tick recovery and deleting it would
+make the schedule re-anchor. The latest tick row of a schedule that has
+been removed from settings is kept by the same rule; such rows are
+harmless and can be deleted by hand if unwanted. See
+[Recurring tasks](recurring-tasks.md#missed-ticks).
+
+## ox_health
+
+A health check for cron alerting and container probes: exits 0 when
+every enabled check passes, non-zero with a one-line reason otherwise.
+With no flags it verifies only that the database answers.
+
+```
+python manage.py ox_health --max-backlog 1000 --max-age 600
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--queue` | all queues | Restrict the checks to one queue. |
+| `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. Tasks deferred to a future `run_after` do not count. |
+| `--max-age` | off | Fail when the oldest waiting task has waited longer than this many seconds since becoming eligible. |
+| `--worker-timeout` | off | Fail when no worker has claimed a task within this many seconds, or no claim was ever recorded. |
+
+Check semantics, probe examples, and guidance on which check fits which
+alert are on the
+[Monitoring](monitoring.md#health-checks-ox_health) page.
+
+## System checks
+
+`manage.py check` validates the setup:
+
+- `django_ox.E001`: `django_ox` is missing from `INSTALLED_APPS`.
+- `django_ox.E002`: a `SCHEDULES` entry is invalid (task path does not
+  import, cron expression does not parse or can never fire, arguments not
+  JSON-serializable, bad queue name or priority).
+- `django_ox.E003`: the same schedule name is defined on more than one
+  backend; schedule names must be unique across backends.
+
+The worker performs the same schedule validation at startup, so a bad
+deploy fails loudly rather than skipping dispatches.
+
+---
+
+# Source: https://oxpull.com/django-ox/recurring-tasks/
+
+# Recurring tasks
+
+django-ox runs cron-style schedules with no separate scheduler process. You
+declare them in settings, next to the backend they enqueue through, so they are
+versioned and deployed with your code. The database holds a dispatch log and
+nothing else. There are no schedule rows to edit by hand.
+
+```python
+TASKS = {
+    "default": {
+        "BACKEND": "django_ox.backend.OxBackend",
+        "QUEUES": ["default", "emails"],
+        "OPTIONS": {
+            "SCHEDULES": {
+                "nightly-report": {
+                    "task": "reports.tasks.build_report",
+                    "cron": "0 3 * * *",
+                    "kwargs": {"full": True},
+                },
+                "warm-cache": {
+                    "task": "core.tasks.warm_cache",
+                    "cron": "*/15 * * * *",
+                },
+            },
+        },
+    }
+}
+```
+
+Each tick enqueues an ordinary task. Workers claim it through the normal queue,
+so retries, backoff, priorities and the result store all work as usual.
+
+## Schedule keys
+
+The dictionary keys are the schedule names. They must be non-empty strings of at
+most 128 characters.
+
+**Names must be unique across every backend, not just within one.** The dispatch
+log is keyed by name alone, so two backends sharing a name would suppress each
+other's ticks. A duplicate is rejected at worker startup and by
+`manage.py check`, as `django_ox.E003`.
+
+Each entry accepts exactly these keys. Anything else is rejected at startup:
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `task` | yes | Dotted path to a `@task` callable, e.g. `"reports.tasks.build_report"`. |
+| `cron` | yes | Five-field cron expression or `@` shortcut, syntax below. |
+| `args` | no | Positional arguments, as a list. Must be JSON-serializable. |
+| `kwargs` | no | Keyword arguments, as a dict. Must be JSON-serializable. |
+| `queue_name` | no | Queue override; defaults to the task's own queue. |
+| `priority` | no | Priority override, -100 to 100. |
+
+### Overriding the queue and priority
+
+A schedule can put its task somewhere other than the task's own queue, which is
+useful when a nightly job would otherwise sit behind interactive work:
+
+```python
+"SCHEDULES": {
+    "nightly-export": {
+        "task": "exports.tasks.rebuild",
+        "cron": "0 2 * * *",
+        "queue_name": "exports",
+        "priority": -50,
+        "kwargs": {"full": True},
+    },
+}
+```
+
+The queue must be listed in that backend's `QUEUES`, and some worker must be
+processing it. Priority runs from -100 to 100, and lower runs later.
+
+A schedule enqueues through the backend it is declared under. That holds even if
+the task itself was declared against a different backend alias.
+
+## Cron syntax
+
+Five fields, in order: minute (0-59), hour (0-23), day of month (1-31), month
+(1-12), day of week (0-7, where 0 and 7 both mean Sunday).
+
+| Form | Example | Meaning |
+| --- | --- | --- |
+| Any | `*` | Every value. |
+| Value | `30` | That value. |
+| List | `1,15` | Any listed value. Elements can be ranges or steps. |
+| Range | `9-17` | Every value in the range, inclusive. Descending ranges are rejected. |
+| Step | `*/15`, `1-10/2` | Every Nth value across the range. |
+| Value with step | `5/15` | From that value to the field maximum. In the minute field, `5/15` means 5, 20, 35, 50. |
+| Month names | `jan`, `DEC` | Case-insensitive, three letters, month field only. |
+| Weekday names | `sun`, `Mon-Fri` | Case-insensitive, three letters, day-of-week field only. |
+
+Shortcuts work in place of a full expression: `@hourly`, `@daily` and
+`@midnight`, `@weekly`, `@monthly`, `@yearly` and `@annually`.
+
+### Common schedules
+
+```python
+"SCHEDULES": {
+    # Every fifteen minutes.
+    "warm-cache":     {"task": "core.tasks.warm_cache",    "cron": "*/15 * * * *"},
+    # 03:00 every day.
+    "nightly-report": {"task": "reports.tasks.build",      "cron": "0 3 * * *"},
+    # Every weekday at 09:30.
+    "weekday-digest": {"task": "core.tasks.digest",        "cron": "30 9 * * mon-fri"},
+    # 00:00 on the 1st and 15th.
+    "twice-monthly":  {"task": "billing.tasks.invoice",    "cron": "0 0 1,15 * *"},
+    # Top of every hour.
+    "hourly-sync":    {"task": "sync.tasks.pull",          "cron": "@hourly"},
+    # 02:15 on the first of the month.
+    "monthly-prune":  {"task": "core.tasks.prune_archive", "cron": "15 2 1 * *"},
+}
+```
+
+Expressions that can never fire are rejected when the configuration loads. So
+`0 0 30 2 *` (February 30th) is a startup error, not a schedule that silently
+never runs.
+
+### Day-of-month and day-of-week combine with OR
+
+This follows vixie cron. When both fields are restricted, a day matches if
+*either* one matches.
+
+`0 0 1,15 * mon` fires on the 1st, on the 15th, and every Monday. It does not
+fire only on Mondays that land on the 1st or 15th.
+
+One deliberate divergence from vixie: a stepped star like `*/2` counts as
+restricted here, which follows the croniter interpretation common in Python. So
+`0 0 */2 * 1` fires on every odd day of the month *and* every Monday. Vixie
+would require both.
+
+### Timezones
+
+Cron fields are wall-clock time in your project's timezone. With `USE_TZ = True`,
+`0 3 * * *` means 03:00 local all year. With `USE_TZ = False` it is naive local
+time.
+
+Across a DST transition, a tick whose wall-clock time is missing or ambiguous is
+resolved by zoneinfo fold handling. It shifts rather than raising. If a job must
+not land inside a transition window, schedule it outside your zone's transition
+hours.
+
+**On the fall-back day a schedule can fire twice.** Take `30 1 * * *` in a zone
+that replays 01:00 to 02:00: it fires once per pass. That is at most one extra
+run per year, and it is consistent with the at-least-once delivery the rest of
+the system already assumes. Hourly and more frequent schedules in the repeated
+hour fire on each pass by design.
+
+Changing `TIME_ZONE` to a zone behind the old one can also re-fire one
+wall-clock label on the day you change it, because ticks are stored as distinct
+UTC instants.
+
+## Many workers, one tick
+
+Every worker is also the scheduler. Alongside its polling, each one checks about
+once a second whether a tick is due.
+
+Coordination is a database unique constraint on (schedule name, tick time). It
+works like this:
+
+1. Every worker derives the same tick datetimes from the cron expression.
+2. Dispatch wraps the tick-log `INSERT` and the task enqueue in one transaction.
+3. When workers race the same tick, exactly one `INSERT` commits.
+4. The losers hit the constraint and roll back, task row included.
+
+So each tick fires exactly once, whatever the worker count, and dispatch keeps
+working as long as one worker is alive. Scheduling is a property of the workers
+you already run. There is nothing extra to deploy, monitor or fail over.
+
+## Missed ticks
+
+**If every worker was down when a tick passed, the most recent missed tick fires
+once on recovery. Older ones are skipped.**
+
+A nightly job due during an unlucky deploy still runs when workers return. A
+weekend of downtime on a five-minute schedule does not replay hundreds of stale
+runs.
+
+**A new schedule never fires for times before it existed.** The first time a
+worker sees a schedule with no history, it records the current tick as an anchor
+and enqueues nothing. The schedule first fires at its next tick.
+
+## Checking a schedule is live
+
+`manage.py check` validates every schedule without starting a worker. It reports
+a bad task path, an unparseable or never-firing cron expression, arguments that
+are not JSON-serializable, and duplicate names across backends:
+
+```
+python manage.py check
+```
+
+To see what has actually dispatched, read the tick log:
+
+```python
+from django_ox.models import OxScheduleTick
+
+OxScheduleTick.objects.filter(schedule_name="nightly-report").order_by(
+    "-scheduled_for"
+)[:5]
+```
+
+Each row is one dispatched tick. A row whose `task` is `None` is the anchor
+written the first time a worker saw the schedule; it enqueued nothing and marks
+the tick before the first real fire.
+
+The recovery baseline is each schedule's most recent tick row, which is why
+`ox_prune` always keeps it. See
+[Configuration](configuration.md#ox_prune).
+
+---
+
+# Source: https://oxpull.com/django-ox/patterns/
+
+# Common patterns
+
+Worked examples for the things people actually reach for. Every snippet uses the
+standard `django.tasks` API, so it works on any backend; the notes point out
+where django-ox behaves differently from a broker.
+
+## Send an email after signup
+
+The common case, and the one where a database queue behaves differently from a
+broker.
+
+```python
+from django.db import transaction
+from django.tasks import task
+
+
+@task
+def send_welcome_email(user_id):
+    user = User.objects.get(pk=user_id)
+    send_mail("Welcome", "...", None, [user.email])
+
+
+def register(request):
+    with transaction.atomic():
+        user = User.objects.create_user(...)
+        send_welcome_email.enqueue(user.pk)
+```
+
+No `transaction.on_commit()` here. The enqueue is an `INSERT` on the same
+connection, so the task becomes visible to workers only when the transaction
+commits. If `create_user` is rolled back further up, the email task disappears
+with it.
+
+Pass the id, not the object. Arguments are stored as JSON, and a stale copy of a
+model is a bug waiting to happen.
+
+## Retry a flaky third-party call
+
+Retries are automatic. Raise, and the worker schedules the next attempt with
+exponential backoff.
+
+```python
+@task
+def sync_to_crm(order_id):
+    order = Order.objects.get(pk=order_id)
+    response = httpx.post("https://crm.example.com/orders", json=order.payload)
+    response.raise_for_status()  # a 5xx raises, so the task retries
+```
+
+Tune the envelope on the backend, not per task:
+
+```python
+"OPTIONS": {
+    "MAX_ATTEMPTS": 5,
+    "BACKOFF_INITIAL": 10,   # seconds before the second attempt
+    "BACKOFF_MAX": 600,      # ceiling
+}
+```
+
+Every attempt keeps its own traceback, so a task that failed four times shows
+all four. After `MAX_ATTEMPTS` the task is `FAILED` and stays in the table:
+`ox_prune` keeps failed rows unless you pass `--include-failed`.
+
+## Answer a webhook fast
+
+Do the minimum in the request, then hand off. The sender gets its `200` straight
+away, however long the work behind it takes.
+
+```python
+@task
+def process_payment_event(event_id): ...
+
+
+@csrf_exempt
+def stripe_webhook(request):
+    event = WebhookEvent.objects.create(payload=json.loads(request.body))
+    process_payment_event.enqueue(event.pk)
+    return HttpResponse(status=200)
+```
+
+Both writes are in the same transaction, so you cannot acknowledge an event you
+failed to record, or record one that never gets processed.
+
+## Run a job and check on it later
+
+`enqueue()` returns a result you can look up by id.
+
+```python
+result = build_report.enqueue(month="2026-08")
+request.session["report_task_id"] = result.id
+```
+
+```python
+from django.tasks import TaskResultStatus
+
+result = build_report.get_result(request.session["report_task_id"])
+result.refresh()
+
+if result.status == TaskResultStatus.SUCCESSFUL:
+    return redirect(result.return_value)
+if result.status == TaskResultStatus.FAILED:
+    return render(request, "report_failed.html", {"errors": result.errors})
+return render(request, "report_pending.html", {"attempts": result.attempts})
+```
+
+`refresh()` re-reads from the database, so call it before checking status.
+`status` is one of `READY`, `RUNNING`, `SUCCESSFUL` or `FAILED`, and
+`is_finished` covers the last two. A task whose worker vanished without
+reporting also reads as `FAILED`; [the reaper](production.md#the-reaper)
+explains what that record contains. Return values are stored as JSON, so
+return a URL or an id rather than a file or a model.
+
+## Defer work to a specific time
+
+Use `.using(run_after=...)`. It returns a copy of the task with that setting
+applied.
+
+```python
+from datetime import timedelta
+from django.utils import timezone
+
+send_reminder.using(run_after=timezone.now() + timedelta(days=1)).enqueue(booking.pk)
+```
+
+Workers ignore the row until then. For anything on a repeating clock, use a
+[schedule](recurring-tasks.md) instead of enqueueing the next one from inside
+the task.
+
+## Keep slow work off the fast queue
+
+Give slow tasks their own queue and run a separate worker for it, so a batch of
+report builds cannot delay password resets.
+
+```python
+@task(queue_name="reports")
+def build_report(month): ...
+
+
+@task(queue_name="emails", priority=50)
+def send_password_reset(user_id): ...
+```
+
+```
+python manage.py ox_worker --queues emails --concurrency 4
+python manage.py ox_worker --queues reports --concurrency 1
+```
+
+Priority runs from -100 to 100, higher first, and applies within a queue rather
+than across queues. List every queue you use in the backend's `QUEUES`, or set
+`QUEUES: []` to accept any name.
+
+## Clean up on a schedule
+
+```python
+"OPTIONS": {
+    "SCHEDULES": {
+        "expire-carts": {
+            "task": "shop.tasks.expire_abandoned_carts",
+            "cron": "*/30 * * * *",
+        },
+    },
+}
+```
+
+Nothing extra to run: the workers you already have dispatch the ticks. Details
+in [Recurring tasks](recurring-tasks.md).
+
+Task rows are not deleted for you. Run `ox_prune` on your own schedule, from
+cron, a systemd timer, or a django-ox schedule:
+
+```
+python manage.py ox_prune --older-than 7d
+```
+
+## Make a task safe to run twice
+
+The one habit worth building. Execution is at-least-once, so a task retries both
+when it raises and when its worker dies mid-run. Assume every task can run
+again.
+
+```python
+from django.db import transaction
+
+
+@task
+def charge_order(order_id):
+    with transaction.atomic():
+        order = Order.objects.select_for_update().get(pk=order_id)
+        if order.charged_at:
+            return  # a previous attempt already did this
+        charge(order, idempotency_key=f"order-{order.pk}")
+        order.charged_at = timezone.now()
+        order.save(update_fields=["charged_at"])
+```
+
+Guard on state you have written, not on a flag you set in memory. The row lock
+serialises concurrent attempts, and the idempotency key covers the gap where the
+charge succeeds but the transaction does not commit. Use one whenever the
+external system offers it.
+
+**Your task is not run inside a transaction.** The worker manages its own for
+claiming and bookkeeping, but your function is called outside them, so
+`select_for_update()` and anything else needing an open transaction must open
+one, as above.
+
+## Test without a worker
+
+Point the test settings at Django's own backends. No django-ox tables, no worker
+process.
+
+```python
+# runs tasks inline, so an assertion right after enqueue sees the effect
+TASKS = {"default": {"BACKEND": "django.tasks.backends.immediate.ImmediateBackend"}}
+```
+
+```python
+# records tasks without running them, for asserting what was enqueued
+TASKS = {"default": {"BACKEND": "django.tasks.backends.dummy.DummyBackend"}}
+```
+
+Keep django-ox in the settings you use for integration tests, where the point is
+to exercise claiming and retries for real.
+
+## Not in the core
+
+Batches and unique or deduplicated tasks are not part of django-ox. They are the
+[Oxpull Pro](pro.md) feature set. Metrics are in the free tier: `django_ox.stats`
+and `manage.py ox_health` ship in the core. Rate limiting, chains and workflows
+do not exist in either tier.
+
+---
+
+# Source: https://oxpull.com/django-ox/migrating/
+
+# Migrating to django-ox
+
+Your task code stays the same. django-ox implements Django's `django.tasks` API,
+so `@task` functions and `.enqueue()` calls do not change.
+
+Three things do change: the backend in your `TASKS` setting, the worker command,
+and the table the queue lives in.
+
+Find your section below, then read [Switching over](#switching-over). That last
+part is where migrations go wrong.
+
+## From another `django.tasks` backend
+
+Configuration only. Here it is with `django-tasks-db`, the most common one:
+
+```python
+# before
+INSTALLED_APPS = ["django_tasks_db", ...]
+
+TASKS = {
+    "default": {
+        "BACKEND": "django_tasks_db.DatabaseBackend",
+        "QUEUES": ["default"],
+    }
+}
+```
+
+```python
+# after
+INSTALLED_APPS = ["django_ox", ...]
+
+TASKS = {
+    "default": {
+        "BACKEND": "django_ox.backend.OxBackend",
+        "QUEUES": ["default"],
+    }
+}
+```
+
+Run `python manage.py migrate django_ox` to create the table.
+
+| | Before | After |
+| --- | --- | --- |
+| Worker | `manage.py db_worker` | `manage.py ox_worker` |
+| Clean up finished rows | `manage.py prune_db_task_results` | `manage.py ox_prune --older-than 7d` |
+
+Nothing else moves. Same decorator, same `.enqueue()`, same result API.
+
+## From Celery
+
+Celery needs a broker and its own workers. django-ox uses the database you
+already have, so there is no broker to run.
+
+```python
+# before
+from celery import shared_task
+
+
+@shared_task
+def send_confirmation(order_id): ...
+
+
+send_confirmation.delay(order_id=42)
+```
+
+```python
+# after
+from django.tasks import task
+
+
+@task
+def send_confirmation(order_id): ...
+
+
+send_confirmation.enqueue(order_id=42)
+```
+
+| Celery | django-ox |
+| --- | --- |
+| Broker URL (Redis, RabbitMQ) | none. The queue is a table on your default database. |
+| `celery -A proj worker` | `manage.py ox_worker` |
+| `celery -A proj beat` | nothing to run. Schedules go in `TASKS` and every worker dispatches them. See [Recurring tasks](recurring-tasks.md). |
+| `.delay(...)`, `.apply_async(...)` | `.enqueue(...)` |
+| `apply_async(countdown=..., eta=...)` | `run_after` |
+| `autoretry_for`, `self.retry` | automatic. Tune with `MAX_ATTEMPTS`, `BACKOFF_INITIAL`, `BACKOFF_MAX`. |
+| Result backend | the same table, read through the standard result API. |
+| Flower | the [stats API and `ox_health`](monitoring.md) |
+
+One difference in behaviour is worth reading before you switch. With a broker,
+`enqueue` leaves your process immediately. If the surrounding transaction then
+rolls back, a worker can pick up an order that no longer exists. The usual fix
+is to wrap every call in `transaction.on_commit()`.
+
+Here the enqueue is an `INSERT` on your own connection. It commits or rolls back
+with the row it belongs to, so there is nothing to wrap.
+
+**Not supported:** Celery's chains, groups and chords, and routing across
+multiple brokers. Queues, priorities and `run_after` are what exist today.
+Chains are on the [Oxpull Pro](pro.md) roadmap.
+
+## From huey
+
+Closer to django-ox than Celery is, since huey can already store tasks in
+SQLite or Postgres. What changes is the API, and where schedules live.
+
+```python
+# before
+from huey.contrib.djhuey import task, periodic_task
+from huey import crontab
+
+
+@task()
+def send_confirmation(order_id): ...
+
+
+@periodic_task(crontab(minute="0", hour="3"))
+def nightly_report(): ...
+```
+
+```python
+# after
+from django.tasks import task
+
+
+@task
+def send_confirmation(order_id): ...
+
+
+@task
+def nightly_report(): ...
+```
+
+The schedule moves off the function and into settings:
+
+```python
+TASKS = {
+    "default": {
+        "BACKEND": "django_ox.backend.OxBackend",
+        "OPTIONS": {
+            "SCHEDULES": {
+                "nightly-report": {
+                    "task": "reports.tasks.nightly_report",
+                    "cron": "0 3 * * *",
+                },
+            },
+        },
+    }
+}
+```
+
+Schedules in settings deploy with your code, so there are no rows to edit by
+hand. A typo fails at `manage.py check` instead of at dispatch time.
+
+| huey | django-ox |
+| --- | --- |
+| `manage.py run_huey` | `manage.py ox_worker` |
+| `@periodic_task(crontab(...))` | a `SCHEDULES` entry, same five-field cron syntax |
+| `.schedule(delay=...)` | `run_after` |
+| `retries`, `retry_delay` | `MAX_ATTEMPTS` and the backoff options |
+| `huey.immediate` in tests | Django's `ImmediateBackend` or `DummyBackend` |
+
+## Switching over
+
+The two systems use different tables. Neither reads the other's rows. So if you
+flip the setting and deploy, anything still queued in the old table has nothing
+left to run it.
+
+1. **Stop enqueueing to the old system.** Leave its workers running.
+2. **Let it drain.** Watch until pending work hits zero. Check scheduled tasks
+   too: a job due in six hours still counts.
+3. **Deploy django-ox.** Run `migrate django_ox`, then switch `TASKS`.
+4. **Start `ox_worker`** and check it picks up work. `manage.py ox_health` will
+   tell you, and the worker logs every claim to the `django_ox` logger.
+5. **Retire the old worker,** then its tables and broker.
+
+No drain window available? Run both. Old workers keep serving the old table
+while new work goes to django-ox. They cannot see each other's rows.
+
+Both systems run tasks at least once, so your tasks should already be
+idempotent. Worth confirming before you start rather than halfway through.
+
+## Migrating away
+
+Task functions are portable. django-ox adds nothing to the producer side, so
+tasks stay ordinary `django.tasks` tasks and moving to another backend is a
+settings change and a drain, run in the same order as above with the roles
+reversed.
+
+One behaviour does not travel, and it is worth deciding about on the way in
+rather than on the way out. Enqueueing inside `transaction.atomic()` ties the
+task to that transaction, so it disappears on rollback. A broker-based backend
+cannot do this: the enqueue leaves your process the moment you call it. Code
+that depends on a rollback removing a task will behave differently once the
+queue lives in a broker, and it will do so quietly.
+
+If you want to keep that option open, wrap enqueues in
+`transaction.on_commit()`, the way a broker-based backend requires. django-ox
+runs correctly either way, and the task is enqueued after the commit instead of
+inside it. You give up the guarantee and keep the portability.
+
+If you would rather have the guarantee, take it, and write the dependency down
+somewhere the next person will find it.
+
+---
+
+# Source: https://oxpull.com/django-ox/production/
+
+# Production
+
+The worker is a plain foreground process: `manage.py ox_worker`, run
+under whatever supervises your other processes. It treats a lost database
+connection as fatal rather than retrying blind, and relies on the
+supervisor to restart it. Run it under `Restart=always` (as in the unit
+below). This page covers systemd,
+scaling, shutdown, the reaper, and monitoring.
+
+## Running under systemd
+
+```ini
+# /etc/systemd/system/ox-worker.service
+[Unit]
+Description=django-ox worker
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=exec
+User=app
+Group=app
+WorkingDirectory=/srv/myproject
+Environment=DJANGO_SETTINGS_MODULE=myproject.settings
+ExecStart=/srv/myproject/.venv/bin/python manage.py ox_worker --concurrency 4
+Restart=always
+RestartSec=5
+
+# systemd sends SIGTERM on stop; the worker drains in-flight tasks and
+# exits 0. Give the drain at least as long as your longest task before
+# systemd escalates to SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```
+sudo systemctl enable --now ox-worker
+journalctl -u ox-worker -f
+```
+
+To run several workers on one host, use a template unit
+(`ox-worker@.service` with the same `[Service]` body) and start
+`ox-worker@1`, `ox-worker@2`, and so on. No flag distinguishes the
+instances; every worker generates its own unique id.
+
+## Running in containers
+
+The worker is a foreground process that exits 0 on SIGTERM, so it needs no
+special entrypoint. The setting that matters is the grace period: give the
+runtime longer than your slowest task before it escalates to SIGKILL.
+
+```yaml
+services:
+  worker:
+    image: myapp:latest
+    command: python manage.py ox_worker --concurrency 4
+    stop_grace_period: 5m
+    restart: unless-stopped
+    depends_on:
+      - db
+    healthcheck:
+      test: ["CMD", "python", "manage.py", "ox_health"]
+      interval: 60s
+      timeout: 15s
+      start_period: 30s
+```
+
+Docker's default grace period is 10 seconds, which will kill a worker mid-task
+and leave the reaper to clean up. `stop_grace_period` is the container
+equivalent of `TimeoutStopSec`. On Kubernetes it is
+`terminationGracePeriodSeconds` on the pod spec.
+
+With no flags, `ox_health` checks that the database answers, which is what a
+per-container probe should test. Queue-wide checks belong in fleet alerting
+rather than in a probe: see
+[which check goes where](monitoring.md#health-checks-ox_health), and the
+liveness probe example there for queues with steady traffic.
+
+Run migrations before rolling workers, as an init container or a job, not from
+the worker itself. Several workers starting at once would race the same
+migration.
+
+## Graceful shutdown
+
+On SIGTERM or SIGINT the worker:
+
+1. Stops claiming new tasks immediately.
+2. Waits for in-flight tasks to finish, however long they take.
+3. Closes its database connections and exits with code 0.
+
+A second signal during the drain forces an immediate exit, code 130. Whatever
+was running is abandoned mid-flight. The reaper on a surviving worker reclaims
+it later, and it counts as a failed attempt.
+
+This maps directly onto rolling deploys: send SIGTERM, wait, start the new
+version. The only tuning point is the supervisor's kill escalation
+(`TimeoutStopSec` above) relative to your longest task.
+
+## Scaling out
+
+Run as many workers as you need, on as many hosts as you need, pointed at
+the same database. No coordinator, no leader election. Two things make
+concurrent workers safe:
+
+- **Claiming is atomic.** On PostgreSQL, a claim is one
+  `UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING`
+  statement, so workers never block each other on the head of the queue.
+  On other databases with `SKIP LOCKED` support (MySQL 8+), the worker
+  uses `SELECT ... FOR UPDATE SKIP LOCKED` in a short transaction. Databases without it, SQLite included, fall back to an optimistic
+compare-and-set UPDATE. That is atomic everywhere, but under contention workers
+can retry against each other for the head of the queue.
+- **Recurring schedules need no dedicated node.** Every worker dispatches;
+  a unique constraint guarantees each tick fires once. See
+  [Recurring tasks](recurring-tasks.md#many-workers-one-tick).
+
+Workers can also be split by queue: run
+`ox_worker --queues emails --concurrency 8` next to
+`ox_worker --queues default` to isolate slow or bursty workloads.
+
+### Threads and processes
+
+`--concurrency N` is a thread pool inside one process. That fits the
+common Django task profile: email, HTTP calls to third parties, ORM work.
+For CPU-bound tasks the GIL makes threads the wrong tool. Run multiple worker
+processes with `--concurrency 1` instead. That is also the natural shape for
+systemd template units, or one container per worker.
+
+## The lease
+
+A worker that claims a task takes a lease on it: the row records who holds
+it, when the lock was last refreshed, and a lease number that goes up by one
+every time the task changes hands. Three things follow from that number, and
+they are worth understanding together because they are what makes recovery
+safe.
+
+**The worker keeps its own lease alive.** While a task is executing, its
+worker refreshes the lock timestamp on the rows it is running, one statement
+per interval however many are in flight, and it keeps doing so through a
+graceful drain. So a task that takes an hour does not look abandoned after
+five minutes. The reaper reclaims work from workers that stopped reporting,
+not from tasks that are merely slow.
+
+**A finish write only lands while the lease still holds.** When a worker
+records success, failure or a retry, the UPDATE carries the lease number it
+was given at claim time. If the task was taken off it in the meantime, that
+number no longer matches and the write is dropped rather than applied, and no
+completion is signalled for it. This is arithmetic rather than timing: no
+pause is long enough to get around it, so a task that finished cannot be put
+back on the queue by a straggler.
+
+**Timestamps come from the database.** With `USE_TZ` on, the lock time is
+written by the database server and compared against the database server's
+clock, so two hosts with drifting clocks do not produce false reclaims. If you
+run workers on more than one host, that is the setting which gives them one
+clock, and it is Django's default.
+
+With `USE_TZ` off the worker's clock is used instead. A database's own clock
+does not always match what these columns hold there: SQLite's is UTC while the
+columns carry naive local time, and reading one against the other would make
+`ox_prune --older-than` treat rows that finished seconds ago as hours old.
+Under that setting, keep `TIME_ZONE` and the timezone your workers run in the
+same, which is what Django assumes of it anyway.
+
+## The reaper
+
+Workers still die: OOM kills, node failures, `kill -9`. A dead worker stops
+refreshing its lock, and the reaper picks the task up. It runs inside every
+worker, on an interval derived from the lock timeout.
+
+A RUNNING task whose lock has not been refreshed for `LOCK_TIMEOUT` (default
+300 seconds, per-worker override `--lock-timeout`) is taken back, and what
+happens next depends on whether the task has attempts left:
+
+- **Attempts remaining.** The task goes back to READY and the lease number
+  goes up, so the old worker cannot write to it again. This is the ordinary
+  case, and it is a guess the system already absorbs: at-least-once execution
+  means the task may run twice, which is why task bodies must be idempotent.
+- **No attempts remaining.** The row is marked LOST. LOST means what it says:
+  the worker holding this task stopped reporting and nobody observed how the
+  attempt ended. The reaper does not record a failure, because it did not see
+  one. It has watched a lock go quiet, and that is all it writes down.
+
+The attempt was already consumed when the task was claimed, so a
+crash-looping task cannot retry forever; it stops after `MAX_ATTEMPTS` like
+any other task.
+
+The reclaim is a compare-and-set on the lease number, so a reaper running
+late cannot stomp a task that finished or was already reclaimed.
+
+### What LOST looks like from the outside
+
+`django.tasks` has four result statuses and django-ox does not add a fifth to
+them. A LOST task reads as `FAILED` through `get_result()`, and
+`result.errors` ends with a `TaskAbandoned` record whose text says the lease
+was lost and the outcome was never observed. `is_finished` is true, so code
+that waits for a result terminates instead of waiting for a worker that is
+not coming back.
+
+The row keeps the distinction the four statuses cannot carry. Its status
+column is LOST rather than FAILED, `queue_stats()` reports it in its own
+`lost` column, and `ox_prune --include-failed` treats it like a failed row
+for retention.
+
+One case is worth knowing about before it surprises you. If the worker
+holding a LOST task was starved rather than dead, and it comes back and
+records a success, the row becomes SUCCESSFUL and a caller reading it twice
+sees `FAILED` and then `SUCCESSFUL`. Only that one execution can do this, and
+only while the row is still LOST. It is the honest cost of giving a
+four-valued API an answer for a task whose outcome nobody saw, and the
+alternative, reporting it as still running forever, hangs every caller that
+waits on it.
+
+It takes two things at once: the task's attempts spent, and its lease allowed
+to lapse. Renewal holds the lease for as long as the worker is answering, so
+what reaches this state is a worker that went unresponsive for longer than
+`LOCK_TIMEOUT` and then came back, which is the case you asked the reaper to
+act on in the first place. If your callers cannot tolerate seeing it, raise
+`LOCK_TIMEOUT` until a merely slow worker is never reclaimed; the cost is that
+a genuinely dead one takes that much longer to notice.
+
+### Tuning LOCK_TIMEOUT
+
+Set `LOCK_TIMEOUT` above the longest gap you expect between a worker's lease
+renewals, not above your longest task. Renewal runs every `LOCK_TIMEOUT / 3`
+seconds, so two consecutive renewals can be missed before anything is
+reclaimed. The value is really a statement about how long a worker may be
+unresponsive before you want its work handed to somebody else: too low and a
+paused or overloaded worker loses tasks it was going to finish, too high and
+recovery after a real crash is slow.
+
+Watch for `task_lease_lost` in the logs. It records an attempt whose result
+was discarded because the lease had already been reclaimed, and a steady
+trickle of it means the timeout is short relative to how long your workers
+go unresponsive.
+
+**Tasks must be idempotent.** Execution is at-least-once by design: a task
+is retried both when it raises and when its worker dies mid-run. Write
+task bodies so that running twice is harmless (upserts, idempotency keys,
+"already sent?" checks).
+
+## PostgreSQL or SQLite
+
+Both are fully supported and both run the full worker suite (221 tests
+each). Guidance:
+
+- **PostgreSQL** is the production recommendation. It gets the
+  single-statement `SKIP LOCKED` claim path, and it handles many workers
+  and high write concurrency the way you would expect.
+- **SQLite** is fine for development, tests, and small single-host
+  deployments in the same situations where SQLite is fine as your Django
+  database at all. Claiming uses the compare-and-set path and remains
+  correct with multiple workers, but SQLite's single-writer nature makes
+  many busy workers on one file a poor fit.
+
+The queue lives in your default database, inside your existing backup and
+migration story. That is the point: one system of record, one thing to
+operate.
+
+## Monitoring
+
+Monitoring has a [dedicated page](monitoring.md). The operational
+summary:
+
+- **The table is the queue.** `django_ox.stats` exposes queue depth,
+  backlog age, throughput and failure rate as plain functions. Backlog
+  depth and backlog age are the two numbers worth alerting on.
+- **`manage.py ox_health`** turns thresholds on those numbers into an
+  exit code, for cron alerting and container probes.
+- **Logs.** The worker logs to the `django_ox` logger: lifecycle at
+  INFO, retries and reaper reclaims at WARNING, terminal failures and
+  unhandled worker errors at ERROR, each with stable extra keys for JSON
+  log handlers. Under systemd this lands in the journal.
+- **Per-task forensics.** Each row keeps its attempts count, the id of
+  every worker that ran it, timestamps for enqueue/start/finish, and the
+  full traceback of every failed attempt.
+
+## Pruning on a timer
+
+Finished rows accumulate; prune them on a schedule sized to how long you
+need results and tracebacks to stay queryable. With systemd:
+
+```ini
+# /etc/systemd/system/ox-prune.service
+[Unit]
+Description=Prune finished django-ox tasks
+
+[Service]
+Type=oneshot
+User=app
+WorkingDirectory=/srv/myproject
+Environment=DJANGO_SETTINGS_MODULE=myproject.settings
+ExecStart=/srv/myproject/.venv/bin/python manage.py ox_prune --older-than 7d
+```
+
+```ini
+# /etc/systemd/system/ox-prune.timer
+[Unit]
+Description=Daily django-ox prune
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Or from cron, or as a recurring task pointed at a small wrapper task of
+your own. Flag reference on the
+[Configuration](configuration.md#ox_prune) page. FAILED rows are kept by
+default so tracebacks survive until you have looked at them; add
+`--include-failed` once that is not needed.
+
+---
+
+# Source: https://oxpull.com/django-ox/monitoring/
+
+# Monitoring
+
+The queue and the result store are one database table. That means metrics are
+just queries, with no agent or exporter process to run. There are three ways in:
+
+- **`django_ox.stats`**, plain functions returning queue metrics.
+- **`manage.py ox_health`**, the same numbers as an exit code, for cron
+  alerting and container probes.
+- **Structured log events** on the `django_ox` logger, with stable extra
+  keys for JSON log handlers.
+
+## Queue statistics
+
+`django_ox.stats` is a small module of read-only functions. Each one is a single
+ORM query over the task table. No extra state, no signals. Safe to call from a
+request, a shell or a metrics collector, on every tested database.
+
+```python
+from datetime import timedelta
+
+from django_ox import stats
+
+stats.queue_stats()
+# [QueueStats(queue_name="default", ready=3, running=1, failed=0, successful=214),
+#  QueueStats(queue_name="emails", ready=0, running=0, failed=2, successful=560)]
+
+stats.ready_count()  # tasks eligible to run right now
+stats.oldest_ready_age()  # timedelta, or None when nothing waits
+stats.throughput(timedelta(minutes=5))  # terminal outcomes per minute
+stats.failure_rate(timedelta(minutes=5))  # 0.0 to 1.0, or None
+stats.last_claim_age()  # time since a worker last claimed
+```
+
+| Function | Returns | Semantics |
+| --- | --- | --- |
+| `queue_stats()` | `list[QueueStats]` | Raw row counts per queue and status (`ready`, `running`, `failed`, `successful`, `lost`), one entry per queue with any rows. The `ready` column counts every READY row, including tasks deferred to a future `run_after`. `lost` counts tasks whose worker stopped reporting with no attempts left; see [the reaper](production.md#the-reaper). |
+| `ready_count()` | `int` | READY tasks eligible to run now, mirroring the worker's dequeue predicate: deferred tasks do not count until `run_after` passes. This is the backlog number. |
+| `oldest_ready_age()` | `timedelta \| None` | Age of the oldest task waiting to run, measured from when it became eligible (`run_after` when set, `enqueued_at` otherwise), so a task deferred by a week does not read as a week of backlog. |
+| `throughput(window)` | `float` | Tasks reaching a terminal state (SUCCESSFUL or FAILED) per minute over the trailing window (default 5 minutes). |
+| `failure_rate(window)` | `float \| None` | Fraction of terminal outcomes in the window that FAILED, or `None` when nothing finished. Retries still pending are not outcomes and do not count. |
+| `last_claim_age()` | `timedelta \| None` | Time since any worker last claimed a task, or `None` if none ever was. This is claim activity, not a heartbeat: idle workers over an empty queue record nothing. |
+
+Every function except `queue_stats()` accepts a `queue_name` keyword to
+scope the metric to one queue.
+
+**Alert on two numbers: backlog depth (`ready_count`) and backlog age
+(`oldest_ready_age`).** Neither works alone. Depth looks fine while one poisoned
+task starves the queue. Age looks fine during a flood of fresh work.
+
+## Health checks: ox_health
+
+`ox_health` turns thresholds on those metrics into an exit code. Zero when every
+enabled check passes. Non-zero with a one-line reason on stderr when one fails.
+With no flags, it checks only that the database answers.
+
+```
+python manage.py ox_health --max-backlog 1000 --max-age 600
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--queue` | all queues | Restrict the checks to one queue. |
+| `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. Deferred tasks do not count. |
+| `--max-age` | off | Fail when the oldest waiting task has waited longer than this many seconds since becoming eligible. |
+| `--worker-timeout` | off | Fail when no worker has claimed a task within this many seconds, or no claim was ever recorded. |
+
+On success it prints the measured values, which is useful in cron mail
+and probe logs:
+
+```
+OK: backlog=3 oldest_age=12s last_claim_age=2s
+```
+
+Which check goes where:
+
+- **`--max-backlog` and `--max-age` measure the whole queue.** Put them in
+  fleet-level alerting, from cron or a monitoring agent. Do not put them in a
+  per-worker probe: a shared backlog would fail every worker's probe and restart
+  healthy workers without shifting the backlog.
+- **`--worker-timeout` is the closest thing to a liveness check here.** Claiming
+  is the only trace a worker leaves, so it works on queues with steady traffic
+  and will false-alarm on ones that are legitimately idle.
+- **For bursty queues, prefer `--max-age`.** It only fires when work exists and
+  is not being picked up.
+
+As a Kubernetes liveness probe on the worker container, for a queue with
+steady traffic:
+
+```yaml
+livenessProbe:
+  exec:
+    command:
+      ["python", "manage.py", "ox_health", "--worker-timeout", "300"]
+  periodSeconds: 60
+  timeoutSeconds: 10
+  failureThreshold: 3
+```
+
+From cron, for alerting on the queue itself:
+
+```
+*/5 * * * * cd /srv/myproject && .venv/bin/python manage.py ox_health \
+    --max-backlog 1000 --max-age 600 || /usr/local/bin/page-someone
+```
+
+## Log events
+
+The worker logs through the standard library logger named `django_ox`. No
+logging dependency, no imposed format. Configure handlers and formatters in
+`LOGGING` as usual.
+
+Lifecycle events carry an `extra` dictionary with stable keys, so a JSON
+formatter that serialises record attributes gets consistent fields to index.
+The message text is not part of the contract. The keys are.
+
+| Event | Level | When |
+| --- | --- | --- |
+| `worker_started` | INFO | The run loop starts. |
+| `task_claimed` | DEBUG | A task was claimed from the queue. |
+| `task_started` | DEBUG | Execution of an attempt begins. |
+| `task_succeeded` | INFO | The task reached SUCCESSFUL. |
+| `task_retrying` | WARNING | An attempt failed with retries remaining. |
+| `task_failed` | ERROR | The task reached FAILED, out of attempts. |
+| `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. |
+| `task_lease_lost` | WARNING | A worker finished an attempt whose lease had already been reclaimed, so its write was dropped and no result was signalled. |
+| `lease_renew_failed` | WARNING | A lease renewal statement failed. The worker keeps going and tries again on the next interval. |
+| `schedule_dispatched` | INFO | A recurring tick enqueued its task. |
+| `worker_error` | ERROR | The execution wrapper itself raised (an internal worker error, not a task failure). |
+| `worker_draining` | INFO | Shutdown began with tasks still in flight. |
+| `worker_stopped` | INFO | The run loop exited. |
+
+| Key | Present on | Meaning |
+| --- | --- | --- |
+| `event` | all events | The event name from the table above. |
+| `worker_id` | all events | Unique id of the worker emitting the record. |
+| `task_id` | task events | The task's UUID, as a string. |
+| `task_path` | task events | Dotted path of the task function. |
+| `queue` | task events | Queue name. |
+| `attempt` | task events | Attempts consumed so far, including the current one. |
+| `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_lease_lost` | Wall-clock duration of the attempt, in milliseconds. |
+| `exception` | `task_retrying`, `task_failed` | Exception class name of the failure. |
+| `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `LOST` (out of attempts). |
+| `dropped_status` | `task_lease_lost` | Status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |
+| `schedule` | `schedule_dispatched` | Schedule name from `SCHEDULES`. |
+| `queues`, `concurrency` | `worker_started` | The worker's configuration. |
+| `pending` | `worker_draining` | In-flight tasks at shutdown. |
+
+`task_claimed` and `task_started` are DEBUG because they fire once per
+attempt; run `ox_worker -v 2` (or set the logger to DEBUG) when you want
+them. Everything a dashboard usually wants survives at INFO.
+
+`task_lease_lost` should be rare. It means a worker went unresponsive long
+enough for the reaper to take its task away, and the worker's own result was
+dropped when it finally finished, because the row no longer belonged to it.
+Treat a steady trickle as a signal that `LOCK_TIMEOUT` is short relative to
+how long your workers stall, rather than as noise; the
+[Production](production.md#tuning-lock_timeout) page covers the tuning.
+
+`throughput()` and `failure_rate()` count SUCCESSFUL and FAILED rows only. A
+LOST task is not an outcome, so it is in neither number; read the `lost`
+column from `queue_stats()` for it.
+
+## Monitoring recipes
+
+- **Alerting.** Alert on `ready_count` and `oldest_ready_age` (via
+  `ox_health` thresholds or the functions directly), and on
+  `failure_rate` rising above your normal baseline. Throughput is better
+  as a dashboard line than an alert: its healthy value depends entirely
+  on offered load.
+- **Prometheus.** No exporter ships with django-ox, and none ships in
+  [Pro](pro.md) either. The stats functions drop into any Django metrics setup
+  though. Either register a custom collector with django-prometheus, whose
+  `collect()` calls `queue_stats()`, `ready_count()` and `oldest_ready_age()`
+  and yields gauges, or render the same numbers from a plain Django view in the
+  Prometheus text format and point a scrape job at it. Label by `queue_name`.
+- **journald.** Under systemd, WARNING and above maps onto journal
+  priorities, so `journalctl -u ox-worker -p warning` shows exactly
+  retries, reclaims and failures. Pair it with `ox_health` in a timer for
+  active checks.
+- **Poisoned-task triage.** When `failure_rate` spikes, the rows have the
+  forensics: filter FAILED rows and read `errors` (per-attempt
+  tracebacks), `attempts` and `worker_ids` to see what died where.
+
+---
+
+# Source: https://oxpull.com/django-ox/benchmarks/
+
+# Benchmarks
+
+django-ox 0.1.0 against django-tasks-db 0.12.0 (the other database
+backend for the Tasks API) on identical no-op workloads, PostgreSQL 16.
+Full methodology, raw JSON with every sample, and per-process logs are in
+the `benchmarks/` directory of the repository. Every run is reported;
+nothing was discarded.
+
+## Results
+
+Final 3-run matrix, runs interleaved between backends, all runs shown.
+
+| Metric | django-ox (r1 / r2 / r3) | django-tasks-db (r1 / r2 / r3) |
+| --- | --- | --- |
+| Enqueue throughput (tasks/sec, higher better) | 657 / 528 / 557 | 447 / 450 / 454 |
+| Enqueue latency in `transaction.atomic()`, p50 ms | 0.53 / 0.43 / 0.55 | 0.55 / 0.54 / 0.43 |
+| End-to-end, 2,000 tasks, concurrency 1 (tasks/sec) | 90.1 / 88.1 / 90.1 | 69.2 / 69.9 / 69.6 |
+| End-to-end, 2,000 tasks, concurrency 4 (tasks/sec) | 393 / 373 / 397 | 366 / 373 / 376 |
+
+Reading: ox wins enqueue throughput and concurrency-1 end-to-end in all
+three runs, and edges or ties concurrency 4. In-transaction enqueue
+latency is a tie at roughly half a millisecond for both; run-to-run drift
+on the machine is larger than the difference between the backends.
+
+A diagnostic cell at a non-default `--interval 0.1` produced the same throughput
+as the defaults: 87.8, 86.6 and 88.5 tasks/sec. So the poll interval does not
+bound throughput. With tasks in flight, the worker wakes on task completion
+rather than on the polling clock.
+
+## Where the numbers come from
+
+Two properties of the worker's claim path drive the end-to-end results:
+
+- **On PostgreSQL, claiming a task is a single statement**:
+  `UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING`,
+  with all per-attempt bookkeeping folded into the same UPDATE. A full
+  claim-and-execute cycle costs 2 SQL statements per task. On a network
+  link where every round trip costs real milliseconds, statement count
+  matters even more than it does on this localhost setup.
+- **The worker wakes on task completion.** When executor slots are busy,
+  the run loop waits on the in-flight futures rather than sleeping the
+  poll interval, so `--interval` only governs how often an idle worker
+  checks for new work.
+
+The harness gates releases. Both properties above are proven by published cells:
+the single-statement claim by the concurrency-1 rows, the completion wake-up by
+the diagnostic cell. A regression in either shows up as a changed number rather
+than a changed claim.
+
+## How to read these numbers
+
+- **No-op task bodies.** The tasks do nothing, so these numbers measure
+  framework overhead only. Real tasks do work; with realistic bodies the
+  differences here shrink as a fraction of total runtime. If your tasks
+  average even 100 ms, both backends will feel identical.
+- **Single machine, one day.** An Apple M1 Max running both the workers
+  and the database; no controlled thermal or background-load environment.
+  The numbers are indicative of relative behavior, not absolute claims.
+- **Localhost database.** PostgreSQL 16 in Docker on the same machine,
+  sub-millisecond round trips. Real deployments have network latency
+  between app and database, which changes end-to-end numbers materially
+  and increases the weight of per-task statement count.
+- **The concurrency-4 comparison is imperfect by construction.**
+  django-tasks-db's worker has no concurrency option, so its
+  "concurrency 4" is four separate processes: four interpreters without a
+  shared GIL, four Django boots inside the timed window. ox's is four
+  threads in one process. This is the fairest available mapping, though
+  still an approximation. (It also means ox wins that cell while sharing
+  one interpreter.)
+- **Small N.** 2,000 tasks and 500 latency samples separate the backends
+  here but say nothing about p99+ tails or sustained load. Sustained load
+  and worker-failure behavior are covered separately by the
+  [soak and chaos run](#reliability-under-load) below.
+
+## Reliability under load
+
+Speed is not the product claim; the durability construction is. A
+separate soak and chaos harness ran django-ox 0.1.0 for 21.5 minutes of
+sustained mixed load on PostgreSQL 16: 37,802 tasks across three
+scenarios, including 9 minutes in which a random worker was SIGKILLed
+every 20 to 45 seconds (16 kills total, 39 interrupted claims). Every
+task reached a terminal state, every interrupted claim was reclaimed and
+re-executed inside the documented bound, retry counts stayed bounded on
+every row, and zero tasks were lost or double-completed. Latency under
+kill-chaos was within noise of the undisturbed baseline (p50 0.217 s vs
+0.211 s).
+
+The full report, including the harness design, every assertion, and the
+caveats, is in
+[`benchmarks/SOAK-2026-08-16.md`](https://github.com/oxpull/django-ox/blob/main/benchmarks/SOAK-2026-08-16.md).
+
+## What to take from this
+
+The shipped worker beats the reference implementation on every measured
+cell or ties it, and holds its documented guarantees under sustained load
+and repeated worker kills. But throughput on no-op tasks is not why you
+choose django-ox. The claim is the durability construction: transactional
+enqueue, at-least-once execution with a reaper, bounded retries with
+per-attempt tracebacks. The benchmark exists to show that choosing those
+semantics costs you nothing on worker performance.
+
+---
+
+# Source: https://oxpull.com/django-ox/stability/
+
+# API stability
+
+This page states what counts as django-ox's public API, how versions
+change, and which Python and Django versions are supported. It is a
+promise about compatibility, so you can pin `django-ox` with confidence.
+
+## Public API
+
+These are the supported surfaces. Changes to them are versioned and
+announced in the [changelog](changelog.md).
+
+- **The backend path** `django_ox.backend.OxBackend`, referenced as a
+  string in the `TASKS` setting, and every `OPTIONS` key it reads:
+  `MAX_ATTEMPTS`, `LOCK_TIMEOUT`, `BACKOFF_INITIAL`, `BACKOFF_MAX`,
+  `QUEUES`, and `SCHEDULES` (with its documented per-schedule keys).
+- **The management commands** and their flags: `ox_worker`, `ox_prune`,
+  `ox_health`.
+- **The metrics module** `django_ox.stats`: the functions listed in its
+  `__all__` (`queue_stats`, `ready_count`, `oldest_ready_age`,
+  `throughput`, `failure_rate`, `last_claim_age`) and the `QueueStats`
+  dataclass.
+- **The exception** `django_ox.exceptions.TaskAbandoned`, recorded against
+  tasks whose worker stopped reporting with no attempts left. It records the
+  lost lease, not a cause of failure.
+- **The structured-log contract**: the event names and stable `extra` keys
+  documented on the [Monitoring](monitoring.md) page.
+- **The database schema** of `OxTask` and `OxScheduleTick`, evolved only
+  through shipped migrations.
+- **`django_ox.__version__`.**
+
+The producer-side API is `django.tasks` itself (`@task`, `.enqueue()`,
+`get_result()`); django-ox adds nothing there and follows Django's
+contract.
+
+### Not public
+
+Everything else is an implementation detail and may change in any release
+without notice. That covers the `django_ox.worker.Worker` internals, the cron
+parser (`django_ox.cron`), the row-to-dataclass conversion
+(`django_ox.results`), the schedule loader (`django_ox.schedules`), and any name
+starting with an underscore. The exact SQL a claim emits and the
+model's non-schema helper methods are not part of the contract.
+
+## Versioning
+
+django-ox follows [Semantic Versioning](https://semver.org/). Before 1.0,
+the pre-1.0 rule applies:
+
+- **0.x minor releases (0.1 to 0.2) may contain breaking changes.** Any
+  break to a public surface above is called out in the changelog under a
+  `Changed` or `Removed` heading, with the migration step.
+- **0.x.y patch releases are bug fixes only** and never break a public
+  surface.
+
+Pin accordingly: `django-ox~=0.1.0` accepts patch releases only;
+`django-ox>=0.1,<0.2` accepts the current minor line.
+
+Once 1.0 ships, breaking changes to the public API will require a major
+version bump, in the usual SemVer way.
+
+## Deprecation policy
+
+When a public surface is going to be removed or changed incompatibly, and
+a compatible path exists, it is deprecated before removal rather than
+dropped outright:
+
+- The deprecation is documented in the changelog and, where it can be,
+  surfaced at runtime (a `DeprecationWarning` or a `manage.py check`
+  message).
+- A deprecated surface keeps working for **at least one full minor release**
+  (pre-1.0) or one major release (post-1.0) before it is removed.
+
+Security fixes are exempt. A surface that cannot be kept without leaving a
+vulnerability open may change in a patch release. That is documented in the
+changelog, and in a security advisory where relevant.
+
+## Supported Python and Django
+
+Each django-ox release is tested against the matrix below in CI (SQLite
+and PostgreSQL); these are the supported combinations.
+
+| | Django 6.0 | Django 6.1 |
+| --- | --- | --- |
+| **Python 3.12** | tested | tested |
+| **Python 3.13** | tested | tested |
+| **Python 3.14** | tested | tested |
+
+The support floor tracks Django's own: when a Python or Django version
+reaches end of life upstream, a later django-ox minor release may drop it,
+announced in the changelog. Databases: PostgreSQL, SQLite and MySQL 8 are
+tested in CI. MariaDB 10.6+ uses the same claim path, since Django's own
+floor guarantees `SELECT ... FOR UPDATE SKIP LOCKED` there, but it is not
+part of the tested matrix.
+
+---
+
+# Source: https://oxpull.com/django-ox/pro/
+
+# Pro
+
+Everything documented on this site is free, open source (BSD 3-Clause), and
+stays that way. The durable queue, transactional enqueue, retries, reaper,
+graceful drain, priorities, deferred tasks, recurring tasks and pruning are
+the free tier, permanently. Nothing that works today moves behind the paid
+tier.
+
+**Oxpull Pro** is a paid add-on for two problems that show up once a queue is
+carrying real volume. Both are built and tested. It is not on sale yet: the
+purchase and delivery path is still being set up, and the waitlist below is
+how to hear when it opens.
+
+## What Pro adds
+
+- **Unique tasks.** Deduplicate at enqueue time, so the same job cannot be
+  queued twice. The lock is written in the same transaction as the task, so
+  the two commit or roll back together, and a lock whose task died is
+  released rather than stranded.
+- **Batches.** Enqueue a group, read its progress as a count, and fire a
+  callback once every member has settled. Completion is computed by querying
+  the task rows rather than by counting signals, so a worker dying mid-task
+  cannot strand a batch: the reconciler picks it up on the next tick.
+
+Both run on the databases the free tier tests in CI: SQLite, PostgreSQL and
+MySQL 8. MariaDB 10.6+ takes the same claim path but is not part of the tested
+matrix. Batches are tested to 100,000 members in a single batch.
+
+## What Pro is not
+
+Rate limiting, workflows and chains, a web dashboard and encrypted payloads
+are not in Pro and are not dated. Metrics stay free: the stats API and the
+health command are in the open source package and remain there.
+
+## Delivery
+
+Pro will install from a private package index using credentials issued per
+company. There is no licence key and no runtime check. A licence check is one
+more thing of ours that can break your production, so we did not build one.
+The credential controls access to the index rather than to code you have
+already installed, so if it lapses, what is deployed keeps running.
+
+## Pricing
+
+Planned at **$399 per year, per company**, flat. One licence to cover a whole
+organisation and every environment, with a seven-day money-back period.
+
+## Waitlist
+
+If Pro would earn its keep in your deployment, join the waitlist and say which
+of the two features matters to you. That ordering decides what gets built
+after these.
+
+[Join the Pro waitlist](https://oxpull.com/#waitlist){ .md-button }
+
+---
+
+# Source: https://oxpull.com/django-ox/changelog/
+
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.2.1] - 2026-08-20
+
+### Fixed
+
+- A task that succeeded after its lease was lost no longer keeps the reaper's
+  lost-lease record in `errors`. That record says the outcome was never
+  observed, and the success write is that observation, so anything reading
+  `result.errors` was handed an exception nobody raised on a task that worked.
+  A failure resolving the same way already dropped it, and the two now agree. A task that is still LOST keeps the record: it is
+  the only thing on the row that says why the result reads as failed.
+
+### Added
+
+- `tools/check_release.py --dist` opens the built wheel and sdist and checks
+  that each one carries every migration in the source tree, along with the
+  licence and the package modules. A packaging rule that stops shipping a
+  migration leaves a distribution that imports and passes its tests, and fails
+  on somebody's upgrade against a column that is not there. The release
+  workflow runs it after the build.
+
+## [0.2.0] - 2026-08-20
+
+### Fixed
+
+- A worker whose task had been taken back by the reaper could still write its
+  own outcome over the row, so a task that had already finished could be moved
+  back to READY and run a second time after its result had been reported. Every
+  claim now stamps the row with a lease number, and every finish write carries
+  that number in its WHERE clause, so a write from a worker that no longer
+  holds the task matches nothing and is dropped instead of applied. No
+  completion is signalled for a dropped write.
+- The reaper no longer records a failure it did not observe. When a lock aged
+  out with no attempts left it wrote FAILED and invented a `TaskAbandoned`
+  exception to explain it, on no evidence beyond a clock. It now records the
+  task as LOST, which says the worker stopped reporting and the outcome was
+  never seen, and nothing more.
+- Lock timestamps are written and compared using the database server's clock
+  rather than each worker's own, so two hosts with drifting clocks no longer
+  produce false reclaims. This applies when `USE_TZ` is on. With `USE_TZ` off
+  the worker's clock is used instead, because the database's clock does not
+  always match what these columns hold: SQLite's is UTC while the columns carry
+  naive local time, and reading one against the other would make `ox_prune
+  --older-than` treat rows that finished seconds ago as hours old.
+- On databases without `SELECT ... FOR UPDATE SKIP LOCKED`, which includes
+  SQLite, a claim read its row back in a second statement and could come away
+  holding a lease granted to a different worker, if the reaper reclaimed the
+  row in the gap between the two. The read is now pinned to the lease the claim
+  was granted, so a worker that lost the row inside that gap comes back with
+  nothing rather than with someone else's lease.
+
+### Added
+
+- **Lease renewal.** A worker refreshes the lock on the tasks it is running,
+  one statement per interval however many are in flight, and keeps doing so
+  through a graceful drain. A long task on a healthy worker is no longer
+  reclaimed while it is still running. `LOCK_TIMEOUT` now bounds how long a
+  worker may go unresponsive, not how long a task may take. The renewal
+  interval is `LOCK_TIMEOUT / 3`, overridable as `renew_interval` when
+  embedding `Worker` directly.
+- `OxTask.Status.LOST`, a fifth value in django-ox's own status column. It
+  reads as `FAILED` through `django.tasks`, which has four statuses and gets no
+  fifth from us, and `is_finished` is true for it, so callers waiting on a
+  result still terminate. The row keeps the distinction: `queue_stats()`
+  reports a `lost` column and `ox_prune --include-failed` covers it. If the
+  worker holding a LOST task comes back and records a real outcome, that
+  outcome replaces LOST; only that one execution can.
+- `task_lease_lost` and `lease_renew_failed`, two WARNING log events. Both are
+  documented on the Monitoring page.
+
+### Changed
+
+- **A migration ships with this release.** Run `python manage.py migrate
+  django_ox` when you upgrade. It adds the `lease_epoch` column and the new
+  status choice.
+- `task_reclaimed` now reports `status` as `READY` or `LOST`, where it
+  previously reported `READY` or `FAILED`.
+- `QueueStats` has a fifth field, `lost`. It is keyword-defaulted, so existing
+  code that constructs one keeps working.
+
+## [0.1.2] - 2026-08-18
+
+The worker, the public API and the database schema are unchanged. This
+release updates the project description that appears on the package page,
+and the documentation that ships with it.
+
+### Changed
+
+- README now leads with what the backend removes from a deployment: the
+  queue lives in the database the application already runs, so there is no
+  broker to provision, secure, upgrade or back up. The transactional
+  guarantee follows it rather than opening.
+
+### Added
+
+- Migration guidance now covers moving *away* from django-ox as well as to
+  it: which behaviour carries over to a broker-backed backend, which does
+  not, and how to keep the option open.
+- Worked examples for routing a queue to its own worker, choosing a lock
+  timeout for long tasks, overriding a schedule's queue and priority,
+  verifying that a schedule is live, and running the worker in containers.
+- `context7.json`, so documentation indexers read the project description,
+  the supported versions and the setup steps rather than inferring them.
+
+## [0.1.1] - 2026-08-17
+
+The worker, the public API and the database schema are unchanged. This
+release updates the packaging metadata and the project description that
+appears on the package page.
+
+### Changed
+
+- Packaging metadata now carries a `Documentation` URL, so the
+  documentation site is linked directly from the package page.
+- README now carries release and CI status badges, a link to the
+  documentation site, and a scope statement: what the core covers, what is
+  deliberately outside it, and which features belong to the commercial
+  tier.
+
+## [0.1.0] - 2026-08-16
+
+Initial release.
+
+### Added
+
+- `OxBackend`, a database-backed backend for Django's Tasks framework
+  (`django.tasks`, Django 6.0+). Tasks are stored in the application database;
+  no broker required.
+- Transactional enqueue: `enqueue()` is a single INSERT on the caller's
+  connection, so a task enqueued inside `transaction.atomic()` commits or
+  rolls back with the business data.
+- `ox_worker` management command: claims tasks with
+  `SELECT ... FOR UPDATE SKIP LOCKED` where supported (PostgreSQL, MySQL 8+)
+  and an atomic compare-and-set UPDATE elsewhere (including SQLite).
+  Configurable via `--backend`, `--queues`, `--concurrency` (thread pool),
+  `--interval`, and `--lock-timeout`.
+- Retries with exponential backoff (`MAX_ATTEMPTS`, `BACKOFF_INITIAL`,
+  `BACKOFF_MAX`), keeping the full traceback of every attempt.
+- Reaper: tasks whose worker died are returned to the queue after
+  `LOCK_TIMEOUT` and count as a failed attempt.
+- Graceful drain: on SIGTERM/SIGINT the worker stops claiming, finishes
+  in-flight tasks, then exits; a second signal forces an immediate exit.
+- Priorities (-100 to 100, higher first) and deferred tasks (`run_after`),
+  with the corresponding `supports_*` flags declared on the backend.
+- Result store: `get_result()`, `refresh()`, and the async variants, with
+  status, return value, and per-attempt errors readable from the database.
+- `ox_prune` management command: batched deletion of finished task rows
+  (`--older-than`, `--include-failed`, `--batch-size`, `--dry-run`).
+- `django_ox.stats`: read-only queue metrics as plain ORM queries, on
+  both supported databases: per-queue status counts, backlog depth and
+  age, throughput and failure rate over a trailing window, and time
+  since the last task claim.
+- `ox_health` management command: exits non-zero with a one-line reason
+  when the database is unreachable or a `--max-backlog`, `--max-age` or
+  `--worker-timeout` threshold is breached; built for cron alerting and
+  container probes.
+- Structured logging: worker lifecycle events (claim, start, success,
+  retry, failure, reclaim, dispatch, shutdown) log to the `django_ox`
+  logger with stable extra keys (`event`, `task_id`, `queue`, `attempt`,
+  `duration_ms`, ...) for JSON log handlers.
+- Recurring tasks: cron schedules declared in the `TASKS` setting
+  (`SCHEDULES` option), dispatched by the workers themselves; a unique
+  constraint on (schedule, tick) makes each tick fire exactly once across
+  any number of workers. Five-field cron syntax plus `@hourly`-style
+  shortcuts; misconfigured schedules fail at startup and in
+  `manage.py check`. On recovery after downtime, only the latest missed
+  tick fires.
+- System check `django_ox.E003`: a schedule name defined on more than
+  one backend is rejected, at worker startup and in `manage.py check`,
+  because the tick log is keyed by schedule name alone and shared names
+  would let the backends suppress each other's ticks.
+- Strict cron validation: expressions that can never fire and step values
+  larger than a field's range (such as `*/61` in the minute field) are
+  rejected at parse time rather than misfiring silently. Schedule
+  dispatch is robust to clock skew between workers: a tick row dated in
+  the future cannot suppress ticks that are due.
+
+### Security
+
+- A stored `task_path` must resolve to a `django.tasks` Task (a function
+  registered with `@task`). A row naming any other importable callable is
+  rejected as an un-runnable task instead of being executed, so the
+  worker never invokes an arbitrary dotted path pulled from the table.
+  `SECURITY.md` documents the full trust model, the JSON-only
+  serialization, and the guidance to keep secrets out of task arguments.
+- An API stability and deprecation policy (`docs/stability.md`) covers
+  the public API surface, the pre-1.0 SemVer rule, the deprecation
+  window, and the supported Python and Django matrix.
+
+[0.2.1]: https://github.com/oxpull/django-ox/releases/tag/v0.2.1
+[0.2.0]: https://github.com/oxpull/django-ox/releases/tag/v0.2.0
+[0.1.2]: https://github.com/oxpull/django-ox/releases/tag/v0.1.2
+[0.1.1]: https://github.com/oxpull/django-ox/releases/tag/v0.1.1
+[0.1.0]: https://github.com/oxpull/django-ox/releases/tag/v0.1.0

@@ -75,7 +75,10 @@ python manage.py ox_worker [options]
 The command also honors Django's standard `-v/--verbosity`: at the default
 verbosity it logs worker lifecycle and warnings to stderr, and `-v 2`
 enables debug logging. `-v 0` attaches no log handler. With `--processes`
-above 1 every flag is passed on to each worker process unchanged.
+above 1 every flag is passed on to each worker process unchanged, including
+`--settings` and `--pythonpath`, and each worker process is started the way
+the supervisor was (`manage.py` by absolute path, or `python -m django`), so
+the command works from any working directory.
 
 Two intervals are derived rather than flagged:
 

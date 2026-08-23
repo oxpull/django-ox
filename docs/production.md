@@ -119,13 +119,27 @@ This maps directly onto rolling deploys: send SIGTERM, wait, start the new
 version. The only tuning point is the process manager's kill escalation
 (`TimeoutStopSec` above) relative to your longest task.
 
-With `--processes` above 1, the signal goes to the supervisor. It forwards
-SIGTERM to every worker process, waits for each to drain, and exits 0 when all
-of them did, otherwise with the first non-zero code. A second signal is
-forwarded again, which is the force-exit on each worker. Send the signal to
-the supervisor only: a worker that also receives the terminal's copy of a
-Ctrl-C has seen two signals, which is why the workers run in their own process
-group and why the systemd unit above sets `KillMode=mixed`.
+With `--processes` above 1, the signal goes to the supervisor, and SIGHUP
+counts as well as SIGTERM and SIGINT. The sequence is:
+
+1. First signal: the supervisor forwards SIGTERM to every worker process
+   and waits for each to drain. It exits 0 when all of them did, otherwise
+   with the first non-zero code.
+2. Second signal: forwarded again, which is the force-exit on each worker.
+   A worker that cannot act on it (stopped, stuck in a C call) gets five
+   seconds, then SIGKILL, logged as `supervisor_killed_workers` at ERROR.
+3. A third signal sends the SIGKILL at once.
+
+Send the signal to the supervisor only: a worker that also receives the
+terminal's copy of a Ctrl-C has seen two signals, which is why the workers
+run in their own process group and why the systemd unit above sets
+`KillMode=mixed`.
+
+A worker whose supervisor dies without signalling it (SIGKILL, an OOM kill)
+notices within one poll interval that its parent pid has changed, logs
+`worker_orphaned` at WARNING, drains and exits. On Linux the kernel also
+sends it SIGTERM the moment the supervisor exits (`PR_SET_PDEATHSIG`). Either
+way nothing runs on as an orphan beside the supervisor's replacement.
 
 ## Scaling out
 
@@ -168,14 +182,35 @@ fresh interpreter running `ox_worker --processes 1` with the same flags, so a
 worker under the supervisor is the same code as a worker started by hand. The
 supervisor itself never opens a database connection.
 
-A worker process that exits on its own, whatever the cause, is restarted a
-second later and the supervisor logs `worker_process_restarted` with the
-exit code at WARNING. Its in-flight tasks go through the ordinary lease path:
-the reaper on a surviving process takes them back after `LOCK_TIMEOUT`. More
-than five restarts inside one minute, counted across all processes, stops the
-supervisor with exit code 1 and `supervisor_restart_cap` at ERROR, so a
-worker that cannot start hands the fault to the process manager and its
-restart policy rather than logging a restart a second forever.
+The children start the way the supervisor was started. `python
+/srv/app/manage.py ox_worker --processes 2` from any working directory runs
+`/srv/app/manage.py` again for each child; `django-admin` or `python -m
+django` runs `python -m django` with `DJANGO_SETTINGS_MODULE` set in the
+child's environment. `--settings` and `--pythonpath` are passed on, and the
+children inherit the supervisor's working directory.
+
+A worker process that exits, whatever the cause and whatever the code, is a
+death: a crash, a kill, and a clean exit 0 all count the same, because a
+worker is meant to run until told to stop. The supervisor restarts the slot
+and logs `worker_process_restarted` with the exit code at WARNING. Its
+in-flight tasks go through the ordinary lease path: the reaper on a
+surviving process takes them back after `LOCK_TIMEOUT`. The restart policy
+is per slot:
+
+- The first restart comes after one second. Each further death within 60
+  seconds of the slot's last start doubles the delay (1, 2, 4, 8, 16, 30
+  seconds, capped at 30). A slot that has run for 60 seconds starts the
+  sequence over at one second.
+- More than five deaths of one slot inside one minute stops the supervisor:
+  it logs `supervisor_restart_cap` at ERROR with the slot index, drains the
+  other workers, and exits 1 whatever the children's own exit codes were, so
+  `Restart=on-failure` restarts it. A worker that cannot start hands the
+  fault to the process manager and its restart policy rather than logging a
+  restart a second forever.
+- Because the count is per slot, every worker dying at once (a database
+  restart, a deploy that changes a connection string) is one restart each,
+  not a trip. Six workers that all die in the same second all come back a
+  second later.
 
 Two things `--processes` does not do. It does not run on Windows, where
 there are no POSIX signals to forward; run one `ox_worker` per process there.

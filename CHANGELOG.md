@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TASK_TIMEOUT`, `TASK_TIMEOUTS` and `TASK_TIMEOUT_GRACE` backend options, a
+  limit on how long one attempt may run. At the deadline the worker raises
+  `django_ox.exceptions.TaskTimeout` inside the task, on the task's own
+  thread, so `finally` blocks run and an open `transaction.atomic()` rolls
+  back; an async task is cancelled inside its event loop instead. The attempt
+  is recorded as failed with the `TaskTimeout` error and retried on the usual
+  backoff, or marked FAILED when attempts are spent. A thread that has not
+  stopped `TASK_TIMEOUT_GRACE` seconds later (default 30) is blocked outside
+  Python: the worker records the attempt as failed, moves the lease number so
+  the thread can write nothing to the row, stops claiming, drains its other
+  tasks and exits with code 75, which `--processes` restarts without counting
+  it against the restart cap. `TASK_TIMEOUTS` maps a queue name to its own
+  value, and a key that is not in `QUEUES` fails `manage.py check` as
+  `django_ox.E005`; a bad value fails it as `django_ox.E004`. Off by default.
+  `django_ox.deadline()` and `django_ox.remaining()` read the attempt's
+  deadline from inside a task. `TaskTimeout` subclasses `TimeoutError`. New
+  log events: `task_timed_out`, `task_stuck`, `worker_recycling`,
+  `worker_process_recycled` and `timeouts_backstop_only`.
 - `ox_worker --processes N`. Above 1, the command supervises N copies of
   itself, each a full worker with its own database connections, lease
   renewal, reaper and `--concurrency` thread pool, so `--processes 2
@@ -72,8 +90,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   django_ox` when you upgrade. It adds the new status choice.
 - `QueueStats` has a sixth field, `discarded`, keyword-defaulted like `lost`.
 - The scope statement no longer says tasks cannot be revoked after enqueue. A
-  queued task can be discarded; a running one still cannot be stopped from
-  outside.
+  queued task can be discarded and every attempt can be bounded with
+  `TASK_TIMEOUT`; one chosen running task still cannot be interrupted on
+  demand.
+- A worker that is already draining, because it is recycling, treats the
+  operator's first signal as the drain it is doing rather than as the
+  force-exit; the second signal is still the force-exit.
 
 ## [0.2.1] - 2026-08-20
 

@@ -173,8 +173,9 @@ schedules, and monitoring, with nothing extra to operate. Design
 decisions worth knowing before you commit:
 
 - A queued task can be discarded before a worker claims it, and a failed
-  one retried, from the admin or with `django_ox.actions`. A running task
-  cannot be stopped from outside; it finishes or its worker dies.
+  one retried, from the admin or with `django_ox.actions`. `TASK_TIMEOUT`
+  bounds how long any attempt may run; a particular running task cannot be
+  interrupted on demand.
 - Tasks are stored on the default database for the model; multi-database
   routing is not part of the current scope.
 - Worker concurrency is a thread pool, which fits I/O-bound tasks. For
@@ -209,6 +210,9 @@ TASKS = {
             "LOCK_TIMEOUT": 300,
             "BACKOFF_INITIAL": 5,
             "BACKOFF_MAX": 600,
+            "TASK_TIMEOUT": None,
+            "TASK_TIMEOUTS": {},
+            "TASK_TIMEOUT_GRACE": 30,
             "SCHEDULES": {},  # see the Recurring tasks page
         },
     }
@@ -246,6 +250,9 @@ retry. Add options when you have a reason to.
 | `LOCK_TIMEOUT` | `300` | Seconds a RUNNING task's lock may go unrefreshed before the reaper takes the task back. A worker refreshes the lock every `LOCK_TIMEOUT / 3` seconds while it is executing, so this is a limit on how long a worker may be unresponsive, not on how long a task may run. |
 | `BACKOFF_INITIAL` | `5` | Delay in seconds before the first retry. |
 | `BACKOFF_MAX` | `600` | Ceiling on the retry delay, in seconds. |
+| `TASK_TIMEOUT` | `None` | Seconds one attempt may run. `None` means no limit. At the deadline the worker raises `django_ox.exceptions.TaskTimeout` inside the task, on the task's own thread, and records the attempt as failed: retried on the usual backoff, or FAILED when attempts are spent. An async task is cancelled at the deadline instead. See [Task timeouts](production.md#task-timeouts). |
+| `TASK_TIMEOUTS` | `{}` | Per-queue timeouts, `{"queue name": seconds}`. A queue in the mapping uses its own value instead of `TASK_TIMEOUT`; `None` as a value exempts that queue. Every key must be a queue named in `QUEUES`, unless `QUEUES` is `[]`. Per queue rather than per task because `django.tasks` gives a task no field a backend could read a timeout from, and a queue is its unit of routing. |
+| `TASK_TIMEOUT_GRACE` | `30` | Seconds a timed-out attempt gets to stop. A thread still running after that is blocked outside Python, where the exception cannot reach it: the worker records the attempt as failed, stops claiming, drains its other tasks and exits with code 75 so its supervisor restarts it. |
 | `SCHEDULES` | `{}` | Recurring task definitions. Documented on the [Recurring tasks](recurring-tasks.md) page. |
 
 The retry delay after attempt *n* fails is
@@ -328,8 +335,8 @@ python manage.py ox_worker --queues exports --lock-timeout 7200
 
 If you embed the worker programmatically, `django_ox.worker.Worker`
 accepts `reap_interval`, `renew_interval`, `schedule_interval`,
-`backoff_initial` and `backoff_max` keyword overrides in addition to the flag
-equivalents.
+`backoff_initial`, `backoff_max`, `task_timeout` and `task_timeout_grace`
+keyword overrides in addition to the flag equivalents.
 
 ## ox_prune
 
@@ -391,9 +398,15 @@ alert are on the
   JSON-serializable, bad queue name or priority).
 - `django_ox.E003`: the same schedule name is defined on more than one
   backend; schedule names must be unique across backends.
+- `django_ox.E004`: `TASK_TIMEOUT`, a `TASK_TIMEOUTS` value or
+  `TASK_TIMEOUT_GRACE` is not a positive number of seconds (the first two
+  may also be `None`), or `TASK_TIMEOUTS` is not a mapping keyed by queue
+  name.
+- `django_ox.E005`: a `TASK_TIMEOUTS` key names a queue that is not in
+  `QUEUES`, so the entry would never apply.
 
-The worker performs the same schedule validation at startup, so a bad
-deploy fails loudly rather than skipping dispatches.
+The worker performs the same schedule and timeout validation at startup, so
+a bad deploy fails loudly rather than skipping dispatches.
 
 ---
 
@@ -1117,6 +1130,7 @@ fewer service. The last section says where django-ox is not the right fit.
 | Retries and backoff | Exponential backoff, `MAX_ATTEMPTS`, `BACKOFF_INITIAL`, `BACKOFF_MAX`; every attempt's traceback kept | No retry option in the README or the worker flags [^tdb-readme] [^tdb-worker] | `retries`, `retry_delay`, `retry_backoff` [^huey-guide] | `autoretry_for`, `retry_backoff`, `retry_backoff_max` (default 600 s), `retry_jitter` [^celery-tasks] | `max_attempts` (default 0, meaning unlimited) and a `retry` interval; backoff not documented [^q2-configure] | Exponential backoff; `max_retries` default 20, `min_backoff` 15 s, `max_backoff` 7 days [^dq-guide] | Retry strategy per task [^proc-index] |
 | Recurring schedules | Cron in settings; every worker dispatches, no scheduler process | None. Issue #259 open since 2026-08-10 [^tasks-259] | `periodic_task(crontab(...))` [^huey-guide] | `celery beat`, a separate process; "ensure only a single scheduler is running" [^celery-beat] | `Schedule` model, editable in admin; cron via croniter [^q2-schedules] | None built in; APScheduler recommended [^dq-cookbook] | `@app.periodic` [^proc-index] |
 | Priorities | -100 to 100 | Yes [^tdb-backend] | Yes; on Redis needs 5.0+ and `PriorityRedisHuey` [^huey-guide] | 0 to 255 on RabbitMQ and Redis [^celery-calling] | Not documented [^q2-configure] | Per actor; lower number runs first [^dq-guide] | Yes [^proc-index] |
+| Time limit on a running task | `TASK_TIMEOUT`, per queue in `TASK_TIMEOUTS`: `TaskTimeout` raised inside the task at the deadline, and a worker recycle when the thread does not stop. See [Production](production.md#task-timeouts) | Not documented in the README or the worker flags [^tdb-readme] [^tdb-worker] | `timeout` per task or per call; "a `TaskTimeout` is raised and returned to the caller via the result handle" [^huey-guide] | `soft_time_limit` raises `SoftTimeLimitExceeded` inside the task; `time_limit` terminates the process running it, which is replaced. "Time limits don't currently work on platforms that don't support the `SIGUSR1` signal" [^celery-workers] | `timeout`, default `None`: "the number of seconds a worker is allowed to spend on a task before it's terminated" [^q2-configure] | `time_limit` per actor, default 10 minutes, raises `TimeLimitExceeded`. "Time limits are best-effort. They cannot cancel system calls or any function that doesn't currently hold the GIL under CPython" [^dq-guide] | Not documented on the page checked [^proc-index] |
 | Worker dies mid-task | Lease renewed every `LOCK_TIMEOUT / 3`; a task whose lease goes stale for `LOCK_TIMEOUT` is put back to READY, or marked LOST when attempts are spent. See [Production](production.md#the-reaper) | Issue #5, open since 2024-06-11: the task 'remains marked as "PROCESSING", and thus is never picked up for re-processing nor marked as completed / failed' [^tdb-5] | "tasks that are mid-execution are lost and will not be retried automatically" [^huey-guide] | `acks_late` re-delivers; the worker still acknowledges "if the child process executing the task is terminated" [^celery-tasks] | Issue #327, open since 2026-05-05: worker death not reported to the monitor, `MAX_ATTEMPTS` ignored [^q2-327] | Not stated on the pages checked [^dq-guide] [^dq-cookbook] | Heartbeat every 10 s; jobs stay in `doing` until a `retry_stalled_jobs` periodic task you define picks them up [^proc-stalled] |
 | Health and metrics | `ox_health` command, `django_ox.stats`, structured log events | Issue #44, container healthchecks, open since 2026-06-08 [^tdb-44] | Signals [^huey-guide] | Flower, a separate process, with Prometheus integration [^flower] | `qmonitor`, `qinfo`, `Stat` [^q2-monitor] | Prometheus middleware; not in the default middleware list [^dq-prom] | Statistics via events [^proc-index] |
 | Databases | PostgreSQL, SQLite and MySQL 8 tested in CI; MariaDB 10.6+ untested | Any Django database [^tdb-readme] | Redis, SQLite, PostgreSQL, file, memory [^huey-guide] | Broker, not a database [^celery-brokers] | Any Django database through the ORM broker [^q2-brokers] | Broker, not a database [^dq-guide] | PostgreSQL 13+ [^proc-index] |
@@ -1128,10 +1142,11 @@ function", open since 2020-12-19 with 98 upvotes [^celery-6552].
 
 ## When not to use django-ox
 
-- **You need to stop a task that is already running.** django-ox can discard
-  a queued task and retry a failed one, but has no way to interrupt a
-  running one. Celery can revoke and terminate a running task, from Flower
-  or the control API [^flower].
+- **You need to stop one chosen task while it runs.** django-ox bounds every
+  attempt with `TASK_TIMEOUT`, discards a queued task and retries a failed
+  one, but has no call that interrupts a particular running task on demand.
+  Celery can revoke and terminate a running task, from Flower or the control
+  API [^flower].
 - **The queue must live on a different database from your models.** Tasks are
   stored on the default database. Multi-database routing is outside the
   current scope, and a separate queue database would also give up the
@@ -1163,6 +1178,7 @@ the link that shows it, and it will be corrected in the next release.
 [^huey-repo]: https://github.com/coleifer/huey, licence field, checked 2026-08-23.
 [^celery-tasks]: https://docs.celeryq.dev/en/stable/userguide/tasks.html, checked 2026-08-23.
 [^celery-brokers]: https://docs.celeryq.dev/en/stable/getting-started/backends-and-brokers/index.html, checked 2026-08-23.
+[^celery-workers]: https://docs.celeryq.dev/en/stable/userguide/workers.html, Time Limits, checked 2026-08-23.
 [^celery-beat]: https://docs.celeryq.dev/en/stable/userguide/periodic-tasks.html, checked 2026-08-23.
 [^celery-calling]: https://docs.celeryq.dev/en/stable/userguide/calling.html, checked 2026-08-23.
 [^celery-5149]: https://github.com/celery/celery/issues/5149, open, checked 2026-08-23.
@@ -1308,6 +1324,11 @@ A second signal during the drain forces an immediate exit, code 130. Whatever
 was running is abandoned mid-flight. The reaper on a surviving worker reclaims
 it later, and it counts as a failed attempt.
 
+One other exit code exists. A worker exits 75 when it recycles itself after
+a task thread that its timeout could not stop; see
+[Task timeouts](#task-timeouts). A process manager on `Restart=always` or
+`Restart=on-failure` restarts it either way.
+
 This maps directly onto rolling deploys: send SIGTERM, wait, start the new
 version. The only tuning point is the process manager's kill escalation
 (`TimeoutStopSec` above) relative to your longest task.
@@ -1445,6 +1466,100 @@ columns carry naive local time, and reading one against the other would make
 `ox_prune --older-than` treat rows that finished seconds ago as hours old.
 Under that setting, keep `TIME_ZONE` and the timezone your workers run in the
 same, which is what Django assumes of it anyway.
+
+### Task timeouts
+
+`TASK_TIMEOUT` bounds how long one attempt may run. It is off by default.
+With it set, the worker raises `django_ox.exceptions.TaskTimeout` inside the
+task when the deadline passes:
+
+- **A sync task** gets the exception on its own thread, at the next line of
+  Python it executes. `finally` blocks run, an open `transaction.atomic()`
+  rolls back, and the thread returns to the pool, where the ordinary cleanup
+  closes its database connection. The task may catch `TaskTimeout` to clean
+  up and then re-raise it. A task that catches it and returns is allowed; the
+  attempt is then recorded as whatever the task went on to do.
+- **An async task** is cancelled inside its event loop at the deadline, and
+  the cancellation reaches the task as `TaskTimeout` from the `await` it was
+  on.
+
+The attempt is recorded as failed with a `TaskTimeout` error that names the
+timeout. The attempt was consumed at claim time, so the retry rule is the
+ordinary one: back to READY on the backoff while attempts remain, FAILED
+when they are spent. The worker logs `task_timed_out` at WARNING, then the
+usual `task_retrying` or `task_failed`. `TaskTimeout` subclasses
+`TimeoutError`, so code written for one treats it as one.
+
+A long loop can check the clock instead of being interrupted between two
+steps. `django_ox.deadline()` returns the attempt's deadline as a `datetime`,
+and `django_ox.remaining()` the seconds left; both return `None` when no
+timeout applies.
+
+```python
+import django_ox
+from django.tasks import task
+
+
+@task
+def export(report_id):
+    for chunk in chunks_of(report_id):
+        left = django_ox.remaining()
+        if left is not None and left < 5:
+            return {"paused_at": chunk.offset}
+        write(chunk)
+    return {"done": True}
+```
+
+**A thread that does not stop.** The exception is delivered when the thread
+next executes Python. A thread blocked in a C call stays blocked: a socket
+read with no timeout, `time.sleep()`, a lock, a long statement waiting on the
+database. `TASK_TIMEOUT_GRACE` (default 30 seconds) is how long the worker
+waits for the thread after the deadline. If it is still running then, the
+worker:
+
+1. Records the attempt as failed, with a `TaskTimeout` whose message says
+   the task did not stop, and moves the lease number in the same write, the
+   way the reaper does when it takes a row off a worker that went quiet.
+   The outcome the thread eventually reports is refused by that number.
+2. Logs `task_stuck` at ERROR and `worker_recycling` at WARNING.
+3. Stops claiming, drains its other in-flight tasks, and exits with code 75
+   (`EX_TEMPFAIL`). The stuck thread dies with the process.
+
+Under `--processes` the supervisor restarts the slot after one second, logs
+`worker_process_recycled`, and does not count the exit against the restart
+cap. Under systemd, `Restart=always` (the unit above) brings the worker back,
+and so does `Restart=on-failure`, since 75 is non-zero. A container runtime
+on `restart: unless-stopped` does the same.
+
+Between the stuck record and the process exit the task may run twice: its
+retry is claimable the moment the record lands, and the stuck thread keeps
+executing until the worker's other in-flight tasks have drained. The thread
+cannot write its outcome to the row, but its side effects are real. That is
+the at-least-once contract every task already lives under: write tasks to be
+safe to run twice.
+
+Put timeouts on sockets and HTTP clients where you can. A task that returns
+to Python regularly is one the soft timeout stops cleanly; the recycle is the
+backstop.
+
+Set per-queue values where one number does not fit:
+
+```python
+"OPTIONS": {
+    "TASK_TIMEOUT": 60,
+    "TASK_TIMEOUTS": {"exports": 3600, "webhooks": 10},
+    "TASK_TIMEOUT_GRACE": 30,
+}
+```
+
+A queue in `TASK_TIMEOUTS` uses its own value; `None` there exempts the
+queue from the global limit. A timeout longer than `LOCK_TIMEOUT` is fine:
+the lease is renewed for as long as the task runs.
+
+Timeouts use CPython's own facility for raising an exception in another
+thread, which every supported Python has. On an interpreter without it, the
+worker logs `timeouts_backstop_only` once at startup and enforces timeouts
+by the grace backstop alone.
 
 ## The reaper
 
@@ -1846,6 +1961,10 @@ The message text is not part of the contract. The keys are.
 | `task_claimed` | DEBUG | A task was claimed from the queue. |
 | `task_started` | DEBUG | Execution of an attempt begins. |
 | `task_succeeded` | INFO | The task reached SUCCESSFUL. |
+| `task_timed_out` | WARNING | An attempt ran past its `TASK_TIMEOUT`. `TaskTimeout` was raised inside it and the attempt is recorded as failed; a `task_retrying` or `task_failed` record follows. |
+| `task_stuck` | ERROR | A timed-out attempt's thread did not stop within `TASK_TIMEOUT_GRACE`. The attempt is recorded as failed and the worker is recycling. |
+| `worker_recycling` | WARNING | The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75. |
+| `timeouts_backstop_only` | WARNING | At startup, on an interpreter that cannot raise an exception inside another thread: timeouts are enforced by the grace backstop alone. |
 | `task_retrying` | WARNING | An attempt failed with retries remaining. |
 | `task_failed` | ERROR | The task reached FAILED, out of attempts. |
 | `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. |
@@ -1857,6 +1976,7 @@ The message text is not part of the contract. The keys are.
 | `worker_stopped` | INFO | The run loop exited. |
 | `supervisor_started` | INFO | `ox_worker --processes N` started its worker processes. |
 | `worker_process_restarted` | WARNING | A worker process exited on its own and is being restarted. |
+| `worker_process_recycled` | WARNING | A worker process exited with code 75 after a stuck task thread and is being restarted. Not counted against the restart cap. |
 | `supervisor_restart_cap` | ERROR | More than five deaths of one slot in a minute; the supervisor is stopping with exit code 1. |
 | `supervisor_killed_workers` | ERROR | Worker processes still running five seconds after the second stop signal were sent SIGKILL. |
 | `supervisor_stopped` | INFO | Every worker process has exited. |
@@ -1870,7 +1990,9 @@ The message text is not part of the contract. The keys are.
 | `task_path` | task events | Dotted path of the task function. |
 | `queue` | task events | Queue name. |
 | `attempt` | task events | Attempts consumed so far, including the current one. |
-| `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_lease_lost` | Wall-clock duration of the attempt, in milliseconds. |
+| `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_timed_out`, `task_stuck`, `task_lease_lost` | Wall-clock duration of the attempt, in milliseconds. |
+| `timeout_s` | `task_timed_out`, `task_stuck` | The timeout that applied, in seconds. |
+| `grace_s` | `task_stuck`, `timeouts_backstop_only` | `TASK_TIMEOUT_GRACE`, in seconds. |
 | `exception` | `task_retrying`, `task_failed` | Exception class name of the failure. |
 | `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `LOST` (out of attempts). |
 | `dropped_status` | `task_lease_lost` | Status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |
@@ -1878,7 +2000,8 @@ The message text is not part of the contract. The keys are.
 | `queues`, `concurrency` | `worker_started` | The worker's configuration. |
 | `pending` | `worker_draining` | In-flight tasks at shutdown. |
 | `processes` | `supervisor_started` | Worker processes the supervisor runs. |
-| `worker_index`, `exit_code` | `worker_process_restarted`, `supervisor_restart_cap` | Which slot exited and how. A negative code is the signal that killed it. |
+| `worker_index`, `exit_code` | `worker_process_restarted`, `worker_process_recycled`, `supervisor_restart_cap` | Which slot exited and how. A negative code is the signal that killed it. |
+| `exit_code` | `worker_recycling` | The code the worker will exit with, 75. |
 | `restarts` | `supervisor_restart_cap` | Deaths of that slot inside the window. |
 | `worker_indexes` | `supervisor_killed_workers` | The slots that were killed. |
 | `parent_pid` | `worker_orphaned` | The supervisor pid the worker was started under. |
@@ -2102,9 +2225,13 @@ announced in the [changelog](changelog.md).
 - **The backend path** `django_ox.backend.OxBackend`, referenced as a
   string in the `TASKS` setting, and every `OPTIONS` key it reads:
   `MAX_ATTEMPTS`, `LOCK_TIMEOUT`, `BACKOFF_INITIAL`, `BACKOFF_MAX`,
-  `QUEUES`, and `SCHEDULES` (with its documented per-schedule keys).
+  `TASK_TIMEOUT`, `TASK_TIMEOUTS`, `TASK_TIMEOUT_GRACE`, `QUEUES`, and
+  `SCHEDULES` (with its documented per-schedule keys).
 - **The management commands** and their flags: `ox_worker`, `ox_prune`,
-  `ox_health`.
+  `ox_health`. `ox_worker`'s exit codes: 0 after a drain, 130 on a forced
+  exit, 75 when the worker recycles itself after a stuck task thread.
+- **The timeout helpers** `django_ox.deadline()` and `django_ox.remaining()`,
+  callable from inside a task.
 - **The metrics module** `django_ox.stats`: the functions listed in its
   `__all__` (`queue_stats`, `ready_count`, `oldest_ready_age`,
   `throughput`, `failure_rate`, `last_claim_age`) and the `QueueStats`
@@ -2125,9 +2252,11 @@ announced in the [changelog](changelog.md).
   `(args, kwargs)` call shape, the input-order return and the
   all-or-nothing write. `INSERT_CHUNK_SIZE` is exported for reading; its
   value may change.
-- **The exception** `django_ox.exceptions.TaskAbandoned`, recorded against
-  tasks whose worker stopped reporting with no attempts left. It records the
-  lost lease, not a cause of failure.
+- **The exceptions** `django_ox.exceptions.TaskAbandoned`, recorded against
+  tasks whose worker stopped reporting with no attempts left (it records the
+  lost lease, not a cause of failure), and `django_ox.exceptions.TaskTimeout`,
+  a `TimeoutError` raised inside a task that ran past its `TASK_TIMEOUT` and
+  recorded against the attempt.
 - **The structured-log contract**: the event names and stable `extra` keys
   documented on the [Monitoring](monitoring.md) page.
 - **The database schema** of `OxTask` and `OxScheduleTick`, evolved only
@@ -2339,6 +2468,9 @@ TASKS = {
             "LOCK_TIMEOUT": 300,  # seconds a worker may stop renewing its lease
             "BACKOFF_INITIAL": 5,  # first retry delay, seconds; doubles each attempt
             "BACKOFF_MAX": 600,  # retry delay ceiling, seconds
+            "TASK_TIMEOUT": None,  # seconds one attempt may run; None is no limit
+            "TASK_TIMEOUTS": {},  # per-queue values, {"queue": seconds}
+            "TASK_TIMEOUT_GRACE": 30,  # seconds a timed-out thread gets to stop
             "SCHEDULES": {},  # recurring tasks, see Recurring tasks
         },
     }
@@ -2367,6 +2499,13 @@ TASKS = {
   `BACKOFF_MAX`.
 - `LOCK_TIMEOUT` bounds an unresponsive worker, not task length. The lease is
   renewed every `LOCK_TIMEOUT / 3` seconds while the task runs.
+- `TASK_TIMEOUT` bounds one attempt. At the deadline `TaskTimeout` is raised
+  inside the task on its own thread (an async task is cancelled) and the
+  attempt is recorded as failed and retried on the backoff. A thread that
+  has not stopped `TASK_TIMEOUT_GRACE` seconds later is recorded as failed
+  and the worker exits 75 so its supervisor restarts it. Per-queue values go
+  in `TASK_TIMEOUTS`; there is no per-task value. `django_ox.remaining()`
+  reads the seconds left from inside a task.
 - Claiming: one `UPDATE ... SKIP LOCKED ... RETURNING` statement on
   PostgreSQL; `SELECT ... FOR UPDATE SKIP LOCKED` on MySQL 8+; an atomic
   compare-and-set UPDATE on SQLite and other databases without `SKIP LOCKED`.
@@ -2386,8 +2525,8 @@ TASKS = {
   FAILED or LOST task without running it. Neither touches a RUNNING task.
   With `django.contrib.admin` installed, the task table appears in the admin
   with the same two actions.
-- A running task cannot be stopped from outside. Tasks live on the default
-  database.
+- A particular running task cannot be interrupted on demand; `TASK_TIMEOUT`
+  bounds every attempt. Tasks live on the default database.
 - In tests use `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend` for `TASKS`.
 - Batches and unique tasks are in [Oxpull Pro](pro.md), a separate paid
@@ -2457,6 +2596,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TASK_TIMEOUT`, `TASK_TIMEOUTS` and `TASK_TIMEOUT_GRACE` backend options, a
+  limit on how long one attempt may run. At the deadline the worker raises
+  `django_ox.exceptions.TaskTimeout` inside the task, on the task's own
+  thread, so `finally` blocks run and an open `transaction.atomic()` rolls
+  back; an async task is cancelled inside its event loop instead. The attempt
+  is recorded as failed with the `TaskTimeout` error and retried on the usual
+  backoff, or marked FAILED when attempts are spent. A thread that has not
+  stopped `TASK_TIMEOUT_GRACE` seconds later (default 30) is blocked outside
+  Python: the worker records the attempt as failed, moves the lease number so
+  the thread can write nothing to the row, stops claiming, drains its other
+  tasks and exits with code 75, which `--processes` restarts without counting
+  it against the restart cap. `TASK_TIMEOUTS` maps a queue name to its own
+  value, and a key that is not in `QUEUES` fails `manage.py check` as
+  `django_ox.E005`; a bad value fails it as `django_ox.E004`. Off by default.
+  `django_ox.deadline()` and `django_ox.remaining()` read the attempt's
+  deadline from inside a task. `TaskTimeout` subclasses `TimeoutError`. New
+  log events: `task_timed_out`, `task_stuck`, `worker_recycling`,
+  `worker_process_recycled` and `timeouts_backstop_only`.
 - `ox_worker --processes N`. Above 1, the command supervises N copies of
   itself, each a full worker with its own database connections, lease
   renewal, reaper and `--concurrency` thread pool, so `--processes 2
@@ -2520,8 +2677,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   django_ox` when you upgrade. It adds the new status choice.
 - `QueueStats` has a sixth field, `discarded`, keyword-defaulted like `lost`.
 - The scope statement no longer says tasks cannot be revoked after enqueue. A
-  queued task can be discarded; a running one still cannot be stopped from
-  outside.
+  queued task can be discarded and every attempt can be bounded with
+  `TASK_TIMEOUT`; one chosen running task still cannot be interrupted on
+  demand.
+- A worker that is already draining, because it is recycling, treats the
+  operator's first signal as the drain it is doing rather than as the
+  force-exit; the second signal is still the force-exit.
 
 ## [0.2.1] - 2026-08-20
 

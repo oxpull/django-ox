@@ -41,6 +41,7 @@ Operational facts worth getting right:
   included. All three are correct with many workers on one database.
 - Backend options live under `OPTIONS` in the `TASKS` entry: `MAX_ATTEMPTS`
   (3), `LOCK_TIMEOUT` (300 s), `BACKOFF_INITIAL` (5 s), `BACKOFF_MAX` (600 s),
+  `TASK_TIMEOUT` (None), `TASK_TIMEOUTS` ({}), `TASK_TIMEOUT_GRACE` (30 s),
   `SCHEDULES` ({}). `QUEUES` sits beside `OPTIONS`, not inside it, and
   defaults to `["default"]`; `[]` allows any queue name.
 - An attempt is consumed at claim time, so a dead worker's run counts. Retry
@@ -50,6 +51,16 @@ Operational facts worth getting right:
   before the reaper hands the task to another worker. The worker renews the
   lease every `LOCK_TIMEOUT / 3` seconds, so a long task on a live worker
   keeps running.
+- `TASK_TIMEOUT` (seconds, default None) bounds one attempt: at the deadline
+  the worker raises `django_ox.exceptions.TaskTimeout` inside the task on its
+  own thread (an async task is cancelled), and the attempt is recorded as
+  failed and retried on the backoff. A thread that has not stopped
+  `TASK_TIMEOUT_GRACE` seconds later (default 30; a blocking C call) is
+  recorded as failed and the worker exits with code 75 so its supervisor
+  restarts it. `TASK_TIMEOUTS = {"queue": seconds}` sets per-queue values;
+  there is no per-task value, because `django.tasks` has no field for one.
+  `django_ox.deadline()` and `django_ox.remaining()` read the attempt's
+  deadline from inside a task.
 - `ox_worker --concurrency N` is a thread pool in one process, suited to
   I/O-bound tasks. `--processes N` runs N such workers under one supervisor,
   each with its own connections and reaper; for CPU-bound work use
@@ -82,8 +93,9 @@ Operational facts worth getting right:
   neither touches a RUNNING task. With `django.contrib.admin` installed the
   task table is registered in the admin with the same two actions.
 - Run `migrate` before rolling workers, not from the worker process.
-- Out of scope in the core: stopping a task that is already running, and
-  multi-database routing (tasks live on the default database). For tests, point `TASKS` at
+- Out of scope in the core: interrupting one chosen running task on demand
+  (every attempt can be bounded with `TASK_TIMEOUT`), and multi-database
+  routing (tasks live on the default database). For tests, point `TASKS` at
   `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend`.
 - Batches and unique (deduplicated) tasks are in Oxpull Pro, a separate paid

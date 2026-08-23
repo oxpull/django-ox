@@ -115,6 +115,11 @@ A second signal during the drain forces an immediate exit, code 130. Whatever
 was running is abandoned mid-flight. The reaper on a surviving worker reclaims
 it later, and it counts as a failed attempt.
 
+One other exit code exists. A worker exits 75 when it recycles itself after
+a task thread that its timeout could not stop; see
+[Task timeouts](#task-timeouts). A process manager on `Restart=always` or
+`Restart=on-failure` restarts it either way.
+
 This maps directly onto rolling deploys: send SIGTERM, wait, start the new
 version. The only tuning point is the process manager's kill escalation
 (`TimeoutStopSec` above) relative to your longest task.
@@ -252,6 +257,100 @@ columns carry naive local time, and reading one against the other would make
 `ox_prune --older-than` treat rows that finished seconds ago as hours old.
 Under that setting, keep `TIME_ZONE` and the timezone your workers run in the
 same, which is what Django assumes of it anyway.
+
+### Task timeouts
+
+`TASK_TIMEOUT` bounds how long one attempt may run. It is off by default.
+With it set, the worker raises `django_ox.exceptions.TaskTimeout` inside the
+task when the deadline passes:
+
+- **A sync task** gets the exception on its own thread, at the next line of
+  Python it executes. `finally` blocks run, an open `transaction.atomic()`
+  rolls back, and the thread returns to the pool, where the ordinary cleanup
+  closes its database connection. The task may catch `TaskTimeout` to clean
+  up and then re-raise it. A task that catches it and returns is allowed; the
+  attempt is then recorded as whatever the task went on to do.
+- **An async task** is cancelled inside its event loop at the deadline, and
+  the cancellation reaches the task as `TaskTimeout` from the `await` it was
+  on.
+
+The attempt is recorded as failed with a `TaskTimeout` error that names the
+timeout. The attempt was consumed at claim time, so the retry rule is the
+ordinary one: back to READY on the backoff while attempts remain, FAILED
+when they are spent. The worker logs `task_timed_out` at WARNING, then the
+usual `task_retrying` or `task_failed`. `TaskTimeout` subclasses
+`TimeoutError`, so code written for one treats it as one.
+
+A long loop can check the clock instead of being interrupted between two
+steps. `django_ox.deadline()` returns the attempt's deadline as a `datetime`,
+and `django_ox.remaining()` the seconds left; both return `None` when no
+timeout applies.
+
+```python
+import django_ox
+from django.tasks import task
+
+
+@task
+def export(report_id):
+    for chunk in chunks_of(report_id):
+        left = django_ox.remaining()
+        if left is not None and left < 5:
+            return {"paused_at": chunk.offset}
+        write(chunk)
+    return {"done": True}
+```
+
+**A thread that does not stop.** The exception is delivered when the thread
+next executes Python. A thread blocked in a C call stays blocked: a socket
+read with no timeout, `time.sleep()`, a lock, a long statement waiting on the
+database. `TASK_TIMEOUT_GRACE` (default 30 seconds) is how long the worker
+waits for the thread after the deadline. If it is still running then, the
+worker:
+
+1. Records the attempt as failed, with a `TaskTimeout` whose message says
+   the task did not stop, and moves the lease number in the same write, the
+   way the reaper does when it takes a row off a worker that went quiet.
+   The outcome the thread eventually reports is refused by that number.
+2. Logs `task_stuck` at ERROR and `worker_recycling` at WARNING.
+3. Stops claiming, drains its other in-flight tasks, and exits with code 75
+   (`EX_TEMPFAIL`). The stuck thread dies with the process.
+
+Under `--processes` the supervisor restarts the slot after one second, logs
+`worker_process_recycled`, and does not count the exit against the restart
+cap. Under systemd, `Restart=always` (the unit above) brings the worker back,
+and so does `Restart=on-failure`, since 75 is non-zero. A container runtime
+on `restart: unless-stopped` does the same.
+
+Between the stuck record and the process exit the task may run twice: its
+retry is claimable the moment the record lands, and the stuck thread keeps
+executing until the worker's other in-flight tasks have drained. The thread
+cannot write its outcome to the row, but its side effects are real. That is
+the at-least-once contract every task already lives under: write tasks to be
+safe to run twice.
+
+Put timeouts on sockets and HTTP clients where you can. A task that returns
+to Python regularly is one the soft timeout stops cleanly; the recycle is the
+backstop.
+
+Set per-queue values where one number does not fit:
+
+```python
+"OPTIONS": {
+    "TASK_TIMEOUT": 60,
+    "TASK_TIMEOUTS": {"exports": 3600, "webhooks": 10},
+    "TASK_TIMEOUT_GRACE": 30,
+}
+```
+
+A queue in `TASK_TIMEOUTS` uses its own value; `None` there exempts the
+queue from the global limit. A timeout longer than `LOCK_TIMEOUT` is fine:
+the lease is renewed for as long as the task runs.
+
+Timeouts use CPython's own facility for raising an exception in another
+thread, which every supported Python has. On an interpreter without it, the
+worker logs `timeouts_backstop_only` once at startup and enforces timeouts
+by the grace backstop alone.
 
 ## The reaper
 

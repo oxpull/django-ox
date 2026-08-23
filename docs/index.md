@@ -166,8 +166,9 @@ schedules, and monitoring, with nothing extra to operate. Design
 decisions worth knowing before you commit:
 
 - A queued task can be discarded before a worker claims it, and a failed
-  one retried, from the admin or with `django_ox.actions`. A running task
-  cannot be stopped from outside; it finishes or its worker dies.
+  one retried, from the admin or with `django_ox.actions`. `TASK_TIMEOUT`
+  bounds how long any attempt may run; a particular running task cannot be
+  interrupted on demand.
 - Tasks are stored on the default database for the model; multi-database
   routing is not part of the current scope.
 - Worker concurrency is a thread pool, which fits I/O-bound tasks. For

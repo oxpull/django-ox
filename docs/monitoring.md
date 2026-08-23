@@ -242,6 +242,10 @@ The message text is not part of the contract. The keys are.
 | `task_claimed` | DEBUG | A task was claimed from the queue. |
 | `task_started` | DEBUG | Execution of an attempt begins. |
 | `task_succeeded` | INFO | The task reached SUCCESSFUL. |
+| `task_timed_out` | WARNING | An attempt ran past its `TASK_TIMEOUT`. `TaskTimeout` was raised inside it and the attempt is recorded as failed; a `task_retrying` or `task_failed` record follows. |
+| `task_stuck` | ERROR | A timed-out attempt's thread did not stop within `TASK_TIMEOUT_GRACE`. The attempt is recorded as failed and the worker is recycling. |
+| `worker_recycling` | WARNING | The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75. |
+| `timeouts_backstop_only` | WARNING | At startup, on an interpreter that cannot raise an exception inside another thread: timeouts are enforced by the grace backstop alone. |
 | `task_retrying` | WARNING | An attempt failed with retries remaining. |
 | `task_failed` | ERROR | The task reached FAILED, out of attempts. |
 | `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. |
@@ -253,6 +257,7 @@ The message text is not part of the contract. The keys are.
 | `worker_stopped` | INFO | The run loop exited. |
 | `supervisor_started` | INFO | `ox_worker --processes N` started its worker processes. |
 | `worker_process_restarted` | WARNING | A worker process exited on its own and is being restarted. |
+| `worker_process_recycled` | WARNING | A worker process exited with code 75 after a stuck task thread and is being restarted. Not counted against the restart cap. |
 | `supervisor_restart_cap` | ERROR | More than five deaths of one slot in a minute; the supervisor is stopping with exit code 1. |
 | `supervisor_killed_workers` | ERROR | Worker processes still running five seconds after the second stop signal were sent SIGKILL. |
 | `supervisor_stopped` | INFO | Every worker process has exited. |
@@ -266,7 +271,9 @@ The message text is not part of the contract. The keys are.
 | `task_path` | task events | Dotted path of the task function. |
 | `queue` | task events | Queue name. |
 | `attempt` | task events | Attempts consumed so far, including the current one. |
-| `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_lease_lost` | Wall-clock duration of the attempt, in milliseconds. |
+| `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_timed_out`, `task_stuck`, `task_lease_lost` | Wall-clock duration of the attempt, in milliseconds. |
+| `timeout_s` | `task_timed_out`, `task_stuck` | The timeout that applied, in seconds. |
+| `grace_s` | `task_stuck`, `timeouts_backstop_only` | `TASK_TIMEOUT_GRACE`, in seconds. |
 | `exception` | `task_retrying`, `task_failed` | Exception class name of the failure. |
 | `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `LOST` (out of attempts). |
 | `dropped_status` | `task_lease_lost` | Status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |
@@ -274,7 +281,8 @@ The message text is not part of the contract. The keys are.
 | `queues`, `concurrency` | `worker_started` | The worker's configuration. |
 | `pending` | `worker_draining` | In-flight tasks at shutdown. |
 | `processes` | `supervisor_started` | Worker processes the supervisor runs. |
-| `worker_index`, `exit_code` | `worker_process_restarted`, `supervisor_restart_cap` | Which slot exited and how. A negative code is the signal that killed it. |
+| `worker_index`, `exit_code` | `worker_process_restarted`, `worker_process_recycled`, `supervisor_restart_cap` | Which slot exited and how. A negative code is the signal that killed it. |
+| `exit_code` | `worker_recycling` | The code the worker will exit with, 75. |
 | `restarts` | `supervisor_restart_cap` | Deaths of that slot inside the window. |
 | `worker_indexes` | `supervisor_killed_workers` | The slots that were killed. |
 | `parent_pid` | `worker_orphaned` | The supervisor pid the worker was started under. |

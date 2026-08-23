@@ -76,6 +76,9 @@ TASKS = {
             "LOCK_TIMEOUT": 300,  # seconds a worker may stop renewing its lease
             "BACKOFF_INITIAL": 5,  # first retry delay, seconds; doubles each attempt
             "BACKOFF_MAX": 600,  # retry delay ceiling, seconds
+            "TASK_TIMEOUT": None,  # seconds one attempt may run; None is no limit
+            "TASK_TIMEOUTS": {},  # per-queue values, {"queue": seconds}
+            "TASK_TIMEOUT_GRACE": 30,  # seconds a timed-out thread gets to stop
             "SCHEDULES": {},  # recurring tasks, see Recurring tasks
         },
     }
@@ -104,6 +107,13 @@ TASKS = {
   `BACKOFF_MAX`.
 - `LOCK_TIMEOUT` bounds an unresponsive worker, not task length. The lease is
   renewed every `LOCK_TIMEOUT / 3` seconds while the task runs.
+- `TASK_TIMEOUT` bounds one attempt. At the deadline `TaskTimeout` is raised
+  inside the task on its own thread (an async task is cancelled) and the
+  attempt is recorded as failed and retried on the backoff. A thread that
+  has not stopped `TASK_TIMEOUT_GRACE` seconds later is recorded as failed
+  and the worker exits 75 so its supervisor restarts it. Per-queue values go
+  in `TASK_TIMEOUTS`; there is no per-task value. `django_ox.remaining()`
+  reads the seconds left from inside a task.
 - Claiming: one `UPDATE ... SKIP LOCKED ... RETURNING` statement on
   PostgreSQL; `SELECT ... FOR UPDATE SKIP LOCKED` on MySQL 8+; an atomic
   compare-and-set UPDATE on SQLite and other databases without `SKIP LOCKED`.
@@ -123,8 +133,8 @@ TASKS = {
   FAILED or LOST task without running it. Neither touches a RUNNING task.
   With `django.contrib.admin` installed, the task table appears in the admin
   with the same two actions.
-- A running task cannot be stopped from outside. Tasks live on the default
-  database.
+- A particular running task cannot be interrupted on demand; `TASK_TIMEOUT`
+  bounds every attempt. Tasks live on the default database.
 - In tests use `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend` for `TASKS`.
 - Batches and unique tasks are in [Oxpull Pro](pro.md), a separate paid

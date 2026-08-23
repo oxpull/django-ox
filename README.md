@@ -254,8 +254,9 @@ firing for a time before it existed.
 
 The core is deliberately small: a durable queue, a worker, recurring
 schedules, monitoring, and nothing else to operate. Outside the current
-scope: stopping a task that is already running, and multi-database routing
-(tasks are stored on the default database for the model).
+scope: interrupting one chosen running task on demand (every attempt can be
+bounded with `TASK_TIMEOUT`), and multi-database routing (tasks are stored on
+the default database for the model).
 
 Batches and unique tasks ship in [Oxpull Pro](https://oxpull.com/django-ox/pro/);
 the waitlist is at <https://oxpull.com/>. Metrics stay in this package:

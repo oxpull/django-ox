@@ -13,6 +13,9 @@ TASKS = {
             "LOCK_TIMEOUT": 300,
             "BACKOFF_INITIAL": 5,
             "BACKOFF_MAX": 600,
+            "TASK_TIMEOUT": None,
+            "TASK_TIMEOUTS": {},
+            "TASK_TIMEOUT_GRACE": 30,
             "SCHEDULES": {},  # see the Recurring tasks page
         },
     }
@@ -50,6 +53,9 @@ retry. Add options when you have a reason to.
 | `LOCK_TIMEOUT` | `300` | Seconds a RUNNING task's lock may go unrefreshed before the reaper takes the task back. A worker refreshes the lock every `LOCK_TIMEOUT / 3` seconds while it is executing, so this is a limit on how long a worker may be unresponsive, not on how long a task may run. |
 | `BACKOFF_INITIAL` | `5` | Delay in seconds before the first retry. |
 | `BACKOFF_MAX` | `600` | Ceiling on the retry delay, in seconds. |
+| `TASK_TIMEOUT` | `None` | Seconds one attempt may run. `None` means no limit. At the deadline the worker raises `django_ox.exceptions.TaskTimeout` inside the task, on the task's own thread, and records the attempt as failed: retried on the usual backoff, or FAILED when attempts are spent. An async task is cancelled at the deadline instead. See [Task timeouts](production.md#task-timeouts). |
+| `TASK_TIMEOUTS` | `{}` | Per-queue timeouts, `{"queue name": seconds}`. A queue in the mapping uses its own value instead of `TASK_TIMEOUT`; `None` as a value exempts that queue. Every key must be a queue named in `QUEUES`, unless `QUEUES` is `[]`. Per queue rather than per task because `django.tasks` gives a task no field a backend could read a timeout from, and a queue is its unit of routing. |
+| `TASK_TIMEOUT_GRACE` | `30` | Seconds a timed-out attempt gets to stop. A thread still running after that is blocked outside Python, where the exception cannot reach it: the worker records the attempt as failed, stops claiming, drains its other tasks and exits with code 75 so its supervisor restarts it. |
 | `SCHEDULES` | `{}` | Recurring task definitions. Documented on the [Recurring tasks](recurring-tasks.md) page. |
 
 The retry delay after attempt *n* fails is
@@ -132,8 +138,8 @@ python manage.py ox_worker --queues exports --lock-timeout 7200
 
 If you embed the worker programmatically, `django_ox.worker.Worker`
 accepts `reap_interval`, `renew_interval`, `schedule_interval`,
-`backoff_initial` and `backoff_max` keyword overrides in addition to the flag
-equivalents.
+`backoff_initial`, `backoff_max`, `task_timeout` and `task_timeout_grace`
+keyword overrides in addition to the flag equivalents.
 
 ## ox_prune
 
@@ -195,6 +201,12 @@ alert are on the
   JSON-serializable, bad queue name or priority).
 - `django_ox.E003`: the same schedule name is defined on more than one
   backend; schedule names must be unique across backends.
+- `django_ox.E004`: `TASK_TIMEOUT`, a `TASK_TIMEOUTS` value or
+  `TASK_TIMEOUT_GRACE` is not a positive number of seconds (the first two
+  may also be `None`), or `TASK_TIMEOUTS` is not a mapping keyed by queue
+  name.
+- `django_ox.E005`: a `TASK_TIMEOUTS` key names a queue that is not in
+  `QUEUES`, so the entry would never apply.
 
-The worker performs the same schedule validation at startup, so a bad
-deploy fails loudly rather than skipping dispatches.
+The worker performs the same schedule and timeout validation at startup, so
+a bad deploy fails loudly rather than skipping dispatches.

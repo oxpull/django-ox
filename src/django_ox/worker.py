@@ -169,6 +169,7 @@ class Worker:
         schedule_interval: float | None = None,
         backoff_initial: float | None = None,
         backoff_max: float | None = None,
+        worker_index: int | None = None,
     ) -> None:
         backend = task_backends[backend_alias]
         if not isinstance(backend, OxBackend):
@@ -227,8 +228,13 @@ class Worker:
             if backoff_max is not None
             else float(options.get("BACKOFF_MAX", 600.0))
         )
+        # The index is the slot number under `ox_worker --processes N`, so a
+        # log line or a worker_ids entry names the slot as well as the pid.
+        # It rides on the id rather than replacing the random part; a
+        # restarted slot is a new worker and must not inherit the old lease.
+        suffix = "" if worker_index is None else f"-{worker_index}"
         self.worker_id = (
-            f"{socket.gethostname()[:40]}-{os.getpid()}-{get_random_string(8)}"
+            f"{socket.gethostname()[:40]}-{os.getpid()}-{get_random_string(8)}{suffix}"
         )
         self._stop = Event()
         self._db_alias = router.db_for_write(OxTask)

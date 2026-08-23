@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -62,6 +63,16 @@ LOGGING = {
     "disable_existing_loggers": False,
     "handlers": {"console": {"class": "logging.StreamHandler"}},
     "loggers": {
-        "django_ox": {"handlers": ["console"], "level": "WARNING"},
+        # Worker processes started from the test suite raise this to INFO to
+        # assert on lifecycle lines.
+        "django_ox": {
+            "handlers": ["console"],
+            "level": os.environ.get("OX_TEST_LOG_LEVEL", "WARNING"),
+        },
     },
 }
+
+# Worker processes started from the test suite must hit the test database the
+# parent created, not the development one; the parent passes its name through.
+if "OX_TEST_DB_NAME" in os.environ:
+    DATABASES["default"]["NAME"] = os.environ["OX_TEST_DB_NAME"]

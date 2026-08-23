@@ -48,7 +48,10 @@ DATABASES = {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": BASE_DIR / "db.sqlite3",
         "OPTIONS": {"timeout": 20},
-        "TEST": {"NAME": BASE_DIR / "test.sqlite3"},
+        # Named per session: two pytest runs on one checkout must not share
+        # a test database. Worker subprocesses do not recompute this; they
+        # get the parent's name through OX_TEST_DB_NAME below.
+        "TEST": {"NAME": BASE_DIR / f"test_{os.getpid()}.sqlite3"},
     }
 }
 

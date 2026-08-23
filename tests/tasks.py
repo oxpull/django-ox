@@ -179,3 +179,43 @@ async def async_spin(seconds):
 @task
 async def async_report_deadline():
     return django_ox.remaining()
+
+
+@task(takes_context=True)
+def atomic_write_loop(context, seconds):
+    """One short transaction per write, as fast as it can, for `seconds`."""
+    attempt = context.attempt
+    writes = 0
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        writes += 1
+        with transaction.atomic():
+            OxTask.objects.filter(pk=context.task_result.id).update(
+                return_value={"written_by": attempt, "writes": writes}
+            )
+    return "loop done"
+
+
+@task
+def swallow_then_run_on(seconds, after):
+    """Catches the timeout, then keeps running Python for `after` seconds."""
+    try:
+        _spin(seconds)
+    except TaskTimeout:
+        STATE["caught"] = True
+        _spin(after)
+        STATE["ran_on"] = True
+        return "finished after the timeout"
+    return "done"
+
+
+@task
+async def async_catch_timeout(seconds):
+    try:
+        await asyncio.sleep(seconds)
+    except TaskTimeout:
+        return "caught TaskTimeout"
+    except asyncio.CancelledError:
+        STATE["cancelled"] = True
+        raise
+    return "done"

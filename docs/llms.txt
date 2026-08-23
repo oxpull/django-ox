@@ -55,10 +55,11 @@ Operational facts worth getting right:
   the worker raises `django_ox.exceptions.TaskTimeout` inside the task on its
   own thread (an async task is cancelled), and the attempt is recorded as
   failed and retried on the backoff. A thread that has not stopped
-  `TASK_TIMEOUT_GRACE` seconds later (default 30; a blocking C call) is
-  recorded as failed and the worker exits with code 75 so its supervisor
-  restarts it. `TASK_TIMEOUTS = {"queue": seconds}` sets per-queue values;
-  there is no per-task value, because `django.tasks` has no field for one.
+  `TASK_TIMEOUT_GRACE` seconds later (default 30; usually a call that never
+  returns to Python) is recorded as failed and the worker exits with code 75
+  so its supervisor restarts it. `TASK_TIMEOUTS = {"queue": seconds}` sets
+  per-queue values; there is no per-task value, because `django.tasks` has
+  no field for one.
   `django_ox.deadline()` and `django_ox.remaining()` read the attempt's
   deadline from inside a task.
 - `ox_worker --concurrency N` is a thread pool in one process, suited to

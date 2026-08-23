@@ -266,13 +266,22 @@ task when the deadline passes:
 
 - **A sync task** gets the exception on its own thread, at the next line of
   Python it executes. `finally` blocks run, an open `transaction.atomic()`
-  rolls back, and the thread returns to the pool, where the ordinary cleanup
-  closes its database connection. The task may catch `TaskTimeout` to clean
-  up and then re-raise it. A task that catches it and returns is allowed; the
-  attempt is then recorded as whatever the task went on to do.
-- **An async task** is cancelled inside its event loop at the deadline, and
-  the cancellation reaches the task as `TaskTimeout` from the `await` it was
-  on.
+  rolls back, and the thread returns to the pool. The worker then drops the
+  thread's database connections, since the exception may have landed inside
+  the driver with a statement in flight, and records the outcome on a fresh
+  one. The task may catch `TaskTimeout` to clean up and then re-raise it. A
+  task that catches it and returns is allowed, and the attempt is recorded
+  as whatever the task went on to do, provided it returns or raises within
+  `TASK_TIMEOUT_GRACE`; one still running then is treated as a thread that
+  did not stop, below. An exception raised while the task unwinds from
+  `TaskTimeout` (a cleanup that fails, say) is recorded as the timeout, with
+  that exception in the traceback.
+- **An async task** is cancelled inside its event loop at the deadline. The
+  coroutine sees `asyncio.CancelledError` at the `await` it was on, as any
+  cancelled coroutine does, and should let it propagate; the worker records
+  the attempt with `TaskTimeout`. `except TaskTimeout` inside an async task
+  never fires, because nothing can raise another class at a running
+  coroutine's `await`.
 
 The attempt is recorded as failed with a `TaskTimeout` error that names the
 timeout. The attempt was consumed at claim time, so the retry rule is the
@@ -302,14 +311,20 @@ def export(report_id):
 ```
 
 **A thread that does not stop.** The exception is delivered when the thread
-next executes Python. A thread blocked in a C call stays blocked: a socket
+next executes Python, so under a pool of CPU-bound threads it can lag the
+deadline by a few multiples of the interpreter's 5 ms switch interval. A
+thread blocked in a C call stays blocked until the call returns: a socket
 read with no timeout, `time.sleep()`, a lock, a long statement waiting on the
-database. `TASK_TIMEOUT_GRACE` (default 30 seconds) is how long the worker
-waits for the thread after the deadline. If it is still running then, the
-worker:
+database. The exception lands when the call returns, and if that is within
+the grace the attempt is an ordinary timeout. `TASK_TIMEOUT_GRACE` (default
+30 seconds) is how long the worker waits for the thread after the deadline.
+A task that caught `TaskTimeout` and is still running then looks the same
+from outside, and is treated the same way. If the thread is still running at
+the grace, the worker:
 
 1. Records the attempt as failed, with a `TaskTimeout` whose message says
-   the task did not stop, and moves the lease number in the same write, the
+   the thread did not stop within the grace, and moves the lease number in
+   the same write, the
    way the reaper does when it takes a row off a worker that went quiet.
    The outcome the thread eventually reports is refused by that number.
 2. Logs `task_stuck` at ERROR and `worker_recycling` at WARNING.
@@ -336,16 +351,18 @@ backstop.
 Set per-queue values where one number does not fit:
 
 ```python
+"QUEUES": ["default", "exports", "webhooks"],
 "OPTIONS": {
     "TASK_TIMEOUT": 60,
     "TASK_TIMEOUTS": {"exports": 3600, "webhooks": 10},
     "TASK_TIMEOUT_GRACE": 30,
-}
+},
 ```
 
 A queue in `TASK_TIMEOUTS` uses its own value; `None` there exempts the
-queue from the global limit. A timeout longer than `LOCK_TIMEOUT` is fine:
-the lease is renewed for as long as the task runs.
+queue from the global limit. Every queue named there must be in `QUEUES`
+(`django_ox.E005` otherwise), unless `QUEUES` is `[]`. A timeout longer than
+`LOCK_TIMEOUT` is fine: the lease is renewed for as long as the task runs.
 
 Timeouts use CPython's own facility for raising an exception in another
 thread, which every supported Python has. On an interpreter without it, the

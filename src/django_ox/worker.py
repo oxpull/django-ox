@@ -23,6 +23,7 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.db import (
     DatabaseError,
+    Error,
     IntegrityError,
     close_old_connections,
     connections,
@@ -105,6 +106,31 @@ def _flush_pending_async_exc() -> None:
     caller's handler, rather than in whatever bookkeeping came next.
     """
     time.monotonic()
+
+
+def _timeout_in(exc: BaseException) -> TaskTimeout | None:
+    """
+    The TaskTimeout this exception is, or the one it was raised while
+    handling, following the chain Python's traceback would print. A cleanup
+    that fails while the task unwinds from its timeout (Django's own
+    atomic() exit, for one, when the delivery landed inside the driver)
+    replaces the TaskTimeout with its own exception; the attempt still
+    timed out. ``raise ... from None`` breaks the chain, and with it this
+    classification, on purpose.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, TaskTimeout):
+            return current
+        seen.add(id(current))
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif current.__suppress_context__:
+            current = None
+        else:
+            current = current.__context__
+    return None
 
 
 @dataclass(slots=True)
@@ -707,6 +733,7 @@ class Worker:
                     timeout_s=exc.timeout,
                 ),
             )
+            self._discard_connections()
             self._handle_failure(db_task, exc, duration_ms)
         except BaseException as exc:
             self._handle_failure(db_task, exc, _elapsed_ms(started))
@@ -791,10 +818,15 @@ class Worker:
             return self._call_async(task, db_task, task_result, timeout)
 
         ident = threading.get_ident()
-        watch = self._arm(ident, db_task, timeout, injectable=True)
-        token = _deadline.set(watch.deadline_at)
+        token = _deadline.set(None)
         try:
             try:
+                # Registered inside the try, so that a delivery landing
+                # between the registration and the call (the watchdog may
+                # inject the moment _arm releases the lock) unwinds through
+                # the deregistration below like any other.
+                watch = self._arm(ident, db_task, timeout, injectable=True)
+                _deadline.set(watch.deadline_at)
                 return invoke()
             finally:
                 # The absorbing try lives in this frame on purpose: the
@@ -804,9 +836,20 @@ class Worker:
                     self._disarm(ident)
                 except TaskTimeout:
                     self._disarm(ident)
-        except TaskTimeout as exc:
-            self._describe_timeout(exc, watch)
-            raise
+        except BaseException as exc:
+            timed_out = _timeout_in(exc)
+            if timed_out is None:
+                raise
+            self._describe_timeout(timed_out, timeout)
+            if timed_out is exc:
+                raise
+            # Something raised while the task unwound from its timeout, and
+            # that is what reached here. The attempt timed out; record it
+            # as one, with the whole chain in the traceback.
+            raise TaskTimeout(
+                self._timeout_message(timeout, unwound=type(exc).__qualname__),
+                timeout=timeout,
+            ) from exc
         finally:
             _deadline.reset(token)
 
@@ -820,11 +863,13 @@ class Worker:
         """
         Run a coroutine task under asyncio's own timeout.
 
-        The coroutine is cancelled at the deadline and the cancellation
-        becomes a TaskTimeout, raised from the await the task was on.
-        Nothing is injected: asgiref runs the loop on a thread of its own,
-        and the loop already has a cooperative way to stop. The watchdog
-        still registers the attempt, for the grace backstop only.
+        The coroutine is cancelled at the deadline, sees CancelledError at
+        the await it was on like any cancelled coroutine, and the
+        cancellation becomes a TaskTimeout out here, with the cancellation
+        as its cause so the record shows where the task was. Nothing is
+        injected: asgiref runs the loop on a thread of its own, and the
+        loop already has a cooperative way to stop. The watchdog still
+        registers the attempt, for the grace backstop only.
         """
 
         async def run() -> Any:
@@ -840,12 +885,15 @@ class Worker:
             try:
                 async with asyncio.timeout(timeout) as scope:
                     return await coroutine
-            except TimeoutError:
+            except TimeoutError as exc:
                 if not scope.expired():
                     raise
                 raise TaskTimeout(
-                    self._timeout_message(timeout), timeout=timeout
-                ) from None
+                    self._timeout_message(
+                        timeout, delivered="its coroutine was cancelled"
+                    ),
+                    timeout=timeout,
+                ) from (exc.__cause__ or exc)
 
         ident = threading.get_ident()
         watch = self._arm(ident, db_task, timeout, injectable=False)
@@ -856,23 +904,62 @@ class Worker:
             self._disarm(ident)
             _deadline.reset(token)
 
-    def _timeout_message(self, timeout: float) -> str:
+    def _timeout_message(
+        self,
+        timeout: float,
+        *,
+        delivered: str = "TaskTimeout was raised inside it",
+        unwound: str | None = None,
+    ) -> str:
+        then = (
+            " and this attempt is recorded as failed"
+            if unwound is None
+            else f", {unwound} was raised while it unwound, and this attempt is "
+            "recorded as failed"
+        )
         return (
             f"Task ran past the {timeout:g}s timeout on worker "
-            f"{self.worker_id!r}; TaskTimeout was raised inside it and this "
-            f"attempt is recorded as failed."
+            f"{self.worker_id!r}; {delivered}{then}."
         )
 
-    def _describe_timeout(self, exc: TaskTimeout, watch: _Watch) -> None:
+    def _describe_timeout(self, exc: TaskTimeout, timeout: float) -> None:
         """
         Fill in an injected TaskTimeout. It was raised by class, so it
         carries no message and no timeout; one the task raised itself
         keeps whatever it said.
         """
         if exc.timeout is None:
-            exc.timeout = watch.timeout
+            exc.timeout = timeout
         if not any(exc.args):
-            exc.args = (self._timeout_message(watch.timeout),)
+            exc.args = (self._timeout_message(timeout),)
+
+    def _discard_connections(self) -> None:
+        """
+        Drop every database connection this thread holds, whatever state
+        it is in, so that the outcome write opens a fresh one.
+
+        A TaskTimeout is delivered at the next line of Python, and a
+        driver that runs a statement through Python (psycopg does) can
+        take it after the query was sent and before its result was read;
+        the connection then has a command in flight and refuses the next
+        one. A delivery inside atomic()'s entry or exit leaves Django's
+        wrapper inside a transaction no exit will ever close, and that
+        state survives close(): Django keeps a connection closed inside a
+        transaction so that the next query fails loudly. Reset the
+        transaction state first, so close() forgets the object. The lease
+        epoch is unchanged, so the outcome write is the same write on
+        either connection.
+        """
+        for conn in connections.all(initialized_only=True):
+            conn.in_atomic_block = False
+            conn.savepoint_ids = []
+            conn.atomic_blocks = []
+            conn.needs_rollback = False
+            conn.closed_in_transaction = False
+            # close() drops its reference to the driver connection even
+            # when closing it raises; a connection broken this way may.
+            with suppress(Error):
+                conn.close()
 
     def _arm(
         self, ident: int, db_task: OxTask, timeout: float, *, injectable: bool
@@ -956,12 +1043,15 @@ class Worker:
 
     def _handle_stuck(self, watch: _Watch) -> None:
         """
-        The backstop. The thread did not stop within the grace, so it is
-        blocked somewhere TaskTimeout cannot reach: a socket with no
-        timeout, a sleep, a lock. Record the attempt as failed and move the
-        lease epoch so nothing the thread writes later lands, stop renewing
-        its lease, and recycle this worker so the thread dies with the
-        process. Runs on the watchdog thread, on its own connection.
+        The backstop. The thread did not stop within the grace. The usual
+        reason is a call that never returns to Python, where TaskTimeout
+        cannot land (a socket with no timeout, a sleep, a lock), but a task
+        that caught the exception and kept running looks the same from
+        here, and the record says only what was seen. Record the attempt
+        as failed and move the lease epoch so nothing the thread writes
+        later lands, stop renewing its lease, and recycle this worker so
+        the thread dies with the process. Runs on the watchdog thread, on
+        its own connection.
         """
         db_task = watch.db_task
         duration_ms = _elapsed_ms(watch.started)
@@ -986,12 +1076,33 @@ class Worker:
                 grace_s=self.timeouts.grace,
             ),
         )
+        if not watch.injectable:
+            delivered = "its coroutine was cancelled at the deadline"
+            usually = (
+                " A thread that does not stop is usually in a call that never "
+                "returns to Python (a socket with no timeout, time.sleep(), a "
+                "lock, a long database statement), or the task caught the "
+                "cancellation and kept running."
+            )
+        elif _inject_async_exc is None:
+            delivered = (
+                "this interpreter cannot raise TaskTimeout inside a running "
+                "task, so the grace is the whole timeout"
+            )
+            usually = ""
+        else:
+            delivered = "TaskTimeout was raised inside it at the deadline"
+            usually = (
+                " A thread that does not stop is usually in a call that never "
+                "returns to Python (a socket with no timeout, time.sleep(), a "
+                "lock, a long database statement), or the task caught "
+                "TaskTimeout and kept running."
+            )
         exc = TaskTimeout(
             f"Task ran past the {watch.timeout:g}s timeout on worker "
-            f"{self.worker_id!r} and did not stop within the "
-            f"{self.timeouts.grace:g}s grace: the thread is blocked outside "
-            f"Python, where TaskTimeout cannot reach it. This attempt is "
-            f"recorded as failed, the worker is recycling so that the thread "
+            f"{self.worker_id!r}: {delivered}, and the thread did not stop "
+            f"within the {self.timeouts.grace:g}s grace.{usually} This attempt "
+            f"is recorded as failed, the worker is recycling so that the thread "
             f"dies with the process, and the outcome the thread eventually "
             f"reports is refused by the lease.",
             timeout=watch.timeout,

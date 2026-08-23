@@ -16,8 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back; an async task is cancelled inside its event loop instead. The attempt
   is recorded as failed with the `TaskTimeout` error and retried on the usual
   backoff, or marked FAILED when attempts are spent. A thread that has not
-  stopped `TASK_TIMEOUT_GRACE` seconds later (default 30) is blocked outside
-  Python: the worker records the attempt as failed, moves the lease number so
+  stopped `TASK_TIMEOUT_GRACE` seconds later (default 30) is treated as
+  stuck: the worker records the attempt as failed, moves the lease number so
   the thread can write nothing to the row, stops claiming, drains its other
   tasks and exits with code 75, which `--processes` restarts without counting
   it against the restart cap. `TASK_TIMEOUTS` maps a queue name to its own
@@ -174,15 +174,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outcome replaces LOST; only that one execution can.
 - `task_lease_lost` and `lease_renew_failed`, two WARNING log events. Both are
   documented on the Monitoring page.
-
-### Fixed
-
-- `manage.py check` runs the django-ox checks, `django_ox.E001` to `E005`,
-  in a project that imports `django.tasks` nowhere else. Django registers its
-  tasks check when that module is first imported, and a project without the
-  admin or a task module on its import path reached `check` without it, so
-  every django-ox check passed silently. The worker's own startup check was
-  unaffected.
 
 ### Changed
 

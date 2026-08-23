@@ -38,8 +38,10 @@ from django_ox.worker import Worker
 from .conftest import wait_for
 from .tasks import (
     add,
+    async_catch_timeout,
     async_report_deadline,
     async_spin,
+    atomic_write_loop,
     busy,
     query_then_spin,
     raise_timeout,
@@ -47,6 +49,7 @@ from .tasks import (
     slow,
     spin,
     spin_in_atomic,
+    swallow_then_run_on,
     swallow_timeout,
     write_loop,
 )
@@ -565,6 +568,61 @@ class TestReleasesWhatItHeld:
         assert not events(caplog, "task_reclaimed")
         assert "too many clients" not in caplog.text
 
+    @postgres_only
+    @pytest.mark.parametrize("loop", [write_loop, atomic_write_loop])
+    def test_a_timeout_landing_inside_a_statement_is_recorded(self, caplog, loop):
+        """
+        psycopg drives a statement through Python, so the injected
+        exception can land after the query was sent and before its result
+        was read, leaving the thread's connection with a command in flight;
+        inside atomic() the same landing makes Django's own exit raise. The
+        worker must still record the attempt as a timeout on a connection
+        it can use, rather than fail its outcome write and leave the row
+        RUNNING for the reaper. 300 tasks writing as fast as they can,
+        timed out at 50 ms, land inside a statement often enough.
+        """
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        worker = Worker(
+            task_timeout=0.05,
+            backoff_initial=0,
+            poll_interval=0.02,
+            concurrency=4,
+            lock_timeout=60,
+        )
+        enqueue_many(loop, [((5.0,), {}) for _ in range(300)])
+        OxTask.objects.update(max_attempts=1)
+
+        thread = run_in_thread(worker)
+        try:
+            assert wait_for(
+                lambda: (
+                    not OxTask.objects.filter(
+                        status__in=(OxTask.Status.READY, OxTask.Status.RUNNING)
+                    ).exists()
+                ),
+                timeout=120,
+                interval=0.1,
+            )
+        finally:
+            worker.request_stop()
+            thread.join(timeout=15)
+        assert not thread.is_alive()
+
+        statuses = dict(OxTask.objects.values_list("status").annotate(n=Count("id")))
+        assert statuses == {OxTask.Status.FAILED: 300}
+        landed_in_the_driver = 0
+        for db_task in OxTask.objects.all():
+            assert [e["exception_class_path"] for e in db_task.errors] == [
+                TIMEOUT_PATH
+            ], db_task.errors
+            if "psycopg" in db_task.errors[-1]["traceback"]:
+                landed_in_the_driver += 1
+        assert landed_in_the_driver > 0, "no delivery landed inside a statement"
+        assert not events(caplog, "worker_error")
+        assert not events(caplog, "task_lease_lost")
+        assert not events(caplog, "task_stuck")
+        assert len(events(caplog, "task_timed_out")) == 300
+
     def test_injection_never_lands_in_worker_bookkeeping(self, caplog):
         """
         A thousand short tasks with a timeout about equal to their runtime,
@@ -662,6 +720,30 @@ class TestAsyncTimeout:
         assert result.return_value == "done"
         assert "cancelled" not in task_state
 
+    def test_the_coroutine_sees_cancelled_error_not_task_timeout(self, task_state):
+        """
+        asyncio delivers a cancellation, and nothing can raise a different
+        class at a running coroutine's await. `except TaskTimeout` inside
+        an async task never fires; the documentation says so.
+        """
+        worker = Worker(task_timeout=0.2, backoff_initial=60, poll_interval=0.05)
+        result = async_catch_timeout.enqueue(5.0)
+        assert worker.run_once()
+        assert task_state.get("cancelled") is True
+        db_task = row(result)
+        assert db_task.status == OxTask.Status.READY
+        assert db_task.errors[-1]["exception_class_path"] == TIMEOUT_PATH
+
+    def test_the_stored_traceback_has_the_task_frames(self):
+        """The record shows the await the coroutine was on, not just the worker."""
+        worker = Worker(task_timeout=0.2, backoff_initial=60, poll_interval=0.05)
+        result = async_spin.enqueue(5.0)
+        assert worker.run_once()
+        traceback = row(result).errors[-1]["traceback"]
+        assert "in async_spin" in traceback, traceback
+        assert "await asyncio.sleep(seconds)" in traceback, traceback
+        assert "0.2s timeout" in traceback
+
 
 # -- the grace backstop and the recycle -------------------------------------
 
@@ -734,6 +816,44 @@ class TestBackstop:
         assert final.status == OxTask.Status.FAILED
         assert final.return_value is None
 
+    def test_a_task_that_catches_it_and_runs_past_the_grace_is_stuck(
+        self, caplog, task_state
+    ):
+        """
+        A task may catch TaskTimeout, but it has until the grace to return
+        or raise. One that keeps going is indistinguishable from a thread
+        the exception could not reach, and is treated the same way; the
+        record says what was observed, not a cause the worker cannot see.
+        """
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        worker = Worker(
+            task_timeout=0.2,
+            task_timeout_grace=0.3,
+            backoff_initial=0,
+            poll_interval=0.05,
+            lock_timeout=60,
+        )
+        result = swallow_then_run_on.enqueue(5.0, 1.5)
+        OxTask.objects.filter(id=result.id).update(max_attempts=1)
+
+        thread = run_in_thread(worker)
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert worker.recycling
+        assert task_state.get("caught") is True
+        db_task = row(result)
+        assert db_task.status == OxTask.Status.FAILED
+        assert db_task.lease_epoch == 2
+        message = db_task.errors[-1]["traceback"]
+        assert "did not stop within the 0.3s grace" in message
+        assert "TaskTimeout was raised inside it" in message
+        assert "blocked outside Python" not in message
+        assert events(caplog, "task_stuck")
+        assert wait_for(lambda: not worker_threads(), timeout=5)
+        assert task_state.get("ran_on") is True, "the thread ran on to its end"
+        assert events(caplog, "task_lease_lost")
+        assert row(result).status == OxTask.Status.FAILED
+
     def test_backstop_alone_when_injection_is_unavailable(self, caplog, monkeypatch):
         """
         The PyPy shape: no PyThreadState_SetAsyncExc. A Python loop that
@@ -761,7 +881,12 @@ class TestBackstop:
         assert not thread.is_alive()
         assert worker.recycling
         assert row(result).status == OxTask.Status.FAILED
-        assert "did not stop" in row(result).errors[-1]["traceback"]
+        message = row(result).errors[-1]["traceback"]
+        assert "did not stop within the 0.2s grace" in message
+        # Nothing was raised inside the task; the record must not say it was.
+        assert "cannot raise TaskTimeout inside a running task" in message
+        assert "raised inside it" not in message
+        assert "blocked outside Python" not in message
         assert events(caplog, "task_stuck")
         assert wait_for(lambda: not worker_threads(), timeout=5)
 

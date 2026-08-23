@@ -41,6 +41,10 @@ class QueueStats:
     observed how they ended, so they are neither a success nor a failure
     and they are not folded into either column. A steady lost count means
     workers are being reclaimed; see the Production guide on LOCK_TIMEOUT.
+
+    discarded counts rows an operator closed without running, through
+    django_ox.actions.discard or the admin action. Settled, not backlog,
+    and not an outcome of any attempt.
     """
 
     queue_name: str
@@ -49,6 +53,7 @@ class QueueStats:
     failed: int
     successful: int
     lost: int = 0
+    discarded: int = 0
 
 
 def _for_queue(queryset: QuerySet[OxTask], queue_name: str | None) -> QuerySet[OxTask]:
@@ -90,6 +95,7 @@ def queue_stats() -> list[QueueStats]:
             failed=Count("pk", filter=Q(status=OxTask.Status.FAILED)),
             successful=Count("pk", filter=Q(status=OxTask.Status.SUCCESSFUL)),
             lost=Count("pk", filter=Q(status=OxTask.Status.LOST)),
+            discarded=Count("pk", filter=Q(status=OxTask.Status.DISCARDED)),
         )
         .order_by("queue_name")
     )

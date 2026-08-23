@@ -7,10 +7,10 @@ class OxTask(models.Model):
     """
     A queued task and its result record.
 
-    Rows double as the durable queue and the result store. Four of the five
+    Rows double as the durable queue and the result store. Four of the six
     status values mirror django.tasks.TaskResultStatus, so conversion is a
-    plain value cast; LOST is django-ox's own and is translated at the
-    boundary by django_ox.results.
+    plain value cast; LOST and DISCARDED are django-ox's own and are
+    translated at the boundary by django_ox.results.
     """
 
     class Status(models.TextChoices):
@@ -26,6 +26,12 @@ class OxTask(models.Model):
         # pending, so completion counting terminates; see results.py for
         # what callers of django.tasks see.
         LOST = "LOST"
+        # Written only by django_ox.actions.discard, on a READY, FAILED or
+        # LOST row. An operator closed the task without running it: a
+        # READY row never runs, a FAILED or LOST row is not retried.
+        # Terminal, never claimed, never written by a worker. Its previous
+        # attempts keep their records.
+        DISCARDED = "DISCARDED"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 

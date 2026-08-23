@@ -28,9 +28,10 @@ matrix. Batches are tested to 100,000 members in a single batch.
 
 ## What Pro is not
 
-Rate limiting, workflows and chains, a web dashboard and encrypted payloads
-are not in Pro and are not dated. Metrics stay free: the stats API and the
-health command are in the open source package and remain there.
+Workflows and chains are on the roadmap, undated. Rate limiting, a web
+dashboard and encrypted payloads are not in Pro and are not dated. Metrics
+stay free: the stats API and the health command are in the open source
+package and remain there.
 
 ## Delivery
 

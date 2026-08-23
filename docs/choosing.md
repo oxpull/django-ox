@@ -46,8 +46,9 @@ function", open since 2020-12-19 with 98 upvotes [^celery-6552].
   [benchmarks](benchmarks.md) page gives measured numbers with the method.
   If your workload is above them, a broker-based queue is the right tool, and
   the cost is the second datastore.
-- **Chains, groups and chords.** Not in django-ox. Batches ship in
-  [Oxpull Pro](pro.md); workflows are on its roadmap.
+- **Chains, groups and chords.** Not in django-ox. Batches are in
+  [Oxpull Pro](pro.md), a paid add-on that is not on sale yet; chains and
+  workflows are on the Pro roadmap, undated.
 - **CPU-bound tasks in one process.** Worker concurrency is a thread pool.
   Run `ox_worker --processes N --concurrency 1` for N interpreters, or pick
   a queue with a process pool.

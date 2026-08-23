@@ -250,7 +250,7 @@ firing for a time before it existed.
   ORM); for CPU-bound work, run `--processes N --concurrency 1`, which is N
   worker processes under one supervisor.
 
-## Scope and roadmap
+## Scope
 
 The core is deliberately small: a durable queue, a worker, recurring
 schedules, monitoring, and nothing else to operate. Outside the current
@@ -258,10 +258,10 @@ scope: interrupting one chosen running task on demand (every attempt can be
 bounded with `TASK_TIMEOUT`), and multi-database routing (tasks are stored on
 the default database for the model).
 
-Batches and unique tasks ship in [Oxpull Pro](https://oxpull.com/django-ox/pro/);
-the waitlist is at <https://oxpull.com/>. Metrics stay in this package:
-`django_ox.stats` and `ox_health` are free and stay free. Rate limiting is in
-neither tier.
+Batches and unique tasks are in
+[Oxpull Pro](https://oxpull.com/django-ox/pro/), a paid add-on that is not on
+sale yet; the waitlist is at <https://oxpull.com/>. Metrics stay in this
+package: `django_ox.stats` and `ox_health` are free and stay free.
 
 ## Stability
 

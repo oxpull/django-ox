@@ -94,9 +94,10 @@ is to wrap every call in `transaction.on_commit()`.
 Here the enqueue is an `INSERT` on your own connection. It commits or rolls back
 with the row it belongs to, so there is nothing to wrap.
 
-**Not supported:** Celery's chains, groups and chords, and routing across
-multiple brokers. Queues, priorities and `run_after` are what exist today.
-Chains are on the [Oxpull Pro](pro.md) roadmap.
+Queues, priorities and `run_after` are what exist today. Celery's chains,
+groups and chords, and routing across multiple brokers, are outside the
+package; chains and workflows are on the [Oxpull Pro](pro.md) roadmap,
+undated.
 
 ## From huey
 

@@ -174,9 +174,9 @@ decisions worth knowing before you commit:
   processes under one supervisor. See
   [Production](production.md#threads-and-processes).
 
-Batches and unique tasks ship in [Oxpull Pro](pro.md). Metrics stay in this
-package: `django_ox.stats` and `ox_health` are free and stay free. Rate limiting
-is in neither tier.
+Batches and unique tasks are in [Oxpull Pro](pro.md), a paid add-on that is
+not on sale yet; the waitlist is at <https://oxpull.com/>. Metrics stay in
+this package: `django_ox.stats` and `ox_health` are free and stay free.
 
 ## License
 

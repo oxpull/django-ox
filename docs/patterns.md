@@ -263,7 +263,7 @@ to exercise claiming and retries for real.
 
 ## Not in the core
 
-Batches and unique or deduplicated tasks are not part of django-ox. They are the
-[Oxpull Pro](pro.md) feature set. Metrics are in the free tier: `django_ox.stats`
-and `manage.py ox_health` ship in the core. Rate limiting, chains and workflows
-do not exist in either tier.
+Batches and unique or deduplicated tasks are in [Oxpull Pro](pro.md), a paid
+add-on that is not on sale yet. Metrics are in the free tier: `django_ox.stats`
+and `manage.py ox_health` ship in the core. Chains and workflows are on the
+Pro roadmap, undated.

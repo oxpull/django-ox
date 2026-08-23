@@ -247,8 +247,8 @@ firing for a time before it existed.
 - Because execution is at-least-once, tasks should be idempotent. A task is
   retried both when it raises and when its worker dies mid-run.
 - Concurrency uses a thread pool. That fits I/O-bound tasks (email, HTTP,
-  ORM); for CPU-bound work, run multiple worker processes with
-  `--concurrency=1` instead.
+  ORM); for CPU-bound work, run `--processes N --concurrency 1`, which is N
+  worker processes under one supervisor.
 
 ## Scope and roadmap
 

@@ -251,11 +251,15 @@ The message text is not part of the contract. The keys are.
 | `worker_error` | ERROR | The execution wrapper itself raised (an internal worker error, not a task failure). |
 | `worker_draining` | INFO | Shutdown began with tasks still in flight. |
 | `worker_stopped` | INFO | The run loop exited. |
+| `supervisor_started` | INFO | `ox_worker --processes N` started its worker processes. |
+| `worker_process_restarted` | WARNING | A worker process exited on its own and is being restarted. |
+| `supervisor_restart_cap` | ERROR | More than five restarts in a minute; the supervisor is stopping with exit code 1. |
+| `supervisor_stopped` | INFO | Every worker process has exited. |
 
 | Key | Present on | Meaning |
 | --- | --- | --- |
 | `event` | all events | The event name from the table above. |
-| `worker_id` | all events | Unique id of the worker emitting the record. |
+| `worker_id` | all worker events | Unique id of the worker emitting the record. With `--processes`, the slot number is the last part of the id. |
 | `task_id` | task events | The task's UUID, as a string. |
 | `task_path` | task events | Dotted path of the task function. |
 | `queue` | task events | Queue name. |
@@ -267,6 +271,10 @@ The message text is not part of the contract. The keys are.
 | `schedule` | `schedule_dispatched` | Schedule name from `SCHEDULES`. |
 | `queues`, `concurrency` | `worker_started` | The worker's configuration. |
 | `pending` | `worker_draining` | In-flight tasks at shutdown. |
+| `processes` | `supervisor_started` | Worker processes the supervisor runs. |
+| `worker_index`, `exit_code` | `worker_process_restarted`, `supervisor_restart_cap` | Which slot exited and how. A negative code is the signal that killed it. |
+| `restarts` | `supervisor_restart_cap` | Restarts seen inside the window. |
+| `exit_code` | `supervisor_stopped` | The code the supervisor exits with. |
 
 `task_claimed` and `task_started` are DEBUG because they fire once per
 attempt; run `ox_worker -v 2` (or set the logger to DEBUG) when you want

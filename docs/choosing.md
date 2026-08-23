@@ -47,8 +47,8 @@ function", open since 2020-12-19 with 98 upvotes [^celery-6552].
 - **Chains, groups and chords.** Not in django-ox. Batches ship in
   [Oxpull Pro](pro.md); workflows are on its roadmap.
 - **CPU-bound tasks in one process.** Worker concurrency is a thread pool.
-  Run several processes with `--concurrency 1`, or pick a queue with a process
-  pool.
+  Run `ox_worker --processes N --concurrency 1` for N interpreters, or pick
+  a queue with a process pool.
 
 ## Maintenance
 

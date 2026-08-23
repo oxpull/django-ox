@@ -107,8 +107,9 @@ TASKS = {
 - Claiming: one `UPDATE ... SKIP LOCKED ... RETURNING` statement on
   PostgreSQL; `SELECT ... FOR UPDATE SKIP LOCKED` on MySQL 8+; an atomic
   compare-and-set UPDATE on SQLite and other databases without `SKIP LOCKED`.
-- `--concurrency N` is a thread pool in one process. CPU-bound work wants
-  several processes with `--concurrency 1`.
+- `--concurrency N` is a thread pool in one process. `--processes N` runs N
+  such workers under one supervisor. CPU-bound work wants
+  `--processes N --concurrency 1`.
 - Recurring tasks go in `OPTIONS["SCHEDULES"]`. Every worker dispatches them;
   there is no scheduler process to start.
 - `ox_prune --older-than 7d` deletes finished rows; FAILED rows stay unless

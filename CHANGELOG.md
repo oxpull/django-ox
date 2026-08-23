@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ox_worker --processes N`. Above 1, the command supervises N copies of
+  itself, each a full worker with its own database connections, lease
+  renewal, reaper and `--concurrency` thread pool, so `--processes 2
+  --concurrency 4` runs eight tasks at once. Every worker id ends in its slot
+  number. SIGTERM or SIGINT to the supervisor is forwarded once and the
+  supervisor exits 0 when every worker drained, or with the first non-zero
+  code; a second signal is the force-exit. A worker process that dies is
+  restarted after a second with `worker_process_restarted` at WARNING; more
+  than five restarts in a minute stops the supervisor with exit code 1 and
+  `supervisor_restart_cap` at ERROR. `--processes 1`, the default, is the
+  worker as before. POSIX only.
 - A Prometheus endpoint. `path("ox/", include("django_ox.urls"))` mounts
   `GET /ox/metrics`, which renders the `django_ox.stats` numbers as gauges in
   the Prometheus text format (OpenMetrics on request), from the standard

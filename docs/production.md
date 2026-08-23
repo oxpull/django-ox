@@ -22,14 +22,18 @@ User=app
 Group=app
 WorkingDirectory=/srv/myproject
 Environment=DJANGO_SETTINGS_MODULE=myproject.settings
-ExecStart=/srv/myproject/.venv/bin/python manage.py ox_worker --concurrency 4
+ExecStart=/srv/myproject/.venv/bin/python manage.py ox_worker --processes 2 --concurrency 4
 Restart=always
 RestartSec=5
 
 # systemd sends SIGTERM on stop; the worker drains in-flight tasks and
 # exits 0. Give the drain at least as long as your longest task before
-# systemd escalates to SIGKILL.
+# systemd escalates to SIGKILL. KillMode=mixed sends that SIGTERM to the
+# supervisor alone, which forwards it once; the default of sending it to
+# every process in the group would reach each worker twice, and a second
+# signal is the force-exit.
 KillSignal=SIGTERM
+KillMode=mixed
 TimeoutStopSec=300
 
 [Install]
@@ -41,10 +45,19 @@ sudo systemctl enable --now ox-worker
 journalctl -u ox-worker -f
 ```
 
-To run several workers on one host, use a template unit
-(`ox-worker@.service` with the same `[Service]` body) and start
-`ox-worker@1`, `ox-worker@2`, and so on. No flag distinguishes the
-instances; every worker generates its own unique id.
+There are two ways to put several worker processes on one host. The unit
+above uses `--processes 2`: one unit, one supervisor, two workers, and one
+place to set the flags. The other is a template unit (`ox-worker@.service`
+with the same `[Service]` body and `--processes 1`), started as
+`ox-worker@1`, `ox-worker@2`, and so on, which makes each worker its own
+unit with its own journal entry and restart counter.
+
+Use `--processes` unless you need to stop, restart or give flags to one
+worker at a time. A supervisor that restarts a dead worker in a second, with
+one command to edit, is the common case. The template unit is the right
+shape when the workers differ, for instance one unit per queue with its own
+`--lock-timeout`, and for that a queue flag per unit says more than a
+process count.
 
 ## Running in containers
 
@@ -56,7 +69,7 @@ runtime longer than your slowest task before it escalates to SIGKILL.
 services:
   worker:
     image: myapp:latest
-    command: python manage.py ox_worker --concurrency 4
+    command: python manage.py ox_worker --processes 2 --concurrency 4
     stop_grace_period: 5m
     restart: unless-stopped
     depends_on:
@@ -72,6 +85,13 @@ Docker's default grace period is 10 seconds, which will kill a worker mid-task
 and leave the reaper to clean up. `stop_grace_period` is the container
 equivalent of `TimeoutStopSec`. On Kubernetes it is
 `terminationGracePeriodSeconds` on the pod spec.
+
+`--processes` inside one container, or one worker per container with the
+replica count doing the scaling, both work. The runtime restarts a container,
+the supervisor restarts a worker process, and each takes about a second. One
+container per worker keeps the runtime's own health and restart accounting
+per worker, which is worth having on an orchestrator; `--processes` keeps the
+number of containers down on a single host.
 
 With no flags, `ox_health` checks that the database answers, which is what a
 per-container probe should test. Queue-wide checks belong in fleet alerting
@@ -96,8 +116,16 @@ was running is abandoned mid-flight. The reaper on a surviving worker reclaims
 it later, and it counts as a failed attempt.
 
 This maps directly onto rolling deploys: send SIGTERM, wait, start the new
-version. The only tuning point is the supervisor's kill escalation
+version. The only tuning point is the process manager's kill escalation
 (`TimeoutStopSec` above) relative to your longest task.
+
+With `--processes` above 1, the signal goes to the supervisor. It forwards
+SIGTERM to every worker process, waits for each to drain, and exits 0 when all
+of them did, otherwise with the first non-zero code. A second signal is
+forwarded again, which is the force-exit on each worker. Send the signal to
+the supervisor only: a worker that also receives the terminal's copy of a
+Ctrl-C has seen two signals, which is why the workers run in their own process
+group and why the systemd unit above sets `KillMode=mixed`.
 
 ## Scaling out
 
@@ -124,9 +152,35 @@ Workers can also be split by queue: run
 
 `--concurrency N` is a thread pool inside one process. That fits the
 common Django task profile: email, HTTP calls to third parties, ORM work.
-For CPU-bound tasks the GIL makes threads the wrong tool. Run multiple worker
-processes with `--concurrency 1` instead. That is also the natural shape for
-systemd template units, or one container per worker.
+For CPU-bound tasks the GIL makes threads the wrong tool; use
+`--processes N` there, with `--concurrency 1`, and the same command on one
+host gives you N interpreters.
+
+```
+python manage.py ox_worker --processes 4 --concurrency 1
+```
+
+Each process is a complete worker with its own database connections, lease
+renewal and reaper, and its own worker id with the slot number on the end, so
+`worker_ids` on a task row says which process ran it. Nothing is shared
+across the processes except the database: the supervisor starts each one as a
+fresh interpreter running `ox_worker --processes 1` with the same flags, so a
+worker under the supervisor is the same code as a worker started by hand. The
+supervisor itself never opens a database connection.
+
+A worker process that exits on its own, whatever the cause, is restarted a
+second later and the supervisor logs `worker_process_restarted` with the
+exit code at WARNING. Its in-flight tasks go through the ordinary lease path:
+the reaper on a surviving process takes them back after `LOCK_TIMEOUT`. More
+than five restarts inside one minute, counted across all processes, stops the
+supervisor with exit code 1 and `supervisor_restart_cap` at ERROR, so a
+worker that cannot start hands the fault to the process manager and its
+restart policy rather than logging a restart a second forever.
+
+Two things `--processes` does not do. It does not run on Windows, where
+there are no POSIX signals to forward; run one `ox_worker` per process there.
+And it does not replace a process manager: the supervisor is a foreground
+process that expects to be restarted itself, like the single worker.
 
 ## The lease
 

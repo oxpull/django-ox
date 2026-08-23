@@ -178,8 +178,9 @@ decisions worth knowing before you commit:
 - Tasks are stored on the default database for the model; multi-database
   routing is not part of the current scope.
 - Worker concurrency is a thread pool, which fits I/O-bound tasks. For
-  CPU-bound work, run multiple worker processes with `--concurrency 1`
-  instead. See [Production](production.md#threads-and-processes).
+  CPU-bound work, run `--processes N --concurrency 1`, which is N worker
+  processes under one supervisor. See
+  [Production](production.md#threads-and-processes).
 
 Batches and unique tasks ship in [Oxpull Pro](pro.md). Metrics stay in this
 package: `django_ox.stats` and `ox_health` are free and stay free. Rate limiting
@@ -262,13 +263,15 @@ python manage.py ox_worker [options]
 | --- | --- | --- |
 | `--backend` | `default` | Backend alias from the `TASKS` setting. |
 | `--queues` | all configured queues | Comma-separated queue names this worker processes. |
-| `--concurrency` | `1` | Tasks executed concurrently, as a thread pool inside the process. |
+| `--concurrency` | `1` | Tasks executed concurrently, as a thread pool inside each worker process. |
+| `--processes` | `1` | Worker processes to run. At `1` the command is the worker. Above `1` it supervises that many copies of itself, each a full worker with its own connections, lease renewal, reaper and `--concurrency` thread pool, so `--processes 2 --concurrency 4` runs eight tasks at once. See [Threads and processes](production.md#threads-and-processes). |
 | `--interval` | `1.0` | Polling interval in seconds when idle. When tasks are in flight the worker wakes as soon as one finishes, so this does not bound throughput. |
 | `--lock-timeout` | backend `LOCK_TIMEOUT`, or 300 | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |
 
 The command also honors Django's standard `-v/--verbosity`: at the default
 verbosity it logs worker lifecycle and warnings to stderr, and `-v 2`
-enables debug logging. `-v 0` attaches no log handler.
+enables debug logging. `-v 0` attaches no log handler. With `--processes`
+above 1 every flag is passed on to each worker process unchanged.
 
 Two intervals are derived rather than flagged:
 
@@ -1137,8 +1140,8 @@ function", open since 2020-12-19 with 98 upvotes [^celery-6552].
 - **Chains, groups and chords.** Not in django-ox. Batches ship in
   [Oxpull Pro](pro.md); workflows are on its roadmap.
 - **CPU-bound tasks in one process.** Worker concurrency is a thread pool.
-  Run several processes with `--concurrency 1`, or pick a queue with a process
-  pool.
+  Run `ox_worker --processes N --concurrency 1` for N interpreters, or pick
+  a queue with a process pool.
 
 ## Maintenance
 
@@ -1209,14 +1212,18 @@ User=app
 Group=app
 WorkingDirectory=/srv/myproject
 Environment=DJANGO_SETTINGS_MODULE=myproject.settings
-ExecStart=/srv/myproject/.venv/bin/python manage.py ox_worker --concurrency 4
+ExecStart=/srv/myproject/.venv/bin/python manage.py ox_worker --processes 2 --concurrency 4
 Restart=always
 RestartSec=5
 
 # systemd sends SIGTERM on stop; the worker drains in-flight tasks and
 # exits 0. Give the drain at least as long as your longest task before
-# systemd escalates to SIGKILL.
+# systemd escalates to SIGKILL. KillMode=mixed sends that SIGTERM to the
+# supervisor alone, which forwards it once; the default of sending it to
+# every process in the group would reach each worker twice, and a second
+# signal is the force-exit.
 KillSignal=SIGTERM
+KillMode=mixed
 TimeoutStopSec=300
 
 [Install]
@@ -1228,10 +1235,19 @@ sudo systemctl enable --now ox-worker
 journalctl -u ox-worker -f
 ```
 
-To run several workers on one host, use a template unit
-(`ox-worker@.service` with the same `[Service]` body) and start
-`ox-worker@1`, `ox-worker@2`, and so on. No flag distinguishes the
-instances; every worker generates its own unique id.
+There are two ways to put several worker processes on one host. The unit
+above uses `--processes 2`: one unit, one supervisor, two workers, and one
+place to set the flags. The other is a template unit (`ox-worker@.service`
+with the same `[Service]` body and `--processes 1`), started as
+`ox-worker@1`, `ox-worker@2`, and so on, which makes each worker its own
+unit with its own journal entry and restart counter.
+
+Use `--processes` unless you need to stop, restart or give flags to one
+worker at a time. A supervisor that restarts a dead worker in a second, with
+one command to edit, is the common case. The template unit is the right
+shape when the workers differ, for instance one unit per queue with its own
+`--lock-timeout`, and for that a queue flag per unit says more than a
+process count.
 
 ## Running in containers
 
@@ -1243,7 +1259,7 @@ runtime longer than your slowest task before it escalates to SIGKILL.
 services:
   worker:
     image: myapp:latest
-    command: python manage.py ox_worker --concurrency 4
+    command: python manage.py ox_worker --processes 2 --concurrency 4
     stop_grace_period: 5m
     restart: unless-stopped
     depends_on:
@@ -1259,6 +1275,13 @@ Docker's default grace period is 10 seconds, which will kill a worker mid-task
 and leave the reaper to clean up. `stop_grace_period` is the container
 equivalent of `TimeoutStopSec`. On Kubernetes it is
 `terminationGracePeriodSeconds` on the pod spec.
+
+`--processes` inside one container, or one worker per container with the
+replica count doing the scaling, both work. The runtime restarts a container,
+the supervisor restarts a worker process, and each takes about a second. One
+container per worker keeps the runtime's own health and restart accounting
+per worker, which is worth having on an orchestrator; `--processes` keeps the
+number of containers down on a single host.
 
 With no flags, `ox_health` checks that the database answers, which is what a
 per-container probe should test. Queue-wide checks belong in fleet alerting
@@ -1283,8 +1306,16 @@ was running is abandoned mid-flight. The reaper on a surviving worker reclaims
 it later, and it counts as a failed attempt.
 
 This maps directly onto rolling deploys: send SIGTERM, wait, start the new
-version. The only tuning point is the supervisor's kill escalation
+version. The only tuning point is the process manager's kill escalation
 (`TimeoutStopSec` above) relative to your longest task.
+
+With `--processes` above 1, the signal goes to the supervisor. It forwards
+SIGTERM to every worker process, waits for each to drain, and exits 0 when all
+of them did, otherwise with the first non-zero code. A second signal is
+forwarded again, which is the force-exit on each worker. Send the signal to
+the supervisor only: a worker that also receives the terminal's copy of a
+Ctrl-C has seen two signals, which is why the workers run in their own process
+group and why the systemd unit above sets `KillMode=mixed`.
 
 ## Scaling out
 
@@ -1311,9 +1342,35 @@ Workers can also be split by queue: run
 
 `--concurrency N` is a thread pool inside one process. That fits the
 common Django task profile: email, HTTP calls to third parties, ORM work.
-For CPU-bound tasks the GIL makes threads the wrong tool. Run multiple worker
-processes with `--concurrency 1` instead. That is also the natural shape for
-systemd template units, or one container per worker.
+For CPU-bound tasks the GIL makes threads the wrong tool; use
+`--processes N` there, with `--concurrency 1`, and the same command on one
+host gives you N interpreters.
+
+```
+python manage.py ox_worker --processes 4 --concurrency 1
+```
+
+Each process is a complete worker with its own database connections, lease
+renewal and reaper, and its own worker id with the slot number on the end, so
+`worker_ids` on a task row says which process ran it. Nothing is shared
+across the processes except the database: the supervisor starts each one as a
+fresh interpreter running `ox_worker --processes 1` with the same flags, so a
+worker under the supervisor is the same code as a worker started by hand. The
+supervisor itself never opens a database connection.
+
+A worker process that exits on its own, whatever the cause, is restarted a
+second later and the supervisor logs `worker_process_restarted` with the
+exit code at WARNING. Its in-flight tasks go through the ordinary lease path:
+the reaper on a surviving process takes them back after `LOCK_TIMEOUT`. More
+than five restarts inside one minute, counted across all processes, stops the
+supervisor with exit code 1 and `supervisor_restart_cap` at ERROR, so a
+worker that cannot start hands the fault to the process manager and its
+restart policy rather than logging a restart a second forever.
+
+Two things `--processes` does not do. It does not run on Windows, where
+there are no POSIX signals to forward; run one `ox_worker` per process there.
+And it does not replace a process manager: the supervisor is a foreground
+process that expects to be restarted itself, like the single worker.
 
 ## The lease
 
@@ -1760,11 +1817,15 @@ The message text is not part of the contract. The keys are.
 | `worker_error` | ERROR | The execution wrapper itself raised (an internal worker error, not a task failure). |
 | `worker_draining` | INFO | Shutdown began with tasks still in flight. |
 | `worker_stopped` | INFO | The run loop exited. |
+| `supervisor_started` | INFO | `ox_worker --processes N` started its worker processes. |
+| `worker_process_restarted` | WARNING | A worker process exited on its own and is being restarted. |
+| `supervisor_restart_cap` | ERROR | More than five restarts in a minute; the supervisor is stopping with exit code 1. |
+| `supervisor_stopped` | INFO | Every worker process has exited. |
 
 | Key | Present on | Meaning |
 | --- | --- | --- |
 | `event` | all events | The event name from the table above. |
-| `worker_id` | all events | Unique id of the worker emitting the record. |
+| `worker_id` | all worker events | Unique id of the worker emitting the record. With `--processes`, the slot number is the last part of the id. |
 | `task_id` | task events | The task's UUID, as a string. |
 | `task_path` | task events | Dotted path of the task function. |
 | `queue` | task events | Queue name. |
@@ -1776,6 +1837,10 @@ The message text is not part of the contract. The keys are.
 | `schedule` | `schedule_dispatched` | Schedule name from `SCHEDULES`. |
 | `queues`, `concurrency` | `worker_started` | The worker's configuration. |
 | `pending` | `worker_draining` | In-flight tasks at shutdown. |
+| `processes` | `supervisor_started` | Worker processes the supervisor runs. |
+| `worker_index`, `exit_code` | `worker_process_restarted`, `supervisor_restart_cap` | Which slot exited and how. A negative code is the signal that killed it. |
+| `restarts` | `supervisor_restart_cap` | Restarts seen inside the window. |
+| `exit_code` | `supervisor_stopped` | The code the supervisor exits with. |
 
 `task_claimed` and `task_started` are DEBUG because they fire once per
 attempt; run `ox_worker -v 2` (or set the logger to DEBUG) when you want
@@ -2263,8 +2328,9 @@ TASKS = {
 - Claiming: one `UPDATE ... SKIP LOCKED ... RETURNING` statement on
   PostgreSQL; `SELECT ... FOR UPDATE SKIP LOCKED` on MySQL 8+; an atomic
   compare-and-set UPDATE on SQLite and other databases without `SKIP LOCKED`.
-- `--concurrency N` is a thread pool in one process. CPU-bound work wants
-  several processes with `--concurrency 1`.
+- `--concurrency N` is a thread pool in one process. `--processes N` runs N
+  such workers under one supervisor. CPU-bound work wants
+  `--processes N --concurrency 1`.
 - Recurring tasks go in `OPTIONS["SCHEDULES"]`. Every worker dispatches them;
   there is no scheduler process to start.
 - `ox_prune --older-than 7d` deletes finished rows; FAILED rows stay unless
@@ -2349,6 +2415,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ox_worker --processes N`. Above 1, the command supervises N copies of
+  itself, each a full worker with its own database connections, lease
+  renewal, reaper and `--concurrency` thread pool, so `--processes 2
+  --concurrency 4` runs eight tasks at once. Every worker id ends in its slot
+  number. SIGTERM or SIGINT to the supervisor is forwarded once and the
+  supervisor exits 0 when every worker drained, or with the first non-zero
+  code; a second signal is the force-exit. A worker process that dies is
+  restarted after a second with `worker_process_restarted` at WARNING; more
+  than five restarts in a minute stops the supervisor with exit code 1 and
+  `supervisor_restart_cap` at ERROR. `--processes 1`, the default, is the
+  worker as before. POSIX only.
 - A Prometheus endpoint. `path("ox/", include("django_ox.urls"))` mounts
   `GET /ox/metrics`, which renders the `django_ox.stats` numbers as gauges in
   the Prometheus text format (OpenMetrics on request), from the standard

@@ -67,13 +67,15 @@ python manage.py ox_worker [options]
 | --- | --- | --- |
 | `--backend` | `default` | Backend alias from the `TASKS` setting. |
 | `--queues` | all configured queues | Comma-separated queue names this worker processes. |
-| `--concurrency` | `1` | Tasks executed concurrently, as a thread pool inside the process. |
+| `--concurrency` | `1` | Tasks executed concurrently, as a thread pool inside each worker process. |
+| `--processes` | `1` | Worker processes to run. At `1` the command is the worker. Above `1` it supervises that many copies of itself, each a full worker with its own connections, lease renewal, reaper and `--concurrency` thread pool, so `--processes 2 --concurrency 4` runs eight tasks at once. See [Threads and processes](production.md#threads-and-processes). |
 | `--interval` | `1.0` | Polling interval in seconds when idle. When tasks are in flight the worker wakes as soon as one finishes, so this does not bound throughput. |
 | `--lock-timeout` | backend `LOCK_TIMEOUT`, or 300 | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |
 
 The command also honors Django's standard `-v/--verbosity`: at the default
 verbosity it logs worker lifecycle and warnings to stderr, and `-v 2`
-enables debug logging. `-v 0` attaches no log handler.
+enables debug logging. `-v 0` attaches no log handler. With `--processes`
+above 1 every flag is passed on to each worker process unchanged.
 
 Two intervals are derived rather than flagged:
 

@@ -171,8 +171,9 @@ decisions worth knowing before you commit:
 - Tasks are stored on the default database for the model; multi-database
   routing is not part of the current scope.
 - Worker concurrency is a thread pool, which fits I/O-bound tasks. For
-  CPU-bound work, run multiple worker processes with `--concurrency 1`
-  instead. See [Production](production.md#threads-and-processes).
+  CPU-bound work, run `--processes N --concurrency 1`, which is N worker
+  processes under one supervisor. See
+  [Production](production.md#threads-and-processes).
 
 Batches and unique tasks ship in [Oxpull Pro](pro.md). Metrics stay in this
 package: `django_ox.stats` and `ox_health` are free and stay free. Rate limiting

@@ -51,8 +51,10 @@ Operational facts worth getting right:
   lease every `LOCK_TIMEOUT / 3` seconds, so a long task on a live worker
   keeps running.
 - `ox_worker --concurrency N` is a thread pool in one process, suited to
-  I/O-bound tasks. For CPU-bound work run several processes with
-  `--concurrency 1`. `--queues a,b` restricts a worker to named queues; a
+  I/O-bound tasks. `--processes N` runs N such workers under one supervisor,
+  each with its own connections and reaper; for CPU-bound work use
+  `--processes N --concurrency 1`. A worker process that dies is restarted
+  after a second. `--queues a,b` restricts a worker to named queues; a
   queue with no worker assigned accumulates tasks and never runs them.
 - Recurring tasks are declared in `OPTIONS["SCHEDULES"]` as `{name: {"task":
   "dotted.path", "cron": "0 3 * * *"}}`. Every worker dispatches schedules and

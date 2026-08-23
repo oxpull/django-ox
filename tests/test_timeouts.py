@@ -12,13 +12,15 @@ recycles itself so the thread dies with the process.
 
 import contextlib
 import logging
+import math
 import os
+import re
 import signal
 import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
@@ -32,8 +34,8 @@ from django_ox.bulk import enqueue_many
 from django_ox.exceptions import TaskTimeout
 from django_ox.models import OxTask
 from django_ox.supervisor import RECYCLE_EXIT_CODE, Supervisor
-from django_ox.timeouts import task_timeouts_from_options
-from django_ox.worker import Worker
+from django_ox.timeouts import MAX_SECONDS, task_timeouts_from_options
+from django_ox.worker import WATCHDOG_MAX_WAIT, Worker
 
 from .conftest import wait_for
 from .tasks import (
@@ -139,6 +141,55 @@ class TestOptions:
         with pytest.raises(ImproperlyConfigured):
             task_timeouts_from_options(options)
 
+    @pytest.mark.parametrize(
+        "options",
+        [
+            {"TASK_TIMEOUT": float("inf")},
+            {"TASK_TIMEOUT": math.inf},
+            {"TASK_TIMEOUT": 1e14},
+            {"TASK_TIMEOUT": MAX_SECONDS + 1},
+            {"TASK_TIMEOUTS": {"exports": float("inf")}},
+            {"TASK_TIMEOUT_GRACE": float("inf")},
+        ],
+    )
+    def test_infinite_and_astronomical_values_are_rejected(self, options):
+        """
+        inf is a plausible spelling of no limit, and it passed validation
+        while the deadline arithmetic on every attempt overflowed, so each
+        attempt failed with OverflowError before the task was called.
+        None is the spelling; the message says so for the two options that
+        take it.
+        """
+        with pytest.raises(ImproperlyConfigured, match="finite number of seconds"):
+            task_timeouts_from_options(options)
+
+    def test_the_infinity_message_points_at_none_where_none_is_no_limit(self):
+        with pytest.raises(ImproperlyConfigured, match="None means no limit"):
+            task_timeouts_from_options({"TASK_TIMEOUT": float("inf")})
+        with pytest.raises(ImproperlyConfigured) as info:
+            task_timeouts_from_options({"TASK_TIMEOUT_GRACE": float("inf")})
+        assert "None" not in str(info.value)
+
+    def test_the_largest_accepted_value_is_usable(self):
+        timeouts = task_timeouts_from_options(
+            {"TASK_TIMEOUT": MAX_SECONDS, "TASK_TIMEOUT_GRACE": MAX_SECONDS}
+        )
+        assert timeouts.for_queue("default") == MAX_SECONDS
+        assert timeouts.grace == MAX_SECONDS
+        # The arithmetic the worker does with it must not overflow.
+        timezone.now() + timedelta(seconds=MAX_SECONDS)
+
+    def test_every_problem_is_listed_not_just_the_first(self):
+        with pytest.raises(ImproperlyConfigured) as info:
+            task_timeouts_from_options(
+                {"TASK_TIMEOUT": -1, "TASK_TIMEOUTS": {"nope": 10, "emails": "x"}},
+                ["default", "emails"],
+            )
+        message = str(info.value)
+        assert "TASK_TIMEOUT must be greater than zero" in message
+        assert "names the queue 'nope'" in message
+        assert "TASK_TIMEOUTS['emails'] must be a number" in message
+
     def test_unknown_queue_is_rejected_when_queues_are_named(self):
         with pytest.raises(ImproperlyConfigured, match="not in QUEUES"):
             task_timeouts_from_options(
@@ -162,6 +213,26 @@ class TestOptions:
         assert "TASK_TIMEOUT_GRACE" in errors[0].msg
 
     @pytest.mark.django_db
+    def test_check_reports_an_infinite_timeout(self, settings):
+        settings.TASKS = tasks_setting(TASK_TIMEOUT=float("inf"))
+        errors = default_task_backend.check()
+        assert [error.id for error in errors] == ["django_ox.E004"]
+        assert "finite" in errors[0].msg
+        settings.TASKS = tasks_setting(TASK_TIMEOUTS={"emails": math.inf})
+        errors = default_task_backend.check()
+        assert [error.id for error in errors] == ["django_ox.E004"]
+        assert "TASK_TIMEOUTS['emails']" in errors[0].msg
+
+    @pytest.mark.django_db
+    def test_check_reports_every_problem_at_once(self, settings):
+        """One run of manage.py check names them all; Django's own do."""
+        settings.TASKS = tasks_setting(TASK_TIMEOUT=-1, TASK_TIMEOUTS={"nope": 10})
+        errors = default_task_backend.check()
+        assert [error.id for error in errors] == ["django_ox.E004", "django_ox.E005"]
+        assert "TASK_TIMEOUT must be greater than zero" in errors[0].msg
+        assert "'nope'" in errors[1].msg
+
+    @pytest.mark.django_db
     def test_check_reports_unknown_queue(self, settings):
         settings.TASKS = tasks_setting(TASK_TIMEOUTS={"nosuchqueue": 1})
         errors = default_task_backend.check()
@@ -180,6 +251,7 @@ class TestOptions:
         ("options", "error_id"),
         [
             ('{"TASK_TIMEOUT": -1}', "django_ox.E004"),
+            ('{"TASK_TIMEOUT": Infinity}', "django_ox.E004"),
             ('{"TASK_TIMEOUT_GRACE": 0}', "django_ox.E004"),
             ('{"TASK_TIMEOUTS": {"nope": 5}}', "django_ox.E005"),
             ('{"SCHEDULES": {"bad": {"task": "x", "cron": "nope"}}}', "django_ox.E002"),
@@ -227,6 +299,12 @@ class TestOptions:
         settings.TASKS = tasks_setting(TASK_TIMEOUT=0)
         with pytest.raises(ImproperlyConfigured, match="TASK_TIMEOUT"):
             Worker()
+        # Used to start, then fail every attempt with OverflowError in the
+        # deadline arithmetic until the task was FAILED.
+        with pytest.raises(ImproperlyConfigured, match="finite"):
+            Worker(task_timeout=float("inf"))
+        with pytest.raises(ImproperlyConfigured, match="finite"):
+            Worker(task_timeout=1, task_timeout_grace=float("inf"))
         settings.TASKS = tasks_setting(TASK_TIMEOUTS={"nosuchqueue": 1})
         with pytest.raises(ImproperlyConfigured, match="nosuchqueue"):
             Worker()
@@ -411,6 +489,46 @@ class TestSoftTimeout:
         db_task = row(result)
         assert db_task.status == OxTask.Status.READY
         assert db_task.errors[-1]["exception_class_path"] == "builtins.ValueError"
+
+    def test_no_timeout_leaves_the_stored_traceback_as_it_was(self):
+        """
+        With no timeout on the queue the worker calls the task the way it
+        did before timeouts existed: the stored traceback goes straight
+        from _run_attempt into django.tasks and the task, with no frame of
+        the timeout machinery between them. Tooling that string-matches
+        traceback frames saw two new ones otherwise.
+        """
+        from .tasks import fail_always
+
+        worker = Worker(backoff_initial=60, poll_interval=0.05)
+        assert worker.timeouts.for_queue("default") is None
+        result = fail_always.enqueue()
+        assert worker.run_once()
+        traceback = row(result).errors[-1]["traceback"]
+        frames = re.findall(r'File ".*?", line \d+, in (\w+)', traceback)
+        assert frames == ["_run_attempt", "call", "fail_always"], traceback
+
+    def test_a_deadline_years_out_is_waited_for_in_steps(self, monkeypatch):
+        """
+        The watchdog sleeps until the earliest deadline. A condition wait
+        longer than the platform allows raises OverflowError, which killed
+        the watchdog thread for any timeout past about 49 days on Windows
+        and past the end of time_t elsewhere; the largest accepted value
+        is well past both.
+        """
+        assert MAX_SECONDS > WATCHDOG_MAX_WAIT
+        died: list[threading.ExceptHookArgs] = []
+        monkeypatch.setattr(threading, "excepthook", died.append)
+        worker = Worker(
+            task_timeout=MAX_SECONDS, backoff_initial=60, poll_interval=0.05
+        )
+        result = spin.enqueue(0.3)
+        assert worker.run_once()
+        result.refresh()
+        assert result.status == TaskResultStatus.SUCCESSFUL
+        assert died == [], died
+        # The watchdog is idling after the attempt, not dead.
+        assert worker._watchdog is not None and worker._watchdog.is_alive()
 
 
 def row_count(status):

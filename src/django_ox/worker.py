@@ -64,6 +64,11 @@ WATCHDOG_IDLE = 1.0
 # flight are all stuck threads it must not wait for.
 RECYCLE_DRAIN_POLL = 0.25
 
+# The longest the watchdog sleeps in one go. A condition wait takes at most
+# the platform's limit (about 49 days on Windows, and the end of time_t
+# elsewhere); a deadline years out is waited for in steps of this.
+WATCHDOG_MAX_WAIT = 3600.0
+
 
 def _load_async_exc_injector() -> Callable[[int], None] | None:
     """
@@ -714,7 +719,21 @@ class Worker:
                 db_task.max_attempts,
                 extra=self._log_extra("task_started", db_task),
             )
-            raw_return_value = self._call_task(task, db_task, task_result)
+            timeout = self.timeouts.for_queue(db_task.queue_name)
+            if timeout is None:
+                # No timeout on this queue: the call is the one the worker
+                # made before timeouts existed, frame for frame, so the
+                # stored traceback of an ordinary failure is unchanged.
+                if task.takes_context:
+                    raw_return_value = task.call(
+                        TaskContext(task_result=task_result),
+                        *db_task.args,
+                        **db_task.kwargs,
+                    )
+                else:
+                    raw_return_value = task.call(*db_task.args, **db_task.kwargs)
+            else:
+                raw_return_value = self._call_task(task, db_task, task_result, timeout)
             return_value = normalize_json(raw_return_value)
         except TaskTimeout as exc:
             duration_ms = _elapsed_ms(started)
@@ -779,14 +798,15 @@ class Worker:
         task: "Task[..., Any]",
         db_task: OxTask,
         task_result: "TaskResult[..., Any]",
+        timeout: float,
     ) -> Any:
         """
-        Call the task function and return what it returned.
+        Call the task function under a timeout and return what it returned.
 
-        With no timeout for this queue the call is exactly what it was
-        before timeouts existed. With one, the attempt is registered with
-        the watchdog for the duration of the call, and the attempt's
-        deadline is published for deadline() and remaining().
+        The attempt is registered with the watchdog for the duration of the
+        call, and the attempt's deadline is published for deadline() and
+        remaining(). A queue with no timeout never comes here: _run_attempt
+        calls the task directly, as it did before timeouts existed.
 
         A sync task is interrupted by TaskTimeout raised on this thread, at
         the next bytecode after the deadline. The exception can therefore
@@ -811,9 +831,6 @@ class Worker:
                 )
             return task.call(*db_task.args, **db_task.kwargs)
 
-        timeout = self.timeouts.for_queue(db_task.queue_name)
-        if timeout is None:
-            return invoke()
         if iscoroutinefunction(task.func):
             return self._call_async(task, db_task, task_result, timeout)
 
@@ -1015,7 +1032,7 @@ class Worker:
                     )
                     remaining = due - time.monotonic()
                     if remaining > 0:
-                        self._watch_cv.wait(remaining)
+                        self._watch_cv.wait(min(remaining, WATCHDOG_MAX_WAIT))
                     stuck = self._fire_due()
                 for watch in stuck:
                     self._handle_stuck(watch)

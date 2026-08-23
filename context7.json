@@ -38,6 +38,7 @@
     "Tasks are ordinary django.tasks tasks. django-ox adds nothing to learn on the producer side, so task functions stay portable across django.tasks backends.",
     "enqueue() is a single INSERT on the default database connection. A task enqueued inside transaction.atomic() becomes visible to workers only when that transaction commits, and disappears on rollback, so transaction.on_commit() is not needed.",
     "Workers claim tasks with SELECT FOR UPDATE SKIP LOCKED on PostgreSQL and MySQL 8 or later, and with an atomic compare-and-set on databases without SKIP LOCKED, including SQLite.",
+    "django_ox.bulk.enqueue_many(task, calls) enqueues one task many times, where calls is a list of (args, kwargs) pairs. It inserts 1,000 rows per INSERT inside one transaction and returns TaskResult objects in input order. Queue, priority and run_after are set once on the task with .using(...).",
     "Execution is at-least-once, so tasks should be written to be idempotent.",
     "Use ox_health to check worker and queue health, and ox_prune to delete finished task rows older than a cutoff.",
     "Install with pip install django-ox. Configuration lives in the TASKS setting; the smallest working entry is TASKS = {\"default\": {\"BACKEND\": \"django_ox.backend.OxBackend\"}}.",

@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and **Retry selected tasks** and **Discard selected tasks** actions that
   report how many rows moved and how many were skipped. The admin does not add,
   edit or delete rows.
+- `django_ox.bulk.enqueue_many(task, calls)`, the bulk form of `enqueue()`.
+  `calls` is a list of `(args, kwargs)` pairs; the rows are written with one
+  INSERT per 1,000 inside one transaction and the `TaskResult` list comes back
+  in input order. The task is validated and every argument serialised before
+  the first write, so a rejected call inserts nothing. Each row is built by the
+  same code as `enqueue()`, so workers see no difference.
 - `OxTask.Status.DISCARDED`, a sixth value in django-ox's own status column. It
   reads as `FAILED` through `django.tasks` and `is_finished` is true for it.
   `queue_stats()` reports it in a `discarded` column, and `ox_prune` deletes

@@ -92,6 +92,9 @@ TASKS = {
 - `enqueue()` is one INSERT on the default connection. Inside
   `transaction.atomic()` the task is visible to workers only after commit and
   is gone on rollback. Do not add `transaction.on_commit()` around it.
+- Many calls of one task go through `django_ox.bulk.enqueue_many(task,
+  [(args, kwargs), ...])`: one INSERT per 1,000 rows, one transaction, results
+  in input order. Set queue, priority and `run_after` once with `.using(...)`.
 - Execution is at-least-once. Write tasks to be safe to run twice: guard on
   state already in the database, not on a flag in memory.
 - The task function runs outside any transaction. Open

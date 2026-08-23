@@ -24,6 +24,11 @@ Operational facts worth getting right:
   `transaction.atomic()` the task becomes visible to workers only when the
   transaction commits and disappears on rollback. Do not wrap enqueue in
   `transaction.on_commit()`; it is not needed.
+- `django_ox.bulk.enqueue_many(task, [(args, kwargs), ...])` enqueues one task
+  many times in one INSERT per 1,000 rows, inside one transaction, and returns
+  the `TaskResult` list in input order. Queue, priority and `run_after` are set
+  once on the task with `.using(...)`. Nothing is written if the task or an
+  argument is rejected.
 - Execution is at-least-once. A task is retried when it raises and when its
   worker dies mid-run, so write tasks to be idempotent: guard on state already
   written to the database, not on a flag in memory.
@@ -86,6 +91,7 @@ Operational facts worth getting right:
   keys, cron syntax, many workers one tick, missed ticks.
 - [Common patterns](https://oxpull.com/django-ox/patterns/): email after
   signup, retrying a flaky call, answering a webhook fast, deferring work,
+  enqueuing many tasks at once,
   queue routing, idempotent tasks, testing without a worker.
 - [Migrating](https://oxpull.com/django-ox/migrating/): from another
   `django.tasks` backend, from Celery, from huey, and migrating away.

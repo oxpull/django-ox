@@ -23,6 +23,10 @@ announced in the [changelog](changelog.md).
   accepted states, and their return values. The admin page that calls
   them is a convenience over this module; its layout is not a contract,
   the two action names are.
+- **The bulk module** `django_ox.bulk`: `enqueue_many(task, calls)`, its
+  `(args, kwargs)` call shape, the input-order return and the
+  all-or-nothing write. `INSERT_CHUNK_SIZE` is exported for reading; its
+  value may change.
 - **The exception** `django_ox.exceptions.TaskAbandoned`, recorded against
   tasks whose worker stopped reporting with no attempts left. It records the
   lost lease, not a cause of failure.

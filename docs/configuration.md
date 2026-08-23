@@ -139,7 +139,7 @@ python manage.py ox_worker --queues exports --lock-timeout 7200
 If you embed the worker programmatically, `django_ox.worker.Worker`
 accepts `reap_interval`, `renew_interval`, `schedule_interval`,
 `backoff_initial`, `backoff_max`, `task_timeout` and `task_timeout_grace`
-keyword overrides in addition to the flag equivalents.
+keyword overrides, which have no flag; they win over the `OPTIONS` values.
 
 ## ox_prune
 
@@ -202,9 +202,10 @@ alert are on the
 - `django_ox.E003`: the same schedule name is defined on more than one
   backend; schedule names must be unique across backends.
 - `django_ox.E004`: `TASK_TIMEOUT`, a `TASK_TIMEOUTS` value or
-  `TASK_TIMEOUT_GRACE` is not a positive number of seconds (the first two
-  may also be `None`), or `TASK_TIMEOUTS` is not a mapping keyed by queue
-  name.
+  `TASK_TIMEOUT_GRACE` is not a positive, finite number of seconds, at most
+  a thousand years (the first two may also be `None`, which means no limit;
+  `float("inf")` does not), or `TASK_TIMEOUTS` is not a mapping keyed by
+  queue name. Every bad value is reported in one run.
 - `django_ox.E005`: a `TASK_TIMEOUTS` key names a queue that is not in
   `QUEUES`, so the entry would never apply.
 

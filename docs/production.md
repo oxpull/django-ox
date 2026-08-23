@@ -269,13 +269,17 @@ task when the deadline passes:
   rolls back, and the thread returns to the pool. The worker then drops the
   thread's database connections, since the exception may have landed inside
   the driver with a statement in flight, and records the outcome on a fresh
-  one. The task may catch `TaskTimeout` to clean up and then re-raise it. A
-  task that catches it and returns is allowed, and the attempt is recorded
-  as whatever the task went on to do, provided it returns or raises within
-  `TASK_TIMEOUT_GRACE`; one still running then is treated as a thread that
-  did not stop, below. An exception raised while the task unwinds from
-  `TaskTimeout` (a cleanup that fails, say) is recorded as the timeout, with
-  that exception in the traceback.
+  one. The task may catch `TaskTimeout` to clean up and then re-raise it.
+  Inside the task the exception is bare: `str(exc)` is empty and
+  `exc.timeout` is `None`, and the worker fills both in when it records the
+  attempt. A task that catches it and returns is allowed, and the attempt
+  is recorded as whatever the task went on to do, provided it returns or
+  raises within `TASK_TIMEOUT_GRACE`; one still running then is treated as
+  a thread that did not stop, below. An exception raised while the task
+  unwinds from `TaskTimeout` (a cleanup that fails, say) is recorded as the
+  timeout, with that exception in the traceback. `raise ... from None`
+  breaks that chain, and the attempt is then recorded as the exception it
+  names, with no `task_timed_out` event.
 - **An async task** is cancelled inside its event loop at the deadline. The
   coroutine sees `asyncio.CancelledError` at the `await` it was on, as any
   cancelled coroutine does, and should let it propagate; the worker records
@@ -331,11 +335,12 @@ the grace, the worker:
 3. Stops claiming, drains its other in-flight tasks, and exits with code 75
    (`EX_TEMPFAIL`). The stuck thread dies with the process.
 
-Under `--processes` the supervisor restarts the slot after one second, logs
-`worker_process_recycled`, and does not count the exit against the restart
-cap. Under systemd, `Restart=always` (the unit above) brings the worker back,
-and so does `Restart=on-failure`, since 75 is non-zero. A container runtime
-on `restart: unless-stopped` does the same.
+Under `--processes` (the unit above) the supervisor restarts the slot after
+one second, logs `worker_process_recycled`, and does not count the exit
+against the restart cap; systemd sees nothing. A single-process worker
+under systemd comes back on `Restart=always`, and on `Restart=on-failure`,
+since 75 is non-zero. A container runtime on `restart: unless-stopped` does
+the same.
 
 Between the stuck record and the process exit the task may run twice: its
 retry is claimable the moment the record lands, and the stuck thread keeps

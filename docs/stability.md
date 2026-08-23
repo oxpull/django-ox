@@ -17,6 +17,9 @@ announced in the [changelog](changelog.md).
 - **The management commands** and their flags: `ox_worker`, `ox_prune`,
   `ox_health`. `ox_worker`'s exit codes: 0 after a drain, 130 on a forced
   exit, 75 when the worker recycles itself after a stuck task thread.
+  Under `--processes`, the supervisor exits 0 when every worker drained
+  or recycled, 1 when a slot hit the restart cap, and otherwise with the
+  first other non-zero worker code.
 - **The timeout helpers** `django_ox.deadline()` and `django_ox.remaining()`,
   callable from inside a task.
 - **The metrics module** `django_ox.stats`: the functions listed in its

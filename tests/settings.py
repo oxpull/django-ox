@@ -1,5 +1,7 @@
+import json
 import os
 from pathlib import Path
+from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -50,7 +52,7 @@ DATABASES = {
     }
 }
 
-TASKS = {
+TASKS: dict[str, dict[str, Any]] = {
     "default": {
         "BACKEND": "django_ox.backend.OxBackend",
         "QUEUES": ["default", "emails"],
@@ -76,3 +78,8 @@ LOGGING = {
 # parent created, not the development one; the parent passes its name through.
 if "OX_TEST_DB_NAME" in os.environ:
     DATABASES["default"]["NAME"] = os.environ["OX_TEST_DB_NAME"]
+
+# Worker processes started from the test suite take extra backend OPTIONS
+# (a task timeout, say) as a JSON object, since they only see settings.
+if "OX_TEST_TASKS_OPTIONS" in os.environ:
+    TASKS["default"]["OPTIONS"].update(json.loads(os.environ["OX_TEST_TASKS_OPTIONS"]))

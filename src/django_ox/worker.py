@@ -1,16 +1,24 @@
+import asyncio
+import copy
+import ctypes
 import json
 import logging
 import os
 import socket
+import threading
 import time
 import uuid
+from collections.abc import Callable, Coroutine
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from threading import Barrier, BrokenBarrierError, Event, Lock, Thread
+from inspect import iscoroutinefunction
+from threading import Barrier, BrokenBarrierError, Condition, Event, Lock, Thread
 from traceback import format_exception
-from typing import Any
+from typing import Any, cast
 
+from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.db import (
@@ -25,22 +33,94 @@ from django.db.models import Max, Q, QuerySet
 from django.db.models.expressions import Combinable
 from django.db.models.functions import Now
 from django.tasks import DEFAULT_TASK_BACKEND_ALIAS, task_backends
-from django.tasks.base import TaskContext
+from django.tasks.base import Task, TaskContext, TaskResult
 from django.tasks.signals import task_finished, task_started
 from django.utils import timezone
 from django.utils.crypto import get_random_string
 from django.utils.json import normalize_json
 
 from .backend import OxBackend
-from .exceptions import TaskAbandoned
+from .exceptions import TaskAbandoned, TaskTimeout
 from .models import OxScheduleTick, OxTask
 from .schedules import schedule_name_collisions, schedules_from_options
+from .timeouts import (
+    RECYCLE_EXIT_CODE,
+    _deadline,
+    task_timeouts_from_options,
+)
 
 logger = logging.getLogger("django_ox")
 
 # Candidates fetched per claim pass on the optimistic (non SKIP LOCKED) path;
 # bounds retries when racing other workers for the head of the queue.
 CLAIM_BATCH_SIZE = 5
+
+# The watchdog thread exits after this long with nothing to watch, and is
+# started again by the next attempt that has a timeout.
+WATCHDOG_IDLE = 1.0
+
+# How often the drain re-checks, while recycling, whether the tasks still in
+# flight are all stuck threads it must not wait for.
+RECYCLE_DRAIN_POLL = 0.25
+
+
+def _load_async_exc_injector() -> Callable[[int], None] | None:
+    """
+    The C API call that raises an exception inside another thread, or None
+    where the interpreter has no such call (PyPy).
+
+    PyThreadState_SetAsyncExc takes an exception class, not an instance,
+    and the target thread raises it at its next bytecode boundary. It
+    cannot reach a thread that is inside a C call, which is what the grace
+    backstop is for. ctypes.pythonapi holds the GIL across the call, which
+    the call requires.
+    """
+    try:
+        set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
+    except (AttributeError, OSError):
+        return None
+
+    def inject(thread_id: int) -> None:
+        modified = set_async_exc(
+            ctypes.c_ulong(thread_id), ctypes.py_object(TaskTimeout)
+        )
+        if modified > 1:
+            # More than one thread state matched, which the C API says must
+            # be undone; it cannot happen for a live thread's own ident.
+            set_async_exc(ctypes.c_ulong(thread_id), ctypes.c_void_p(None))
+
+    return inject
+
+
+_inject_async_exc = _load_async_exc_injector()
+
+
+def _flush_pending_async_exc() -> None:
+    """
+    Give a pending injected exception a place to land.
+
+    An injection is delivered at the target thread's next eval-breaker
+    check, which every call into a C function is. Calling this right after
+    an attempt is deregistered makes the exception surface here, inside the
+    caller's handler, rather than in whatever bookkeeping came next.
+    """
+    time.monotonic()
+
+
+@dataclass(slots=True)
+class _Watch:
+    """One attempt under a timeout, as the watchdog sees it."""
+
+    ident: int
+    db_task: OxTask
+    timeout: float
+    started: float
+    deadline: float
+    deadline_at: datetime
+    injectable: bool
+    fired: bool = False
+    grace_at: float = 0.0
+
 
 # The states an execution may write its outcome onto. RUNNING is the ordinary
 # one. LOST is a row the reaper gave up on without seeing how it ended, and
@@ -171,6 +251,8 @@ class Worker:
         backoff_max: float | None = None,
         worker_index: int | None = None,
         parent_pid: int | None = None,
+        task_timeout: float | None = None,
+        task_timeout_grace: float | None = None,
     ) -> None:
         backend = task_backends[backend_alias]
         if not isinstance(backend, OxBackend):
@@ -233,6 +315,15 @@ class Worker:
             if backoff_max is not None
             else float(options.get("BACKOFF_MAX", 600.0))
         )
+        # TASK_TIMEOUT, the per-queue TASK_TIMEOUTS and TASK_TIMEOUT_GRACE,
+        # validated the same way the system check validates them. The
+        # keywords override the default and the grace; per-queue values
+        # still come from the options.
+        if task_timeout is not None:
+            options = {**options, "TASK_TIMEOUT": task_timeout}
+        if task_timeout_grace is not None:
+            options = {**options, "TASK_TIMEOUT_GRACE": task_timeout_grace}
+        self.timeouts = task_timeouts_from_options(options, backend.queues)
         # The index is the slot number under `ox_worker --processes N`, so a
         # log line or a worker_ids entry names the slot as well as the pid.
         # It rides on the id rather than replacing the random part; a
@@ -249,6 +340,39 @@ class Worker:
         # is gone stops being renewed and the reaper can still recover it.
         self._in_flight: set[tuple[Any, int]] = set()
         self._in_flight_lock = Lock()
+        # Thread ident -> the attempt running on that thread under a
+        # timeout. The lock is the injection lock: the watchdog injects only
+        # while it holds the lock and the entry is present, and the runner
+        # removes the entry under the same lock, so an injection can never
+        # be aimed at a thread that has already left the task.
+        #
+        # Pool threads take the raw lock, never the Condition. An injected
+        # exception lands at the next bytecode, and Condition.__enter__ is
+        # Python: an exception delivered inside it, after the acquire and
+        # before the with statement has installed its exit, leaves the lock
+        # held forever. The C lock has no such gap, so the with block's
+        # release always runs.
+        self._watches: dict[int, _Watch] = {}
+        self._watch_lock = Lock()
+        self._watch_cv = Condition(self._watch_lock)
+        self._watchdog: Thread | None = None
+        # Idents of pool threads the backstop gave up on. The drain does not
+        # wait for them; they die with the process.
+        self._stuck: set[int] = set()
+        self._recycling = False
+        if self.timeouts.enabled and _inject_async_exc is None:
+            logger.warning(
+                "Worker %s cannot raise TaskTimeout inside a running task on "
+                "this interpreter; timeouts are enforced by the %gs grace "
+                "backstop alone",
+                self.worker_id,
+                self.timeouts.grace,
+                extra={
+                    "event": "timeouts_backstop_only",
+                    "worker_id": self.worker_id,
+                    "grace_s": self.timeouts.grace,
+                },
+            )
 
     # -- logging -----------------------------------------------------------
 
@@ -564,15 +688,26 @@ class Worker:
                 db_task.max_attempts,
                 extra=self._log_extra("task_started", db_task),
             )
-            if task.takes_context:
-                raw_return_value = task.call(
-                    TaskContext(task_result=task_result),
-                    *db_task.args,
-                    **db_task.kwargs,
-                )
-            else:
-                raw_return_value = task.call(*db_task.args, **db_task.kwargs)
+            raw_return_value = self._call_task(task, db_task, task_result)
             return_value = normalize_json(raw_return_value)
+        except TaskTimeout as exc:
+            duration_ms = _elapsed_ms(started)
+            logger.warning(
+                "Task id=%s path=%s ran past its %ss timeout on attempt %d/%d; "
+                "recording the attempt as failed",
+                db_task.id,
+                db_task.task_path,
+                "?" if exc.timeout is None else f"{exc.timeout:g}",
+                db_task.attempts,
+                db_task.max_attempts,
+                extra=self._log_extra(
+                    "task_timed_out",
+                    db_task,
+                    duration_ms=duration_ms,
+                    timeout_s=exc.timeout,
+                ),
+            )
+            self._handle_failure(db_task, exc, duration_ms)
         except BaseException as exc:
             self._handle_failure(db_task, exc, _elapsed_ms(started))
         else:
@@ -610,11 +745,318 @@ class Worker:
                 task_result=task_result_from_db(db_task, task=task),
             )
 
+    # -- timeouts ----------------------------------------------------------
+
+    def _call_task(
+        self,
+        task: "Task[..., Any]",
+        db_task: OxTask,
+        task_result: "TaskResult[..., Any]",
+    ) -> Any:
+        """
+        Call the task function and return what it returned.
+
+        With no timeout for this queue the call is exactly what it was
+        before timeouts existed. With one, the attempt is registered with
+        the watchdog for the duration of the call, and the attempt's
+        deadline is published for deadline() and remaining().
+
+        A sync task is interrupted by TaskTimeout raised on this thread, at
+        the next bytecode after the deadline. The exception can therefore
+        surface anywhere between registration and deregistration, including
+        inside the deregistration itself. One that lands in the task is the
+        timeout. One that lands in the deregistration arrived after the
+        task had already returned or raised, so it is absorbed there, the
+        deregistration is finished, and the task's own outcome stands; the
+        flush in _disarm is what makes that delivery happen there rather
+        than in the bookkeeping that follows. Past the deregistration
+        nothing is pending, because the watchdog injects only while the
+        entry is present and the entry is gone. An async task is cancelled
+        inside its event loop instead.
+        """
+
+        def invoke() -> Any:
+            if task.takes_context:
+                return task.call(
+                    TaskContext(task_result=task_result),
+                    *db_task.args,
+                    **db_task.kwargs,
+                )
+            return task.call(*db_task.args, **db_task.kwargs)
+
+        timeout = self.timeouts.for_queue(db_task.queue_name)
+        if timeout is None:
+            return invoke()
+        if iscoroutinefunction(task.func):
+            return self._call_async(task, db_task, task_result, timeout)
+
+        ident = threading.get_ident()
+        watch = self._arm(ident, db_task, timeout, injectable=True)
+        token = _deadline.set(watch.deadline_at)
+        try:
+            try:
+                return invoke()
+            finally:
+                # The absorbing try lives in this frame on purpose: the
+                # first place a pending delivery can land after invoke()
+                # returns is the entry of _disarm, which is inside it.
+                try:
+                    self._disarm(ident)
+                except TaskTimeout:
+                    self._disarm(ident)
+        except TaskTimeout as exc:
+            self._describe_timeout(exc, watch)
+            raise
+        finally:
+            _deadline.reset(token)
+
+    def _call_async(
+        self,
+        task: "Task[..., Any]",
+        db_task: OxTask,
+        task_result: "TaskResult[..., Any]",
+        timeout: float,
+    ) -> Any:
+        """
+        Run a coroutine task under asyncio's own timeout.
+
+        The coroutine is cancelled at the deadline and the cancellation
+        becomes a TaskTimeout, raised from the await the task was on.
+        Nothing is injected: asgiref runs the loop on a thread of its own,
+        and the loop already has a cooperative way to stop. The watchdog
+        still registers the attempt, for the grace backstop only.
+        """
+
+        async def run() -> Any:
+            if task.takes_context:
+                awaitable = task.func(
+                    TaskContext(task_result=task_result),
+                    *db_task.args,
+                    **db_task.kwargs,
+                )
+            else:
+                awaitable = task.func(*db_task.args, **db_task.kwargs)
+            coroutine = cast("Coroutine[Any, Any, Any]", awaitable)
+            try:
+                async with asyncio.timeout(timeout) as scope:
+                    return await coroutine
+            except TimeoutError:
+                if not scope.expired():
+                    raise
+                raise TaskTimeout(
+                    self._timeout_message(timeout), timeout=timeout
+                ) from None
+
+        ident = threading.get_ident()
+        watch = self._arm(ident, db_task, timeout, injectable=False)
+        token = _deadline.set(watch.deadline_at)
+        try:
+            return async_to_sync(run)()
+        finally:
+            self._disarm(ident)
+            _deadline.reset(token)
+
+    def _timeout_message(self, timeout: float) -> str:
+        return (
+            f"Task ran past the {timeout:g}s timeout on worker "
+            f"{self.worker_id!r}; TaskTimeout was raised inside it and this "
+            f"attempt is recorded as failed."
+        )
+
+    def _describe_timeout(self, exc: TaskTimeout, watch: _Watch) -> None:
+        """
+        Fill in an injected TaskTimeout. It was raised by class, so it
+        carries no message and no timeout; one the task raised itself
+        keeps whatever it said.
+        """
+        if exc.timeout is None:
+            exc.timeout = watch.timeout
+        if not any(exc.args):
+            exc.args = (self._timeout_message(watch.timeout),)
+
+    def _arm(
+        self, ident: int, db_task: OxTask, timeout: float, *, injectable: bool
+    ) -> _Watch:
+        now = time.monotonic()
+        watch = _Watch(
+            ident=ident,
+            # The watchdog writes the stuck record onto its own copy, so the
+            # epoch it moves is never mirrored onto the instance the stuck
+            # thread still holds; that thread's own write stays fenced.
+            db_task=copy.copy(db_task),
+            timeout=timeout,
+            started=now,
+            deadline=now + timeout,
+            deadline_at=timezone.now() + timedelta(seconds=timeout),
+            injectable=injectable,
+        )
+        with self._watch_lock:
+            self._watches[ident] = watch
+            if self._watchdog is None or not self._watchdog.is_alive():
+                self._watchdog = Thread(
+                    target=self._watchdog_loop, name="ox-watchdog", daemon=True
+                )
+                self._watchdog.start()
+            self._watch_cv.notify_all()
+        return watch
+
+    def _disarm(self, ident: int) -> None:
+        with self._watch_lock:
+            if self._watches.pop(ident, None) is not None:
+                # The watchdog may be sleeping out this attempt's grace;
+                # wake it so it recomputes from what is left.
+                self._watch_cv.notify_all()
+        _flush_pending_async_exc()
+
+    def _watchdog_loop(self) -> None:
+        """
+        Fire deadlines and grace backstops. One thread for every attempt
+        this worker has under a timeout; it exits when idle and is started
+        again by the next attempt that needs it.
+        """
+        try:
+            while True:
+                with self._watch_lock:
+                    if not self._watches:
+                        self._watch_cv.wait(WATCHDOG_IDLE)
+                        if not self._watches:
+                            self._watchdog = None
+                            return
+                    due = min(
+                        watch.grace_at if watch.fired else watch.deadline
+                        for watch in self._watches.values()
+                    )
+                    remaining = due - time.monotonic()
+                    if remaining > 0:
+                        self._watch_cv.wait(remaining)
+                    stuck = self._fire_due()
+                for watch in stuck:
+                    self._handle_stuck(watch)
+        finally:
+            connections.close_all()
+
+    def _fire_due(self) -> list[_Watch]:
+        """
+        Under the watch lock: inject into every attempt past its deadline,
+        and take out of the table every attempt past its grace. Returns the
+        latter; the caller records them without holding the lock.
+        """
+        now = time.monotonic()
+        stuck: list[_Watch] = []
+        for ident, watch in list(self._watches.items()):
+            if not watch.fired and now >= watch.deadline:
+                watch.fired = True
+                watch.grace_at = now + self.timeouts.grace
+                if watch.injectable and _inject_async_exc is not None:
+                    _inject_async_exc(ident)
+            elif watch.fired and now >= watch.grace_at:
+                del self._watches[ident]
+                stuck.append(watch)
+        return stuck
+
+    def _handle_stuck(self, watch: _Watch) -> None:
+        """
+        The backstop. The thread did not stop within the grace, so it is
+        blocked somewhere TaskTimeout cannot reach: a socket with no
+        timeout, a sleep, a lock. Record the attempt as failed and move the
+        lease epoch so nothing the thread writes later lands, stop renewing
+        its lease, and recycle this worker so the thread dies with the
+        process. Runs on the watchdog thread, on its own connection.
+        """
+        db_task = watch.db_task
+        duration_ms = _elapsed_ms(watch.started)
+        with self._in_flight_lock:
+            self._in_flight.discard((db_task.pk, db_task.lease_epoch))
+        logger.error(
+            "Task id=%s path=%s did not stop %gs after its %gs timeout on "
+            "attempt %d/%d; recording the attempt as failed and recycling "
+            "worker %s",
+            db_task.id,
+            db_task.task_path,
+            self.timeouts.grace,
+            watch.timeout,
+            db_task.attempts,
+            db_task.max_attempts,
+            self.worker_id,
+            extra=self._log_extra(
+                "task_stuck",
+                db_task,
+                duration_ms=duration_ms,
+                timeout_s=watch.timeout,
+                grace_s=self.timeouts.grace,
+            ),
+        )
+        exc = TaskTimeout(
+            f"Task ran past the {watch.timeout:g}s timeout on worker "
+            f"{self.worker_id!r} and did not stop within the "
+            f"{self.timeouts.grace:g}s grace: the thread is blocked outside "
+            f"Python, where TaskTimeout cannot reach it. This attempt is "
+            f"recorded as failed, the worker is recycling so that the thread "
+            f"dies with the process, and the outcome the thread eventually "
+            f"reports is refused by the lease.",
+            timeout=watch.timeout,
+        )
+        if self._handle_failure(db_task, exc, duration_ms, release=True):
+            # Only now is the thread known to be stuck: the write lost only
+            # if the thread's own outcome landed first, in which case it came
+            # back on its own and the drain must still wait for it.
+            self._stuck.add(watch.ident)
+            self._recycle(db_task)
+
+    def _recycle(self, db_task: OxTask) -> None:
+        if self._recycling:
+            return
+        self._recycling = True
+        logger.warning(
+            "Worker %s recycling: no new claims, draining the other in-flight "
+            "tasks, then exiting with code %d",
+            self.worker_id,
+            RECYCLE_EXIT_CODE,
+            extra={
+                "event": "worker_recycling",
+                "worker_id": self.worker_id,
+                "task_id": str(db_task.id),
+                "exit_code": RECYCLE_EXIT_CODE,
+            },
+        )
+        self._stop.set()
+
+    @property
+    def recycling(self) -> bool:
+        """
+        True once the backstop has given up on a thread. run() then drains
+        and returns, and the process should exit with RECYCLE_EXIT_CODE
+        via os._exit, because the stuck thread would block a normal exit.
+        """
+        return self._recycling
+
+    def _stuck_alive(self) -> int:
+        alive = {thread.ident for thread in threading.enumerate()}
+        return sum(1 for ident in self._stuck if ident in alive)
+
     def _handle_failure(
-        self, db_task: OxTask, exc: BaseException, duration_ms: int
-    ) -> None:
+        self,
+        db_task: OxTask,
+        exc: BaseException,
+        duration_ms: int,
+        *,
+        release: bool = False,
+    ) -> bool:
+        """
+        Record a failed attempt: a retry with backoff, or FAILED when the
+        attempts are spent. Returns True when the write landed.
+
+        release=True is the stuck-thread case. The execution is being taken
+        off the row while its thread is still running, so the write also
+        moves the lease epoch, the same way the reaper moves it when it
+        takes a row off a worker that went quiet. Whatever that thread
+        writes later carries the old number and matches nothing.
+        """
         from .results import task_result_from_db
 
+        handover: dict[str, Any] = (
+            {"lease_epoch": db_task.lease_epoch + 1} if release else {}
+        )
         exception_type = type(exc)
         errors = [
             *db_task.errors,
@@ -635,8 +1077,9 @@ class Worker:
                 finished_at=_lease_now(),
                 locked_by=None,
                 locked_at=None,
+                **handover,
             ):
-                return
+                return False
             try:
                 task_result = task_result_from_db(db_task)
             except ImportError:
@@ -672,8 +1115,9 @@ class Worker:
                 run_after=timezone.now() + timedelta(seconds=delay),
                 locked_by=None,
                 locked_at=None,
+                **handover,
             ):
-                return
+                return False
             logger.warning(
                 "Task id=%s path=%s attempt %d/%d failed (%s); retrying in %.1fs",
                 db_task.id,
@@ -689,6 +1133,7 @@ class Worker:
                     exception=exception_type.__qualname__,
                 ),
             )
+        return True
 
     # -- reaping -----------------------------------------------------------
 
@@ -994,19 +1439,40 @@ class Worker:
                         "pending": pending,
                     },
                 )
-            wait(in_flight)
+            self._drain(in_flight)
             renew_stop.set()
             renewer.join(timeout=self.renew_interval + 5)
-            # Pool threads hold thread-local DB connections that survive the
-            # drain (close_old_connections() only closes expired ones); close
-            # each deterministically before the pool exits.
-            barrier = Barrier(self.concurrency)
-            for _ in range(self.concurrency):
-                executor.submit(self._close_connections_in_thread, barrier)
-            executor.shutdown(wait=True)
+            if self._recycling:
+                # A stuck thread never takes a close task, so the barrier
+                # below would only time out; the process is about to exit
+                # and the connections go with it.
+                executor.shutdown(wait=False, cancel_futures=True)
+            else:
+                # Pool threads hold thread-local DB connections that survive
+                # the drain (close_old_connections() only closes expired
+                # ones); close each deterministically before the pool exits.
+                barrier = Barrier(self.concurrency)
+                for _ in range(self.concurrency):
+                    executor.submit(self._close_connections_in_thread, barrier)
+                executor.shutdown(wait=True)
             connections.close_all()
             logger.info(
                 "Worker %s stopped",
                 self.worker_id,
                 extra={"event": "worker_stopped", "worker_id": self.worker_id},
             )
+
+    def _drain(self, in_flight: set[Future[None]]) -> None:
+        """
+        Wait for the in-flight tasks, except the stuck ones while recycling:
+        a thread the backstop gave up on may never finish, and the point of
+        the recycle is to stop waiting for it.
+        """
+        if not self._recycling:
+            wait(in_flight)
+            return
+        while True:
+            pending = {future for future in in_flight if not future.done()}
+            if len(pending) <= self._stuck_alive():
+                return
+            wait(pending, timeout=RECYCLE_DRAIN_POLL, return_when=FIRST_COMPLETED)

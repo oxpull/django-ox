@@ -10,6 +10,7 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.tasks import DEFAULT_TASK_BACKEND_ALIAS
 
 from django_ox.supervisor import STOP_SIGNALS, Supervisor
+from django_ox.timeouts import RECYCLE_EXIT_CODE
 from django_ox.worker import Worker
 
 logger = logging.getLogger("django_ox")
@@ -117,8 +118,15 @@ class Command(BaseCommand):
             parent_pid=parent_pid,
         )
 
+        signals_seen = 0
+
         def handle_signal(signum: int, frame: Any) -> None:
-            if worker.stopping:
+            # Counted here rather than read off worker.stopping: a worker
+            # that is recycling is already stopping, and the operator's
+            # first signal during that drain should not be the force-exit.
+            nonlocal signals_seen
+            signals_seen += 1
+            if signals_seen > 1:
                 logger.error(
                     "Worker %s: second signal received; forcing exit.", worker.worker_id
                 )
@@ -135,6 +143,15 @@ class Command(BaseCommand):
         signal.signal(signal.SIGINT, handle_signal)
 
         worker.run()
+        if worker.recycling:
+            # A thread the timeout could not stop is still running. A normal
+            # exit would wait for it at interpreter shutdown, which is the
+            # wait the recycle exists to end; flush what can be flushed and
+            # leave without it.
+            logging.shutdown()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(RECYCLE_EXIT_CODE)
         sys.exit(0)
 
 

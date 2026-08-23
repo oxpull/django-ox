@@ -31,6 +31,8 @@ from typing import Any
 
 from django.conf import settings
 
+from .timeouts import RECYCLE_EXIT_CODE
+
 logger = logging.getLogger("django_ox")
 
 # A slot that dies is restarted after this many seconds the first time, so a
@@ -205,6 +207,28 @@ class Supervisor:
             if self._stopping:
                 continue
             now = time.monotonic()
+            if code == RECYCLE_EXIT_CODE:
+                # The worker chose to exit, after a task thread its timeout
+                # could not stop. That is the recovery working, not a
+                # fault: restart at the base delay, and keep it out of the
+                # death count and the backoff.
+                logger.warning(
+                    "Worker process %d recycled itself (exit code %d); "
+                    "restarting in %.1fs",
+                    index,
+                    code,
+                    self.restart_delay,
+                    extra={
+                        "event": "worker_process_recycled",
+                        "worker_index": index,
+                        "exit_code": code,
+                        "delay": self.restart_delay,
+                    },
+                )
+                with self._lock:
+                    if not self._stopping:
+                        self._restart_due[index] = now + self.restart_delay
+                continue
             deaths = self._deaths.setdefault(index, deque())
             deaths.append(now)
             while deaths and now - deaths[0] > self.restart_window:
@@ -331,10 +355,12 @@ class Supervisor:
             for index, proc in self._children.items():
                 self._exit_codes[index] = proc.wait()
             self._children.clear()
+        # A recycle that lands during a stop is a worker that finished the
+        # job it was asked to do, not a failure to report upwards.
         failures = [
             (index, code)
             for index, code in sorted(self._exit_codes.items())
-            if code != 0
+            if code not in (0, RECYCLE_EXIT_CODE)
         ]
         code = failures[0][1] if failures else 0
         # A child killed by a signal reports a negative code; the shell

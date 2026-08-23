@@ -12,6 +12,7 @@ class WorkerRecorder:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.stopping = False
+        self.recycling = False
         WorkerRecorder.instances.append(self)
 
     def run(self):

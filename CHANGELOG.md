@@ -84,6 +84,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `queue_stats()` reports it in a `discarded` column, and `ox_prune` deletes
   discarded rows with successful ones.
 
+### Fixed
+
+- `manage.py check` runs the django-ox checks, `django_ox.E001` to `E005`,
+  in a project that imports `django.tasks` nowhere else. Django registers its
+  tasks check when that module is first imported, and a project without the
+  admin or a task module on its import path reached `check` without it, so
+  every django-ox check passed silently. The worker's own startup check was
+  unaffected.
+
 ### Changed
 
 - **A migration ships with this release.** Run `python manage.py migrate
@@ -165,6 +174,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outcome replaces LOST; only that one execution can.
 - `task_lease_lost` and `lease_renew_failed`, two WARNING log events. Both are
   documented on the Monitoring page.
+
+### Fixed
+
+- `manage.py check` runs the django-ox checks, `django_ox.E001` to `E005`,
+  in a project that imports `django.tasks` nowhere else. Django registers its
+  tasks check when that module is first imported, and a project without the
+  admin or a task module on its import path reached `check` without it, so
+  every django-ox check passed silently. The worker's own startup check was
+  unaffected.
 
 ### Changed
 

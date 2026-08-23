@@ -14,6 +14,7 @@ import contextlib
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -172,6 +173,53 @@ class TestOptions:
         assert default_task_backend.check() == []
 
     @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        ("options", "error_id"),
+        [
+            ('{"TASK_TIMEOUT": -1}', "django_ox.E004"),
+            ('{"TASK_TIMEOUT_GRACE": 0}', "django_ox.E004"),
+            ('{"TASK_TIMEOUTS": {"nope": 5}}', "django_ox.E005"),
+            ('{"SCHEDULES": {"bad": {"task": "x", "cron": "nope"}}}', "django_ox.E002"),
+        ],
+    )
+    def test_manage_py_check_reports_them_in_a_plain_project(self, options, error_id):
+        """
+        Django registers its tasks check when django.tasks is imported,
+        and a project with no admin and no URLconf imports it nowhere
+        before `manage.py check` runs. The app has to do that itself, or
+        every django_ox check is silent exactly where there is nothing
+        else to catch the mistake.
+        """
+        env = dict(os.environ)
+        env["DJANGO_SETTINGS_MODULE"] = "tests.settings_plain"
+        env["OX_TEST_TASKS_OPTIONS"] = options
+        completed = subprocess.run(
+            [sys.executable, "-m", "django", "check"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert completed.returncode == 1, completed.stdout + completed.stderr
+        assert error_id in completed.stderr, completed.stderr
+
+    def test_manage_py_check_passes_in_a_plain_project(self):
+        env = dict(os.environ)
+        env["DJANGO_SETTINGS_MODULE"] = "tests.settings_plain"
+        env["OX_TEST_TASKS_OPTIONS"] = (
+            '{"TASK_TIMEOUT": 5, "TASK_TIMEOUTS": {"emails": 1}}'
+        )
+        completed = subprocess.run(
+            [sys.executable, "-m", "django", "check"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+
     def test_worker_init_rejects_invalid_values(self, settings):
         settings.TASKS = tasks_setting(TASK_TIMEOUT=0)
         with pytest.raises(ImproperlyConfigured, match="TASK_TIMEOUT"):

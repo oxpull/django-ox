@@ -9,6 +9,11 @@ for a selection in one conditional UPDATE per thousand ids, inside one
 transaction. None of them ever touches a RUNNING row: a running task
 belongs to the worker holding its lease, and the reaper is the only party
 that takes a lease away.
+
+The actions write the table directly and send no django.tasks signal: a
+discard finishes the result without task_finished, and a retry requeues
+it without task_enqueued. The worker's signals fire as usual when a
+retried task next runs.
 """
 
 from __future__ import annotations
@@ -145,17 +150,21 @@ def discard(result_id: str | uuid.UUID) -> bool:
 
 def _ids(
     selection: QuerySet[OxTask] | Iterable[str | uuid.UUID],
-) -> list[uuid.UUID]:
+) -> tuple[list[uuid.UUID], int]:
+    """The distinct usable ids, and how many distinct items were malformed."""
     if isinstance(selection, QuerySet):
         raw: Iterable[str | uuid.UUID] = selection.values_list("pk", flat=True)
     else:
         raw = selection
     seen: dict[uuid.UUID, None] = {}
+    malformed: set[str] = set()
     for item in raw:
         pk = _pk(item)
-        if pk is not None:
+        if pk is None:
+            malformed.add(str(item))
+        else:
             seen.setdefault(pk, None)
-    return list(seen)
+    return list(seen), len(malformed)
 
 
 def retry_many(
@@ -178,7 +187,7 @@ def retry_many(
     the one extra attempt this grants. The whole call runs in one
     transaction: an error part-way leaves every row as it was.
     """
-    ids = _ids(selection)
+    ids, malformed = _ids(selection)
     changed = 0
     with transaction.atomic():
         for start in range(0, len(ids), UPDATE_CHUNK_SIZE):
@@ -194,7 +203,7 @@ def retry_many(
                 locked_by=None,
                 locked_at=None,
             )
-    return changed, len(ids) - changed
+    return changed, len(ids) + malformed - changed
 
 
 def discard_many(
@@ -210,7 +219,7 @@ def discard_many(
     bumped, for the reason given on discard(). One transaction for the
     whole call.
     """
-    ids = _ids(selection)
+    ids, malformed = _ids(selection)
     changed = 0
     now = timezone.now()
     with transaction.atomic():
@@ -224,4 +233,4 @@ def discard_many(
                 locked_by=None,
                 locked_at=None,
             )
-    return changed, len(ids) - changed
+    return changed, len(ids) + malformed - changed

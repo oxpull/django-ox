@@ -361,9 +361,17 @@ class TestMany:
 
         assert after_many == after_one
         assert changed == sum(results) == expected
-        # The unknown id counts as skipped; the duplicate and the malformed id
-        # are not ids at all.
-        assert skipped == len(ids) + 1 - expected
+        # The unknown id and the malformed string count as skipped; the
+        # duplicate counts once.
+        assert skipped == len(ids) + 2 - expected
+
+    def test_malformed_ids_count_as_skipped(self):
+        """(changed, skipped) accounts for every distinct item passed in."""
+        seed(OxTask.Status.FAILED, 1)
+        pk = OxTask.objects.get().pk
+        assert actions.retry_many(["nope", "nope", "also-nope"]) == (0, 2)
+        assert actions.retry_many([pk, "junk"]) == (1, 1)
+        assert actions.discard_many(["junk"]) == (0, 1)
 
     def test_many_accepts_a_queryset(self):
         self.mixed()

@@ -350,6 +350,10 @@ thousand rows inside one transaction and return `(changed, skipped)`. The
 admin actions use them, so a select-across of a hundred thousand rows is a
 hundred statements, and either all of it lands or none does.
 
+The actions write the table directly and send no `django.tasks` signal: a
+discard finishes the result without `task_finished`, and a retry requeues
+it without `task_enqueued`.
+
 Both single-row functions return `False` for any other state, for an id
 that is not in the table, and for a malformed id. `RUNNING` and `SUCCESSFUL` rows are never
 matched. A retry that races a second retry of the same row, or a discard

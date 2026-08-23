@@ -5,7 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-08-24
+
+### Upgrading
+
+- Run `python manage.py migrate django_ox`, and roll every process, web and
+  worker, to 0.3.0 before the first discard. This release adds the
+  DISCARDED status: a 0.2.1 process that reads a DISCARDED row raises
+  `ValueError` from `get_result()` and `refresh()`, and 0.2.1's `ox_prune`
+  cannot delete such rows. Rolling back with DISCARDED rows present keeps
+  that crash until the rows are removed by hand
+  (`DELETE FROM django_ox_oxtask WHERE status = 'DISCARDED'`); reversing
+  the migration does not remove them.
 
 ### Added
 
@@ -294,7 +305,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
-[Unreleased]: https://github.com/oxpull/django-ox/compare/v0.2.1...HEAD
+[0.3.0]: https://github.com/oxpull/django-ox/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/oxpull/django-ox/releases/tag/v0.2.1
 [0.2.0]: https://github.com/oxpull/django-ox/releases/tag/v0.2.0
 [0.1.2]: https://github.com/oxpull/django-ox/releases/tag/v0.1.2

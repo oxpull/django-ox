@@ -103,6 +103,14 @@ Run migrations before rolling workers, as an init container or a job, not from
 the worker itself. Several workers starting at once would race the same
 migration.
 
+Roll every process before using a status the old version cannot read. 0.3.0
+adds DISCARDED: a 0.2.1 process that reads a discarded row raises
+`ValueError` from `get_result()` and `refresh()`, and its `ox_prune` cannot
+delete the row. Migrate, finish the rollout, then discard. A rollback to
+0.2.1 with discarded rows present keeps the crash until those rows are
+deleted by hand (`DELETE FROM django_ox_oxtask WHERE status = 'DISCARDED'`);
+reversing the migration does not remove them.
+
 ## Graceful shutdown
 
 On SIGTERM or SIGINT the worker:

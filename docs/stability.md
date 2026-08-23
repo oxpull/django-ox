@@ -79,14 +79,14 @@ model's non-schema helper methods are not part of the contract.
 django-ox follows [Semantic Versioning](https://semver.org/). Before 1.0,
 the pre-1.0 rule applies:
 
-- **0.x minor releases (0.1 to 0.2) may contain breaking changes.** Any
+- **0.x minor releases may contain breaking changes.** Any
   break to a public surface above is called out in the changelog under a
   `Changed` or `Removed` heading, with the migration step.
 - **0.x.y patch releases are bug fixes only** and never break a public
   surface.
 
-Pin accordingly: `django-ox~=0.1.0` accepts patch releases only;
-`django-ox>=0.1,<0.2` accepts the current minor line.
+Pin accordingly: `django-ox~=0.3.0` accepts patch releases only;
+`django-ox>=0.3,<0.4` accepts the current minor line.
 
 Once 1.0 ships, breaking changes to the public API will require a major
 version bump, in the usual SemVer way.

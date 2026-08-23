@@ -140,7 +140,7 @@ Operational facts worth getting right:
   procrastinate, and when not to use django-ox.
 - [Production](https://oxpull.com/django-ox/production/): systemd units,
   containers, graceful shutdown, scaling out, the lease and the reaper,
-  PostgreSQL or SQLite, pruning on a timer.
+  PostgreSQL, MySQL or SQLite, pruning on a timer.
 - [Monitoring](https://oxpull.com/django-ox/monitoring/): `django_ox.stats`
   functions, `ox_health` semantics and probe examples, the Prometheus
   endpoint and metric names, log events, retry and discard, the admin page.

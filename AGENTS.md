@@ -8,7 +8,9 @@ guidance is on the docs site: https://oxpull.com/django-ox/agents/
 - `src/django_ox/`: the package. `backend.py` (enqueue, result API),
   `worker.py` (claim, execute, lease, reaper, schedule dispatch),
   `management/commands/` (`ox_worker`, `ox_health`, `ox_prune`),
+  `supervisor.py` (the `--processes` supervisor),
   `schedules.py` and `cron.py` (recurring tasks), `stats.py` (queue metrics),
+  `metrics.py`, `views.py` and `urls.py` (the Prometheus endpoint),
   `actions.py` (retry, discard), `bulk.py` (`enqueue_many`), `admin.py`
   (the admin page, imported only when `django.contrib.admin` is installed).
 - `tests/`: pytest suite. `tests/settings.py` is SQLite; `settings_postgres.py`
@@ -45,6 +47,13 @@ PostgreSQL and MySQL legs, run locally when a change touches the claim path:
 ```
 docker run -d --name ox-pg -e POSTGRES_PASSWORD=ox -p 54329:5432 postgres:16
 DJANGO_SETTINGS_MODULE=tests.settings_postgres .venv/bin/python -m pytest -q
+```
+
+```
+.venv/bin/pip install PyMySQL
+docker run -d --name ox-mysql -e MYSQL_ROOT_PASSWORD=ox \
+    -e MYSQL_DATABASE=oxtest -p 33069:3306 mysql:8
+DJANGO_SETTINGS_MODULE=tests.settings_mysql .venv/bin/python -m pytest -q
 ```
 
 ## Rules that are not obvious from the code

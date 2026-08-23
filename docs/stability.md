@@ -109,8 +109,9 @@ changelog, and in a security advisory where relevant.
 
 ## Supported Python and Django
 
-Each django-ox release is tested against the matrix below in CI (SQLite
-and PostgreSQL); these are the supported combinations.
+Each django-ox release is tested against the matrix below in CI, on SQLite
+and PostgreSQL 16 across the grid and MySQL 8 on the oldest and newest
+corners; these are the supported combinations.
 
 | | Django 6.0 | Django 6.1 |
 | --- | --- | --- |

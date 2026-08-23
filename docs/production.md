@@ -461,14 +461,16 @@ is retried both when it raises and when its worker dies mid-run. Write
 task bodies so that running twice is harmless (upserts, idempotency keys,
 "already sent?" checks).
 
-## PostgreSQL or SQLite
+## PostgreSQL, MySQL or SQLite
 
-Both are fully supported and both run the full worker suite in CI.
-Guidance:
+All three run the full worker suite in CI. Guidance:
 
 - **PostgreSQL** is the production recommendation. It gets the
   single-statement `SKIP LOCKED` claim path, and it handles many workers
   and high write concurrency the way you would expect.
+- **MySQL 8** claims with `SELECT ... FOR UPDATE SKIP LOCKED` in a short
+  transaction and runs the full suite in CI on the oldest and newest Python
+  and Django corners.
 - **SQLite** is fine for development, tests, and small single-host
   deployments in the same situations where SQLite is fine as your Django
   database at all. Claiming uses the compare-and-set path and remains

@@ -54,8 +54,9 @@ python manage.py ox_health
 OK: backlog=0 oldest_age=none last_claim_age=none
 ```
 
-`manage.py check` also runs the django-ox system checks; a missing app entry
-reports `django_ox.E001`.
+`manage.py check` also runs the django-ox system checks, so a bad schedule
+or timeout option fails here, as `django_ox.E002` to `E005`, before anything
+deploys.
 
 Start a worker in its own process, next to the web server, under the same
 supervisor:
@@ -166,6 +167,8 @@ TaskResultStatus.READY
 Start `python manage.py ox_worker` in another terminal. The worker logs
 `Worker <id> starting: queues=['default'] concurrency=1 poll=1.0s schedules=0`
 to stderr, then `Task id=<id> path=myapp.tasks.add succeeded in <n>ms`.
+With `DEBUG = True`, Django's own `Task id=... state=RUNNING` and
+`state=SUCCESSFUL` lines appear between them.
 
 Back in the shell:
 

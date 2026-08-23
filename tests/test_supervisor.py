@@ -554,7 +554,7 @@ class TestEscalation:
 
 class TestStopRestartRace:
     def test_a_stop_just_before_the_restart_starts_nothing(self, monkeypatch):
-        """The reviewer's timing: the stop lands between the snapshot and Popen."""
+        """A stop that lands between the snapshot and Popen must start nothing."""
         in_process_env(monkeypatch)
         supervisor = Supervisor(
             processes=1,

@@ -195,7 +195,11 @@ alert are on the
 
 `manage.py check` validates the setup:
 
-- `django_ox.E001`: `django_ox` is missing from `INSTALLED_APPS`.
+- `django_ox.E001`: `django_ox` is missing from `INSTALLED_APPS`. The app
+  itself registers these checks with Django, so a project that also lacks
+  any other import of `django.tasks` gets no `E001` from `manage.py check`;
+  the reliable symptom is `Unknown command: 'ox_worker'`, because the
+  command ships with the app.
 - `django_ox.E002`: a `SCHEDULES` entry is invalid (task path does not
   import, cron expression does not parse or can never fire, arguments not
   JSON-serializable, bad queue name or priority).

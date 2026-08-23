@@ -83,8 +83,6 @@ coming back. The mechanics, and the one case worth knowing about, are in
 - [Monitoring](monitoring.md): a queue-stats API, an `ox_health` command
   for probes and cron alerting, and structured log events.
 
-The worker is covered by 221 tests, green on both SQLite and PostgreSQL 16.
-
 ## Install
 
 Requires Python 3.12+ and Django 6.0+.

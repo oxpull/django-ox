@@ -1,3 +1,5 @@
+import os
+
 from .settings import *  # noqa: F403
 
 # The smallest project that installs django_ox: no admin, no URLconf, nothing
@@ -12,3 +14,8 @@ INSTALLED_APPS = [
 MIDDLEWARE: list[str] = []
 TEMPLATES: list[dict[str, object]] = []
 del ROOT_URLCONF  # noqa: F821
+
+# The check tests prove E001 is invisible to manage.py check: the app's own
+# ready() registers the checks, so dropping the app also drops them.
+if "OX_TEST_DROP_APP" in os.environ:
+    INSTALLED_APPS = [app for app in INSTALLED_APPS if app != "django_ox"]

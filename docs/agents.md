@@ -76,8 +76,6 @@ TASKS = {
             "LOCK_TIMEOUT": 300,  # seconds a worker may stop renewing its lease
             "BACKOFF_INITIAL": 5,  # first retry delay, seconds; doubles each attempt
             "BACKOFF_MAX": 600,  # retry delay ceiling, seconds
-            "TASK_TIMEOUT": None,  # seconds one attempt may run; None is no limit
-            "TASK_TIMEOUTS": {},  # per-queue values, {"queue": seconds}
             "SCHEDULES": {},  # recurring tasks, see Recurring tasks
         },
     }
@@ -106,10 +104,6 @@ TASKS = {
   `BACKOFF_MAX`.
 - `LOCK_TIMEOUT` bounds an unresponsive worker, not task length. The lease is
   renewed every `LOCK_TIMEOUT / 3` seconds while the task runs.
-- `TASK_TIMEOUT` bounds one attempt. A timed-out attempt is recorded as
-  failed and retried on the backoff. The thread running it is not stopped;
-  it runs until the task returns and its result is discarded. Per-queue
-  values go in `TASK_TIMEOUTS`; there is no per-task value.
 - Claiming: one `UPDATE ... SKIP LOCKED ... RETURNING` statement on
   PostgreSQL; `SELECT ... FOR UPDATE SKIP LOCKED` on MySQL 8+; an atomic
   compare-and-set UPDATE on SQLite and other databases without `SKIP LOCKED`.

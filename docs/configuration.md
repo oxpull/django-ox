@@ -13,8 +13,6 @@ TASKS = {
             "LOCK_TIMEOUT": 300,
             "BACKOFF_INITIAL": 5,
             "BACKOFF_MAX": 600,
-            "TASK_TIMEOUT": None,
-            "TASK_TIMEOUTS": {},
             "SCHEDULES": {},  # see the Recurring tasks page
         },
     }
@@ -52,8 +50,6 @@ retry. Add options when you have a reason to.
 | `LOCK_TIMEOUT` | `300` | Seconds a RUNNING task's lock may go unrefreshed before the reaper takes the task back. A worker refreshes the lock every `LOCK_TIMEOUT / 3` seconds while it is executing, so this is a limit on how long a worker may be unresponsive, not on how long a task may run. |
 | `BACKOFF_INITIAL` | `5` | Delay in seconds before the first retry. |
 | `BACKOFF_MAX` | `600` | Ceiling on the retry delay, in seconds. |
-| `TASK_TIMEOUT` | `None` | Seconds an attempt may run before the worker gives up on it. `None` means no limit. A timed-out attempt is recorded as failed with a `TaskTimeout` error and retried on the usual backoff, or marked FAILED when attempts are spent. The timeout is soft: the thread running the task is not stopped, because Python cannot stop a thread. See [Task timeouts](production.md#task-timeouts). |
-| `TASK_TIMEOUTS` | `{}` | Per-queue timeouts, `{"queue name": seconds}`. A queue in the mapping uses its own value instead of `TASK_TIMEOUT`; `None` as a value exempts that queue from the global limit. Per queue rather than per task because `django.tasks` gives a task no field a backend could read a timeout from, and a queue is its unit of routing. |
 | `SCHEDULES` | `{}` | Recurring task definitions. Documented on the [Recurring tasks](recurring-tasks.md) page. |
 
 The retry delay after attempt *n* fails is
@@ -131,8 +127,8 @@ python manage.py ox_worker --queues exports --lock-timeout 7200
 
 If you embed the worker programmatically, `django_ox.worker.Worker`
 accepts `reap_interval`, `renew_interval`, `schedule_interval`,
-`backoff_initial`, `backoff_max` and `task_timeout` keyword overrides in
-addition to the flag equivalents.
+`backoff_initial` and `backoff_max` keyword overrides in addition to the flag
+equivalents.
 
 ## ox_prune
 
@@ -194,9 +190,6 @@ alert are on the
   JSON-serializable, bad queue name or priority).
 - `django_ox.E003`: the same schedule name is defined on more than one
   backend; schedule names must be unique across backends.
-- `django_ox.E004`: `TASK_TIMEOUT` or a `TASK_TIMEOUTS` value is not a
-  positive number of seconds or `None`, or `TASK_TIMEOUTS` is not a
-  mapping keyed by queue name.
 
-The worker performs the same schedule and timeout validation at startup, so
-a bad deploy fails loudly rather than skipping dispatches.
+The worker performs the same schedule validation at startup, so a bad
+deploy fails loudly rather than skipping dispatches.

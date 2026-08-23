@@ -149,21 +149,6 @@ class OxBackend(BaseTaskBackend):
                     id="django_ox.E002",
                 )
             )
-        from .timeouts import task_timeouts_from_options
-
-        try:
-            task_timeouts_from_options(self.options)
-        except ImproperlyConfigured as exc:
-            errors.append(
-                checks.Error(
-                    str(exc),
-                    hint=(
-                        "TASK_TIMEOUT is a positive number of seconds or None; "
-                        "TASK_TIMEOUTS maps queue names to the same."
-                    ),
-                    id="django_ox.E004",
-                )
-            )
         for name, other_alias in schedule_name_collisions(self.alias):
             errors.append(
                 checks.Error(

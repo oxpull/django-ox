@@ -19,15 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   view has no authentication of its own. `django_ox.metrics.collector()`
   returns a collector for a `prometheus_client` registry when that package is
   installed; it is not a dependency.
-- `TASK_TIMEOUT` and `TASK_TIMEOUTS` backend options, a limit on how long one
-  attempt may run. A timed-out attempt is recorded as failed with a
-  `django_ox.exceptions.TaskTimeout` error, the lease number moves so nothing
-  from that execution can write to the row, and the task is retried on the
-  usual backoff or marked FAILED when attempts are spent. The timeout is soft:
-  the thread running the task is not stopped, because Python cannot stop a
-  thread, and whatever it returns later is discarded. `TASK_TIMEOUTS` maps a
-  queue name to its own value. Off by default. A bad value fails
-  `manage.py check` as `django_ox.E004`. The worker logs `task_timed_out`.
 - `django_ox.actions.retry(result_id)` and `django_ox.actions.discard(result_id)`.
   A retry puts a FAILED or LOST task back to READY for one more attempt, keeping
   its attempt count, worker ids and every traceback, and clearing the backoff so

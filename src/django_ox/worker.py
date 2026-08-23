@@ -25,17 +25,16 @@ from django.db.models import Max, Q, QuerySet
 from django.db.models.expressions import Combinable
 from django.db.models.functions import Now
 from django.tasks import DEFAULT_TASK_BACKEND_ALIAS, task_backends
-from django.tasks.base import Task, TaskContext, TaskResult
+from django.tasks.base import TaskContext
 from django.tasks.signals import task_finished, task_started
 from django.utils import timezone
 from django.utils.crypto import get_random_string
 from django.utils.json import normalize_json
 
 from .backend import OxBackend
-from .exceptions import TaskAbandoned, TaskTimeout
+from .exceptions import TaskAbandoned
 from .models import OxScheduleTick, OxTask
 from .schedules import schedule_name_collisions, schedules_from_options
-from .timeouts import task_timeouts_from_options
 
 logger = logging.getLogger("django_ox")
 
@@ -170,7 +169,6 @@ class Worker:
         schedule_interval: float | None = None,
         backoff_initial: float | None = None,
         backoff_max: float | None = None,
-        task_timeout: float | None = None,
     ) -> None:
         backend = task_backends[backend_alias]
         if not isinstance(backend, OxBackend):
@@ -229,12 +227,6 @@ class Worker:
             if backoff_max is not None
             else float(options.get("BACKOFF_MAX", 600.0))
         )
-        # TASK_TIMEOUT and the per-queue TASK_TIMEOUTS, validated the same
-        # way the system check validates them. The keyword overrides only
-        # the default; per-queue values still come from the options.
-        if task_timeout is not None:
-            options = {**options, "TASK_TIMEOUT": task_timeout}
-        self.timeouts = task_timeouts_from_options(options)
         self.worker_id = (
             f"{socket.gethostname()[:40]}-{os.getpid()}-{get_random_string(8)}"
         )
@@ -561,26 +553,15 @@ class Worker:
                 db_task.max_attempts,
                 extra=self._log_extra("task_started", db_task),
             )
-            raw_return_value = self._call_task(task, db_task, task_result)
+            if task.takes_context:
+                raw_return_value = task.call(
+                    TaskContext(task_result=task_result),
+                    *db_task.args,
+                    **db_task.kwargs,
+                )
+            else:
+                raw_return_value = task.call(*db_task.args, **db_task.kwargs)
             return_value = normalize_json(raw_return_value)
-        except TaskTimeout as exc:
-            duration_ms = _elapsed_ms(started)
-            logger.warning(
-                "Task id=%s path=%s ran past its %gs timeout on attempt %d/%d; "
-                "recording the attempt as failed and leaving the thread to finish",
-                db_task.id,
-                db_task.task_path,
-                exc.timeout,
-                db_task.attempts,
-                db_task.max_attempts,
-                extra=self._log_extra(
-                    "task_timed_out",
-                    db_task,
-                    duration_ms=duration_ms,
-                    timeout_s=exc.timeout,
-                ),
-            )
-            self._handle_failure(db_task, exc, duration_ms, release=True)
         except BaseException as exc:
             self._handle_failure(db_task, exc, _elapsed_ms(started))
         else:
@@ -618,90 +599,11 @@ class Worker:
                 task_result=task_result_from_db(db_task, task=task),
             )
 
-    def _call_task(
-        self,
-        task: "Task[..., Any]",
-        db_task: OxTask,
-        task_result: "TaskResult[..., Any]",
-    ) -> Any:
-        """
-        Call the task function and return what it returned.
-
-        With no timeout for this queue the call runs on the calling thread,
-        exactly as before timeouts existed. With one, it runs on a thread
-        of its own and the caller waits up to the timeout for it. If the
-        wait runs out, TaskTimeout is raised here, and the thread is left
-        running: Python has no way to stop it. Whatever it returns or
-        raises later lands in a list nobody reads. It never touches the
-        row, because every write for an attempt is made by the caller, and
-        the caller has stopped listening.
-        """
-
-        def invoke() -> Any:
-            if task.takes_context:
-                return task.call(
-                    TaskContext(task_result=task_result),
-                    *db_task.args,
-                    **db_task.kwargs,
-                )
-            return task.call(*db_task.args, **db_task.kwargs)
-
-        timeout = self.timeouts.for_queue(db_task.queue_name)
-        if timeout is None:
-            return invoke()
-
-        outcome: list[tuple[bool, Any]] = []
-
-        def runner() -> None:
-            try:
-                outcome.append((True, invoke()))
-            except BaseException as exc:
-                outcome.append((False, exc))
-            finally:
-                # The task ran on this thread's own connection; it is not a
-                # pool thread, so nothing else will close it.
-                connections.close_all()
-
-        thread = Thread(target=runner, name=f"ox-task-{db_task.id}", daemon=True)
-        thread.start()
-        thread.join(timeout)
-        if thread.is_alive():
-            raise TaskTimeout(
-                f"Task ran past the {timeout:g}s timeout on worker "
-                f"{self.worker_id!r}; this attempt is recorded as failed. The "
-                f"thread running it was not stopped, because Python cannot stop "
-                f"a thread: it keeps running until the task returns, and its "
-                f"result is then discarded.",
-                timeout=timeout,
-            )
-        succeeded, value = outcome[0]
-        if succeeded:
-            return value
-        raise value
-
     def _handle_failure(
-        self,
-        db_task: OxTask,
-        exc: BaseException,
-        duration_ms: int,
-        *,
-        release: bool = False,
+        self, db_task: OxTask, exc: BaseException, duration_ms: int
     ) -> None:
-        """
-        Record a failed attempt: a retry with backoff, or FAILED when the
-        attempts are spent.
-
-        release=True is the timeout case. The execution is being taken off
-        the row while its thread may still be running, so the write also
-        moves the lease epoch, the same way the reaper moves it when it
-        takes a row off a worker that went quiet. Whatever that thread
-        might write later carries the old number and matches nothing.
-        """
         from .results import task_result_from_db
 
-        handover: dict[str, Any] = (
-            {"lease_epoch": db_task.lease_epoch + 1} if release else {}
-        )
         exception_type = type(exc)
         errors = [
             *db_task.errors,
@@ -722,7 +624,6 @@ class Worker:
                 finished_at=_lease_now(),
                 locked_by=None,
                 locked_at=None,
-                **handover,
             ):
                 return
             try:
@@ -760,7 +661,6 @@ class Worker:
                 run_after=timezone.now() + timedelta(seconds=delay),
                 locked_by=None,
                 locked_at=None,
-                **handover,
             ):
                 return
             logger.warning(

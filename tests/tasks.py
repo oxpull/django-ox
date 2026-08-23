@@ -65,17 +65,3 @@ def with_context(context):
 @task
 async def async_add(a, b):
     return a + b
-
-
-@task
-def record_thread():
-    import threading
-
-    STATE["thread_name"] = threading.current_thread().name
-    return "done"
-
-
-@task(takes_context=True)
-def slow_with_context(context, seconds):
-    time.sleep(seconds)
-    return context.attempt

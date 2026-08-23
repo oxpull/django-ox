@@ -59,4 +59,5 @@ nav:
   - Benchmarks: benchmarks.md
   - API stability: stability.md
   - Pro: pro.md
+  - For AI assistants: agents.md
   - Changelog: changelog.md

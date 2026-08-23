@@ -13,7 +13,11 @@
     "old",
     "deprecated",
     "legacy",
-    "superseded"
+    "superseded",
+    "benchmarks",
+    "overrides",
+    "site",
+    "tools"
   ],
   "excludeFiles": [
     "CHANGELOG.md",
@@ -23,7 +27,8 @@
     "CODE_OF_CONDUCT.md",
     "code_of_conduct.md",
     "NEWS.md",
-    "SECURITY.md"
+    "SECURITY.md",
+    "CONTRIBUTING.md"
   ],
   "rules": [
     "Requires Django 6.0 or later and Python 3.12 or later.",
@@ -34,6 +39,16 @@
     "enqueue() is a single INSERT on the default database connection. A task enqueued inside transaction.atomic() becomes visible to workers only when that transaction commits, and disappears on rollback, so transaction.on_commit() is not needed.",
     "Workers claim tasks with SELECT FOR UPDATE SKIP LOCKED on PostgreSQL and MySQL 8 or later, and with an atomic compare-and-set on databases without SKIP LOCKED, including SQLite.",
     "Execution is at-least-once, so tasks should be written to be idempotent.",
-    "Use ox_health to check worker and queue health, and ox_prune to delete finished task rows older than a cutoff."
+    "Use ox_health to check worker and queue health, and ox_prune to delete finished task rows older than a cutoff.",
+    "Install with pip install django-ox. Configuration lives in the TASKS setting; the smallest working entry is TASKS = {\"default\": {\"BACKEND\": \"django_ox.backend.OxBackend\"}}.",
+    "Backend OPTIONS are MAX_ATTEMPTS (default 3), LOCK_TIMEOUT (300 seconds), BACKOFF_INITIAL (5 seconds), BACKOFF_MAX (600 seconds) and SCHEDULES. QUEUES sits beside OPTIONS, not inside it.",
+    "An attempt is consumed when a worker claims the task, so a worker dying mid-run counts as an attempt. The retry delay after attempt n is BACKOFF_INITIAL * 2 ** (n - 1), capped at BACKOFF_MAX, with no jitter.",
+    "LOCK_TIMEOUT bounds how long a worker may stop refreshing its lease, not how long a task may run. A worker renews the lease every LOCK_TIMEOUT / 3 seconds, so a long task on a live worker is not reclaimed.",
+    "Recurring tasks are declared in OPTIONS[\"SCHEDULES\"] with a dotted task path and a five-field cron expression. Every running worker dispatches schedules and a unique constraint makes each tick fire once, so there is no separate scheduler process.",
+    "The task function is called outside any transaction. A task that needs select_for_update() or atomic writes opens its own transaction.atomic().",
+    "ox_worker --concurrency N is a thread pool inside one process. For CPU-bound tasks run several worker processes with --concurrency 1.",
+    "There is no revocation or cancellation API after enqueue, and tasks are stored on the default database.",
+    "For tests, point TASKS at django.tasks.backends.immediate.ImmediateBackend or django.tasks.backends.dummy.DummyBackend instead of django-ox.",
+    "Batches and unique tasks are not in django-ox. They are in Oxpull Pro, a separate paid package. django_ox.stats and ox_health are in the free package."
   ]
 }

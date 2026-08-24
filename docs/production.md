@@ -149,10 +149,12 @@ runs in its own process group, and why the systemd unit above sets
 `KillMode=mixed`.
 
 A worker whose supervisor dies without signalling it (SIGKILL, an OOM kill)
-notices within one poll interval that its parent pid has changed, logs
-`worker_orphaned` at WARNING, drains and exits. On Linux the kernel also
-sends it SIGTERM the moment the supervisor exits (`PR_SET_PDEATHSIG`). Either
-way nothing runs on as an orphan beside the supervisor's replacement.
+does not run on as an orphan. On Linux the kernel sends it SIGTERM the
+moment the supervisor exits (`PR_SET_PDEATHSIG`), so it drains through its
+ordinary signal path. Everywhere else, and on Linux in the window before
+that flag is set, the worker notices within one poll interval that its
+parent pid has changed, logs `worker_orphaned` at WARNING, drains and
+exits.
 
 ## Scaling out
 

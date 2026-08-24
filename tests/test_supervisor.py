@@ -480,7 +480,16 @@ class TestOrphans:
                 with contextlib.suppress(ProcessLookupError):
                     os.kill(pid, signal.SIGKILL)
         log = (tmp_path / "worker.log").read_text()
-        assert log.count("lost its supervisor") == 2
+        # Both children drained cleanly rather than being killed.
+        assert log.count("stopped") == 2, log
+        if sys.platform.startswith("linux"):
+            # The kernel delivers SIGTERM the moment the supervisor dies
+            # (PR_SET_PDEATHSIG), before the next ppid poll runs, so the
+            # children drain through their ordinary signal path.
+            assert log.count("received SIGTERM; draining") == 2, log
+        else:
+            # No parent-death signal here: the ppid poll is the drain path.
+            assert log.count("lost its supervisor") == 2, log
 
     @needs_pgrep
     def test_sighup_is_a_drain(self, tmp_path):

@@ -242,10 +242,10 @@ The message text is not part of the contract. The keys are.
 | `task_claimed` | DEBUG | A task was claimed from the queue. |
 | `task_started` | DEBUG | Execution of an attempt begins. |
 | `task_succeeded` | INFO | The task reached SUCCESSFUL. |
-| `task_timed_out` | WARNING | An attempt ran past its `TASK_TIMEOUT` and is recorded as failed; a `task_retrying` or `task_failed` record follows. A task that catches `TaskTimeout` and returns produces no event, so this counts timeouts recorded as failures, not deadlines that passed. |
-| `task_stuck` | ERROR | A timed-out attempt's thread did not stop within `TASK_TIMEOUT_GRACE`. The attempt is recorded as failed and the worker is recycling. |
-| `worker_recycling` | WARNING | The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75. |
-| `timeouts_backstop_only` | WARNING | Once per worker: timeouts are enforced by the grace backstop alone, because the interpreter cannot raise an exception inside another thread (`reason=interpreter`) or a coverage or tracing tool is watching the worker's threads (`reason=tracing_tool`). |
+| `task_timed_out` | WARNING | An attempt ran past its `TASK_TIMEOUT` and is recorded as failed; a `task_retrying` or `task_failed` record follows. It counts timeouts recorded as failures, not deadlines that passed: a task that catches `TaskTimeout` and returns produces no event, and neither does a timeout on a worker logging `timeouts_backstop_only`, where the attempt ends in `task_stuck` or in whatever the task went on to do. |
+| `task_stuck` | ERROR | A timed-out attempt's thread did not stop within `TASK_TIMEOUT_GRACE`. The attempt is recorded as failed and the worker is recycling. On a worker logging `timeouts_backstop_only` nothing is raised inside the task, so this is the ordinary end of a timeout there rather than a pathological one. |
+| `worker_recycling` | WARNING | The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75. One follows every `task_stuck`, so on a worker logging `timeouts_backstop_only` every timeout that reaches the backstop costs a worker restart. |
+| `timeouts_backstop_only` | WARNING | Once per worker: `TaskTimeout` is not raised inside a running sync task, because the interpreter cannot raise an exception inside another thread (`reason=interpreter`, logged at startup) or a coverage tool or debugger is watching the worker's threads (`reason=tracing_tool`, logged on the first attempt registered under it). `TASK_TIMEOUT_GRACE` is the whole enforcement while it stands. See [Task timeouts](production.md#task-timeouts). |
 | `task_retrying` | WARNING | An attempt failed with retries remaining. |
 | `task_failed` | ERROR | The task reached FAILED, out of attempts. |
 | `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. |
@@ -275,7 +275,7 @@ The message text is not part of the contract. The keys are.
 | `timeout_s` | `task_timed_out`, `task_stuck` | The timeout that applied, in seconds. |
 | `grace_s` | `task_stuck`, `timeouts_backstop_only` | `TASK_TIMEOUT_GRACE`, in seconds. |
 | `reason` | `timeouts_backstop_only` | Why the backstop is the whole enforcement: `interpreter` or `tracing_tool`. |
-| `tracer` | `timeouts_backstop_only` with `reason=tracing_tool` | The tool watching the worker's threads. |
+| `tracer` | `timeouts_backstop_only` with `reason=tracing_tool` | How the worker's threads are being watched: `sys.settrace` when a trace function is installed, which does not say which tool installed it, or `sys.monitoring (NAME)` for a registered tool, which names itself. |
 | `exception` | `task_retrying`, `task_failed` | Exception class name of the failure. |
 | `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `LOST` (out of attempts). |
 | `dropped_status` | `task_lease_lost` | Status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |

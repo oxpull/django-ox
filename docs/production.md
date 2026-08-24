@@ -384,15 +384,51 @@ thread, which every supported Python has. On an interpreter without it, the
 worker logs `timeouts_backstop_only` once at startup and enforces timeouts
 by the grace backstop alone.
 
-A coverage or tracing tool watching the worker's threads changes how a
-timeout is enforced. Under `coverage run`, a debugger, a tracing profiler or
-a `sys.monitoring` tool, the worker raises nothing inside the running task:
-the attempt is registered for the grace backstop, the task is not
-interrupted, and at `TASK_TIMEOUT` plus `TASK_TIMEOUT_GRACE` the attempt is
-recorded as failed and the worker recycles. The worker logs
-`timeouts_backstop_only` once, naming the tool. A test suite that runs tasks
-under coverage sees that shape; a production worker is not usually watched
-by anything.
+**Under a coverage tool or a debugger.** A tool that watches a thread runs a
+callback between one bytecode and the next, and those callbacks hold locks
+of their own. An exception raised into such a thread can land inside one,
+leaving a lock held with nobody to release it. So the worker does not raise
+into a watched thread. It asks on the task's own thread as it registers the
+attempt, and two things count:
+
+- a trace function on that thread (`sys.settrace`), which is what
+  `coverage run` installs before Python 3.14, and what `pdb` and most
+  debuggers install;
+- a registered `sys.monitoring` tool with events enabled, which is what
+  `coverage run` uses from Python 3.14 on.
+
+A profile hook (`sys.setprofile`) is not consulted, so a sampling profiler
+that installs one leaves timeouts alone.
+
+For a **sync task** on a watched thread, `TaskTimeout` is not raised and the
+grace backstop is the whole enforcement:
+
+- A task that returns before `TASK_TIMEOUT` plus `TASK_TIMEOUT_GRACE` is
+  recorded as whatever it did, however long it ran. There is no
+  `task_timed_out` event, and nothing else says a deadline passed. With the
+  default 30-second grace this is the common case.
+- A task still running then is recorded as failed with `TaskTimeout`, and
+  the worker recycles: `task_stuck` at ERROR, `worker_recycling` at WARNING,
+  exit code 75. Every timeout that reaches the backstop costs a worker
+  restart.
+
+An **async task** is not affected. It is cancelled inside its event loop at
+the deadline, watched or not.
+
+The worker logs `timeouts_backstop_only` once, on the first attempt it
+registers under the tool rather than at startup, with `reason=tracing_tool`
+and `tracer` naming the mechanism. That line is the check: if it is in the
+log, this is what is happening; if it is not, timeouts are being raised
+inside tasks as usual.
+
+A tool that starts watching a thread after that thread's attempt was
+registered is not seen until the next attempt, since a thread's trace hook
+cannot be read from outside it.
+
+A test suite that measures coverage over its own task bodies sees this
+shape. To run an attempt unwatched, take the calling thread's trace hook off
+for the length of the call and put it back afterwards; a `sys.monitoring`
+tool cannot be taken off a single thread.
 
 ## The reaper
 

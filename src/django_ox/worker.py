@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import socket
+import sys
 import threading
 import time
 import uuid
@@ -100,6 +101,37 @@ def _load_async_exc_injector() -> Callable[[int], None] | None:
 
 _inject_async_exc = _load_async_exc_injector()
 
+# sys.monitoring has six tool slots (PEP 669); get_tool() rejects any other id.
+_MONITORING_TOOL_IDS = range(6)
+
+
+def _active_tracer() -> str | None:
+    """
+    A tool watching the calling thread's execution, named, or None if
+    there is none.
+
+    Coverage measurement, debuggers and tracing profilers install a
+    callback that the interpreter runs between one bytecode and the next,
+    and those callbacks hold locks of their own. An exception raised inside
+    the thread can land in one of them, so a thread being watched is not
+    one this worker raises an exception inside.
+
+    Two mechanisms, both of which count. The trace hook is per thread, and
+    ``sys.gettrace`` is what that thread was started with (``threading``
+    installs its default hook as the new thread's own) or has set since.
+    ``sys.monitoring`` is a separate, process-wide registry, and coverage
+    measurement uses it in preference to the trace hook where the
+    interpreter supports it, so a thread with no trace hook can still be
+    watched through a registered tool id.
+    """
+    if sys.gettrace() is not None:
+        return "a trace function (sys.settrace)"
+    for tool_id in _MONITORING_TOOL_IDS:
+        name = sys.monitoring.get_tool(tool_id)
+        if name is not None:
+            return f"a sys.monitoring tool ({name})"
+    return None
+
 
 def _flush_pending_async_exc() -> None:
     """
@@ -149,6 +181,10 @@ class _Watch:
     deadline: float
     deadline_at: datetime
     injectable: bool
+    # A tool was watching this thread when the attempt was armed, so the
+    # watchdog leaves the thread alone and the grace backstop is the whole
+    # enforcement.
+    traced: bool = False
     fired: bool = False
     grace_at: float = 0.0
 
@@ -394,7 +430,12 @@ class Worker:
         # wait for them; they die with the process.
         self._stuck: set[int] = set()
         self._recycling = False
+        # Set once the worker has said that a tracing tool is holding
+        # timeouts to the backstop, so it is said once and not per attempt.
+        self._backstop_only_notice = False
+        self._backstop_only_lock = Lock()
         if self.timeouts.enabled and _inject_async_exc is None:
+            self._backstop_only_notice = True
             logger.warning(
                 "Worker %s cannot raise TaskTimeout inside a running task on "
                 "this interpreter; timeouts are enforced by the %gs grace "
@@ -404,6 +445,7 @@ class Worker:
                 extra={
                     "event": "timeouts_backstop_only",
                     "worker_id": self.worker_id,
+                    "reason": "interpreter",
                     "grace_s": self.timeouts.grace,
                 },
             )
@@ -823,6 +865,10 @@ class Worker:
         nothing is pending, because the watchdog injects only while the
         entry is present and the entry is gone. An async task is cancelled
         inside its event loop instead.
+
+        A thread that a coverage or tracing tool is watching is left alone:
+        the attempt is registered for the grace backstop, and the task runs
+        until it returns or the backstop recycles the worker.
         """
 
         def invoke() -> Any:
@@ -981,9 +1027,43 @@ class Worker:
             with suppress(Error):
                 conn.close()
 
+    def _note_backstop_only(self, tracer: str) -> None:
+        """
+        Say once, not once per attempt, that a tracing tool is holding this
+        worker's timeouts to the grace backstop.
+        """
+        with self._backstop_only_lock:
+            if self._backstop_only_notice:
+                return
+            self._backstop_only_notice = True
+        logger.warning(
+            "Worker %s is running under %s, so TaskTimeout is not raised "
+            "inside a running task; timeouts are enforced by the %gs grace "
+            "backstop alone",
+            self.worker_id,
+            tracer,
+            self.timeouts.grace,
+            extra={
+                "event": "timeouts_backstop_only",
+                "worker_id": self.worker_id,
+                "reason": "tracing_tool",
+                "tracer": tracer,
+                "grace_s": self.timeouts.grace,
+            },
+        )
+
     def _arm(
         self, ident: int, db_task: OxTask, timeout: float, *, injectable: bool
     ) -> _Watch:
+        # Asked here, on the thread the exception would be raised inside,
+        # and asked for every attempt: the trace hook is per thread, so the
+        # watchdog cannot answer this from its own, and a tool can be
+        # installed long after the worker started.
+        tracer = (
+            _active_tracer() if injectable and _inject_async_exc is not None else None
+        )
+        if tracer is not None:
+            self._note_backstop_only(tracer)
         now = time.monotonic()
         watch = _Watch(
             ident=ident,
@@ -995,7 +1075,8 @@ class Worker:
             started=now,
             deadline=now + timeout,
             deadline_at=timezone.now() + timedelta(seconds=timeout),
-            injectable=injectable,
+            injectable=injectable and tracer is None,
+            traced=tracer is not None,
         )
         with self._watch_lock:
             self._watches[ident] = watch
@@ -1109,7 +1190,13 @@ class Worker:
                 grace_s=self.timeouts.grace,
             ),
         )
-        if not watch.injectable:
+        if watch.traced:
+            delivered = (
+                "a tracing tool is active on this worker, so nothing was "
+                "raised inside the task and the grace is the whole timeout"
+            )
+            usually = ""
+        elif not watch.injectable:
             delivered = "its coroutine was cancelled at the deadline"
             usually = (
                 " A thread that does not stop is usually in a call that never "

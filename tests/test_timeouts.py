@@ -37,15 +37,15 @@ from django_ox.supervisor import RECYCLE_EXIT_CODE, Supervisor
 from django_ox.timeouts import MAX_SECONDS, task_timeouts_from_options
 from django_ox.worker import WATCHDOG_MAX_WAIT, Worker
 
-from .conftest import wait_for
+from .conftest import start_worker_thread, wait_for
 from .tasks import (
     add,
     async_catch_timeout,
     async_report_deadline,
     async_spin,
-    atomic_write_loop,
+    atomic_write_until_released,
     busy,
-    query_then_spin,
+    query_then_hold,
     raise_timeout,
     report_deadline,
     slow,
@@ -54,6 +54,7 @@ from .tasks import (
     swallow_then_run_on,
     swallow_timeout,
     write_loop,
+    write_until_released,
 )
 
 TIMEOUT_PATH = f"{TaskTimeout.__module__}.{TaskTimeout.__qualname__}"
@@ -105,33 +106,36 @@ def worker_threads():
     ]
 
 
-def wait_until_no_task_is_pending(stall_timeout=60.0):
+def wait_until_no_task_is_pending(stall_timeout=60.0, budget=300.0):
     """
     True once no task is READY or RUNNING. Waits on progress rather than
-    the clock, so a slow database gets the time it needs: it only gives
-    up after `stall_timeout` seconds in which the pending count did not
-    move.
+    the clock, so a slow database gets the time it needs: it gives up
+    after `stall_timeout` seconds in which the pending count did not
+    move, or after `budget` seconds in total, so a worker that is merely
+    crawling still fails its test instead of outliving the CI job.
     """
     pending = None
-    changed_at = time.monotonic()
+    started = time.monotonic()
+    changed_at = started
     while True:
         now_pending = OxTask.objects.filter(
             status__in=(OxTask.Status.READY, OxTask.Status.RUNNING)
         ).count()
         if now_pending == 0:
             return True
+        now = time.monotonic()
+        if now - started > budget:
+            return False
         if now_pending != pending:
             pending = now_pending
-            changed_at = time.monotonic()
-        elif time.monotonic() - changed_at > stall_timeout:
+            changed_at = now
+        elif now - changed_at > stall_timeout:
             return False
         time.sleep(0.1)
 
 
 def run_in_thread(worker):
-    thread = threading.Thread(target=worker.run, daemon=True)
-    thread.start()
-    return thread
+    return start_worker_thread(worker)
 
 
 def row(result):
@@ -686,21 +690,30 @@ class TestReleasesWhatItHeld:
         assert row(result).return_value == "loop done"
 
     @postgres_only
-    def test_many_timeouts_do_not_pile_up_connections(self, caplog):
+    def test_many_timeouts_do_not_pile_up_connections(self, task_state, caplog):
         """
         120 ORM tasks that each time out, at concurrency 8. Every thread
         comes back and closes its connection, so the session count stays
-        within the pool plus the worker's own threads.
+        within the pool plus the worker's own threads. Each task holds
+        until the test releases it, so no attempt can finish before its
+        delivery lands, however late the watchdog manages to run.
         """
         caplog.set_level(logging.WARNING, logger="django_ox")
+        # The grace backstop belongs to TestBackstop, not here: on a loaded
+        # host a delivery can run tens of seconds late, and a backstop that
+        # fires first leaves a refused straggler write that the lease-lost
+        # assertion would read as a defect. A grace the load cannot reach
+        # keeps the delivery itself as the only path to an outcome.
         worker = Worker(
             task_timeout=0.05,
+            task_timeout_grace=300,
             backoff_initial=0,
             poll_interval=0.02,
             concurrency=8,
             lock_timeout=2.0,
         )
-        enqueue_many(query_then_spin, [((25.0,), {}) for _ in range(120)])
+        task_state["release"] = threading.Event()
+        enqueue_many(query_then_hold, [((), {}) for _ in range(120)])
         peak = 0
 
         def sessions():
@@ -722,6 +735,7 @@ class TestReleasesWhatItHeld:
         try:
             assert wait_for(settled, timeout=60, interval=0.05)
         finally:
+            task_state["release"].set()
             worker.request_stop()
             thread.join(timeout=15)
         assert not thread.is_alive()
@@ -737,8 +751,12 @@ class TestReleasesWhatItHeld:
         assert "too many clients" not in caplog.text
 
     @postgres_only
-    @pytest.mark.parametrize("loop", [write_loop, atomic_write_loop])
-    def test_a_timeout_landing_inside_a_statement_is_recorded(self, caplog, loop):
+    @pytest.mark.parametrize(
+        "loop", [write_until_released, atomic_write_until_released]
+    )
+    def test_a_timeout_landing_inside_a_statement_is_recorded(
+        self, task_state, caplog, loop
+    ):
         """
         psycopg drives a statement through Python, so the injected
         exception can land after the query was sent and before its result
@@ -747,23 +765,32 @@ class TestReleasesWhatItHeld:
         worker must still record the attempt as a timeout on a connection
         it can use, rather than fail its outcome write and leave the row
         RUNNING for the reaper. 300 tasks writing as fast as they can,
-        timed out at 50 ms, land inside a statement often enough.
+        timed out at 50 ms, land inside a statement often enough. Each
+        writes until the test releases it, so a delivery the watchdog runs
+        late (seen seconds late on a loaded runner) still lands while its
+        task is inside the loop, never after a finish it could lose to.
         """
         caplog.set_level(logging.WARNING, logger="django_ox")
+        # Same reasoning as the connection test above: the grace backstop
+        # must not fire here, so a delivery running late under load stays
+        # a late delivery rather than a stuck record plus a refused write.
         worker = Worker(
             task_timeout=0.05,
+            task_timeout_grace=300,
             backoff_initial=0,
             poll_interval=0.02,
             concurrency=4,
             lock_timeout=60,
         )
-        enqueue_many(loop, [((5.0,), {}) for _ in range(300)])
+        task_state["release"] = threading.Event()
+        enqueue_many(loop, [((), {}) for _ in range(300)])
         OxTask.objects.update(max_attempts=1)
 
         thread = run_in_thread(worker)
         try:
             assert wait_until_no_task_is_pending()
         finally:
+            task_state["release"].set()
             worker.request_stop()
             thread.join(timeout=15)
         assert not thread.is_alive()

@@ -148,12 +148,28 @@ def write_loop(context, seconds):
     return "loop done"
 
 
+@task(takes_context=True)
+def write_until_released(context):
+    """Write to the task's own row as fast as it can until STATE["release"]."""
+    attempt = context.attempt
+    writes = 0
+    release = STATE["release"]
+    while not release.is_set():
+        writes += 1
+        OxTask.objects.filter(pk=context.task_result.id).update(
+            return_value={"written_by": attempt, "writes": writes}
+        )
+    return "released"
+
+
 @task
-def query_then_spin(seconds):
-    """One ORM query (opening this thread's connection), then a Python loop."""
+def query_then_hold():
+    """One ORM query (opening this thread's connection), then hold for release."""
     OxTask.objects.count()
-    _spin(seconds)
-    return "done"
+    release = STATE["release"]
+    while not release.is_set():
+        time.sleep(0.005)
+    return "released"
 
 
 @task
@@ -182,18 +198,18 @@ async def async_report_deadline():
 
 
 @task(takes_context=True)
-def atomic_write_loop(context, seconds):
-    """One short transaction per write, as fast as it can, for `seconds`."""
+def atomic_write_until_released(context):
+    """One short transaction per write until the test sets STATE["release"]."""
     attempt = context.attempt
     writes = 0
-    end = time.monotonic() + seconds
-    while time.monotonic() < end:
+    release = STATE["release"]
+    while not release.is_set():
         writes += 1
         with transaction.atomic():
             OxTask.objects.filter(pk=context.task_result.id).update(
                 return_value={"written_by": attempt, "writes": writes}
             )
-    return "loop done"
+    return "released"
 
 
 @task

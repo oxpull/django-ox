@@ -263,6 +263,21 @@ class TestReinvocation:
                 ),
                 timeout=20,
             )
+            # Both children must be past their import window, handlers
+            # installed, before the stop: a SIGTERM that lands while a
+            # child is still importing Django kills it with 143.
+            assert wait_for(
+                lambda: (
+                    len(
+                        re.findall(
+                            r"Worker \S+ starting: queues=",
+                            (tmp_path / "worker.log").read_text(),
+                        )
+                    )
+                    == 2
+                ),
+                timeout=20,
+            )
         finally:
             code, log = stop_worker(proc, tmp_path)
         assert code == 0, log

@@ -1415,19 +1415,23 @@ class TestActiveTracer:
             seen = tracer_seen_by_an_unwatched_thread()
         assert seen == "sys.monitoring (ox-test-tool)"
 
-    @pytest.mark.skipif(
-        bool(watching_monitoring_tools()), reason="this session is measured through it"
-    )
     def test_ignores_a_monitoring_tool_with_no_events(self):
         """
         Reserving a tool id enables no callback and takes no lock, so a
         tool that reserved one and stopped there is watching nothing. Three
         lines of unrelated code in the process must not turn every timeout
         in every worker into a backstop and a recycle.
+
+        The debugger id is below the one coverage measurement takes, so the
+        inert tool is what the probe would report first. A session measured
+        through sys.monitoring still answers with the tool that is really
+        watching, which is why the claim is about the inert tool by name.
         """
         with monitoring_tool(0):
             seen = tracer_seen_by_an_unwatched_thread()
-        assert seen is None
+        assert seen != "sys.monitoring (ox-test-tool)"
+        if not watching_monitoring_tools():
+            assert seen is None
 
 
 @pytest.mark.django_db(transaction=True)

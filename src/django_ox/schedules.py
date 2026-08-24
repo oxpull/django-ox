@@ -11,7 +11,7 @@ any number of workers.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -49,9 +49,10 @@ def schedule_name_collisions(backend_alias: str) -> list[tuple[str, str]]:
     """
 
     def names(alias: str) -> set[str]:
-        # The plugin infers TASKS from the literal in the active settings
-        # module; the documented shape is a dict of backend configurations.
-        tasks = cast("dict[str, dict[str, Any]]", settings.TASKS)
+        # The annotation states the documented shape, a dict of backend
+        # configurations, without repeating what the settings plugin
+        # already infers from the literal in the active settings module.
+        tasks: dict[str, dict[str, Any]] = settings.TASKS
         raw = tasks[alias].get("OPTIONS", {}).get("SCHEDULES", {})
         return set(raw) if isinstance(raw, dict) else set()
 

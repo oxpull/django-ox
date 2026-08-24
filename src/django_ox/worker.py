@@ -381,8 +381,11 @@ class Worker:
         # exception lands at the next bytecode, and Condition.__enter__ is
         # Python: an exception delivered inside it, after the acquire and
         # before the with statement has installed its exit, leaves the lock
-        # held forever. The C lock has no such gap, so the with block's
-        # release always runs.
+        # held forever. The C lock closes most of that gap, but from Python
+        # 3.14 the with statement itself acquires one instruction before
+        # its cleanup is installed, so the injectable path in _disarm takes
+        # the lock through an explicit try/finally built around a single
+        # indivisible acquire instead.
         self._watches: dict[int, _Watch] = {}
         self._watch_lock = Lock()
         self._watch_cv = Condition(self._watch_lock)
@@ -1005,11 +1008,24 @@ class Worker:
         return watch
 
     def _disarm(self, ident: int) -> None:
-        with self._watch_lock:
+        # This runs while an injection can still be pending, and on Python
+        # 3.14 a with statement acquires the lock one instruction before
+        # the block's cleanup covers it, so a delivery attributed to the
+        # acquiring call would leave the lock held with nobody to release
+        # it. list(map(...)) makes the acquire and its record one
+        # indivisible instruction: `held` is non-empty exactly when this
+        # thread took the lock, whatever instruction the delivery hits,
+        # and the finally is installed before any of it runs.
+        held: list[bool] = []
+        try:
+            held.extend(map(self._watch_lock.acquire, (True,)))
             if self._watches.pop(ident, None) is not None:
                 # The watchdog may be sleeping out this attempt's grace;
                 # wake it so it recomputes from what is left.
                 self._watch_cv.notify_all()
+        finally:
+            if held:
+                self._watch_lock.release()
         _flush_pending_async_exc()
 
     def _watchdog_loop(self) -> None:

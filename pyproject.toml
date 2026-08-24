@@ -72,6 +72,9 @@ exclude = ["**/__pycache__", "**/*.pyc"]
 DJANGO_SETTINGS_MODULE = "tests.settings"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "watched_attempts: leave the attempt's thread as the run found it, watched or not",
+]
 
 [tool.ruff]
 target-version = "py312"

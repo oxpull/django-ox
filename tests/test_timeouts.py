@@ -101,13 +101,56 @@ def _snapshot_worker_threads():
     yield
 
 
-def monitoring_tools():
-    """Registered sys.monitoring tool ids, by id."""
+def watching_monitoring_tools():
+    """
+    Registered sys.monitoring tool ids that have events enabled, by id. A
+    reserved id with no events runs no callback, so it watches nothing.
+    """
     return {
         tool_id: name
         for tool_id in range(6)
         if (name := sys.monitoring.get_tool(tool_id)) is not None
+        and sys.monitoring.get_events(tool_id)
     }
+
+
+@pytest.fixture(autouse=True)
+def _a_watched_timeout_is_declared(request, monkeypatch):
+    """
+    Fail a test whose attempt timed out on a watched thread without saying
+    it meant to.
+
+    Nothing is raised inside a watched thread, so under `pytest --cov` a
+    test that expects an interruption gets the grace backstop instead: a
+    grace and a worker recycle per attempt, which stalls the run rather
+    than failing an assertion. This names the omission instead. Take
+    `interruptible_attempts` to run the attempt unwatched, or mark the test
+    `watched_attempts` to say the watched path is the one under test.
+
+    Only attempts that reached their deadline count. An attempt that
+    finished inside its timeout is the same either way, so a test that runs
+    one is left to be measured as usual.
+    """
+    if "watched_attempts" in request.keywords:
+        yield
+        return
+    armed: list = []
+    original = Worker._arm
+
+    def arm(self, ident, db_task, timeout, *, injectable):
+        watch = original(self, ident, db_task, timeout, injectable=injectable)
+        armed.append(watch)
+        return watch
+
+    monkeypatch.setattr(Worker, "_arm", arm)
+    yield
+    watched = [watch for watch in armed if watch.tracer is not None and watch.fired]
+    assert not watched, (
+        f"{len(watched)} attempt(s) ran past their deadline on a thread "
+        f"{watched[0].tracer} was watching, so nothing was raised inside "
+        "them. Take the interruptible_attempts fixture, or mark the test "
+        "watched_attempts if that is the path under test."
+    )
 
 
 @pytest.fixture
@@ -140,7 +183,7 @@ def interruptible_attempts(monkeypatch):
             sys.settrace(installed)
 
     monkeypatch.setattr(Worker, "_call_task", call_task)
-    if monitoring_tools():
+    if watching_monitoring_tools():
         monkeypatch.setattr(worker_module, "_active_tracer", lambda: None)
 
 
@@ -791,7 +834,9 @@ class TestReleasesWhatItHeld:
         assert row(result).return_value == "loop done"
 
     @postgres_only
-    def test_many_timeouts_do_not_pile_up_connections(self, task_state, caplog):
+    def test_many_timeouts_do_not_pile_up_connections(
+        self, task_state, caplog, interruptible_attempts
+    ):
         """
         120 ORM tasks that each time out, at concurrency 8. Every thread
         comes back and closes its connection, so the session count stays
@@ -895,7 +940,7 @@ class TestReleasesWhatItHeld:
         "loop", [write_until_released, atomic_write_until_released]
     )
     def test_a_timeout_landing_inside_a_statement_is_recorded(
-        self, task_state, caplog, loop
+        self, task_state, caplog, loop, interruptible_attempts
     ):
         """
         psycopg drives a statement through Python, so the injected
@@ -1233,7 +1278,8 @@ class TestBackstop:
         assert "did not stop within the 0.2s grace" in message
         # Nothing was raised inside the task; the record must not say it was.
         assert "cannot raise TaskTimeout inside a running task" in message
-        assert "raised inside it" not in message
+        assert "nothing was raised inside it" in message
+        assert "TaskTimeout was raised inside it" not in message
         assert "blocked outside Python" not in message
         assert events(caplog, "task_stuck")
         assert wait_for(lambda: not worker_threads(), timeout=5)
@@ -1313,39 +1359,80 @@ def tracer_seen_by_an_unwatched_thread(setup=None):
     return seen[0]
 
 
+@contextlib.contextmanager
+def watching_this_thread():
+    """
+    Install a trace function on the calling thread and take it off again.
+    `threading.settrace` reaches only threads started afterwards, so a
+    worker running a task inline needs this one instead.
+    """
+    installed = sys.gettrace()
+    sys.settrace(_null_trace)
+    try:
+        yield
+    finally:
+        sys.settrace(installed)
+
+
+@contextlib.contextmanager
+def monitoring_tool(events):
+    """
+    A registered sys.monitoring tool with `events` enabled, freed
+    afterwards. The debugger id is the lowest, so it is what the probe
+    reports even in a session that is itself measured that way.
+    """
+    tool_id = sys.monitoring.DEBUGGER_ID
+    if sys.monitoring.get_tool(tool_id) is not None:
+        pytest.skip("something else holds the debugger tool id")
+    sys.monitoring.use_tool_id(tool_id, "ox-test-tool")
+    try:
+        sys.monitoring.set_events(tool_id, events)
+        yield tool_id
+    finally:
+        sys.monitoring.set_events(tool_id, 0)
+        sys.monitoring.free_tool_id(tool_id)
+
+
 class TestActiveTracer:
     @pytest.mark.skipif(
-        bool(monitoring_tools()), reason="this session is measured through it"
+        bool(watching_monitoring_tools()), reason="this session is measured through it"
     )
     def test_none_when_nothing_is_watching_the_thread(self):
         assert tracer_seen_by_an_unwatched_thread() is None
 
-    def test_names_a_trace_function(self):
+    def test_names_the_trace_hook(self):
         seen = tracer_seen_by_an_unwatched_thread(
             setup=lambda: sys.settrace(_null_trace)
         )
-        assert seen == "a trace function (sys.settrace)"
+        assert seen == "sys.settrace"
 
     def test_names_a_monitoring_tool(self):
         """
         A sys.monitoring tool watches a thread that has no trace hook at
-        all, and coverage measurement uses it from Python 3.14 on. The
-        debugger id is the lowest, so it is what the probe reports even in
-        a session that is itself measured that way.
+        all, and coverage measurement uses it from Python 3.14 on.
         """
-        tool_id = sys.monitoring.DEBUGGER_ID
-        if sys.monitoring.get_tool(tool_id) is not None:
-            pytest.skip("something else holds the debugger tool id")
-        sys.monitoring.use_tool_id(tool_id, "ox-test-tool")
-        try:
+        with monitoring_tool(sys.monitoring.events.PY_START):
             seen = tracer_seen_by_an_unwatched_thread()
-        finally:
-            sys.monitoring.free_tool_id(tool_id)
-        assert seen == "a sys.monitoring tool (ox-test-tool)"
+        assert seen == "sys.monitoring (ox-test-tool)"
+
+    @pytest.mark.skipif(
+        bool(watching_monitoring_tools()), reason="this session is measured through it"
+    )
+    def test_ignores_a_monitoring_tool_with_no_events(self):
+        """
+        Reserving a tool id enables no callback and takes no lock, so a
+        tool that reserved one and stopped there is watching nothing. Three
+        lines of unrelated code in the process must not turn every timeout
+        in every worker into a backstop and a recycle.
+        """
+        with monitoring_tool(0):
+            seen = tracer_seen_by_an_unwatched_thread()
+        assert seen is None
 
 
 @pytest.mark.django_db(transaction=True)
 class TestUnderATracingTool:
+    @pytest.mark.watched_attempts
     def test_the_backstop_alone_while_a_trace_function_is_installed(
         self, caplog, task_state
     ):
@@ -1380,16 +1467,19 @@ class TestUnderATracingTool:
         assert worker.recycling
         assert row(first).status == OxTask.Status.FAILED
         message = row(first).errors[-1]["traceback"]
-        assert "a tracing tool is active on this worker" in message
+        assert "this worker's threads are watched by sys.settrace" in message
         assert "did not stop within the 0.2s grace" in message
         # Nothing was raised inside the task; the record must not say it was.
-        assert "raised inside it" not in message
+        assert "nothing was raised inside it" in message
+        assert "TaskTimeout was raised inside it" not in message
         assert task_state.get("caught") is not True
         # One line for the worker, not one per attempt.
         (degraded,) = events(caplog, "timeouts_backstop_only")
         assert degraded.reason == "tracing_tool"
-        assert degraded.tracer == "a trace function (sys.settrace)"
+        assert degraded.tracer == "sys.settrace"
         assert degraded.grace_s == 0.2
+        # The consequences an operator acts on, in the line that reports it.
+        assert "recycles this worker with exit code 75" in degraded.getMessage()
         assert events(caplog, "task_stuck")
         assert wait_for(lambda: not worker_threads(), timeout=10)
 
@@ -1415,7 +1505,7 @@ class TestUnderATracingTool:
             deadline=now - 1,
             deadline_at=timezone.now(),
             injectable=False,
-            traced=True,
+            tracer="sys.settrace",
             fired=True,
             grace_at=now,
         )
@@ -1425,21 +1515,22 @@ class TestUnderATracingTool:
         assert worker.recycling
         assert row(result).status == OxTask.Status.FAILED
         message = row(result).errors[-1]["traceback"]
-        assert "a tracing tool is active on this worker" in message
+        assert "this worker's threads are watched by sys.settrace" in message
         assert "did not stop within the 1s grace" in message
-        assert "raised inside it" not in message
+        assert "nothing was raised inside it" in message
+        assert "TaskTimeout was raised inside it" not in message
         assert "cannot raise TaskTimeout" not in message
         assert "its coroutine was cancelled" not in message
 
     def test_the_degraded_line_is_said_once_per_worker(self, caplog):
         caplog.set_level(logging.WARNING, logger="django_ox")
         worker = Worker(task_timeout=5, task_timeout_grace=1, backoff_initial=0)
-        worker._note_backstop_only("a trace function (sys.settrace)")
-        worker._note_backstop_only("a sys.monitoring tool (coverage.py)")
+        worker._note_backstop_only("sys.settrace")
+        worker._note_backstop_only("sys.monitoring (coverage.py)")
 
         (degraded,) = events(caplog, "timeouts_backstop_only")
         assert degraded.reason == "tracing_tool"
-        assert degraded.tracer == "a trace function (sys.settrace)"
+        assert degraded.tracer == "sys.settrace"
         assert degraded.grace_s == 1
 
     def test_raised_inside_the_task_when_nothing_is_watching(
@@ -1461,6 +1552,103 @@ class TestUnderATracingTool:
         error = row(result).errors[-1]
         assert error["exception_class_path"] == TIMEOUT_PATH
         assert "TaskTimeout was raised inside it" in error["traceback"]
+
+    @pytest.mark.watched_attempts
+    def test_a_task_that_returns_inside_the_grace_is_recorded_as_it_ran(self, caplog):
+        """
+        Nothing is raised, so a task that overruns its timeout and returns
+        before the backstop keeps its own outcome, however long it ran, and
+        no event says a deadline passed.
+        """
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        worker = Worker(
+            task_timeout=0.1,
+            task_timeout_grace=5,
+            backoff_initial=0,
+            poll_interval=0.05,
+            lock_timeout=60,
+        )
+        result = slow.enqueue(0.4)
+
+        with watching_this_thread():
+            assert worker.run_once()
+
+        assert not worker.recycling
+        assert row(result).status == OxTask.Status.SUCCESSFUL
+        assert row(result).return_value == "done"
+        assert not events(caplog, "task_timed_out")
+        assert not events(caplog, "task_stuck")
+        (degraded,) = events(caplog, "timeouts_backstop_only")
+        assert degraded.reason == "tracing_tool"
+
+    @pytest.mark.watched_attempts
+    def test_an_async_task_is_still_cancelled_at_its_deadline(self, caplog, task_state):
+        """
+        The injection facility is what a watched thread rules out, and an
+        async task does not use it: it is cancelled inside its event loop,
+        watched or not, and nothing is degraded.
+        """
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        worker = Worker(task_timeout=0.2, backoff_initial=60, poll_interval=0.05)
+        result = async_spin.enqueue(5.0)
+
+        started = time.monotonic()
+        with watching_this_thread():
+            assert worker.run_once()
+
+        assert time.monotonic() - started < 2.0
+        assert task_state.get("cancelled") is True
+        assert row(result).errors[-1]["exception_class_path"] == TIMEOUT_PATH
+        assert events(caplog, "task_timed_out")
+        assert not events(caplog, "timeouts_backstop_only")
+        assert not events(caplog, "task_stuck")
+        assert wait_for(lambda: not worker_threads(), timeout=5)
+
+    @pytest.mark.watched_attempts
+    def test_coverage_measuring_this_session_is_seen(self, caplog, monkeypatch):
+        """
+        The other tests here install a hook of their own, so they would
+        pass against a detector that had stopped recognising coverage.
+        This one asks the question the CI job asks: with coverage really
+        measuring this session, an attempt armed on a pool thread must come
+        back watched, and nothing may be raised inside it.
+
+        It runs only under `pytest --cov`, which is the run it protects.
+        """
+        coverage = pytest.importorskip("coverage")
+        if coverage.Coverage.current() is None:
+            pytest.skip("this session is not measured by coverage")
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        armed = []
+        arm = Worker._arm
+
+        def record(self, ident, db_task, timeout, *, injectable):
+            watch = arm(self, ident, db_task, timeout, injectable=injectable)
+            armed.append(watch)
+            return watch
+
+        monkeypatch.setattr(Worker, "_arm", record)
+        worker = Worker(
+            task_timeout=0.1,
+            task_timeout_grace=0.2,
+            backoff_initial=0,
+            poll_interval=0.05,
+            lock_timeout=60,
+        )
+        result = spin.enqueue(1.0)
+        OxTask.objects.filter(id=result.id).update(max_attempts=1)
+
+        thread = run_in_thread(worker)
+        thread.join(timeout=15)
+        assert not thread.is_alive()
+
+        (watch,) = armed
+        assert watch.tracer is not None
+        assert not watch.injectable
+        assert row(result).status == OxTask.Status.FAILED
+        (degraded,) = events(caplog, "timeouts_backstop_only")
+        assert degraded.reason == "tracing_tool"
+        assert wait_for(lambda: not worker_threads(), timeout=10)
 
 
 # -- the supervisor ---------------------------------------------------------

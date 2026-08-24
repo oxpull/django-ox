@@ -1154,7 +1154,12 @@ counts as well as SIGTERM and SIGINT. The sequence is:</p>
 <ol>
 <li>First signal: the supervisor forwards SIGTERM to every worker process
    and waits for each to drain. It exits 0 when all of them did, otherwise
-   with the first non-zero code.</li>
+   with the first non-zero code. A worker process cannot act on a signal
+   until it has installed its handler, which is after Django is imported,
+   so a stop that lands in that window kills it outright. It had claimed
+   no work, so the supervisor logs <code>worker_process_stopped_early</code> and
+   still exits 0. A restart, or a deploy that rolls twice, is not a
+   failure to report to the process manager.</li>
 <li>Second signal: forwarded again, which is the force-exit on each worker.
    A worker that cannot act on it (stopped, stuck in a C call) gets five
    seconds, then SIGKILL, logged as <code>supervisor_killed_workers</code> at ERROR.</li>
@@ -1371,6 +1376,47 @@ queue from the global limit. Every queue named there must be in <code>QUEUES</co
 thread, which every supported Python has. On an interpreter without it, the
 worker logs <code>timeouts_backstop_only</code> once at startup and enforces timeouts
 by the grace backstop alone.</p>
+<p><strong>Under a coverage tool or a debugger.</strong> A tool that watches a thread runs a
+callback between one bytecode and the next, and those callbacks hold locks
+of their own. An exception raised into such a thread can land inside one,
+leaving a lock held with nobody to release it. So the worker does not raise
+into a watched thread. It asks on the task's own thread as it registers the
+attempt, and two things count:</p>
+<ul>
+<li>a trace function on that thread (<code>sys.settrace</code>), which is what
+  <code>coverage run</code> installs before Python 3.14, and what <code>pdb</code> and most
+  debuggers install;</li>
+<li>a registered <code>sys.monitoring</code> tool with events enabled, which is what
+  <code>coverage run</code> uses from Python 3.14 on.</li>
+</ul>
+<p>A profile hook (<code>sys.setprofile</code>) is not consulted, so a sampling profiler
+that installs one leaves timeouts alone.</p>
+<p>For a <strong>sync task</strong> on a watched thread, <code>TaskTimeout</code> is not raised and the
+grace backstop is the whole enforcement:</p>
+<ul>
+<li>A task that returns before <code>TASK_TIMEOUT</code> plus <code>TASK_TIMEOUT_GRACE</code> is
+  recorded as whatever it did, however long it ran. There is no
+  <code>task_timed_out</code> event, and nothing else says a deadline passed. With the
+  default 30-second grace this is the common case.</li>
+<li>A task still running then is recorded as failed with <code>TaskTimeout</code>, and
+  the worker recycles: <code>task_stuck</code> at ERROR, <code>worker_recycling</code> at WARNING,
+  exit code 75. Every timeout that reaches the backstop costs a worker
+  restart.</li>
+</ul>
+<p>An <strong>async task</strong> is not affected. It is cancelled inside its event loop at
+the deadline, watched or not.</p>
+<p>The worker logs <code>timeouts_backstop_only</code> once, on the first attempt it
+registers under the tool rather than at startup, with <code>reason=tracing_tool</code>
+and <code>tracer</code> naming the mechanism. That line is the check: if it is in the
+log, this is what is happening; if it is not, timeouts are being raised
+inside tasks as usual.</p>
+<p>A tool that starts watching a thread after that thread's attempt was
+registered is not seen until the next attempt, since a thread's trace hook
+cannot be read from outside it.</p>
+<p>A test suite that measures coverage over its own task bodies sees this
+shape. To run an attempt unwatched, take the calling thread's trace hook off
+for the length of the call and put it back afterwards; a <code>sys.monitoring</code>
+tool cannot be taken off a single thread.</p>
 <h2 id="the-reaper">The reaper</h2>
 <p>Workers still die: OOM kills, node failures, <code>kill -9</code>. A dead worker stops
 refreshing its lock, and the reaper picks the task up. It runs inside every

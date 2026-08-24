@@ -1247,22 +1247,22 @@ The message text is not part of the contract. The keys are.</p>
 <tr>
 <td><code>task_timed_out</code></td>
 <td>WARNING</td>
-<td>An attempt ran past its <code>TASK_TIMEOUT</code> and is recorded as failed; a <code>task_retrying</code> or <code>task_failed</code> record follows. A task that catches <code>TaskTimeout</code> and returns produces no event, so this counts timeouts recorded as failures, not deadlines that passed.</td>
+<td>An attempt ran past its <code>TASK_TIMEOUT</code> and is recorded as failed; a <code>task_retrying</code> or <code>task_failed</code> record follows. It counts timeouts recorded as failures, not deadlines that passed: a task that catches <code>TaskTimeout</code> and returns produces no event, and neither does a timeout on a worker logging <code>timeouts_backstop_only</code>, where the attempt ends in <code>task_stuck</code> or in whatever the task went on to do.</td>
 </tr>
 <tr>
 <td><code>task_stuck</code></td>
 <td>ERROR</td>
-<td>A timed-out attempt's thread did not stop within <code>TASK_TIMEOUT_GRACE</code>. The attempt is recorded as failed and the worker is recycling.</td>
+<td>A timed-out attempt's thread did not stop within <code>TASK_TIMEOUT_GRACE</code>. The attempt is recorded as failed and the worker is recycling. On a worker logging <code>timeouts_backstop_only</code> nothing is raised inside the task, so this is the ordinary end of a timeout there rather than a pathological one.</td>
 </tr>
 <tr>
 <td><code>worker_recycling</code></td>
 <td>WARNING</td>
-<td>The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75.</td>
+<td>The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75. One follows every <code>task_stuck</code>, so on a worker logging <code>timeouts_backstop_only</code> every timeout that reaches the backstop costs a worker restart.</td>
 </tr>
 <tr>
 <td><code>timeouts_backstop_only</code></td>
 <td>WARNING</td>
-<td>At startup, on an interpreter that cannot raise an exception inside another thread: timeouts are enforced by the grace backstop alone.</td>
+<td>Once per worker: <code>TaskTimeout</code> is not raised inside a running sync task, because the interpreter cannot raise an exception inside another thread (<code>reason=interpreter</code>, logged at startup) or a coverage tool or debugger is watching the worker's threads (<code>reason=tracing_tool</code>, logged on the first attempt registered under it). <code>TASK_TIMEOUT_GRACE</code> is the whole enforcement while it stands. See <a href="../production/#task-timeouts">Task timeouts</a>.</td>
 </tr>
 <tr>
 <td><code>task_retrying</code></td>
@@ -1323,6 +1323,11 @@ The message text is not part of the contract. The keys are.</p>
 <td><code>worker_process_recycled</code></td>
 <td>WARNING</td>
 <td>A worker process exited with code 75 after a stuck task thread and is being restarted. Not counted against the restart cap.</td>
+</tr>
+<tr>
+<td><code>worker_process_stopped_early</code></td>
+<td>INFO</td>
+<td>A stop signal reached a worker process before it had finished starting, so it died on the signal rather than draining. It had claimed no work, and the supervisor does not count it as a failure.</td>
 </tr>
 <tr>
 <td><code>supervisor_restart_cap</code></td>
@@ -1399,6 +1404,16 @@ The message text is not part of the contract. The keys are.</p>
 <td><code>grace_s</code></td>
 <td><code>task_stuck</code>, <code>timeouts_backstop_only</code></td>
 <td><code>TASK_TIMEOUT_GRACE</code>, in seconds.</td>
+</tr>
+<tr>
+<td><code>reason</code></td>
+<td><code>timeouts_backstop_only</code></td>
+<td>Why the backstop is the whole enforcement: <code>interpreter</code> or <code>tracing_tool</code>.</td>
+</tr>
+<tr>
+<td><code>tracer</code></td>
+<td><code>timeouts_backstop_only</code> with <code>reason=tracing_tool</code></td>
+<td>How the worker's threads are being watched: <code>sys.settrace</code> when a trace function is installed, which does not say which tool installed it, or <code>sys.monitoring (NAME)</code> for a registered tool, which names itself.</td>
 </tr>
 <tr>
 <td><code>exception</code></td>

@@ -868,7 +868,7 @@ fewer service. The last section says where django-ox is not the right fit.</p>
 </tr>
 <tr>
 <td>Time limit on a running task</td>
-<td><code>TASK_TIMEOUT</code>, per queue in <code>TASK_TIMEOUTS</code>: <code>TaskTimeout</code> raised inside the task at the deadline, and a worker recycle when the thread does not stop. See <a href="../production/#task-timeouts">Production</a></td>
+<td><code>TASK_TIMEOUT</code>, per queue in <code>TASK_TIMEOUTS</code>: <code>TaskTimeout</code> raised inside the task at the deadline, and a worker recycle when the thread does not stop. Two caveats leave the grace backstop as the whole enforcement: an interpreter with no facility for raising an exception in another thread, and a thread a coverage tool or debugger is watching. See <a href="../production/#task-timeouts">Production</a></td>
 <td>Not documented in the README or the worker flags <sup id="fnref5:tdb-readme"><a class="footnote-ref" href="#fn:tdb-readme">1</a></sup> <sup id="fnref2:tdb-worker"><a class="footnote-ref" href="#fn:tdb-worker">2</a></sup></td>
 <td><code>timeout</code> per task or per call; "a <code>TaskTimeout</code> is raised and returned to the caller via the result handle" <sup id="fnref6:huey-guide"><a class="footnote-ref" href="#fn:huey-guide">8</a></sup></td>
 <td><code>soft_time_limit</code> raises <code>SoftTimeLimitExceeded</code> inside the task; <code>time_limit</code> terminates the process running it, which is replaced. "Time limits don't currently work on platforms that don't support the <code>SIGUSR1</code> signal" <sup id="fnref:celery-workers"><a class="footnote-ref" href="#fn:celery-workers">13</a></sup></td>

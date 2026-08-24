@@ -71,7 +71,13 @@ Operational facts worth getting right:
   per-queue values; there is no per-task value, because `django.tasks` has
   no field for one.
   `django_ox.deadline()` and `django_ox.remaining()` read the attempt's
-  deadline from inside a task.
+  deadline from inside a task. A worker whose threads are watched by a
+  coverage tool or a debugger (a `sys.settrace` hook, or a `sys.monitoring`
+  tool with events enabled) raises nothing inside a running sync task: it
+  logs `timeouts_backstop_only`, a task that returns within
+  `TASK_TIMEOUT_GRACE` is recorded as whatever it did, and one still running
+  then is recorded as failed and recycles the worker. An async task is
+  cancelled at the deadline either way.
 - `ox_worker --concurrency N` is a thread pool in one process, suited to
   I/O-bound tasks. `--processes N` runs N such workers under one supervisor,
   each with its own connections and reaper; for CPU-bound work use

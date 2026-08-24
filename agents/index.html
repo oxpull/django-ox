@@ -904,7 +904,13 @@ supervisor:</p>
   has not stopped <code>TASK_TIMEOUT_GRACE</code> seconds later is recorded as failed
   and the worker exits 75 so its supervisor restarts it. Per-queue values go
   in <code>TASK_TIMEOUTS</code>; there is no per-task value. <code>django_ox.remaining()</code>
-  reads the seconds left from inside a task.</li>
+  reads the seconds left from inside a task. On a thread a coverage tool or
+  a debugger is watching (a <code>sys.settrace</code> hook, or a <code>sys.monitoring</code> tool
+  with events enabled) nothing is raised inside a sync task: the worker logs
+  <code>timeouts_backstop_only</code>, a task that returns within <code>TASK_TIMEOUT_GRACE</code>
+  is recorded as whatever it did, and one still running then is recorded as
+  failed and recycles the worker. An async task is cancelled at the deadline
+  either way.</li>
 <li>Claiming: one <code>UPDATE ... SKIP LOCKED ... RETURNING</code> statement on
   PostgreSQL; <code>SELECT ... FOR UPDATE SKIP LOCKED</code> on MySQL 8+; an atomic
   compare-and-set UPDATE on SQLite and other databases without <code>SKIP LOCKED</code>.</li>

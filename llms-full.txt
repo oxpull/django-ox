@@ -249,9 +249,9 @@ retry. Add options when you have a reason to.
 | `LOCK_TIMEOUT` | `300` | Seconds a RUNNING task's lock may go unrefreshed before the reaper takes the task back. A worker refreshes the lock every `LOCK_TIMEOUT / 3` seconds while it is executing, so this is a limit on how long a worker may be unresponsive, not on how long a task may run. |
 | `BACKOFF_INITIAL` | `5` | Delay in seconds before the first retry. |
 | `BACKOFF_MAX` | `600` | Ceiling on the retry delay, in seconds. |
-| `TASK_TIMEOUT` | `None` | Seconds one attempt may run. `None` means no limit. At the deadline the worker raises `django_ox.exceptions.TaskTimeout` inside the task, on the task's own thread, and records the attempt as failed: retried on the usual backoff, or FAILED when attempts are spent. An async task is cancelled at the deadline instead. See [Task timeouts](production.md#task-timeouts). |
+| `TASK_TIMEOUT` | `None` | Seconds one attempt may run. `None` means no limit. At the deadline the worker raises `django_ox.exceptions.TaskTimeout` inside the task, on the task's own thread, and records the attempt as failed: retried on the usual backoff, or FAILED when attempts are spent. An async task is cancelled at the deadline instead. A sync task on a thread a coverage tool or debugger is watching is left alone, and `TASK_TIMEOUT_GRACE` is the whole enforcement for it. See [Task timeouts](production.md#task-timeouts). |
 | `TASK_TIMEOUTS` | `{}` | Per-queue timeouts, `{"queue name": seconds}`. A queue in the mapping uses its own value instead of `TASK_TIMEOUT`; `None` as a value exempts that queue. Every key must be a queue named in `QUEUES`, unless `QUEUES` is `[]`. Per queue rather than per task because `django.tasks` gives a task no field a backend could read a timeout from, and a queue is its unit of routing. |
-| `TASK_TIMEOUT_GRACE` | `30` | Seconds a timed-out attempt gets to stop. A thread still running after that is treated as stuck, which usually means it is in a call that never returns to Python, where the exception cannot land: the worker records the attempt as failed, stops claiming, drains its other tasks and exits with code 75 so its supervisor restarts it. A task that catches `TaskTimeout` has the same deadline to return or raise. |
+| `TASK_TIMEOUT_GRACE` | `30` | Seconds a timed-out attempt gets to stop. A thread still running after that is treated as stuck, which usually means it is in a call that never returns to Python, where the exception cannot land: the worker records the attempt as failed, stops claiming, drains its other tasks and exits with code 75 so its supervisor restarts it. A task that catches `TaskTimeout` has the same deadline to return or raise, and so does a task on a watched thread, where nothing was raised at all. |
 | `SCHEDULES` | `{}` | Recurring task definitions. Documented on the [Recurring tasks](recurring-tasks.md) page. |
 
 The retry delay after attempt *n* fails is
@@ -1135,7 +1135,7 @@ fewer service. The last section says where django-ox is not the right fit.
 | Retries and backoff | Exponential backoff, `MAX_ATTEMPTS`, `BACKOFF_INITIAL`, `BACKOFF_MAX`; every attempt's traceback kept | No retry option in the README or the worker flags [^tdb-readme] [^tdb-worker] | `retries`, `retry_delay`, `retry_backoff` [^huey-guide] | `autoretry_for`, `retry_backoff`, `retry_backoff_max` (default 600 s), `retry_jitter` [^celery-tasks] | `max_attempts` (default 0, meaning unlimited) and a `retry` interval; backoff not documented [^q2-configure] | Exponential backoff; `max_retries` default 20, `min_backoff` 15 s, `max_backoff` 7 days [^dq-guide] | Retry strategy per task [^proc-index] |
 | Recurring schedules | Cron in settings; every worker dispatches, no scheduler process | None. Issue #259 open since 2026-08-10 [^tasks-259] | `periodic_task(crontab(...))` [^huey-guide] | `celery beat`, a separate process; "ensure only a single scheduler is running" [^celery-beat] | `Schedule` model, editable in admin; cron via croniter [^q2-schedules] | None built in; APScheduler recommended [^dq-cookbook] | `@app.periodic` [^proc-index] |
 | Priorities | -100 to 100 | Yes [^tdb-backend] | Yes; on Redis needs 5.0+ and `PriorityRedisHuey` [^huey-guide] | 0 to 255 on RabbitMQ and Redis [^celery-calling] | Not documented [^q2-configure] | Per actor; lower number runs first [^dq-guide] | Yes [^proc-index] |
-| Time limit on a running task | `TASK_TIMEOUT`, per queue in `TASK_TIMEOUTS`: `TaskTimeout` raised inside the task at the deadline, and a worker recycle when the thread does not stop. See [Production](production.md#task-timeouts) | Not documented in the README or the worker flags [^tdb-readme] [^tdb-worker] | `timeout` per task or per call; "a `TaskTimeout` is raised and returned to the caller via the result handle" [^huey-guide] | `soft_time_limit` raises `SoftTimeLimitExceeded` inside the task; `time_limit` terminates the process running it, which is replaced. "Time limits don't currently work on platforms that don't support the `SIGUSR1` signal" [^celery-workers] | `timeout`, default `None`: "the number of seconds a worker is allowed to spend on a task before it's terminated" [^q2-configure] | `time_limit` per actor, default 10 minutes, raises `TimeLimitExceeded`. "Time limits are best-effort. They cannot cancel system calls or any function that doesn't currently hold the GIL under CPython" [^dq-guide] | Not documented on the page checked [^proc-index] |
+| Time limit on a running task | `TASK_TIMEOUT`, per queue in `TASK_TIMEOUTS`: `TaskTimeout` raised inside the task at the deadline, and a worker recycle when the thread does not stop. Two caveats leave the grace backstop as the whole enforcement: an interpreter with no facility for raising an exception in another thread, and a thread a coverage tool or debugger is watching. See [Production](production.md#task-timeouts) | Not documented in the README or the worker flags [^tdb-readme] [^tdb-worker] | `timeout` per task or per call; "a `TaskTimeout` is raised and returned to the caller via the result handle" [^huey-guide] | `soft_time_limit` raises `SoftTimeLimitExceeded` inside the task; `time_limit` terminates the process running it, which is replaced. "Time limits don't currently work on platforms that don't support the `SIGUSR1` signal" [^celery-workers] | `timeout`, default `None`: "the number of seconds a worker is allowed to spend on a task before it's terminated" [^q2-configure] | `time_limit` per actor, default 10 minutes, raises `TimeLimitExceeded`. "Time limits are best-effort. They cannot cancel system calls or any function that doesn't currently hold the GIL under CPython" [^dq-guide] | Not documented on the page checked [^proc-index] |
 | Worker dies mid-task | Lease renewed every `LOCK_TIMEOUT / 3`; a task whose lease goes stale for `LOCK_TIMEOUT` is put back to READY, or marked LOST when attempts are spent. See [Production](production.md#the-reaper) | Issue #5, open since 2024-06-11: the task 'remains marked as "PROCESSING", and thus is never picked up for re-processing nor marked as completed / failed' [^tdb-5] | "tasks that are mid-execution are lost and will not be retried automatically" [^huey-guide] | `acks_late` re-delivers; the worker still acknowledges "if the child process executing the task is terminated" [^celery-tasks] | Issue #327, open since 2026-05-05: worker death not reported to the monitor, `MAX_ATTEMPTS` ignored [^q2-327] | Not stated on the pages checked [^dq-guide] [^dq-cookbook] | Heartbeat every 10 s; jobs stay in `doing` until a `retry_stalled_jobs` periodic task you define picks them up [^proc-stalled] |
 | Health and metrics | `ox_health` command, `django_ox.stats`, a Prometheus endpoint (`/ox/metrics`), structured log events, admin retry and discard | Issue #44, container healthchecks, open since 2026-06-08 [^tdb-44] | Signals [^huey-guide] | Flower, a separate process, with Prometheus integration [^flower] | `qmonitor`, `qinfo`, `Stat` [^q2-monitor] | Prometheus middleware; not in the default middleware list [^dq-prom] | Statistics via events [^proc-index] |
 | Databases | PostgreSQL, SQLite and MySQL 8 tested in CI; MariaDB 10.6+ untested | Any Django database [^tdb-readme] | Redis, SQLite, PostgreSQL, file, memory [^huey-guide] | Broker, not a database [^celery-brokers] | Any Django database through the ORM broker [^q2-brokers] | Broker, not a database [^dq-guide] | PostgreSQL 13+ [^proc-index] |
@@ -1352,7 +1352,12 @@ counts as well as SIGTERM and SIGINT. The sequence is:
 
 1. First signal: the supervisor forwards SIGTERM to every worker process
    and waits for each to drain. It exits 0 when all of them did, otherwise
-   with the first non-zero code.
+   with the first non-zero code. A worker process cannot act on a signal
+   until it has installed its handler, which is after Django is imported,
+   so a stop that lands in that window kills it outright. It had claimed
+   no work, so the supervisor logs `worker_process_stopped_early` and
+   still exits 0. A restart, or a deploy that rolls twice, is not a
+   failure to report to the process manager.
 2. Second signal: forwarded again, which is the force-exit on each worker.
    A worker that cannot act on it (stopped, stuck in a C call) gets five
    seconds, then SIGKILL, logged as `supervisor_killed_workers` at ERROR.
@@ -1598,6 +1603,52 @@ Timeouts use CPython's own facility for raising an exception in another
 thread, which every supported Python has. On an interpreter without it, the
 worker logs `timeouts_backstop_only` once at startup and enforces timeouts
 by the grace backstop alone.
+
+**Under a coverage tool or a debugger.** A tool that watches a thread runs a
+callback between one bytecode and the next, and those callbacks hold locks
+of their own. An exception raised into such a thread can land inside one,
+leaving a lock held with nobody to release it. So the worker does not raise
+into a watched thread. It asks on the task's own thread as it registers the
+attempt, and two things count:
+
+- a trace function on that thread (`sys.settrace`), which is what
+  `coverage run` installs before Python 3.14, and what `pdb` and most
+  debuggers install;
+- a registered `sys.monitoring` tool with events enabled, which is what
+  `coverage run` uses from Python 3.14 on.
+
+A profile hook (`sys.setprofile`) is not consulted, so a sampling profiler
+that installs one leaves timeouts alone.
+
+For a **sync task** on a watched thread, `TaskTimeout` is not raised and the
+grace backstop is the whole enforcement:
+
+- A task that returns before `TASK_TIMEOUT` plus `TASK_TIMEOUT_GRACE` is
+  recorded as whatever it did, however long it ran. There is no
+  `task_timed_out` event, and nothing else says a deadline passed. With the
+  default 30-second grace this is the common case.
+- A task still running then is recorded as failed with `TaskTimeout`, and
+  the worker recycles: `task_stuck` at ERROR, `worker_recycling` at WARNING,
+  exit code 75. Every timeout that reaches the backstop costs a worker
+  restart.
+
+An **async task** is not affected. It is cancelled inside its event loop at
+the deadline, watched or not.
+
+The worker logs `timeouts_backstop_only` once, on the first attempt it
+registers under the tool rather than at startup, with `reason=tracing_tool`
+and `tracer` naming the mechanism. That line is the check: if it is in the
+log, this is what is happening; if it is not, timeouts are being raised
+inside tasks as usual.
+
+A tool that starts watching a thread after that thread's attempt was
+registered is not seen until the next attempt, since a thread's trace hook
+cannot be read from outside it.
+
+A test suite that measures coverage over its own task bodies sees this
+shape. To run an attempt unwatched, take the calling thread's trace hook off
+for the length of the call and put it back afterwards; a `sys.monitoring`
+tool cannot be taken off a single thread.
 
 ## The reaper
 
@@ -2003,10 +2054,10 @@ The message text is not part of the contract. The keys are.
 | `task_claimed` | DEBUG | A task was claimed from the queue. |
 | `task_started` | DEBUG | Execution of an attempt begins. |
 | `task_succeeded` | INFO | The task reached SUCCESSFUL. |
-| `task_timed_out` | WARNING | An attempt ran past its `TASK_TIMEOUT` and is recorded as failed; a `task_retrying` or `task_failed` record follows. A task that catches `TaskTimeout` and returns produces no event, so this counts timeouts recorded as failures, not deadlines that passed. |
-| `task_stuck` | ERROR | A timed-out attempt's thread did not stop within `TASK_TIMEOUT_GRACE`. The attempt is recorded as failed and the worker is recycling. |
-| `worker_recycling` | WARNING | The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75. |
-| `timeouts_backstop_only` | WARNING | At startup, on an interpreter that cannot raise an exception inside another thread: timeouts are enforced by the grace backstop alone. |
+| `task_timed_out` | WARNING | An attempt ran past its `TASK_TIMEOUT` and is recorded as failed; a `task_retrying` or `task_failed` record follows. It counts timeouts recorded as failures, not deadlines that passed: a task that catches `TaskTimeout` and returns produces no event, and neither does a timeout on a worker logging `timeouts_backstop_only`, where the attempt ends in `task_stuck` or in whatever the task went on to do. |
+| `task_stuck` | ERROR | A timed-out attempt's thread did not stop within `TASK_TIMEOUT_GRACE`. The attempt is recorded as failed and the worker is recycling. On a worker logging `timeouts_backstop_only` nothing is raised inside the task, so this is the ordinary end of a timeout there rather than a pathological one. |
+| `worker_recycling` | WARNING | The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75. One follows every `task_stuck`, so on a worker logging `timeouts_backstop_only` every timeout that reaches the backstop costs a worker restart. |
+| `timeouts_backstop_only` | WARNING | Once per worker: `TaskTimeout` is not raised inside a running sync task, because the interpreter cannot raise an exception inside another thread (`reason=interpreter`, logged at startup) or a coverage tool or debugger is watching the worker's threads (`reason=tracing_tool`, logged on the first attempt registered under it). `TASK_TIMEOUT_GRACE` is the whole enforcement while it stands. See [Task timeouts](production.md#task-timeouts). |
 | `task_retrying` | WARNING | An attempt failed with retries remaining. |
 | `task_failed` | ERROR | The task reached FAILED, out of attempts. |
 | `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. |
@@ -2019,6 +2070,7 @@ The message text is not part of the contract. The keys are.
 | `supervisor_started` | INFO | `ox_worker --processes N` started its worker processes. |
 | `worker_process_restarted` | WARNING | A worker process exited on its own and is being restarted. |
 | `worker_process_recycled` | WARNING | A worker process exited with code 75 after a stuck task thread and is being restarted. Not counted against the restart cap. |
+| `worker_process_stopped_early` | INFO | A stop signal reached a worker process before it had finished starting, so it died on the signal rather than draining. It had claimed no work, and the supervisor does not count it as a failure. |
 | `supervisor_restart_cap` | ERROR | More than five deaths of one slot in a minute; the supervisor is stopping with exit code 1. |
 | `supervisor_killed_workers` | ERROR | Worker processes still running five seconds after the second stop signal were sent SIGKILL. |
 | `supervisor_stopped` | INFO | Every worker process has exited. |
@@ -2035,6 +2087,8 @@ The message text is not part of the contract. The keys are.
 | `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_timed_out`, `task_stuck`, `task_lease_lost` | Wall-clock duration of the attempt, in milliseconds. |
 | `timeout_s` | `task_timed_out`, `task_stuck` | The timeout that applied, in seconds. |
 | `grace_s` | `task_stuck`, `timeouts_backstop_only` | `TASK_TIMEOUT_GRACE`, in seconds. |
+| `reason` | `timeouts_backstop_only` | Why the backstop is the whole enforcement: `interpreter` or `tracing_tool`. |
+| `tracer` | `timeouts_backstop_only` with `reason=tracing_tool` | How the worker's threads are being watched: `sys.settrace` when a trace function is installed, which does not say which tool installed it, or `sys.monitoring (NAME)` for a registered tool, which names itself. |
 | `exception` | `task_retrying`, `task_failed` | Exception class name of the failure. |
 | `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `LOST` (out of attempts). |
 | `dropped_status` | `task_lease_lost` | Status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |
@@ -2346,7 +2400,7 @@ the pre-1.0 rule applies:
 - **0.x.y patch releases are bug fixes only** and never break a public
   surface.
 
-Pin accordingly: `django-ox~=0.3.0` accepts patch releases only;
+Pin accordingly: `django-ox~=0.3.1` accepts patch releases only;
 `django-ox>=0.3,<0.4` accepts the current minor line.
 
 Once 1.0 ships, breaking changes to the public API will require a major
@@ -2580,7 +2634,13 @@ TASKS = {
   has not stopped `TASK_TIMEOUT_GRACE` seconds later is recorded as failed
   and the worker exits 75 so its supervisor restarts it. Per-queue values go
   in `TASK_TIMEOUTS`; there is no per-task value. `django_ox.remaining()`
-  reads the seconds left from inside a task.
+  reads the seconds left from inside a task. On a thread a coverage tool or
+  a debugger is watching (a `sys.settrace` hook, or a `sys.monitoring` tool
+  with events enabled) nothing is raised inside a sync task: the worker logs
+  `timeouts_backstop_only`, a task that returns within `TASK_TIMEOUT_GRACE`
+  is recorded as whatever it did, and one still running then is recorded as
+  failed and recycles the worker. An async task is cancelled at the deadline
+  either way.
 - Claiming: one `UPDATE ... SKIP LOCKED ... RETURNING` statement on
   PostgreSQL; `SELECT ... FOR UPDATE SKIP LOCKED` on MySQL 8+; an atomic
   compare-and-set UPDATE on SQLite and other databases without `SKIP LOCKED`.
@@ -2670,6 +2730,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.3.1] - 2026-08-24
+
+### Fixed
+
+- `ox_worker --processes N` exits 0 when a stop signal arrives while a
+  worker process is still starting up. A worker cannot act on a signal
+  until it has installed its handler, and that is after Django has been
+  imported. A signal landing before then killed the worker outright, and
+  the supervisor reported that worker's 143 as its own exit code. A unit
+  on `Restart=on-failure` reads that as a fault and starts the service
+  again. The worker had claimed no work, so there is nothing to report:
+  the supervisor now logs `worker_process_stopped_early` and exits 0.
+
+### Changed
+
+- A worker enforces `TASK_TIMEOUT` on a sync task through the grace backstop
+  alone while a coverage tool or a debugger is watching the thread the
+  attempt runs on. Two things count: a trace function (`sys.settrace`, which
+  `coverage run` installs before Python 3.14, and which `pdb` and most
+  debuggers install), and a registered `sys.monitoring` tool with events
+  enabled (which `coverage run` uses from Python 3.14 on). Nothing is raised
+  inside the task. A task that returns within `TASK_TIMEOUT` plus
+  `TASK_TIMEOUT_GRACE` is recorded as whatever it did, however long it ran,
+  with no `task_timed_out` event; one still running then is recorded as
+  failed and recycles the worker. An async task is cancelled at its deadline
+  either way, and a profile hook (`sys.setprofile`) is not consulted.
+- The worker logs `timeouts_backstop_only` once under such a tool, on the
+  first attempt it registers rather than at startup. That event now carries
+  `reason` (`interpreter` or `tracing_tool`) and, for a tool, `tracer`:
+  `sys.settrace`, or `sys.monitoring (NAME)`.
 
 ## [0.3.0] - 2026-08-24
 
@@ -2969,6 +3060,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[0.3.1]: https://github.com/oxpull/django-ox/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/oxpull/django-ox/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/oxpull/django-ox/releases/tag/v0.2.1
 [0.2.0]: https://github.com/oxpull/django-ox/releases/tag/v0.2.0

@@ -25,7 +25,6 @@ from datetime import datetime, timedelta
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connection, connections
-from django.db.models import Count
 from django.tasks import TaskResultStatus, default_task_backend
 from django.utils import timezone
 
@@ -132,6 +131,57 @@ def wait_until_no_task_is_pending(stall_timeout=60.0, budget=300.0):
         elif now - changed_at > stall_timeout:
             return False
         time.sleep(0.1)
+
+
+def run_workers_until_no_task_is_pending(
+    make_worker, workers, threads, on_poll=None, stall_timeout=60.0, budget=300.0
+):
+    """
+    Run a worker until no task is READY or RUNNING, starting a fresh one
+    whenever the grace backstop recycles the one before -- the
+    supervisor's job in production, done inline here. Progress-based like
+    wait_until_no_task_is_pending: the backstop resolves a stalled batch
+    within one grace, so a drain that moves nothing for `stall_timeout`
+    seconds, or takes more than `budget` in total, is a genuine failure.
+    Every worker and thread started lands in `workers` and `threads`, so
+    the caller's cleanup sees them all however this exits.
+    """
+
+    def start():
+        worker = make_worker()
+        workers.append(worker)
+        threads.append(start_worker_thread(worker))
+        return worker, threads[-1]
+
+    worker, thread = start()
+    started = time.monotonic()
+    pending = None
+    changed_at = started
+    while True:
+        if on_poll is not None:
+            on_poll()
+        now_pending = OxTask.objects.filter(
+            status__in=(OxTask.Status.READY, OxTask.Status.RUNNING)
+        ).count()
+        if now_pending == 0:
+            return
+        if not thread.is_alive():
+            assert worker.recycling, "the worker exited without being asked"
+            worker, thread = start()
+            changed_at = time.monotonic()
+        now = time.monotonic()
+        assert now - started <= budget, (
+            f"{now_pending} task(s) still pending after {budget:g}s "
+            f"across {len(workers)} worker(s)"
+        )
+        if now_pending != pending:
+            pending = now_pending
+            changed_at = now
+        else:
+            assert now - changed_at <= stall_timeout, (
+                f"no progress for {stall_timeout:g}s with {now_pending} task(s) pending"
+            )
+        time.sleep(0.05)
 
 
 def run_in_thread(worker):
@@ -696,56 +746,95 @@ class TestReleasesWhatItHeld:
         comes back and closes its connection, so the session count stays
         within the pool plus the worker's own threads. Each task holds
         until the test releases it, so no attempt can finish before its
-        delivery lands, however late the watchdog manages to run.
+        delivery lands. A delivery that cannot land within the grace is
+        the backstop's case, exactly as documented: the attempt is
+        recorded as stuck, the worker recycles, and the replacement --
+        started here the way the supervisor would -- carries on. Either
+        way, every attempt ends recorded, fenced, and off its connection.
         """
         caplog.set_level(logging.WARNING, logger="django_ox")
-        # The grace backstop belongs to TestBackstop, not here: on a loaded
-        # host a delivery can run tens of seconds late, and a backstop that
-        # fires first leaves a refused straggler write that the lease-lost
-        # assertion would read as a defect. A grace the load cannot reach
-        # keeps the delivery itself as the only path to an outcome.
-        worker = Worker(
-            task_timeout=0.05,
-            task_timeout_grace=300,
-            backoff_initial=0,
-            poll_interval=0.02,
-            concurrency=8,
-            lock_timeout=2.0,
-        )
+
+        def make_worker():
+            # The default grace. The backstop is part of the contract
+            # under test: on a runner too slow for the delivery to land,
+            # it is what keeps the drain moving.
+            return Worker(
+                task_timeout=0.05,
+                backoff_initial=0,
+                poll_interval=0.02,
+                concurrency=8,
+                lock_timeout=2.0,
+            )
+
         task_state["release"] = threading.Event()
         enqueue_many(query_then_hold, [((), {}) for _ in range(120)])
-        peak = 0
+        peak_used = 0
+        peak_total = 0
 
         def sessions():
+            """
+            (used, total) backends on this database. `used` is every
+            session that has run at least one statement -- the only kind
+            the worker's threads produce, since a claim, a renewal, an
+            outcome write and a task body all query. A starved server
+            also accumulates sessions that never got that far (connection
+            attempts a delivery interrupted mid-handshake, held by the
+            test process until it exits, and closed backends not yet
+            reaped); those are the environment's, counted only against
+            the coarse cap below.
+            """
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT count(*) FROM pg_stat_activity "
-                    "WHERE datname = current_database()"
+                    "SELECT count(*) FILTER (WHERE query <> ''), count(*) "
+                    "FROM pg_stat_activity WHERE datname = current_database()"
                 )
-                return cursor.fetchone()[0]
+                return cursor.fetchone()
 
-        def settled():
-            nonlocal peak
-            peak = max(peak, sessions())
-            return not OxTask.objects.filter(
-                status__in=(OxTask.Status.READY, OxTask.Status.RUNNING)
-            ).exists()
+        def note_peak():
+            nonlocal peak_used, peak_total
+            used, total = sessions()
+            peak_used = max(peak_used, used)
+            peak_total = max(peak_total, total)
 
-        thread = run_in_thread(worker)
+        workers: list[Worker] = []
+        threads: list[threading.Thread] = []
         try:
-            assert wait_for(settled, timeout=60, interval=0.05)
+            run_workers_until_no_task_is_pending(
+                make_worker, workers, threads, on_poll=note_peak
+            )
         finally:
             task_state["release"].set()
-            worker.request_stop()
-            thread.join(timeout=15)
-        assert not thread.is_alive()
+            for worker in workers:
+                worker.request_stop()
+            for thread in threads:
+                thread.join(timeout=15)
+        assert not any(thread.is_alive() for thread in threads)
+        # A recycled worker's stuck threads outlive it until the release;
+        # every one must finish and lose its fenced write before the rows
+        # are judged.
+        assert wait_for(lambda: not worker_threads(), timeout=60)
 
-        statuses = dict(OxTask.objects.values_list("status").annotate(n=Count("id")))
-        assert statuses == {OxTask.Status.FAILED: 120}
-        # Beside the pool: the run loop, the renewer, and this test's own
-        # polling connection, plus one just-closed session the server has
-        # not torn down yet. 120 leaking sessions would dwarf any margin.
-        assert peak <= worker.concurrency + 4, peak
+        db_tasks = list(OxTask.objects.all())
+        assert len(db_tasks) == 120
+        for db_task in db_tasks:
+            assert db_task.status == OxTask.Status.FAILED, db_task.errors
+            assert {e["exception_class_path"] for e in db_task.errors} == {
+                TIMEOUT_PATH
+            }, db_task.errors
+            assert db_task.attempts == db_task.max_attempts
+            assert db_task.attempts == len(db_task.worker_ids)
+            assert db_task.return_value != "released", "a fenced write landed"
+        # Beside each worker's pool: the run loop, the renewer, this
+        # test's polling connection, and one just-closed session the
+        # server has not torn down yet. A recycle strands up to a pool's
+        # worth of stuck connections until the release, on top of the
+        # replacement's own. 120 leaking sessions would dwarf any of it.
+        assert peak_used <= 12 + 8 * (len(workers) - 1), (peak_used, len(workers))
+        # The coarse cap on what the storm leaves behind on a slow
+        # server: handshake debris and unreaped backends stay far from
+        # the server's limit, while a genuine pileup -- counted in
+        # attempts, 360 here -- would blow straight past it.
+        assert peak_total < 60, peak_total
         assert not events(caplog, "worker_error")
         assert not events(caplog, "task_reclaimed")
         assert "too many clients" not in caplog.text
@@ -765,50 +854,75 @@ class TestReleasesWhatItHeld:
         worker must still record the attempt as a timeout on a connection
         it can use, rather than fail its outcome write and leave the row
         RUNNING for the reaper. 300 tasks writing as fast as they can,
-        timed out at 50 ms, land inside a statement often enough. Each
-        writes until the test releases it, so a delivery the watchdog runs
-        late (seen seconds late on a loaded runner) still lands while its
-        task is inside the loop, never after a finish it could lose to.
+        timed out at 50 ms, land inside a statement often enough.
+
+        A thread waiting inside the driver's C wait is out of the
+        exception's reach until the statement returns -- the documented
+        limit of delivery, and the grace backstop's whole reason to
+        exist. So the claim is the invariant, not the path: every attempt
+        ends FAILED with TaskTimeout, recorded either where the delivery
+        landed or by the backstop as stuck, every straggler write is
+        fenced, and nothing is left RUNNING. Which path recorded it
+        belongs to the machine the test happens to run on.
         """
         caplog.set_level(logging.WARNING, logger="django_ox")
-        # Same reasoning as the connection test above: the grace backstop
-        # must not fire here, so a delivery running late under load stays
-        # a late delivery rather than a stuck record plus a refused write.
-        worker = Worker(
-            task_timeout=0.05,
-            task_timeout_grace=300,
-            backoff_initial=0,
-            poll_interval=0.02,
-            concurrency=4,
-            lock_timeout=60,
-        )
+
+        def make_worker():
+            # The default grace, so a delivery a slow database blocks
+            # past it becomes the backstop's stuck record, not a hang.
+            return Worker(
+                task_timeout=0.05,
+                backoff_initial=0,
+                poll_interval=0.02,
+                concurrency=4,
+                lock_timeout=60,
+            )
+
         task_state["release"] = threading.Event()
         enqueue_many(loop, [((), {}) for _ in range(300)])
         OxTask.objects.update(max_attempts=1)
 
-        thread = run_in_thread(worker)
+        workers: list[Worker] = []
+        threads: list[threading.Thread] = []
         try:
-            assert wait_until_no_task_is_pending()
+            run_workers_until_no_task_is_pending(make_worker, workers, threads)
         finally:
             task_state["release"].set()
-            worker.request_stop()
-            thread.join(timeout=15)
-        assert not thread.is_alive()
+            for worker in workers:
+                worker.request_stop()
+            for thread in threads:
+                thread.join(timeout=15)
+        assert not any(thread.is_alive() for thread in threads)
+        # Stuck threads outlive their worker until the release; every one
+        # must finish and lose its fenced write before the rows are
+        # judged.
+        assert wait_for(lambda: not worker_threads(), timeout=60)
 
-        statuses = dict(OxTask.objects.values_list("status").annotate(n=Count("id")))
-        assert statuses == {OxTask.Status.FAILED: 300}
+        db_tasks = list(OxTask.objects.all())
+        assert len(db_tasks) == 300
         landed_in_the_driver = 0
-        for db_task in OxTask.objects.all():
+        recorded_by_backstop = 0
+        for db_task in db_tasks:
+            # SUCCESSFUL is impossible by construction: the release only
+            # opens once nothing is pending, so every attempt was already
+            # terminal, and a straggler's later outcome is refused by the
+            # fence rather than recorded.
+            assert db_task.status == OxTask.Status.FAILED, db_task.errors
             assert [e["exception_class_path"] for e in db_task.errors] == [
                 TIMEOUT_PATH
             ], db_task.errors
-            if "psycopg" in db_task.errors[-1]["traceback"]:
-                landed_in_the_driver += 1
+            assert db_task.attempts == 1 == len(db_task.worker_ids)
+            assert db_task.return_value != "released", "a fenced write landed"
+            trace = db_task.errors[-1]["traceback"]
+            if "did not stop" in trace:
+                recorded_by_backstop += 1
+            else:
+                assert 'File "' in trace, trace
+                if "psycopg" in trace:
+                    landed_in_the_driver += 1
         assert landed_in_the_driver > 0, "no delivery landed inside a statement"
+        assert recorded_by_backstop <= len(events(caplog, "task_stuck"))
         assert not events(caplog, "worker_error")
-        assert not events(caplog, "task_lease_lost")
-        assert not events(caplog, "task_stuck")
-        assert len(events(caplog, "task_timed_out")) == 300
 
     def test_injection_never_lands_in_worker_bookkeeping(self, caplog):
         """

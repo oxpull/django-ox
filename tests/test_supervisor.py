@@ -24,7 +24,7 @@ from django_ox.models import OxTask
 from django_ox.supervisor import Supervisor, child_command
 from django_ox.worker import Worker
 
-from .conftest import wait_for
+from .conftest import start_worker_thread, wait_for
 from .tasks import add, slow
 
 REPO = Path(__file__).resolve().parent.parent
@@ -527,8 +527,7 @@ class TestOrphans:
     def test_worker_drains_when_its_parent_changes(self, caplog):
         caplog.set_level(logging.WARNING, logger="django_ox")
         worker = Worker(poll_interval=0.05, parent_pid=os.getppid() + 100000)
-        thread = threading.Thread(target=worker.run)
-        thread.start()
+        thread = start_worker_thread(worker)
         thread.join(timeout=10)
         assert not thread.is_alive()
         assert [getattr(r, "event", None) for r in caplog.records] == [

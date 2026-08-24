@@ -2394,7 +2394,7 @@ the pre-1.0 rule applies:
 - **0.x.y patch releases are bug fixes only** and never break a public
   surface.
 
-Pin accordingly: `django-ox~=0.3.0` accepts patch releases only;
+Pin accordingly: `django-ox~=0.3.1` accepts patch releases only;
 `django-ox>=0.3,<0.4` accepts the current minor line.
 
 Once 1.0 ships, breaking changes to the public API will require a major
@@ -2725,7 +2725,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.1] - 2026-08-24
 
 ### Changed
 
@@ -3043,7 +3043,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
-[Unreleased]: https://github.com/oxpull/django-ox/compare/v0.3.0...HEAD
+[0.3.1]: https://github.com/oxpull/django-ox/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/oxpull/django-ox/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/oxpull/django-ox/releases/tag/v0.2.1
 [0.2.0]: https://github.com/oxpull/django-ox/releases/tag/v0.2.0

@@ -127,7 +127,13 @@ TASKS = {
   has not stopped `TASK_TIMEOUT_GRACE` seconds later is recorded as failed
   and the worker exits 75 so its supervisor restarts it. Per-queue values go
   in `TASK_TIMEOUTS`; there is no per-task value. `django_ox.remaining()`
-  reads the seconds left from inside a task.
+  reads the seconds left from inside a task. On a thread a coverage tool or
+  a debugger is watching (a `sys.settrace` hook, or a `sys.monitoring` tool
+  with events enabled) nothing is raised inside a sync task: the worker logs
+  `timeouts_backstop_only`, a task that returns within `TASK_TIMEOUT_GRACE`
+  is recorded as whatever it did, and one still running then is recorded as
+  failed and recycles the worker. An async task is cancelled at the deadline
+  either way.
 - Claiming: one `UPDATE ... SKIP LOCKED ... RETURNING` statement on
   PostgreSQL; `SELECT ... FOR UPDATE SKIP LOCKED` on MySQL 8+; an atomic
   compare-and-set UPDATE on SQLite and other databases without `SKIP LOCKED`.

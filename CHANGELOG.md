@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- A worker enforces `TASK_TIMEOUT` on a sync task through the grace backstop
+  alone while a coverage tool or a debugger is watching the thread the
+  attempt runs on. Two things count: a trace function (`sys.settrace`, which
+  `coverage run` installs before Python 3.14, and which `pdb` and most
+  debuggers install), and a registered `sys.monitoring` tool with events
+  enabled (which `coverage run` uses from Python 3.14 on). Nothing is raised
+  inside the task. A task that returns within `TASK_TIMEOUT` plus
+  `TASK_TIMEOUT_GRACE` is recorded as whatever it did, however long it ran,
+  with no `task_timed_out` event; one still running then is recorded as
+  failed and recycles the worker. An async task is cancelled at its deadline
+  either way, and a profile hook (`sys.setprofile`) is not consulted.
+- The worker logs `timeouts_backstop_only` once under such a tool, on the
+  first attempt it registers rather than at startup. That event now carries
+  `reason` (`interpreter` or `tracing_tool`) and, for a tool, `tracer`:
+  `sys.settrace`, or `sys.monitoring (NAME)`.
+
 ## [0.3.0] - 2026-08-24
 
 ### Upgrading
@@ -303,6 +323,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[Unreleased]: https://github.com/oxpull/django-ox/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/oxpull/django-ox/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/oxpull/django-ox/releases/tag/v0.2.1
 [0.2.0]: https://github.com/oxpull/django-ox/releases/tag/v0.2.0

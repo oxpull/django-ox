@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import socket
+import sys
 import threading
 import time
 import uuid
@@ -100,6 +101,50 @@ def _load_async_exc_injector() -> Callable[[int], None] | None:
 
 _inject_async_exc = _load_async_exc_injector()
 
+# sys.monitoring has six tool slots (PEP 669); get_tool() rejects any other id.
+_MONITORING_TOOL_IDS = range(6)
+
+
+def _active_tracer() -> str | None:
+    """
+    How the calling thread is being watched, or None if it is not.
+
+    Coverage measurement and debuggers install a callback that the
+    interpreter runs between one bytecode and the next, and those callbacks
+    hold locks of their own. An exception raised inside the thread can land
+    in one of them, so a thread being watched is not one this worker raises
+    an exception inside.
+
+    Two mechanisms, both of which count, and the answer names the mechanism
+    rather than the tool. The trace hook is per thread, and ``sys.gettrace``
+    is what that thread was started with (``threading`` installs its default
+    hook as the new thread's own) or has set since; it does not say who
+    installed it. ``sys.monitoring`` is a separate, process-wide registry
+    that carries the tool's own name, and coverage measurement uses it in
+    preference to the trace hook where the interpreter supports it, so a
+    thread with no trace hook can still be watched through a registered tool
+    id.
+
+    A registered tool id with no events enabled is watching nothing:
+    reserving an id runs no callback and takes no lock, so this asks about
+    the events rather than the reservation. A tool that enables events on
+    individual code objects and none globally is the shape this does not
+    see; nothing in the standard library enumerates those without the code
+    object to ask about.
+
+    ``sys.setprofile`` is deliberately not consulted. A profile hook runs on
+    call and return rather than between one bytecode and the next, sampling
+    profilers used in production install one, and degrading every production
+    worker's timeouts for it would cost more than it protects.
+    """
+    if sys.gettrace() is not None:
+        return "sys.settrace"
+    for tool_id in _MONITORING_TOOL_IDS:
+        name = sys.monitoring.get_tool(tool_id)
+        if name is not None and sys.monitoring.get_events(tool_id):
+            return f"sys.monitoring ({name})"
+    return None
+
 
 def _flush_pending_async_exc() -> None:
     """
@@ -149,6 +194,10 @@ class _Watch:
     deadline: float
     deadline_at: datetime
     injectable: bool
+    # How this thread was being watched when the attempt was armed, if it
+    # was. The watchdog leaves a watched thread alone, so the grace backstop
+    # is the whole enforcement for it.
+    tracer: str | None = None
     fired: bool = False
     grace_at: float = 0.0
 
@@ -394,16 +443,26 @@ class Worker:
         # wait for them; they die with the process.
         self._stuck: set[int] = set()
         self._recycling = False
+        # Set once the worker has said that a tracing tool is holding
+        # timeouts to the backstop, so it is said once and not per attempt.
+        self._backstop_only_notice = False
+        self._backstop_only_lock = Lock()
         if self.timeouts.enabled and _inject_async_exc is None:
+            self._backstop_only_notice = True
             logger.warning(
                 "Worker %s cannot raise TaskTimeout inside a running task on "
-                "this interpreter; timeouts are enforced by the %gs grace "
-                "backstop alone",
+                "this interpreter, so the %gs grace backstop is the whole "
+                "enforcement. A task that returns before the backstop fires "
+                "is recorded as whatever it did, however long it ran; one "
+                "still running when it fires is recorded as failed and "
+                "recycles this worker with exit code %d",
                 self.worker_id,
                 self.timeouts.grace,
+                RECYCLE_EXIT_CODE,
                 extra={
                     "event": "timeouts_backstop_only",
                     "worker_id": self.worker_id,
+                    "reason": "interpreter",
                     "grace_s": self.timeouts.grace,
                 },
             )
@@ -823,6 +882,12 @@ class Worker:
         nothing is pending, because the watchdog injects only while the
         entry is present and the entry is gone. An async task is cancelled
         inside its event loop instead.
+
+        A thread that a coverage tool or debugger is watching is left
+        alone. The attempt is registered for the grace backstop and nothing
+        is raised inside it, so a task that returns first is recorded as
+        whatever it did, however long it ran, and one still running when the
+        backstop fires is recorded as failed and recycles the worker.
         """
 
         def invoke() -> Any:
@@ -981,9 +1046,51 @@ class Worker:
             with suppress(Error):
                 conn.close()
 
+    def _note_backstop_only(self, tracer: str) -> None:
+        """
+        Say once, not once per attempt, that a tracing tool is holding this
+        worker's timeouts to the grace backstop.
+        """
+        with self._backstop_only_lock:
+            if self._backstop_only_notice:
+                return
+            self._backstop_only_notice = True
+        logger.warning(
+            "Worker %s runs its tasks under %s, so TaskTimeout is not raised "
+            "inside a running sync task (an async task is still cancelled at "
+            "its deadline) and the %gs grace backstop is the whole "
+            "enforcement. A task that returns before the backstop fires is "
+            "recorded as whatever it did, however long it ran; one still "
+            "running when it fires is recorded as failed and recycles this "
+            "worker with exit code %d",
+            self.worker_id,
+            tracer,
+            self.timeouts.grace,
+            RECYCLE_EXIT_CODE,
+            extra={
+                "event": "timeouts_backstop_only",
+                "worker_id": self.worker_id,
+                "reason": "tracing_tool",
+                "tracer": tracer,
+                "grace_s": self.timeouts.grace,
+            },
+        )
+
     def _arm(
         self, ident: int, db_task: OxTask, timeout: float, *, injectable: bool
     ) -> _Watch:
+        # Asked here, on the thread the exception would be raised inside,
+        # and asked for every attempt: the trace hook is per thread, so the
+        # watchdog cannot answer this from its own, and a tool can be
+        # installed long after the worker started. A tool that starts
+        # watching this thread after the attempt is armed is not seen until
+        # the next attempt; there is no way to read another thread's hook,
+        # so the watchdog cannot re-ask at the deadline.
+        tracer = (
+            _active_tracer() if injectable and _inject_async_exc is not None else None
+        )
+        if tracer is not None:
+            self._note_backstop_only(tracer)
         now = time.monotonic()
         watch = _Watch(
             ident=ident,
@@ -995,7 +1102,8 @@ class Worker:
             started=now,
             deadline=now + timeout,
             deadline_at=timezone.now() + timedelta(seconds=timeout),
-            injectable=injectable,
+            injectable=injectable and tracer is None,
+            tracer=tracer,
         )
         with self._watch_lock:
             self._watches[ident] = watch
@@ -1109,7 +1217,13 @@ class Worker:
                 grace_s=self.timeouts.grace,
             ),
         )
-        if not watch.injectable:
+        if watch.tracer is not None:
+            delivered = (
+                f"nothing was raised inside it, because this worker's threads "
+                f"are watched by {watch.tracer}"
+            )
+            usually = ""
+        elif not watch.injectable:
             delivered = "its coroutine was cancelled at the deadline"
             usually = (
                 " A thread that does not stop is usually in a call that never "
@@ -1119,8 +1233,8 @@ class Worker:
             )
         elif _inject_async_exc is None:
             delivered = (
-                "this interpreter cannot raise TaskTimeout inside a running "
-                "task, so the grace is the whole timeout"
+                "nothing was raised inside it, because this interpreter "
+                "cannot raise TaskTimeout inside a running task"
             )
             usually = ""
         else:

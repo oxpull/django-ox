@@ -4,7 +4,9 @@
   "public_key": "pk_bMEQ94xqHcqvERACC7UDy",
   "projectTitle": "django-ox",
   "description": "Database-backed worker backend for Django's Tasks framework (django.tasks, Django 6.0+). Background tasks run on the database you already have. No broker to provision, secure or back up.",
-  "folders": [],
+  "folders": [
+    "docs"
+  ],
   "excludeFolders": [
     "tests",
     ".github",
@@ -28,7 +30,9 @@
     "code_of_conduct.md",
     "NEWS.md",
     "SECURITY.md",
-    "CONTRIBUTING.md"
+    "CONTRIBUTING.md",
+    "AGENTS.md",
+    "requirements.txt"
   ],
   "rules": [
     "Requires Django 6.0 or later and Python 3.12 or later.",
@@ -44,7 +48,7 @@
     "path(\"ox/\", include(\"django_ox.urls\")) exposes GET /ox/metrics, the queue stats as Prometheus gauges: django_ox_tasks{queue,status}, django_ox_ready_tasks, django_ox_oldest_ready_age_seconds, django_ox_last_claim_age_seconds, django_ox_throughput_per_minute and django_ox_failure_rate. The view has no authentication; wrap it with login_required or restrict it by network. django_ox.metrics.collector() registers the same gauges with an existing prometheus_client registry.",
     "Install with pip install django-ox. Configuration lives in the TASKS setting; the smallest working entry is TASKS = {\"default\": {\"BACKEND\": \"django_ox.backend.OxBackend\"}}.",
     "Backend OPTIONS are MAX_ATTEMPTS (default 3), LOCK_TIMEOUT (300 seconds), BACKOFF_INITIAL (5 seconds), BACKOFF_MAX (600 seconds), TASK_TIMEOUT (None), TASK_TIMEOUTS ({}), TASK_TIMEOUT_GRACE (30 seconds) and SCHEDULES. QUEUES sits beside OPTIONS, not inside it.",
-    "TASK_TIMEOUT (seconds, default None) bounds one attempt. At the deadline the worker raises django_ox.exceptions.TaskTimeout inside the task on its own thread, or cancels an async task, and records the attempt as failed and retried on the usual backoff. A thread that has not stopped TASK_TIMEOUT_GRACE seconds later is recorded as failed and the worker exits with code 75 so its supervisor restarts it. TASK_TIMEOUTS maps queue names to their own values; there is no per-task timeout because django.tasks has no field for one. django_ox.deadline() and django_ox.remaining() read the attempt's deadline from inside a task.",
+    "TASK_TIMEOUT (seconds, default None) bounds one attempt. At the deadline the worker raises django_ox.exceptions.TaskTimeout inside the task on its own thread, or cancels an async task, and records the attempt as failed and retried on the usual backoff. A thread that has not stopped TASK_TIMEOUT_GRACE seconds later is recorded as failed and the worker exits with code 75 so its supervisor restarts it. TASK_TIMEOUTS maps queue names to their own values; there is no per-task timeout because django.tasks has no field for one. django_ox.deadline() and django_ox.remaining() read the attempt's deadline from inside a task. On a thread a coverage tool or a debugger is watching (a sys.settrace hook, or a sys.monitoring tool with events enabled) nothing is raised inside a sync task: the worker logs timeouts_backstop_only, a task that returns within TASK_TIMEOUT_GRACE is recorded as whatever it did, and one still running then is recorded as failed and recycles the worker. An async task is cancelled at the deadline either way.",
     "An attempt is consumed when a worker claims the task, so a worker dying mid-run counts as an attempt. The retry delay after attempt n is BACKOFF_INITIAL * 2 ** (n - 1), capped at BACKOFF_MAX, with no jitter.",
     "LOCK_TIMEOUT bounds how long a worker may stop refreshing its lease, not how long a task may run. A worker renews the lease every LOCK_TIMEOUT / 3 seconds, so a long task on a live worker is not reclaimed.",
     "Recurring tasks are declared in OPTIONS[\"SCHEDULES\"] with a dotted task path and a five-field cron expression. Every running worker dispatches schedules and a unique constraint makes each tick fire once, so there is no separate scheduler process.",

@@ -15,7 +15,7 @@ from django_ox.exceptions import TaskAbandoned
 from django_ox.models import OxTask
 from django_ox.worker import Worker
 
-from .conftest import wait_for
+from .conftest import start_worker_thread, wait_for
 from .tasks import add, fail_always, flaky, record_interval, slow
 
 
@@ -887,8 +887,7 @@ class TestLeaseRenewalUnderTheReaper:
         reaper = Worker(lock_timeout=0.4, poll_interval=0.05)
         slow.enqueue(1.0)
 
-        thread = threading.Thread(target=worker.run, daemon=True)
-        thread.start()
+        thread = start_worker_thread(worker)
         try:
             assert wait_for(
                 lambda: OxTask.objects.get().status == OxTask.Status.RUNNING
@@ -921,8 +920,7 @@ class TestLeaseRenewalUnderTheReaper:
         reaper = Worker(lock_timeout=0.4, poll_interval=0.05)
         slow.enqueue(1.0)
 
-        thread = threading.Thread(target=worker.run, daemon=True)
-        thread.start()
+        thread = start_worker_thread(worker)
         try:
             assert wait_for(
                 lambda: OxTask.objects.get().status == OxTask.Status.RUNNING
@@ -945,8 +943,7 @@ class TestLeaseRenewalUnderTheReaper:
         reaper = Worker(lock_timeout=0.4, poll_interval=0.05)
         slow.enqueue(1.0)
 
-        thread = threading.Thread(target=worker.run, daemon=True)
-        thread.start()
+        thread = start_worker_thread(worker)
         try:
             assert wait_for(
                 lambda: OxTask.objects.get().status == OxTask.Status.RUNNING
@@ -967,9 +964,7 @@ class TestLeaseRenewalUnderTheReaper:
 @pytest.mark.django_db(transaction=True)
 class TestRunLoop:
     def _run_in_thread(self, worker):
-        thread = threading.Thread(target=worker.run, daemon=True)
-        thread.start()
-        return thread
+        return start_worker_thread(worker)
 
     def test_graceful_shutdown_drains_in_flight(self):
         worker = Worker(poll_interval=0.05, backoff_initial=0)

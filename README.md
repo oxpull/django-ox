@@ -13,7 +13,41 @@ Django 6.0 ships the Tasks API but no production backend: the built-in
 `ImmediateBackend` and `DummyBackend` are for development and testing only.
 django-ox stores background tasks in the database you already run and executes
 them with a worker process. There is no broker to provision, secure, upgrade or
-back up.
+back up, and because `enqueue()` is an INSERT on your default connection, a
+task enqueued inside `transaction.atomic()` commits or rolls back with your
+data. No `transaction.on_commit()` needed.
+Comparing backends? See [Choosing a task backend](https://oxpull.com/django-ox/choosing/).
+
+## Install
+
+Requires Python 3.12+ and Django 6.0+.
+
+```
+pip install django-ox
+```
+
+```python
+INSTALLED_APPS = [
+    # ...
+    "django_ox",
+]
+
+TASKS = {
+    "default": {
+        "BACKEND": "django_ox.backend.OxBackend",
+    }
+}
+```
+
+```
+python manage.py migrate django_ox
+python manage.py ox_worker
+```
+
+Tasks are plain `django.tasks` tasks; django-ox adds nothing to learn on the
+producer side. The worker is a separate process, and tasks run only while one
+is running. Every option and flag is on the
+[Configuration](https://oxpull.com/django-ox/configuration/) page.
 
 ## One fewer service to run
 
@@ -40,20 +74,11 @@ it (PostgreSQL, MySQL 8+) and an atomic compare-and-set UPDATE elsewhere
 Failed tasks retry with exponential backoff up to a configurable attempt
 limit, keeping the full traceback of every attempt.
 
-## Install
+## Configuration
 
-Requires Python 3.12+ and Django 6.0+.
-
-```
-pip install django-ox
-```
+Every option has a default; add one when you have a reason to.
 
 ```python
-INSTALLED_APPS = [
-    # ...
-    "django_ox",
-]
-
 TASKS = {
     "default": {
         "BACKEND": "django_ox.backend.OxBackend",
@@ -68,16 +93,7 @@ TASKS = {
 }
 ```
 
-Then run migrations:
-
-```
-python manage.py migrate django_ox
-```
-
 ## Quickstart
-
-Tasks are plain `django.tasks` tasks; django-ox adds nothing to learn on the
-producer side.
 
 ```python
 from django.tasks import task
@@ -104,11 +120,14 @@ python manage.py ox_worker
 | `--backend` | `default` | Backend alias from the `TASKS` setting. |
 | `--queues` | all configured queues | Comma-separated queue names to process. |
 | `--concurrency` | `1` | Tasks executed concurrently (thread pool). |
+| `--processes` | `1` | Worker processes under one supervisor. Each is a full worker with its own connections, reaper and `--concurrency` thread pool; a process that dies is restarted. POSIX only. |
 | `--interval` | `1.0` | Polling interval in seconds when idle. |
-| `--lock-timeout` | backend `LOCK_TIMEOUT` | Seconds before a stuck task is reclaimed. |
+| `--lock-timeout` | backend `LOCK_TIMEOUT` | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |
 
 On SIGTERM or SIGINT the worker stops claiming, finishes in-flight tasks, then
-exits. A second signal forces an immediate exit.
+exits. A second signal forces an immediate exit. With `--processes` above 1,
+send the signal to the supervisor; it forwards once and restarts a worker that
+dies.
 
 ## Pruning
 
@@ -122,12 +141,12 @@ python manage.py ox_prune --older-than 7d
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--older-than` | `7d` | Minimum time since the task finished. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
-| `--include-failed` | off | Also delete FAILED rows. By default they are kept: they hold the per-attempt tracebacks. |
+| `--include-failed` | off | Also delete FAILED and LOST rows. By default they are kept: they hold the per-attempt tracebacks and can be retried. |
 | `--batch-size` | `1000` | Rows per DELETE statement, so pruning a large table never takes a long lock or builds a giant IN clause. |
 | `--dry-run` | off | Report how many rows would be deleted without deleting any. |
 
-Only SUCCESSFUL rows (and, with `--include-failed`, FAILED rows) past the
-cutoff are deleted. READY and RUNNING rows are never touched, whatever their
+Only SUCCESSFUL and DISCARDED rows (and, with `--include-failed`, FAILED and
+LOST rows) past the cutoff are deleted. READY and RUNNING rows are never touched, whatever their
 age. Old rows from the recurring-schedule tick log are cleared with the same
 cutoff, always keeping each schedule's most recent tick.
 
@@ -148,6 +167,18 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. |
 | `--max-age` | off | Fail when the oldest waiting task has waited longer than this many seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this many seconds. |
+
+Mounting `path("ox/", include("django_ox.urls"))` exposes `GET /ox/metrics`,
+the same numbers as Prometheus gauges; the view has no authentication of its
+own.
+
+When `django.contrib.admin` is installed, the task table is registered with
+it: a filterable list, a read-only detail page with every attempt's
+traceback, and **Retry selected tasks** and **Discard selected tasks**
+actions. The same two operations are `django_ox.actions.retry(result_id)`
+and `django_ox.actions.discard(result_id)`. A retry is one more attempt on
+a FAILED or LOST task; a discard closes a READY, FAILED or LOST task without
+running it. Neither touches a running task.
 
 Worker lifecycle events (claim, start, success, retry, failure, reclaim,
 shutdown) log to the `django_ox` logger with stable extra keys (task id,
@@ -223,20 +254,21 @@ firing for a time before it existed.
 - Because execution is at-least-once, tasks should be idempotent. A task is
   retried both when it raises and when its worker dies mid-run.
 - Concurrency uses a thread pool. That fits I/O-bound tasks (email, HTTP,
-  ORM); for CPU-bound work, run multiple worker processes with
-  `--concurrency=1` instead.
+  ORM); for CPU-bound work, run `--processes N --concurrency 1`, which is N
+  worker processes under one supervisor.
 
-## Scope and roadmap
+## Scope
 
 The core is deliberately small: a durable queue, a worker, recurring
 schedules, monitoring, and nothing else to operate. Outside the current
-scope: task revocation after enqueue, and multi-database routing (tasks
-are stored on the default database for the model).
+scope: interrupting one chosen running task on demand (every attempt can be
+bounded with `TASK_TIMEOUT`), and multi-database routing (tasks are stored on
+the default database for the model).
 
-Batches and unique tasks ship in [Oxpull Pro](https://oxpull.com/django-ox/pro/);
-the waitlist is at <https://oxpull.com/>. Metrics stay in this package:
-`django_ox.stats` and `ox_health` are free and stay free. Rate limiting is in
-neither tier.
+Batches and unique tasks are in
+[Oxpull Pro](https://oxpull.com/django-ox/pro/), a paid add-on that is not on
+sale yet; the waitlist is at <https://oxpull.com/>. Metrics stay in this
+package: `django_ox.stats` and `ox_health` are free and stay free.
 
 ## Stability
 

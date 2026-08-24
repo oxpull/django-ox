@@ -3,8 +3,8 @@
 {#
   Social and icon metadata. Material's built-in social plugin generates cards
   at build time but needs cairo and pango on the build machine; a static card
-  is one less thing that can break a docs deploy, and it keeps the published
-  card identical to the one used in the newsletter placement.
+  is one less thing that can break a docs deploy, and it keeps the card
+  identical everywhere it is shared.
 #}
 {% block extrahead %}
   {% set title = config.site_name %}

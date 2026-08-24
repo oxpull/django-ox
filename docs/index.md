@@ -55,6 +55,18 @@ failed tasks retry with
 exponential backoff, and a reaper returns tasks whose worker died to the
 queue. Details in [Production](production.md).
 
+## What happens when a worker dies
+
+A worker that claims a task takes a lease on it, and the attempt is counted at
+that moment. While the task runs, the worker renews the lease every
+`LOCK_TIMEOUT / 3` seconds, so a slow task on a live worker is never reclaimed.
+If the worker is killed, the lease goes stale. After `LOCK_TIMEOUT` (default
+300 seconds) the reaper in any surviving worker takes the task back: to READY
+if attempts remain, or to LOST if they are spent. LOST reads as `FAILED`
+through the result API, so nothing waits forever on a worker that is not
+coming back. The mechanics, and the one case worth knowing about, are in
+[Production](production.md#the-lease).
+
 ## What you get
 
 - Transactional enqueue, as above. No `on_commit` boilerplate.
@@ -69,9 +81,8 @@ queue. Details in [Production](production.md).
   standard `django.tasks` result API.
 - A [prune command](configuration.md#ox_prune) to keep the table small.
 - [Monitoring](monitoring.md): a queue-stats API, an `ox_health` command
-  for probes and cron alerting, and structured log events.
-
-The worker is covered by 221 tests, green on both SQLite and PostgreSQL 16.
+  for probes and cron alerting, a Prometheus endpoint, structured log
+  events, and an admin page with retry and discard.
 
 ## Install
 
@@ -153,17 +164,20 @@ The core is deliberately small: a durable queue, a worker, recurring
 schedules, and monitoring, with nothing extra to operate. Design
 decisions worth knowing before you commit:
 
-- Enqueued tasks run; there is no revocation or cancellation API after
-  enqueue.
+- A queued task can be discarded before a worker claims it, and a failed
+  one retried, from the admin or with `django_ox.actions`. `TASK_TIMEOUT`
+  bounds how long any attempt may run; a particular running task cannot be
+  interrupted on demand.
 - Tasks are stored on the default database for the model; multi-database
   routing is not part of the current scope.
 - Worker concurrency is a thread pool, which fits I/O-bound tasks. For
-  CPU-bound work, run multiple worker processes with `--concurrency 1`
-  instead. See [Production](production.md#threads-and-processes).
+  CPU-bound work, run `--processes N --concurrency 1`, which is N worker
+  processes under one supervisor. See
+  [Production](production.md#threads-and-processes).
 
-Batches and unique tasks ship in [Oxpull Pro](pro.md). Metrics stay in this
-package: `django_ox.stats` and `ox_health` are free and stay free. Rate limiting
-is in neither tier.
+Batches and unique tasks are in [Oxpull Pro](pro.md), a paid add-on that is
+not on sale yet; the waitlist is at <https://oxpull.com/>. Metrics stay in
+this package: `django_ox.stats` and `ox_health` are free and stay free.
 
 ## License
 

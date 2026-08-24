@@ -1,4 +1,3 @@
-import threading
 from datetime import timedelta
 
 import pytest
@@ -10,7 +9,7 @@ from django_ox.models import OxScheduleTick, OxTask
 from django_ox.schedules import schedules_from_options
 from django_ox.worker import Worker
 
-from .conftest import wait_for
+from .conftest import start_worker_thread, wait_for
 
 
 def tasks_setting(schedules):
@@ -356,8 +355,7 @@ class TestScheduleRunLoop:
             }
         )
         worker = Worker(poll_interval=0.05, schedule_interval=0.05, backoff_initial=0)
-        thread = threading.Thread(target=worker.run, daemon=True)
-        thread.start()
+        thread = start_worker_thread(worker)
         try:
             # First pass anchors the schedule without firing.
             assert wait_for(

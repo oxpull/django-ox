@@ -42,6 +42,7 @@ extra_css:
 
 markdown_extensions:
   - admonition
+  - footnotes
   - attr_list
   - pymdownx.highlight
   - pymdownx.superfences
@@ -54,9 +55,11 @@ nav:
   - Recurring tasks: recurring-tasks.md
   - Common patterns: patterns.md
   - Migrating: migrating.md
+  - Choosing a backend: choosing.md
   - Production: production.md
   - Monitoring: monitoring.md
   - Benchmarks: benchmarks.md
   - API stability: stability.md
   - Pro: pro.md
+  - For AI assistants: agents.md
   - Changelog: changelog.md

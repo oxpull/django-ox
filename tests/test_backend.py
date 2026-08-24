@@ -1,8 +1,12 @@
+import os
+import subprocess
+import sys
 import uuid
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from django.core.management import call_command
 from django.db import transaction
 from django.tasks import TaskResultStatus, default_task_backend
 from django.tasks.exceptions import TaskResultDoesNotExist, TaskResultMismatch
@@ -212,3 +216,29 @@ def test_check_requires_installed_app(settings):
     settings.INSTALLED_APPS = []
     errors = default_task_backend.check()
     assert [e.id for e in errors] == ["django_ox.E001"]
+
+
+def test_a_model_change_without_a_migration_fails_the_check():
+    """makemigrations --check: the CI step and this test make the same claim."""
+    call_command("makemigrations", "django_ox", "--check", "--dry-run", verbosity=0)
+
+
+def test_manage_py_check_cannot_see_a_missing_app_entry():
+    """
+    The app's ready() is what registers the django-ox checks, so E001, the
+    missing-app check, never fires from manage.py check in a project that
+    imports django.tasks nowhere else. The configuration page says so.
+    """
+    env = dict(os.environ)
+    env["DJANGO_SETTINGS_MODULE"] = "tests.settings_plain"
+    env["OX_TEST_DROP_APP"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-m", "django", "check"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "E001" not in completed.stderr

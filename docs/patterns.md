@@ -126,6 +126,46 @@ Workers ignore the row until then. For anything on a repeating clock, use a
 [schedule](recurring-tasks.md) instead of enqueueing the next one from inside
 the task.
 
+## Enqueuing many tasks at once
+
+A loop of `enqueue()` calls is one `INSERT` per task. For a few dozen that is
+fine; for a mailing run or a nightly fan-out it is the slow part of the
+request. `django_ox.bulk.enqueue_many()` writes them in one statement per
+thousand rows.
+
+```python
+from django_ox.bulk import enqueue_many
+
+results = enqueue_many(
+    send_digest,
+    [((user.pk,), {}) for user in User.objects.filter(digest=True)],
+)
+```
+
+Each element of the list is an `(args, kwargs)` pair, the same two values
+`enqueue(*args, **kwargs)` passes to the backend. The return value is one
+`TaskResult` per pair, in the order given. Queue, priority and `run_after`
+belong to the task, so set them once with `.using(...)`:
+
+```python
+results = enqueue_many(
+    send_digest.using(queue_name="emails", run_after=tonight),
+    [((user.pk,), {}) for user in users],
+)
+```
+
+The task and every argument are checked before the first row is written: a
+queue the backend does not accept, a task bound to another backend, or an
+argument that will not serialise to JSON raises with nothing inserted. The
+rows go in one `INSERT` per 1,000 (SQLite caps the variables a statement can
+bind) inside one transaction, so a call of 5,000 commits all 5,000 or none,
+and inside your own `transaction.atomic()` it commits or rolls back with
+the rest of your work, as `enqueue()` does.
+
+This is a bulk insert and nothing more. Grouping the
+tasks, reading their progress as one number and firing a callback when the
+last one settles is a [batch](pro.md), in Oxpull Pro.
+
 ## Keep slow work off the fast queue
 
 Give slow tasks their own queue and run a separate worker for it, so a batch of
@@ -223,7 +263,7 @@ to exercise claiming and retries for real.
 
 ## Not in the core
 
-Batches and unique or deduplicated tasks are not part of django-ox. They are the
-[Oxpull Pro](pro.md) feature set. Metrics are in the free tier: `django_ox.stats`
-and `manage.py ox_health` ship in the core. Rate limiting, chains and workflows
-do not exist in either tier.
+Batches and unique or deduplicated tasks are in [Oxpull Pro](pro.md), a paid
+add-on that is not on sale yet. Metrics are in the free tier: `django_ox.stats`
+and `manage.py ox_health` ship in the core. Chains and workflows are on the
+Pro roadmap, undated.

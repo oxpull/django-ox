@@ -5,6 +5,116 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-08-24
+
+### Upgrading
+
+- Run `python manage.py migrate django_ox`, and roll every process, web and
+  worker, to 0.3.0 before the first discard. This release adds the
+  DISCARDED status: a 0.2.1 process that reads a DISCARDED row raises
+  `ValueError` from `get_result()` and `refresh()`, and 0.2.1's `ox_prune`
+  cannot delete such rows. Rolling back with DISCARDED rows present keeps
+  that crash until the rows are removed by hand
+  (`DELETE FROM django_ox_oxtask WHERE status = 'DISCARDED'`); reversing
+  the migration does not remove them.
+
+### Added
+
+- `TASK_TIMEOUT`, `TASK_TIMEOUTS` and `TASK_TIMEOUT_GRACE` backend options, a
+  limit on how long one attempt may run. At the deadline the worker raises
+  `django_ox.exceptions.TaskTimeout` inside the task, on the task's own
+  thread, so `finally` blocks run and an open `transaction.atomic()` rolls
+  back; an async task is cancelled inside its event loop instead. The attempt
+  is recorded as failed with the `TaskTimeout` error and retried on the usual
+  backoff, or marked FAILED when attempts are spent. A thread that has not
+  stopped `TASK_TIMEOUT_GRACE` seconds later (default 30) is treated as
+  stuck: the worker records the attempt as failed, moves the lease number so
+  the thread can write nothing to the row, stops claiming, drains its other
+  tasks and exits with code 75, which `--processes` restarts without counting
+  it against the restart cap. `TASK_TIMEOUTS` maps a queue name to its own
+  value, and a key that is not in `QUEUES` fails `manage.py check` as
+  `django_ox.E005`; a bad value fails it as `django_ox.E004`. Off by default.
+  `django_ox.deadline()` and `django_ox.remaining()` read the attempt's
+  deadline from inside a task. `TaskTimeout` subclasses `TimeoutError`. New
+  log events: `task_timed_out`, `task_stuck`, `worker_recycling`,
+  `worker_process_recycled` and `timeouts_backstop_only`.
+- `ox_worker --processes N`. Above 1, the command supervises N copies of
+  itself, each a full worker with its own database connections, lease
+  renewal, reaper and `--concurrency` thread pool, so `--processes 2
+  --concurrency 4` runs eight tasks at once. Every worker id ends in its slot
+  number. SIGTERM, SIGINT or SIGHUP to the supervisor is forwarded once and
+  the supervisor exits 0 when every worker drained, or with the first
+  non-zero code; a second signal is the force-exit, and a worker that has
+  not exited five seconds later is SIGKILLed. A worker process that dies,
+  by any exit code, is restarted with `worker_process_restarted` at
+  WARNING, after one second and then with a doubling delay up to 30
+  seconds; more than five deaths of one slot in a minute stops the
+  supervisor with exit code 1 and `supervisor_restart_cap` at ERROR. A
+  worker whose supervisor dies drains and exits (`worker_orphaned`). The
+  children are started the way the supervisor was, `manage.py` by absolute
+  path or `python -m django`, with `--settings` and `--pythonpath` passed
+  on, so the command works from any working directory. `--processes 1`, the
+  default, is the worker as before. POSIX only.
+- A Prometheus endpoint. `path("ox/", include("django_ox.urls"))` mounts
+  `GET /ox/metrics`, which renders the `django_ox.stats` numbers as gauges in
+  the Prometheus text format (OpenMetrics on request), from the standard
+  library alone. The metric names are `django_ox_tasks{queue,status}`,
+  `django_ox_ready_tasks`, `django_ox_oldest_ready_age_seconds`,
+  `django_ox_last_claim_age_seconds`, `django_ox_throughput_per_minute` and
+  `django_ox_failure_rate`, and they are public API from this release. The
+  view has no authentication of its own. `django_ox.metrics.collector()`
+  returns a collector for a `prometheus_client` registry when that package is
+  installed; it is not a dependency.
+- `django_ox.actions.retry(result_id)` and `django_ox.actions.discard(result_id)`.
+  A retry puts a FAILED or LOST task back to READY for one more attempt, keeping
+  its attempt count, worker ids and every traceback, and clearing the backoff so
+  it is eligible at once. A discard closes a READY, FAILED or LOST task without
+  running it. Each is one compare-and-set on the row's status and lease number,
+  so two retries of one row requeue it once, a discard that races a claim loses
+  to it, and a LOST row's missing worker cannot write over its retry. Neither
+  touches a RUNNING task. `retry_many(selection)` and `discard_many(selection)`
+  take a queryset or a list of ids and make the same move in one conditional
+  UPDATE per thousand rows inside one transaction, returning
+  `(changed, skipped)`.
+- The task table in the Django admin, registered only when
+  `django.contrib.admin` is installed: a list with status and queue filters and
+  search by id or path, a read-only detail page with every attempt's traceback,
+  and **Retry selected tasks** and **Discard selected tasks** actions that
+  report how many rows moved and how many were skipped. The actions call
+  `retry_many` and `discard_many`, so a select-across of any size is a few
+  statements in one transaction. The admin does not add, edit or delete rows.
+- `django_ox.bulk.enqueue_many(task, calls)`, the bulk form of `enqueue()`.
+  `calls` is a list of `(args, kwargs)` pairs; the rows are written with one
+  INSERT per 1,000 inside one transaction and the `TaskResult` list comes back
+  in input order. The task is validated and every argument serialised before
+  the first write, so a rejected call inserts nothing. Each row is built by the
+  same code as `enqueue()`, so workers see no difference.
+- `OxTask.Status.DISCARDED`, a sixth value in django-ox's own status column. It
+  reads as `FAILED` through `django.tasks` and `is_finished` is true for it.
+  `queue_stats()` reports it in a `discarded` column, and `ox_prune` deletes
+  discarded rows with successful ones.
+
+### Fixed
+
+- `manage.py check` runs the django-ox checks, `django_ox.E001` to `E005`,
+  in a project that imports `django.tasks` nowhere else. Django registers its
+  tasks check when that module is first imported, and a project without the
+  admin or a task module on its import path reached `check` without it, so
+  every django-ox check passed silently. The worker's own startup check was
+  unaffected.
+
+### Changed
+
+- **A migration ships with this release.** Run `python manage.py migrate
+  django_ox` when you upgrade. It adds the new status choice.
+- `QueueStats` has a sixth field, `discarded`, keyword-defaulted like `lost`.
+- A queued task can now be discarded and a failed or lost one retried, and
+  every attempt can be bounded with `TASK_TIMEOUT`; interrupting one chosen
+  running task on demand stays outside scope.
+- A worker that is already draining, because it is recycling, treats the
+  operator's first signal as the drain it is doing rather than as the
+  force-exit; the second signal is still the force-exit.
+
 ## [0.2.1] - 2026-08-20
 
 ### Fixed
@@ -193,6 +303,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[0.3.0]: https://github.com/oxpull/django-ox/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/oxpull/django-ox/releases/tag/v0.2.1
 [0.2.0]: https://github.com/oxpull/django-ox/releases/tag/v0.2.0
 [0.1.2]: https://github.com/oxpull/django-ox/releases/tag/v0.1.2

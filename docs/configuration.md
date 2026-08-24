@@ -13,6 +13,9 @@ TASKS = {
             "LOCK_TIMEOUT": 300,
             "BACKOFF_INITIAL": 5,
             "BACKOFF_MAX": 600,
+            "TASK_TIMEOUT": None,
+            "TASK_TIMEOUTS": {},
+            "TASK_TIMEOUT_GRACE": 30,
             "SCHEDULES": {},  # see the Recurring tasks page
         },
     }
@@ -50,6 +53,9 @@ retry. Add options when you have a reason to.
 | `LOCK_TIMEOUT` | `300` | Seconds a RUNNING task's lock may go unrefreshed before the reaper takes the task back. A worker refreshes the lock every `LOCK_TIMEOUT / 3` seconds while it is executing, so this is a limit on how long a worker may be unresponsive, not on how long a task may run. |
 | `BACKOFF_INITIAL` | `5` | Delay in seconds before the first retry. |
 | `BACKOFF_MAX` | `600` | Ceiling on the retry delay, in seconds. |
+| `TASK_TIMEOUT` | `None` | Seconds one attempt may run. `None` means no limit. At the deadline the worker raises `django_ox.exceptions.TaskTimeout` inside the task, on the task's own thread, and records the attempt as failed: retried on the usual backoff, or FAILED when attempts are spent. An async task is cancelled at the deadline instead. See [Task timeouts](production.md#task-timeouts). |
+| `TASK_TIMEOUTS` | `{}` | Per-queue timeouts, `{"queue name": seconds}`. A queue in the mapping uses its own value instead of `TASK_TIMEOUT`; `None` as a value exempts that queue. Every key must be a queue named in `QUEUES`, unless `QUEUES` is `[]`. Per queue rather than per task because `django.tasks` gives a task no field a backend could read a timeout from, and a queue is its unit of routing. |
+| `TASK_TIMEOUT_GRACE` | `30` | Seconds a timed-out attempt gets to stop. A thread still running after that is treated as stuck, which usually means it is in a call that never returns to Python, where the exception cannot land: the worker records the attempt as failed, stops claiming, drains its other tasks and exits with code 75 so its supervisor restarts it. A task that catches `TaskTimeout` has the same deadline to return or raise. |
 | `SCHEDULES` | `{}` | Recurring task definitions. Documented on the [Recurring tasks](recurring-tasks.md) page. |
 
 The retry delay after attempt *n* fails is
@@ -67,13 +73,18 @@ python manage.py ox_worker [options]
 | --- | --- | --- |
 | `--backend` | `default` | Backend alias from the `TASKS` setting. |
 | `--queues` | all configured queues | Comma-separated queue names this worker processes. |
-| `--concurrency` | `1` | Tasks executed concurrently, as a thread pool inside the process. |
+| `--concurrency` | `1` | Tasks executed concurrently, as a thread pool inside each worker process. |
+| `--processes` | `1` | Worker processes to run. At `1` the command is the worker. Above `1` it supervises that many copies of itself, each a full worker with its own connections, lease renewal, reaper and `--concurrency` thread pool, so `--processes 2 --concurrency 4` runs eight tasks at once. See [Threads and processes](production.md#threads-and-processes). |
 | `--interval` | `1.0` | Polling interval in seconds when idle. When tasks are in flight the worker wakes as soon as one finishes, so this does not bound throughput. |
 | `--lock-timeout` | backend `LOCK_TIMEOUT`, or 300 | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |
 
 The command also honors Django's standard `-v/--verbosity`: at the default
 verbosity it logs worker lifecycle and warnings to stderr, and `-v 2`
-enables debug logging. `-v 0` attaches no log handler.
+enables debug logging. `-v 0` attaches no log handler. With `--processes`
+above 1 every flag is passed on to each worker process unchanged, including
+`--settings` and `--pythonpath`, and each worker process is started the way
+the supervisor was (`manage.py` by absolute path, or `python -m django`), so
+the command works from any working directory.
 
 Two intervals are derived rather than flagged:
 
@@ -127,8 +138,8 @@ python manage.py ox_worker --queues exports --lock-timeout 7200
 
 If you embed the worker programmatically, `django_ox.worker.Worker`
 accepts `reap_interval`, `renew_interval`, `schedule_interval`,
-`backoff_initial` and `backoff_max` keyword overrides in addition to the flag
-equivalents.
+`backoff_initial`, `backoff_max`, `task_timeout` and `task_timeout_grace`
+keyword overrides, which have no flag; they win over the `OPTIONS` values.
 
 ## ox_prune
 
@@ -145,12 +156,12 @@ python manage.py ox_prune --older-than 7d
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--older-than` | `7d` | Minimum time since the task finished. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
-| `--include-failed` | off | Also delete FAILED and LOST rows. By default they are kept, because they hold the per-attempt tracebacks. |
+| `--include-failed` | off | Also delete FAILED and LOST rows. By default they are kept, because they hold the per-attempt tracebacks and can be retried. |
 | `--batch-size` | `1000` | Rows per DELETE statement, so pruning a large table never takes a long lock or builds a giant IN clause. Must be at least 1. |
 | `--dry-run` | off | Report how many rows would be deleted without deleting any. |
 
-Only SUCCESSFUL rows (and, with `--include-failed`, FAILED rows) whose
-`finished_at` is past the cutoff are deleted. READY and RUNNING rows are
+Only SUCCESSFUL and DISCARDED rows (and, with `--include-failed`, FAILED and
+LOST rows) whose `finished_at` is past the cutoff are deleted. READY and RUNNING rows are
 never touched, whatever their age. Rows from the recurring-schedule tick
 log are pruned with the same cutoff, always keeping each schedule's most
 recent tick; that row anchors missed-tick recovery and deleting it would
@@ -184,12 +195,23 @@ alert are on the
 
 `manage.py check` validates the setup:
 
-- `django_ox.E001`: `django_ox` is missing from `INSTALLED_APPS`.
+- `django_ox.E001`: `django_ox` is missing from `INSTALLED_APPS`. The app
+  itself registers these checks with Django, so a project that also lacks
+  any other import of `django.tasks` gets no `E001` from `manage.py check`;
+  the reliable symptom is `Unknown command: 'ox_worker'`, because the
+  command ships with the app.
 - `django_ox.E002`: a `SCHEDULES` entry is invalid (task path does not
   import, cron expression does not parse or can never fire, arguments not
   JSON-serializable, bad queue name or priority).
 - `django_ox.E003`: the same schedule name is defined on more than one
   backend; schedule names must be unique across backends.
+- `django_ox.E004`: `TASK_TIMEOUT`, a `TASK_TIMEOUTS` value or
+  `TASK_TIMEOUT_GRACE` is not a positive, finite number of seconds, at most
+  a thousand years (the first two may also be `None`, which means no limit;
+  `float("inf")` does not), or `TASK_TIMEOUTS` is not a mapping keyed by
+  queue name. Every bad value is reported in one run.
+- `django_ox.E005`: a `TASK_TIMEOUTS` key names a queue that is not in
+  `QUEUES`, so the entry would never apply.
 
-The worker performs the same schedule validation at startup, so a bad
-deploy fails loudly rather than skipping dispatches.
+The worker performs the same schedule and timeout validation at startup, so
+a bad deploy fails loudly rather than skipping dispatches.

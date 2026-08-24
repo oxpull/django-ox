@@ -93,6 +93,7 @@ def _repo(
     link_ref=True,
     urls=None,
     readme_pin=None,
+    docs_pin=None,
 ):
     repo = tmp_path / "repo"
     (repo / "src" / "django_ox").mkdir(parents=True, exist_ok=True)
@@ -121,6 +122,9 @@ def _repo(
         )
     pin = f"`django-ox=={readme_pin}`" if readme_pin else "pip install django-ox"
     (repo / "README.md").write_text(f"Python 3.12+, Django 6.0+. {pin}\n", "utf-8")
+    (repo / "docs").mkdir(exist_ok=True)
+    docs_text = f"Pin `django-ox~={docs_pin}`.\n" if docs_pin else "Stable.\n"
+    (repo / "docs" / "stability.md").write_text(docs_text, "utf-8")
     return repo
 
 
@@ -181,7 +185,14 @@ def test_unexpected_host_fails(tmp_path):
 
 def test_stale_readme_pin_fails(tmp_path):
     problems, _ = check_source(_repo(tmp_path, readme_pin="0.1.2"))
-    assert "README pins django-ox 0.1.2 but this release is 0.2.0" in _messages(
+    assert "README.md pins django-ox 0.1.2 but this release is 0.2.0" in _messages(
+        problems
+    )
+
+
+def test_stale_docs_pin_fails(tmp_path):
+    problems, _ = check_source(_repo(tmp_path, docs_pin="0.1.2"))
+    assert "stability.md pins django-ox 0.1.2 but this release is 0.2.0" in _messages(
         problems
     )
 

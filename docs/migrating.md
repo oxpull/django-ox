@@ -84,7 +84,7 @@ send_confirmation.enqueue(order_id=42)
 | `apply_async(countdown=..., eta=...)` | `run_after` |
 | `autoretry_for`, `self.retry` | automatic. Tune with `MAX_ATTEMPTS`, `BACKOFF_INITIAL`, `BACKOFF_MAX`. |
 | Result backend | the same table, read through the standard result API. |
-| Flower | the [stats API and `ox_health`](monitoring.md) |
+| Flower | the [stats API, `ox_health`, the Prometheus endpoint and the admin page](monitoring.md) |
 
 One difference in behaviour is worth reading before you switch. With a broker,
 `enqueue` leaves your process immediately. If the surrounding transaction then
@@ -94,9 +94,10 @@ is to wrap every call in `transaction.on_commit()`.
 Here the enqueue is an `INSERT` on your own connection. It commits or rolls back
 with the row it belongs to, so there is nothing to wrap.
 
-**Not supported:** Celery's chains, groups and chords, and routing across
-multiple brokers. Queues, priorities and `run_after` are what exist today.
-Chains are on the [Oxpull Pro](pro.md) roadmap.
+Queues, priorities and `run_after` are what exist today. Celery's chains,
+groups and chords, and routing across multiple brokers, are outside the
+package; chains and workflows are on the [Oxpull Pro](pro.md) roadmap,
+undated.
 
 ## From huey
 

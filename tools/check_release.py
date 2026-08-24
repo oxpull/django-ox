@@ -12,7 +12,8 @@ The source tree (`check_source`):
      all agree.
   2. The CHANGELOG has a link reference for that version.
   3. Every project URL is well formed and points at a host we actually control.
-  4. The README declares no version other than the one being released.
+  4. The README and the docs pages pin no django-ox version other than the
+     one being released.
   5. On a tag build, the tag matches the declared version.
 
 The built archives (`check_dist`), which the source tree cannot show:
@@ -107,17 +108,20 @@ def check_urls(urls: dict[str, str]) -> list[str]:
 
 
 def check_readme(version: str, repo: Path = REPO) -> list[str]:
-    """The README is the package page. A stale version in it is a public error."""
-    text = (repo / "README.md").read_text(encoding="utf-8")
+    """The README is the package page and the docs ship pin examples. A stale
+    django-ox version on any of them is a public error."""
     problems: list[str] = []
-    for match in re.finditer(r"django-ox[=~><]=\s*([0-9]+\.[0-9]+\.[0-9]+)", text):
-        if match.group(1) != version:
-            problems.append(
-                fail(
-                    f"README pins django-ox {match.group(1)} but this release is "
-                    f"{version}"
+    pages = [repo / "README.md", *sorted((repo / "docs").glob("*.md"))]
+    for page in pages:
+        text = page.read_text(encoding="utf-8")
+        for match in re.finditer(r"django-ox[=~><]=\s*([0-9]+\.[0-9]+\.[0-9]+)", text):
+            if match.group(1) != version:
+                problems.append(
+                    fail(
+                        f"{page.name} pins django-ox {match.group(1)} but this "
+                        f"release is {version}"
+                    )
                 )
-            )
     return problems
 
 

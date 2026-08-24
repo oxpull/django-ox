@@ -1,3 +1,5 @@
+import os
+
 from .settings import *  # noqa: F403
 
 # Local verification settings for the SELECT ... FOR UPDATE SKIP LOCKED path.
@@ -13,3 +15,8 @@ DATABASES = {
         "PORT": "54329",
     }
 }
+
+# Worker processes started from the test suite must hit the test database the
+# parent created, not the development one; the parent passes its name through.
+if "OX_TEST_DB_NAME" in os.environ:
+    DATABASES["default"]["NAME"] = os.environ["OX_TEST_DB_NAME"]

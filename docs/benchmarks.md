@@ -8,7 +8,8 @@ nothing was discarded.
 
 ## Results
 
-Final 3-run matrix, runs interleaved between backends, all runs shown.
+Final 3-run matrix, runs interleaved between backends, all runs shown,
+measured on django-ox 0.1.0.
 
 | Metric | django-ox (r1 / r2 / r3) | django-tasks-db (r1 / r2 / r3) |
 | --- | --- | --- |
@@ -17,8 +18,8 @@ Final 3-run matrix, runs interleaved between backends, all runs shown.
 | End-to-end, 2,000 tasks, concurrency 1 (tasks/sec) | 90.1 / 88.1 / 90.1 | 69.2 / 69.9 / 69.6 |
 | End-to-end, 2,000 tasks, concurrency 4 (tasks/sec) | 393 / 373 / 397 | 366 / 373 / 376 |
 
-Reading: ox wins enqueue throughput and concurrency-1 end-to-end in all
-three runs, and edges or ties concurrency 4. In-transaction enqueue
+Reading: django-ox wins enqueue throughput and concurrency-1 end-to-end
+in all three runs, and edges or ties concurrency 4. In-transaction enqueue
 latency is a tie at roughly half a millisecond for both; run-to-run drift
 on the machine is larger than the difference between the backends.
 
@@ -42,7 +43,7 @@ Two properties of the worker's claim path drive the end-to-end results:
   poll interval, so `--interval` only governs how often an idle worker
   checks for new work.
 
-The harness gates releases. Both properties above are proven by published cells:
+Both properties above are proven by published cells:
 the single-statement claim by the concurrency-1 rows, the completion wake-up by
 the diagnostic cell. A regression in either shows up as a changed number rather
 than a changed claim.
@@ -63,10 +64,10 @@ than a changed claim.
 - **The concurrency-4 comparison is imperfect by construction.**
   django-tasks-db's worker has no concurrency option, so its
   "concurrency 4" is four separate processes: four interpreters without a
-  shared GIL, four Django boots inside the timed window. ox's is four
-  threads in one process. This is the fairest available mapping, though
-  still an approximation. (It also means ox wins that cell while sharing
-  one interpreter.)
+  shared GIL, four Django boots inside the timed window. django-ox's is
+  four threads in one process. This is the fairest available mapping, though
+  still an approximation. (It also means django-ox wins that cell
+  while sharing one interpreter.)
 - **Small N.** 2,000 tasks and 500 latency samples separate the backends
   here but say nothing about p99+ tails or sustained load. Sustained load
   and worker-failure behavior are covered separately by the

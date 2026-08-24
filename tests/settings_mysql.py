@@ -1,3 +1,5 @@
+import os
+
 from .settings import *  # noqa: F403
 
 # MySQL 8 verification settings. MySQL 8 supports SELECT ... FOR UPDATE SKIP
@@ -38,3 +40,8 @@ DATABASES = {
         "TEST": {"CHARSET": "utf8mb4", "COLLATION": "utf8mb4_unicode_ci"},
     }
 }
+
+# Worker processes started from the test suite must hit the test database the
+# parent created, not the development one; the parent passes its name through.
+if "OX_TEST_DB_NAME" in os.environ:
+    DATABASES["default"]["NAME"] = os.environ["OX_TEST_DB_NAME"]

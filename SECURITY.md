@@ -58,6 +58,23 @@ backup, or those log records can read them.
 Encrypting arguments at rest is not offered in either tier today; the plaintext
 posture above is what both packages do.
 
+## The admin page
+
+When `django.contrib.admin` is installed, the task detail page renders
+`args`, `kwargs`, `return_value` and every stored traceback to any user
+holding the `view_oxtask` permission; grant it as you would read access to
+the table itself. The `change_oxtask` permission enables the retry and
+discard actions, and a retry re-runs a stored task with its stored
+arguments, so treat that permission as the ability to execute the
+application's registered tasks.
+
+## The metrics endpoint
+
+Mounting `django_ox.urls` exposes `/ox/metrics` with no authentication of
+its own. It reveals queue names and traffic shape, never task data. Put it
+behind the project's own policy before it is reachable from outside; the
+[Monitoring](docs/monitoring.md#prometheus) page shows two one-line guards.
+
 ## SQL
 
 Every query is built through the Django ORM. The one raw statement (the
@@ -70,7 +87,8 @@ or user input by string formatting.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x   | yes       |
+| 0.3.x   | yes       |
+| older   | no        |
 
 ## Reporting a vulnerability
 

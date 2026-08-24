@@ -384,6 +384,16 @@ thread, which every supported Python has. On an interpreter without it, the
 worker logs `timeouts_backstop_only` once at startup and enforces timeouts
 by the grace backstop alone.
 
+A coverage or tracing tool watching the worker's threads changes how a
+timeout is enforced. Under `coverage run`, a debugger, a tracing profiler or
+a `sys.monitoring` tool, the worker raises nothing inside the running task:
+the attempt is registered for the grace backstop, the task is not
+interrupted, and at `TASK_TIMEOUT` plus `TASK_TIMEOUT_GRACE` the attempt is
+recorded as failed and the worker recycles. The worker logs
+`timeouts_backstop_only` once, naming the tool. A test suite that runs tasks
+under coverage sees that shape; a production worker is not usually watched
+by anything.
+
 ## The reaper
 
 Workers still die: OOM kills, node failures, `kill -9`. A dead worker stops

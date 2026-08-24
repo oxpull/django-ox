@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- A worker whose threads are watched by a coverage or tracing tool
+  (`coverage run`, a debugger, a tracing profiler, a `sys.monitoring` tool)
+  enforces `TASK_TIMEOUT` through the grace backstop alone: nothing is
+  raised inside the running task, the task is not interrupted, and at
+  `TASK_TIMEOUT` plus `TASK_TIMEOUT_GRACE` the attempt is recorded as failed
+  and the worker recycles. The worker logs `timeouts_backstop_only` once,
+  naming the tool; that event now carries `reason` (`interpreter` or
+  `tracing_tool`) and, for a tool, `tracer`.
+
 ## [0.3.0] - 2026-08-24
 
 ### Upgrading

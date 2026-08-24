@@ -127,7 +127,9 @@ TASKS = {
   has not stopped `TASK_TIMEOUT_GRACE` seconds later is recorded as failed
   and the worker exits 75 so its supervisor restarts it. Per-queue values go
   in `TASK_TIMEOUTS`; there is no per-task value. `django_ox.remaining()`
-  reads the seconds left from inside a task.
+  reads the seconds left from inside a task. Under a coverage or tracing
+  tool nothing is raised inside the task: it is not interrupted, and the
+  grace backstop is the whole enforcement.
 - Claiming: one `UPDATE ... SKIP LOCKED ... RETURNING` statement on
   PostgreSQL; `SELECT ... FOR UPDATE SKIP LOCKED` on MySQL 8+; an atomic
   compare-and-set UPDATE on SQLite and other databases without `SKIP LOCKED`.

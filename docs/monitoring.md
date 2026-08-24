@@ -245,7 +245,7 @@ The message text is not part of the contract. The keys are.
 | `task_timed_out` | WARNING | An attempt ran past its `TASK_TIMEOUT` and is recorded as failed; a `task_retrying` or `task_failed` record follows. A task that catches `TaskTimeout` and returns produces no event, so this counts timeouts recorded as failures, not deadlines that passed. |
 | `task_stuck` | ERROR | A timed-out attempt's thread did not stop within `TASK_TIMEOUT_GRACE`. The attempt is recorded as failed and the worker is recycling. |
 | `worker_recycling` | WARNING | The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75. |
-| `timeouts_backstop_only` | WARNING | At startup, on an interpreter that cannot raise an exception inside another thread: timeouts are enforced by the grace backstop alone. |
+| `timeouts_backstop_only` | WARNING | Once per worker: timeouts are enforced by the grace backstop alone, because the interpreter cannot raise an exception inside another thread (`reason=interpreter`) or a coverage or tracing tool is watching the worker's threads (`reason=tracing_tool`). |
 | `task_retrying` | WARNING | An attempt failed with retries remaining. |
 | `task_failed` | ERROR | The task reached FAILED, out of attempts. |
 | `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. |
@@ -274,6 +274,8 @@ The message text is not part of the contract. The keys are.
 | `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_timed_out`, `task_stuck`, `task_lease_lost` | Wall-clock duration of the attempt, in milliseconds. |
 | `timeout_s` | `task_timed_out`, `task_stuck` | The timeout that applied, in seconds. |
 | `grace_s` | `task_stuck`, `timeouts_backstop_only` | `TASK_TIMEOUT_GRACE`, in seconds. |
+| `reason` | `timeouts_backstop_only` | Why the backstop is the whole enforcement: `interpreter` or `tracing_tool`. |
+| `tracer` | `timeouts_backstop_only` with `reason=tracing_tool` | The tool watching the worker's threads. |
 | `exception` | `task_retrying`, `task_failed` | Exception class name of the failure. |
 | `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `LOST` (out of attempts). |
 | `dropped_status` | `task_lease_lost` | Status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |

@@ -71,7 +71,9 @@ Operational facts worth getting right:
   per-queue values; there is no per-task value, because `django.tasks` has
   no field for one.
   `django_ox.deadline()` and `django_ox.remaining()` read the attempt's
-  deadline from inside a task.
+  deadline from inside a task. A worker whose threads are watched by a
+  coverage or tracing tool raises nothing inside a running task: the task is
+  not interrupted and the grace backstop is the whole enforcement.
 - `ox_worker --concurrency N` is a thread pool in one process, suited to
   I/O-bound tasks. `--processes N` runs N such workers under one supervisor,
   each with its own connections and reaper; for CPU-bound work use

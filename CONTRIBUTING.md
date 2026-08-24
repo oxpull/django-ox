@@ -48,6 +48,10 @@ The documentation site builds with `mkdocs build --strict`, which is also a CI
 job, so a broken link or a missing page fails the build rather than the site. It
 publishes with `mkdocs gh-deploy` and does not publish on merge.
 
+One unversioned site describes one released version, so deploy from the release
+commit rather than from main. `python tools/check_release.py --docs` refuses a
+tree with unreleased changelog entries; run it before `mkdocs gh-deploy`.
+
 Prose is held to the same bar as code: state what the software does, keep the
 measurement caveats that make a number quotable, and describe scope rather than
 listing things as missing.

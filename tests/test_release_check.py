@@ -18,7 +18,7 @@ import zipfile
 
 import pytest
 
-from tools.check_release import REPO, check_dist, check_source
+from tools.check_release import REPO, check_dist, check_docs, check_source
 
 VERSION = "0.2.0"
 MIGRATIONS = {"0001_initial.py", "0002_oxscheduletick.py", "0003_lease_epoch.py"}
@@ -91,6 +91,7 @@ def _repo(
     dunder=None,
     changelog=VERSION,
     link_ref=True,
+    unreleased=None,
     urls=None,
     readme_pin=None,
     docs_pin=None,
@@ -115,9 +116,14 @@ def _repo(
             if link_ref
             else "\n"
         )
+        pending = (
+            f"## [Unreleased]\n\n### Changed\n\n- {unreleased}\n\n"
+            if unreleased
+            else ""
+        )
         (repo / "CHANGELOG.md").write_text(
-            f"# Changelog\n\n## [{changelog}] - 2026-08-20\n\n### Fixed\n\n- A thing.\n"
-            + refs,
+            f"# Changelog\n\n{pending}"
+            f"## [{changelog}] - 2026-08-20\n\n### Fixed\n\n- A thing.\n" + refs,
             encoding="utf-8",
         )
     pin = f"`django-ox=={readme_pin}`" if readme_pin else "pip install django-ox"
@@ -206,6 +212,35 @@ def test_this_repository_is_consistent():
     """
     problems, _ = check_source(REPO)
     assert problems == []
+
+
+# --- the documentation site -----------------------------------------------
+
+
+def test_a_tree_with_nothing_unreleased_may_deploy_the_docs(tmp_path):
+    problems, notes = check_docs(_repo(tmp_path))
+    assert problems == []
+    assert notes
+
+
+def test_unreleased_changes_block_a_docs_deploy(tmp_path):
+    """The site is unversioned and deploys by hand. A deploy from a tree that
+    is ahead of PyPI publishes behaviour nobody can install yet."""
+    problems, _ = check_docs(_repo(tmp_path, unreleased="A behaviour change."))
+    assert "1 unreleased entry" in _messages(problems)
+    assert "0.2.0" in _messages(problems)
+
+
+def test_an_empty_unreleased_heading_does_not_block(tmp_path):
+    repo = _repo(tmp_path)
+    changelog = repo / "CHANGELOG.md"
+    changelog.write_text(
+        changelog.read_text(encoding="utf-8").replace(
+            "## [0.2.0]", "## [Unreleased]\n\n## [0.2.0]"
+        ),
+        encoding="utf-8",
+    )
+    assert check_docs(repo)[0] == []
 
 
 # --- the built archives ---------------------------------------------------

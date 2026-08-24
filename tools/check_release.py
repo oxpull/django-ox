@@ -24,10 +24,16 @@ The built archives (`check_dist`), which the source tree cannot show:
      and no test that imports from the source tree can see it.
   8. Both carry the licence and the worker module.
 
+The documentation site (`check_docs`), which publishes on its own schedule:
+  9. The changelog has nothing unreleased. The site is one unversioned site
+     deployed by hand, so a deploy from a tree ahead of PyPI would describe
+     behaviour nobody can install.
+
 Usage:
     python tools/check_release.py               # source only
     python tools/check_release.py --tag v0.1.1  # also assert the tag matches
     python tools/check_release.py --dist        # also open dist/
+    python tools/check_release.py --docs        # before mkdocs gh-deploy
 """
 
 from __future__ import annotations
@@ -73,6 +79,15 @@ def read_changelog(repo: Path = REPO) -> tuple[str | None, set[str]]:
     newest = next((h for h in headings if h.lower() != "unreleased"), None)
     refs = set(re.findall(r"^\[([^\]]+)\]:\s*https?://", text, re.M))
     return newest, refs
+
+
+def read_unreleased(repo: Path = REPO) -> str:
+    """The body of the CHANGELOG's Unreleased section, empty when there is none."""
+    text = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    match = re.search(
+        r"^##\s*\[unreleased\][^\n]*\n(.*?)(?=^##\s|\Z)", text, re.M | re.S | re.I
+    )
+    return match.group(1).strip() if match else ""
 
 
 def read_migrations(repo: Path = REPO) -> set[str]:
@@ -123,6 +138,28 @@ def check_readme(version: str, repo: Path = REPO) -> list[str]:
                     )
                 )
     return problems
+
+
+def check_docs(repo: Path = REPO) -> tuple[list[str], list[str]]:
+    """The docs site is one unversioned site and deploys by hand, so what it
+    describes has to be what the released package does. Returns (problems,
+    notes)."""
+    version, _ = read_pyproject_version(repo)
+    unreleased = read_unreleased(repo)
+    if unreleased:
+        entries = [
+            line.strip() for line in unreleased.splitlines() if line.startswith("- ")
+        ]
+        count = len(entries) or 1
+        return [
+            fail(
+                f"CHANGELOG has {count} unreleased entr{'y' if count == 1 else 'ies'} "
+                f"and the declared version is {version}. Deploying the docs now "
+                "would describe behaviour that is not in the package on PyPI. "
+                "Release first, then deploy from the release commit."
+            )
+        ], []
+    return [], [f"CHANGELOG has nothing unreleased; the docs match {version}"]
 
 
 def check_source(
@@ -264,6 +301,11 @@ def main() -> int:
     parser.add_argument(
         "--dist", action="store_true", help="also open the archives in dist/"
     )
+    parser.add_argument(
+        "--docs",
+        action="store_true",
+        help="also assert the tree is releasable, for a docs deploy",
+    )
     args = parser.parse_args()
 
     version, _ = read_pyproject_version()
@@ -271,6 +313,9 @@ def main() -> int:
     if args.dist:
         dist_problems, _ = check_dist(REPO / "dist", version)
         problems.extend(dist_problems)
+    if args.docs:
+        docs_problems, _ = check_docs(REPO)
+        problems.extend(docs_problems)
 
     for problem in problems:
         print(problem)
@@ -279,7 +324,7 @@ def main() -> int:
         print(f"\ncheck-release: {len(problems)} problem(s). A release is permanent.")
         return 1
 
-    scope = "source and archives" if args.dist else "source"
+    scope = ", ".join(["source"] + ["archives"] * args.dist + ["docs"] * args.docs)
     print(f"check-release: {version} is consistent ({scope} checked).")
     return 0
 

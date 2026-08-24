@@ -2,7 +2,8 @@ import logging
 import threading
 import time
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
+from typing import NamedTuple
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
@@ -865,34 +866,108 @@ class TestLeaseRenewalScope:
         assert worker._in_flight == set()
 
 
+class _Hammered(NamedTuple):
+    """What one pass of the reaper over a live worker's task saw."""
+
+    reaped: int
+    # Distinct locked_at values seen before anything was reclaimed: the one
+    # the claim wrote, then one more for every renewal that reached the
+    # database. Two samples with the same value mean nothing landed between
+    # them, so the length is a count of renewals plus the claim.
+    leases: list[datetime]
+    statuses: set[str]
+
+    @property
+    def renewals(self) -> int:
+        return max(len(self.leases) - 1, 0)
+
+
 @pytest.mark.django_db(transaction=True)
 class TestLeaseRenewalUnderTheReaper:
     """
     The point of renewal: the reaper stops reclaiming tasks that are merely
     slow and reclaims only workers that actually stopped reporting.
+
+    The timings below are a ratio rather than a stopwatch. What is under
+    test is the shape the worker documents -- a renewal every
+    LOCK_TIMEOUT / 3, so two consecutive renewals can be missed before the
+    reaper is entitled to conclude anything -- and the ratio, not the
+    absolute value, is what these tests assert. The absolute values are
+    scaled so that a single renewal round-trip on a networked database, or
+    under a coverage tracer, still lands well inside the lease. A tighter
+    lease makes the same test measure how fast the machine is instead.
     """
 
+    LOCK_TIMEOUT = 1.5
+    # What the worker derives from that timeout on its own. The renewal
+    # tests below pass no interval and check this one came out of the
+    # worker, so what is exercised is the rule that ships rather than a
+    # number the test made up.
+    RENEW_INTERVAL = LOCK_TIMEOUT / 3
+    # Longer than the lease, so a claim that stopped being renewed is
+    # certain to age past the timeout inside the window rather than merely
+    # likely to.
+    HAMMER_SECONDS = LOCK_TIMEOUT * 2.25
+    # The task has to still be running when the window closes: a reaper
+    # finds nothing to reclaim on a finished task whatever renewal did, and
+    # a test that let the task finish early would pass on an empty window.
+    TASK_SECONDS = LOCK_TIMEOUT * 3
+
     def _hammer_the_reaper(self, reaper, seconds):
+        """
+        Run the reaper flat out for `seconds`, watching the lease as it goes.
+
+        A count of reclaims on its own cannot tell "renewal held the lease"
+        apart from "there was nothing here to reclaim", so every pass also
+        reads the row: the status it was in, and the lease timestamp, which
+        moves forward once per renewal that reached the database. Sampling
+        stops at the first reclaim, because from there the lease has
+        changed hands and says nothing further about the worker that held
+        it.
+        """
         reaped = 0
+        leases: list[datetime] = []
+        statuses: set[str] = set()
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
+            if reaped == 0:
+                status, locked_at = OxTask.objects.values_list(
+                    "status", "locked_at"
+                ).get()
+                statuses.add(status)
+                if locked_at is not None and locked_at not in leases:
+                    leases.append(locked_at)
             reaped += reaper.reap()
             time.sleep(0.05)
-        return reaped
+        return _Hammered(reaped, leases, statuses)
+
+    def _assert_renewal_held_the_lease(self, hammered):
+        """
+        The claim both renewal tests make: nothing was reclaimed, and the
+        reason was renewal rather than an idle window. A stopped renewal
+        thread fails here even though it reclaims nothing.
+        """
+        assert hammered.reaped == 0
+        assert hammered.statuses == {OxTask.Status.RUNNING}
+        assert hammered.renewals >= 3
+        assert hammered.leases == sorted(hammered.leases)
 
     def test_renewal_keeps_a_slow_task_out_of_the_reaper(self):
         worker = Worker(
-            lock_timeout=0.4, renew_interval=0.1, poll_interval=0.05, backoff_initial=0
+            lock_timeout=self.LOCK_TIMEOUT, poll_interval=0.05, backoff_initial=0
         )
-        reaper = Worker(lock_timeout=0.4, poll_interval=0.05)
-        slow.enqueue(1.0)
+        assert worker.renew_interval == self.RENEW_INTERVAL
+        reaper = Worker(lock_timeout=self.LOCK_TIMEOUT, poll_interval=0.05)
+        slow.enqueue(self.TASK_SECONDS)
 
         thread = start_worker_thread(worker)
         try:
             assert wait_for(
                 lambda: OxTask.objects.get().status == OxTask.Status.RUNNING
             )
-            assert self._hammer_the_reaper(reaper, 0.9) == 0
+            self._assert_renewal_held_the_lease(
+                self._hammer_the_reaper(reaper, self.HAMMER_SECONDS)
+            )
             assert wait_for(
                 lambda: OxTask.objects.get().status == OxTask.Status.SUCCESSFUL
             )
@@ -911,21 +986,26 @@ class TestLeaseRenewalUnderTheReaper:
         its own lock.
         """
         worker = Worker(
-            lock_timeout=0.4,
+            lock_timeout=self.LOCK_TIMEOUT,
             renew_interval=1000,
             reap_interval=1000,
             poll_interval=0.05,
             backoff_initial=0,
         )
-        reaper = Worker(lock_timeout=0.4, poll_interval=0.05)
-        slow.enqueue(1.0)
+        reaper = Worker(lock_timeout=self.LOCK_TIMEOUT, poll_interval=0.05)
+        slow.enqueue(self.TASK_SECONDS)
 
         thread = start_worker_thread(worker)
         try:
             assert wait_for(
                 lambda: OxTask.objects.get().status == OxTask.Status.RUNNING
             )
-            assert self._hammer_the_reaper(reaper, 0.9) >= 1
+            hammered = self._hammer_the_reaper(reaper, self.HAMMER_SECONDS)
+            assert hammered.reaped >= 1
+            # Reclaimed for the stated reason: the task was running the
+            # whole time and its lease sat at the value the claim wrote.
+            assert hammered.statuses == {OxTask.Status.RUNNING}
+            assert hammered.renewals == 0
         finally:
             worker.request_stop()
             thread.join(timeout=5)
@@ -938,10 +1018,11 @@ class TestLeaseRenewalUnderTheReaper:
         the poll loop.
         """
         worker = Worker(
-            lock_timeout=0.4, renew_interval=0.1, poll_interval=0.05, backoff_initial=0
+            lock_timeout=self.LOCK_TIMEOUT, poll_interval=0.05, backoff_initial=0
         )
-        reaper = Worker(lock_timeout=0.4, poll_interval=0.05)
-        slow.enqueue(1.0)
+        assert worker.renew_interval == self.RENEW_INTERVAL
+        reaper = Worker(lock_timeout=self.LOCK_TIMEOUT, poll_interval=0.05)
+        slow.enqueue(self.TASK_SECONDS)
 
         thread = start_worker_thread(worker)
         try:
@@ -949,7 +1030,9 @@ class TestLeaseRenewalUnderTheReaper:
                 lambda: OxTask.objects.get().status == OxTask.Status.RUNNING
             )
             worker.request_stop()  # drain begins with the task still running
-            assert self._hammer_the_reaper(reaper, 0.9) == 0
+            self._assert_renewal_held_the_lease(
+                self._hammer_the_reaper(reaper, self.HAMMER_SECONDS)
+            )
             thread.join(timeout=5)
             assert not thread.is_alive()
         finally:

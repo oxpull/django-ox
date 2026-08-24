@@ -413,6 +413,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../choosing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing a backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../production/" class="md-nav__link">
         
   
@@ -650,6 +677,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    For AI assistants
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../changelog/" class="md-nav__link">
         
   
@@ -778,7 +832,8 @@ Full methodology, raw JSON with every sample, and per-process logs are in
 the <code>benchmarks/</code> directory of the repository. Every run is reported;
 nothing was discarded.</p>
 <h2 id="results">Results</h2>
-<p>Final 3-run matrix, runs interleaved between backends, all runs shown.</p>
+<p>Final 3-run matrix, runs interleaved between backends, all runs shown,
+measured on django-ox 0.1.0.</p>
 <table>
 <thead>
 <tr>
@@ -810,8 +865,8 @@ nothing was discarded.</p>
 </tr>
 </tbody>
 </table>
-<p>Reading: ox wins enqueue throughput and concurrency-1 end-to-end in all
-three runs, and edges or ties concurrency 4. In-transaction enqueue
+<p>Reading: django-ox wins enqueue throughput and concurrency-1 end-to-end
+in all three runs, and edges or ties concurrency 4. In-transaction enqueue
 latency is a tie at roughly half a millisecond for both; run-to-run drift
 on the machine is larger than the difference between the backends.</p>
 <p>A diagnostic cell at a non-default <code>--interval 0.1</code> produced the same throughput
@@ -832,7 +887,7 @@ rather than on the polling clock.</p>
   poll interval, so <code>--interval</code> only governs how often an idle worker
   checks for new work.</li>
 </ul>
-<p>The harness gates releases. Both properties above are proven by published cells:
+<p>Both properties above are proven by published cells:
 the single-statement claim by the concurrency-1 rows, the completion wake-up by
 the diagnostic cell. A regression in either shows up as a changed number rather
 than a changed claim.</p>
@@ -852,10 +907,10 @@ than a changed claim.</p>
 <li><strong>The concurrency-4 comparison is imperfect by construction.</strong>
   django-tasks-db's worker has no concurrency option, so its
   "concurrency 4" is four separate processes: four interpreters without a
-  shared GIL, four Django boots inside the timed window. ox's is four
-  threads in one process. This is the fairest available mapping, though
-  still an approximation. (It also means ox wins that cell while sharing
-  one interpreter.)</li>
+  shared GIL, four Django boots inside the timed window. django-ox's is
+  four threads in one process. This is the fairest available mapping, though
+  still an approximation. (It also means django-ox wins that cell
+  while sharing one interpreter.)</li>
 <li><strong>Small N.</strong> 2,000 tasks and 500 latency samples separate the backends
   here but say nothing about p99+ tails or sustained load. Sustained load
   and worker-failure behavior are covered separately by the

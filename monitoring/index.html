@@ -413,6 +413,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../choosing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing a backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../production/" class="md-nav__link">
         
   
@@ -522,6 +549,45 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#prometheus" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prometheus
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Prometheus">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#with-an-existing-registry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        With an existing registry
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#opentelemetry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenTelemetry
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#log-events" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -540,6 +606,34 @@
       
     </span>
   </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#retrying-and-discarding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retrying and discarding
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Retrying and discarding">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-admin-page" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The admin page
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -639,6 +733,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    For AI assistants
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../changelog/" class="md-nav__link">
         
   
@@ -708,6 +829,45 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#prometheus" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prometheus
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Prometheus">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#with-an-existing-registry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        With an existing registry
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#opentelemetry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenTelemetry
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#log-events" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -726,6 +886,34 @@
       
     </span>
   </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#retrying-and-discarding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retrying and discarding
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Retrying and discarding">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-admin-page" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The admin page
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -751,11 +939,13 @@
 
 <h1 id="monitoring">Monitoring</h1>
 <p>The queue and the result store are one database table. That means metrics are
-just queries, with no agent or exporter process to run. There are three ways in:</p>
+just queries, with no agent or exporter process to run. There are four ways in:</p>
 <ul>
 <li><strong><code>django_ox.stats</code></strong>, plain functions returning queue metrics.</li>
 <li><strong><code>manage.py ox_health</code></strong>, the same numbers as an exit code, for cron
   alerting and container probes.</li>
+<li><strong>A Prometheus endpoint</strong>, the same numbers as gauges, rendered by a view
+  you mount where your scraper can reach it.</li>
 <li><strong>Structured log events</strong> on the <code>django_ox</code> logger, with stable extra
   keys for JSON log handlers.</li>
 </ul>
@@ -789,7 +979,7 @@ request, a shell or a metrics collector, on every tested database.</p>
 <tr>
 <td><code>queue_stats()</code></td>
 <td><code>list[QueueStats]</code></td>
-<td>Raw row counts per queue and status (<code>ready</code>, <code>running</code>, <code>failed</code>, <code>successful</code>, <code>lost</code>), one entry per queue with any rows. The <code>ready</code> column counts every READY row, including tasks deferred to a future <code>run_after</code>. <code>lost</code> counts tasks whose worker stopped reporting with no attempts left; see <a href="../production/#the-reaper">the reaper</a>.</td>
+<td>Raw row counts per queue and status (<code>ready</code>, <code>running</code>, <code>failed</code>, <code>successful</code>, <code>lost</code>, <code>discarded</code>), one entry per queue with any rows. The <code>ready</code> column counts every READY row, including tasks deferred to a future <code>run_after</code>. <code>lost</code> counts tasks whose worker stopped reporting with no attempts left; see <a href="../production/#the-reaper">the reaper</a>. <code>discarded</code> counts tasks an operator closed without running; see <a href="#retrying-and-discarding">Retrying and discarding</a>.</td>
 </tr>
 <tr>
 <td><code>ready_count()</code></td>
@@ -890,6 +1080,134 @@ steady traffic:</p>
 <div class="highlight"><pre><span></span><code>*/5 * * * * cd /srv/myproject &amp;&amp; .venv/bin/python manage.py ox_health \
     --max-backlog 1000 --max-age 600 || /usr/local/bin/page-someone
 </code></pre></div>
+<h2 id="prometheus">Prometheus</h2>
+<p><code>django_ox.metrics</code> renders the stats functions in the Prometheus text
+format, from the standard library alone. Mount the view and point a scrape
+job at it:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># urls.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.urls</span><span class="w"> </span><span class="kn">import</span> <span class="n">include</span><span class="p">,</span> <span class="n">path</span>
+
+<span class="n">urlpatterns</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="n">path</span><span class="p">(</span><span class="s2">&quot;ox/&quot;</span><span class="p">,</span> <span class="n">include</span><span class="p">(</span><span class="s2">&quot;django_ox.urls&quot;</span><span class="p">)),</span>  <span class="c1"># GET /ox/metrics</span>
+<span class="p">]</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="c1"># prometheus.yml</span>
+<span class="nt">scrape_configs</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">job_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">django_ox</span>
+<span class="w">    </span><span class="nt">metrics_path</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/ox/metrics</span>
+<span class="w">    </span><span class="nt">static_configs</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">targets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;app.internal:8000&quot;</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+<p>The response is <code>text/plain; version=0.0.4</code>. A scraper that sends
+<code>Accept: application/openmetrics-text</code> gets the OpenMetrics form of the
+same text, and <code>HEAD</code> is answered for load-balancer checks. Each scrape is
+five aggregate queries over the task table, however many queues there are.</p>
+<p><strong>The endpoint has no authentication of its own.</strong> The numbers are not
+secret, but the queue names and the shape of your traffic are yours to keep,
+so put the route behind the project's policy before it goes near the public
+side of a load balancer. Two one-line ways:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django.contrib.auth.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">login_required</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django_ox.views</span><span class="w"> </span><span class="kn">import</span> <span class="n">metrics</span>
+
+<span class="n">path</span><span class="p">(</span><span class="s2">&quot;ox/metrics&quot;</span><span class="p">,</span> <span class="n">login_required</span><span class="p">(</span><span class="n">metrics</span><span class="p">))</span>  <span class="c1"># session auth, for a human</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django.http</span><span class="w"> </span><span class="kn">import</span> <span class="n">HttpResponseForbidden</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">from_prometheus</span><span class="p">(</span><span class="n">view</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">guard</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">request</span><span class="o">.</span><span class="n">META</span><span class="p">[</span><span class="s2">&quot;REMOTE_ADDR&quot;</span><span class="p">]</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;10.0.0.12&quot;</span><span class="p">}:</span>
+            <span class="k">return</span> <span class="n">HttpResponseForbidden</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">view</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">guard</span>
+
+
+<span class="n">path</span><span class="p">(</span><span class="s2">&quot;ox/metrics&quot;</span><span class="p">,</span> <span class="n">from_prometheus</span><span class="p">(</span><span class="n">metrics</span><span class="p">))</span>  <span class="c1"># the scraper&#39;s address only</span>
+</code></pre></div>
+<p>A network policy that only admits the scraper to the path does the same
+job without code.</p>
+<p>Every metric is a gauge, with one sample per queue that has any row:</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Labels</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>django_ox_tasks</code></td>
+<td><code>queue</code>, <code>status</code></td>
+<td>Rows by status, one of <code>ready</code>, <code>running</code>, <code>failed</code>, <code>successful</code>, <code>lost</code>, <code>discarded</code>. The same numbers as <code>queue_stats()</code>, so <code>ready</code> includes deferred tasks.</td>
+</tr>
+<tr>
+<td><code>django_ox_ready_tasks</code></td>
+<td><code>queue</code></td>
+<td><code>ready_count()</code>: READY tasks eligible to run now. The backlog number.</td>
+</tr>
+<tr>
+<td><code>django_ox_oldest_ready_age_seconds</code></td>
+<td><code>queue</code></td>
+<td><code>oldest_ready_age()</code> in seconds. Absent when nothing waits.</td>
+</tr>
+<tr>
+<td><code>django_ox_last_claim_age_seconds</code></td>
+<td><code>queue</code></td>
+<td><code>last_claim_age()</code> in seconds. Absent until a worker has claimed on that queue.</td>
+</tr>
+<tr>
+<td><code>django_ox_throughput_per_minute</code></td>
+<td><code>queue</code></td>
+<td><code>throughput()</code> over the default five-minute window.</td>
+</tr>
+<tr>
+<td><code>django_ox_failure_rate</code></td>
+<td><code>queue</code></td>
+<td><code>failure_rate()</code> over the same window, 0 to 1. Absent when nothing finished.</td>
+</tr>
+</tbody>
+</table>
+<p>There are no counters. The table is pruned, so a monotonic count of finished
+tasks cannot be read from it; throughput and the failure rate are
+trailing-window readings instead, and <code>rate()</code> in PromQL is not the tool
+for them. Alert on <code>django_ox_ready_tasks</code> and
+<code>django_ox_oldest_ready_age_seconds</code> the same way as on the functions.</p>
+<p>The metric names and label names above are public API from the release that
+ships them; see <a href="../stability/">API stability</a>. The help text is not.</p>
+<h3 id="with-an-existing-registry">With an existing registry</h3>
+<p>A project that already runs <code>prometheus_client</code> (on its own or through
+django-prometheus) can register the same numbers with its registry instead
+of mounting a second endpoint. <code>prometheus_client</code> is not a dependency of
+django-ox; <code>collector()</code> imports it when called and raises <code>ImportError</code>
+when it is missing.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">prometheus_client</span><span class="w"> </span><span class="kn">import</span> <span class="n">REGISTRY</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">django_ox</span><span class="w"> </span><span class="kn">import</span> <span class="n">metrics</span>
+
+<span class="n">REGISTRY</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">metrics</span><span class="o">.</span><span class="n">collector</span><span class="p">())</span>
+</code></pre></div>
+<h3 id="opentelemetry">OpenTelemetry</h3>
+<p>django-ox does not ship an OpenTelemetry exporter. The stats functions fit
+an observable gauge callback, so a project that already has an OTel meter
+can read the queue through it in a few lines. This is the whole recipe;
+nothing in django-ox imports <code>opentelemetry</code>.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">opentelemetry</span><span class="w"> </span><span class="kn">import</span> <span class="n">metrics</span> <span class="k">as</span> <span class="n">otel</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">opentelemetry.metrics</span><span class="w"> </span><span class="kn">import</span> <span class="n">Observation</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">django_ox</span><span class="w"> </span><span class="kn">import</span> <span class="n">stats</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">observe_backlog</span><span class="p">(</span><span class="n">options</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">stats</span><span class="o">.</span><span class="n">queue_stats</span><span class="p">():</span>
+        <span class="k">yield</span> <span class="n">Observation</span><span class="p">(</span><span class="n">row</span><span class="o">.</span><span class="n">ready</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;queue&quot;</span><span class="p">:</span> <span class="n">row</span><span class="o">.</span><span class="n">queue_name</span><span class="p">})</span>
+
+
+<span class="n">meter</span> <span class="o">=</span> <span class="n">otel</span><span class="o">.</span><span class="n">get_meter</span><span class="p">(</span><span class="s2">&quot;django_ox&quot;</span><span class="p">)</span>
+<span class="n">meter</span><span class="o">.</span><span class="n">create_observable_gauge</span><span class="p">(</span><span class="s2">&quot;django_ox.ready_tasks&quot;</span><span class="p">,</span> <span class="n">callbacks</span><span class="o">=</span><span class="p">[</span><span class="n">observe_backlog</span><span class="p">])</span>
+</code></pre></div>
+<p>The same shape reads <code>oldest_ready_age()</code> or <code>failure_rate()</code> per queue.</p>
 <h2 id="log-events">Log events</h2>
 <p>The worker logs through the standard library logger named <code>django_ox</code>. No
 logging dependency, no imposed format. Configure handlers and formatters in
@@ -925,6 +1243,26 @@ The message text is not part of the contract. The keys are.</p>
 <td><code>task_succeeded</code></td>
 <td>INFO</td>
 <td>The task reached SUCCESSFUL.</td>
+</tr>
+<tr>
+<td><code>task_timed_out</code></td>
+<td>WARNING</td>
+<td>An attempt ran past its <code>TASK_TIMEOUT</code> and is recorded as failed; a <code>task_retrying</code> or <code>task_failed</code> record follows. A task that catches <code>TaskTimeout</code> and returns produces no event, so this counts timeouts recorded as failures, not deadlines that passed.</td>
+</tr>
+<tr>
+<td><code>task_stuck</code></td>
+<td>ERROR</td>
+<td>A timed-out attempt's thread did not stop within <code>TASK_TIMEOUT_GRACE</code>. The attempt is recorded as failed and the worker is recycling.</td>
+</tr>
+<tr>
+<td><code>worker_recycling</code></td>
+<td>WARNING</td>
+<td>The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75.</td>
+</tr>
+<tr>
+<td><code>timeouts_backstop_only</code></td>
+<td>WARNING</td>
+<td>At startup, on an interpreter that cannot raise an exception inside another thread: timeouts are enforced by the grace backstop alone.</td>
 </tr>
 <tr>
 <td><code>task_retrying</code></td>
@@ -971,6 +1309,41 @@ The message text is not part of the contract. The keys are.</p>
 <td>INFO</td>
 <td>The run loop exited.</td>
 </tr>
+<tr>
+<td><code>supervisor_started</code></td>
+<td>INFO</td>
+<td><code>ox_worker --processes N</code> started its worker processes.</td>
+</tr>
+<tr>
+<td><code>worker_process_restarted</code></td>
+<td>WARNING</td>
+<td>A worker process exited on its own and is being restarted.</td>
+</tr>
+<tr>
+<td><code>worker_process_recycled</code></td>
+<td>WARNING</td>
+<td>A worker process exited with code 75 after a stuck task thread and is being restarted. Not counted against the restart cap.</td>
+</tr>
+<tr>
+<td><code>supervisor_restart_cap</code></td>
+<td>ERROR</td>
+<td>More than five deaths of one slot in a minute; the supervisor is stopping with exit code 1.</td>
+</tr>
+<tr>
+<td><code>supervisor_killed_workers</code></td>
+<td>ERROR</td>
+<td>Worker processes still running five seconds after the second stop signal were sent SIGKILL.</td>
+</tr>
+<tr>
+<td><code>supervisor_stopped</code></td>
+<td>INFO</td>
+<td>Every worker process has exited.</td>
+</tr>
+<tr>
+<td><code>worker_orphaned</code></td>
+<td>WARNING</td>
+<td>A worker process found its supervisor gone and is draining.</td>
+</tr>
 </tbody>
 </table>
 <table>
@@ -989,8 +1362,8 @@ The message text is not part of the contract. The keys are.</p>
 </tr>
 <tr>
 <td><code>worker_id</code></td>
-<td>all events</td>
-<td>Unique id of the worker emitting the record.</td>
+<td>all worker events</td>
+<td>Unique id of the worker emitting the record. With <code>--processes</code>, the slot number is the last part of the id.</td>
 </tr>
 <tr>
 <td><code>task_id</code></td>
@@ -1014,8 +1387,18 @@ The message text is not part of the contract. The keys are.</p>
 </tr>
 <tr>
 <td><code>duration_ms</code></td>
-<td><code>task_succeeded</code>, <code>task_retrying</code>, <code>task_failed</code>, <code>task_lease_lost</code></td>
+<td><code>task_succeeded</code>, <code>task_retrying</code>, <code>task_failed</code>, <code>task_timed_out</code>, <code>task_stuck</code>, <code>task_lease_lost</code></td>
 <td>Wall-clock duration of the attempt, in milliseconds.</td>
+</tr>
+<tr>
+<td><code>timeout_s</code></td>
+<td><code>task_timed_out</code>, <code>task_stuck</code></td>
+<td>The timeout that applied, in seconds.</td>
+</tr>
+<tr>
+<td><code>grace_s</code></td>
+<td><code>task_stuck</code>, <code>timeouts_backstop_only</code></td>
+<td><code>TASK_TIMEOUT_GRACE</code>, in seconds.</td>
 </tr>
 <tr>
 <td><code>exception</code></td>
@@ -1047,6 +1430,46 @@ The message text is not part of the contract. The keys are.</p>
 <td><code>worker_draining</code></td>
 <td>In-flight tasks at shutdown.</td>
 </tr>
+<tr>
+<td><code>processes</code></td>
+<td><code>supervisor_started</code></td>
+<td>Worker processes the supervisor runs.</td>
+</tr>
+<tr>
+<td><code>worker_index</code>, <code>exit_code</code></td>
+<td><code>worker_process_restarted</code>, <code>worker_process_recycled</code>, <code>supervisor_restart_cap</code></td>
+<td>Which slot exited and how. A negative code is the signal that killed it.</td>
+</tr>
+<tr>
+<td><code>delay</code></td>
+<td><code>worker_process_restarted</code>, <code>worker_process_recycled</code></td>
+<td>Seconds until the slot is started again.</td>
+</tr>
+<tr>
+<td><code>task_id</code>, <code>exit_code</code></td>
+<td><code>worker_recycling</code></td>
+<td>The stuck task that started the recycle, and the code the worker will exit with, 75.</td>
+</tr>
+<tr>
+<td><code>restarts</code></td>
+<td><code>supervisor_restart_cap</code></td>
+<td>Deaths of that slot inside the window.</td>
+</tr>
+<tr>
+<td><code>worker_indexes</code></td>
+<td><code>supervisor_killed_workers</code></td>
+<td>The slots that were killed.</td>
+</tr>
+<tr>
+<td><code>parent_pid</code></td>
+<td><code>worker_orphaned</code></td>
+<td>The supervisor pid the worker was started under.</td>
+</tr>
+<tr>
+<td><code>exit_code</code></td>
+<td><code>supervisor_stopped</code></td>
+<td>The code the supervisor exits with.</td>
+</tr>
 </tbody>
 </table>
 <p><code>task_claimed</code> and <code>task_started</code> are DEBUG because they fire once per
@@ -1068,20 +1491,87 @@ column from <code>queue_stats()</code> for it.</p>
   <code>failure_rate</code> rising above your normal baseline. Throughput is better
   as a dashboard line than an alert: its healthy value depends entirely
   on offered load.</li>
-<li><strong>Prometheus.</strong> No exporter ships with django-ox, and none ships in
-  <a href="../pro/">Pro</a> either. The stats functions drop into any Django metrics setup
-  though. Either register a custom collector with django-prometheus, whose
-  <code>collect()</code> calls <code>queue_stats()</code>, <code>ready_count()</code> and <code>oldest_ready_age()</code>
-  and yields gauges, or render the same numbers from a plain Django view in the
-  Prometheus text format and point a scrape job at it. Label by <code>queue_name</code>.</li>
+<li><strong>Prometheus.</strong> Mount <code>django_ox.urls</code> and scrape <code>/ox/metrics</code>, or
+  register <code>django_ox.metrics.collector()</code> with a registry you already run.
+  Both are covered <a href="#prometheus">above</a>.</li>
 <li><strong>journald.</strong> Under systemd, WARNING and above maps onto journal
   priorities, so <code>journalctl -u ox-worker -p warning</code> shows exactly
   retries, reclaims and failures. Pair it with <code>ox_health</code> in a timer for
   active checks.</li>
 <li><strong>Poisoned-task triage.</strong> When <code>failure_rate</code> spikes, the rows have the
   forensics: filter FAILED rows and read <code>errors</code> (per-attempt
-  tracebacks), <code>attempts</code> and <code>worker_ids</code> to see what died where.</li>
+  tracebacks), <code>attempts</code> and <code>worker_ids</code> to see what died where. The
+  admin page below shows the same fields, and the two actions close the
+  loop once the cause is fixed.</li>
 </ul>
+<h2 id="retrying-and-discarding">Retrying and discarding</h2>
+<p>Two operator actions live in <code>django_ox.actions</code>. Each is one
+compare-and-set UPDATE on the row's status and lease number, so it either
+moves the row from the state it read or does nothing and says so. Neither
+touches a RUNNING row: that row belongs to the worker holding its lease,
+and only the reaper takes a lease away.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django_ox</span><span class="w"> </span><span class="kn">import</span> <span class="n">actions</span>
+
+<span class="n">actions</span><span class="o">.</span><span class="n">retry</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>  <span class="c1"># True if the row was requeued</span>
+<span class="n">actions</span><span class="o">.</span><span class="n">discard</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>  <span class="c1"># True if the row was closed</span>
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th>Function</th>
+<th>Accepts</th>
+<th>Does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>retry(result_id)</code></td>
+<td>FAILED, LOST</td>
+<td>Sets the row back to READY for one more attempt, clears <code>run_after</code> so it is eligible at once, and raises <code>max_attempts</code> to <code>attempts + 1</code>. The count, <code>worker_ids</code> and every per-attempt traceback stay as they were, so the record still says what happened before. The lease number goes up, so a LOST row's last worker, if it is still alive somewhere, writes nothing over the retry.</td>
+</tr>
+<tr>
+<td><code>discard(result_id)</code></td>
+<td>READY, FAILED, LOST</td>
+<td>Marks the row DISCARDED. A READY task that is discarded never runs; a discarded FAILED or LOST task is not retried. The attempt records stay.</td>
+</tr>
+</tbody>
+</table>
+<p><code>retry_many(selection)</code> and <code>discard_many(selection)</code> make the same move
+for a queryset or a list of ids. They run one conditional UPDATE per
+thousand rows inside one transaction and return <code>(changed, skipped)</code>. The
+admin actions use them, so a select-across of a hundred thousand rows is a
+hundred statements, and either all of it lands or none does.</p>
+<p>The actions write the table directly and send no <code>django.tasks</code> signal: a
+discard finishes the result without <code>task_finished</code>, and a retry requeues
+it without <code>task_enqueued</code>.</p>
+<p>Both single-row functions return <code>False</code> for any other state, for an id
+that is not in the table, and for a malformed id. <code>RUNNING</code> and <code>SUCCESSFUL</code> rows are never
+matched. A retry that races a second retry of the same row, or a discard
+that races a worker's claim, resolves to exactly one winner: the UPDATE
+pins the lease number it read, and the loser matches zero rows.</p>
+<p>A retried task is one more attempt, not a fresh set. If the new attempt
+fails, the row is FAILED again with one more traceback, and can be retried
+again. A task retried while its worker is still missing gets the same
+treatment as any at-least-once task: make the body idempotent.</p>
+<p>DISCARDED is the sixth value in the row's status column and reads as
+<code>FAILED</code> through <code>django.tasks</code>, which has four statuses, so <code>is_finished</code>
+is true and callers waiting on the result return. <code>queue_stats()</code> reports
+it in its own <code>discarded</code> column, and <code>ox_prune</code> deletes discarded rows
+with successful ones.</p>
+<h3 id="the-admin-page">The admin page</h3>
+<p>When <code>django.contrib.admin</code> is installed, django-ox registers the task
+table with it. Nothing is added to a project without the admin. The
+change list shows id, task path, queue, status, attempts, and the enqueue
+and finish times, filters on status and queue, and searches by id and
+path. The detail page is read-only and lays out every attempt's
+traceback. The two actions, <strong>Retry selected tasks</strong> and <strong>Discard
+selected tasks</strong>, call <code>retry_many</code> and <code>discard_many</code> on the selection and
+report how many moved and how many were skipped for being in a state the
+action does not accept.</p>
+<p>The admin does not add, edit or delete rows. A hand-edited status would
+bypass the lease, and a delete could take a row from under a running
+worker; <code>ox_prune</code> is the way rows leave the table. The actions need the
+<code>change_oxtask</code> permission; viewing needs <code>view_oxtask</code>.</p>
 
 
 

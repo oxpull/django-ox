@@ -356,6 +356,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#what-happens-when-a-worker-dies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What happens when a worker dies
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#what-you-get" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -533,6 +544,33 @@
   
   
     <li class="md-nav__item">
+      <a href="choosing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing a backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="production/" class="md-nav__link">
         
   
@@ -668,6 +706,33 @@
   
   
     <li class="md-nav__item">
+      <a href="agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    For AI assistants
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="changelog/" class="md-nav__link">
         
   
@@ -730,6 +795,17 @@
     <span class="md-ellipsis">
       
         Transactional enqueue
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-happens-when-a-worker-dies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What happens when a worker dies
       
     </span>
   </a>
@@ -856,6 +932,16 @@ PostgreSQL; an atomic compare-and-set elsewhere, including SQLite),
 failed tasks retry with
 exponential backoff, and a reaper returns tasks whose worker died to the
 queue. Details in <a href="production/">Production</a>.</p>
+<h2 id="what-happens-when-a-worker-dies">What happens when a worker dies</h2>
+<p>A worker that claims a task takes a lease on it, and the attempt is counted at
+that moment. While the task runs, the worker renews the lease every
+<code>LOCK_TIMEOUT / 3</code> seconds, so a slow task on a live worker is never reclaimed.
+If the worker is killed, the lease goes stale. After <code>LOCK_TIMEOUT</code> (default
+300 seconds) the reaper in any surviving worker takes the task back: to READY
+if attempts remain, or to LOST if they are spent. LOST reads as <code>FAILED</code>
+through the result API, so nothing waits forever on a worker that is not
+coming back. The mechanics, and the one case worth knowing about, are in
+<a href="production/#the-lease">Production</a>.</p>
 <h2 id="what-you-get">What you get</h2>
 <ul>
 <li>Transactional enqueue, as above. No <code>on_commit</code> boilerplate.</li>
@@ -870,9 +956,9 @@ queue. Details in <a href="production/">Production</a>.</p>
   standard <code>django.tasks</code> result API.</li>
 <li>A <a href="configuration/#ox_prune">prune command</a> to keep the table small.</li>
 <li><a href="monitoring/">Monitoring</a>: a queue-stats API, an <code>ox_health</code> command
-  for probes and cron alerting, and structured log events.</li>
+  for probes and cron alerting, a Prometheus endpoint, structured log
+  events, and an admin page with retry and discard.</li>
 </ul>
-<p>The worker is covered by 221 tests, green on both SQLite and PostgreSQL 16.</p>
 <h2 id="install">Install</h2>
 <p>Requires Python 3.12+ and Django 6.0+.</p>
 <div class="highlight"><pre><span></span><code>pip install django-ox
@@ -929,17 +1015,20 @@ the producer side.</p>
 schedules, and monitoring, with nothing extra to operate. Design
 decisions worth knowing before you commit:</p>
 <ul>
-<li>Enqueued tasks run; there is no revocation or cancellation API after
-  enqueue.</li>
+<li>A queued task can be discarded before a worker claims it, and a failed
+  one retried, from the admin or with <code>django_ox.actions</code>. <code>TASK_TIMEOUT</code>
+  bounds how long any attempt may run; a particular running task cannot be
+  interrupted on demand.</li>
 <li>Tasks are stored on the default database for the model; multi-database
   routing is not part of the current scope.</li>
 <li>Worker concurrency is a thread pool, which fits I/O-bound tasks. For
-  CPU-bound work, run multiple worker processes with <code>--concurrency 1</code>
-  instead. See <a href="production/#threads-and-processes">Production</a>.</li>
+  CPU-bound work, run <code>--processes N --concurrency 1</code>, which is N worker
+  processes under one supervisor. See
+  <a href="production/#threads-and-processes">Production</a>.</li>
 </ul>
-<p>Batches and unique tasks ship in <a href="pro/">Oxpull Pro</a>. Metrics stay in this
-package: <code>django_ox.stats</code> and <code>ox_health</code> are free and stay free. Rate limiting
-is in neither tier.</p>
+<p>Batches and unique tasks are in <a href="pro/">Oxpull Pro</a>, a paid add-on that is
+not on sale yet; the waitlist is at <a href="https://oxpull.com/">https://oxpull.com/</a>. Metrics stay in
+this package: <code>django_ox.stats</code> and <code>ox_health</code> are free and stay free.</p>
 <h2 id="license">License</h2>
 <p>BSD 3-Clause.</p>
 

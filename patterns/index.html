@@ -474,6 +474,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#enqueuing-many-tasks-at-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Enqueuing many tasks at once
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#keep-slow-work-off-the-fast-queue" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -551,6 +562,33 @@
     
   
     Migrating
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../choosing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing a backend
   
 
     
@@ -705,6 +743,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    For AI assistants
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../changelog/" class="md-nav__link">
         
   
@@ -800,6 +865,17 @@
     <span class="md-ellipsis">
       
         Defer work to a specific time
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#enqueuing-many-tasks-at-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Enqueuing many tasks at once
       
     </span>
   </a>
@@ -976,6 +1052,37 @@ applied.</p>
 <p>Workers ignore the row until then. For anything on a repeating clock, use a
 <a href="../recurring-tasks/">schedule</a> instead of enqueueing the next one from inside
 the task.</p>
+<h2 id="enqueuing-many-tasks-at-once">Enqueuing many tasks at once</h2>
+<p>A loop of <code>enqueue()</code> calls is one <code>INSERT</code> per task. For a few dozen that is
+fine; for a mailing run or a nightly fan-out it is the slow part of the
+request. <code>django_ox.bulk.enqueue_many()</code> writes them in one statement per
+thousand rows.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django_ox.bulk</span><span class="w"> </span><span class="kn">import</span> <span class="n">enqueue_many</span>
+
+<span class="n">results</span> <span class="o">=</span> <span class="n">enqueue_many</span><span class="p">(</span>
+    <span class="n">send_digest</span><span class="p">,</span>
+    <span class="p">[((</span><span class="n">user</span><span class="o">.</span><span class="n">pk</span><span class="p">,),</span> <span class="p">{})</span> <span class="k">for</span> <span class="n">user</span> <span class="ow">in</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">digest</span><span class="o">=</span><span class="kc">True</span><span class="p">)],</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>Each element of the list is an <code>(args, kwargs)</code> pair, the same two values
+<code>enqueue(*args, **kwargs)</code> passes to the backend. The return value is one
+<code>TaskResult</code> per pair, in the order given. Queue, priority and <code>run_after</code>
+belong to the task, so set them once with <code>.using(...)</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="n">results</span> <span class="o">=</span> <span class="n">enqueue_many</span><span class="p">(</span>
+    <span class="n">send_digest</span><span class="o">.</span><span class="n">using</span><span class="p">(</span><span class="n">queue_name</span><span class="o">=</span><span class="s2">&quot;emails&quot;</span><span class="p">,</span> <span class="n">run_after</span><span class="o">=</span><span class="n">tonight</span><span class="p">),</span>
+    <span class="p">[((</span><span class="n">user</span><span class="o">.</span><span class="n">pk</span><span class="p">,),</span> <span class="p">{})</span> <span class="k">for</span> <span class="n">user</span> <span class="ow">in</span> <span class="n">users</span><span class="p">],</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>The task and every argument are checked before the first row is written: a
+queue the backend does not accept, a task bound to another backend, or an
+argument that will not serialise to JSON raises with nothing inserted. The
+rows go in one <code>INSERT</code> per 1,000 (SQLite caps the variables a statement can
+bind) inside one transaction, so a call of 5,000 commits all 5,000 or none,
+and inside your own <code>transaction.atomic()</code> it commits or rolls back with
+the rest of your work, as <code>enqueue()</code> does.</p>
+<p>This is a bulk insert and nothing more. Grouping the
+tasks, reading their progress as one number and firing a callback when the
+last one settles is a <a href="../pro/">batch</a>, in Oxpull Pro.</p>
 <h2 id="keep-slow-work-off-the-fast-queue">Keep slow work off the fast queue</h2>
 <p>Give slow tasks their own queue and run a separate worker for it, so a batch of
 report builds cannot delay password resets.</p>
@@ -1045,10 +1152,10 @@ process.</p>
 <p>Keep django-ox in the settings you use for integration tests, where the point is
 to exercise claiming and retries for real.</p>
 <h2 id="not-in-the-core">Not in the core</h2>
-<p>Batches and unique or deduplicated tasks are not part of django-ox. They are the
-<a href="../pro/">Oxpull Pro</a> feature set. Metrics are in the free tier: <code>django_ox.stats</code>
-and <code>manage.py ox_health</code> ship in the core. Rate limiting, chains and workflows
-do not exist in either tier.</p>
+<p>Batches and unique or deduplicated tasks are in <a href="../pro/">Oxpull Pro</a>, a paid
+add-on that is not on sale yet. Metrics are in the free tier: <code>django_ox.stats</code>
+and <code>manage.py ox_health</code> ship in the core. Chains and workflows are on the
+Pro roadmap, undated.</p>
 
 
 

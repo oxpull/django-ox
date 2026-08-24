@@ -2,46 +2,54 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
          <loc>https://oxpull.com/django-ox/</loc>
-         <lastmod>2026-08-20</lastmod>
+         <lastmod>2026-08-24</lastmod>
+    </url>
+    <url>
+         <loc>https://oxpull.com/django-ox/agents/</loc>
+         <lastmod>2026-08-24</lastmod>
     </url>
     <url>
          <loc>https://oxpull.com/django-ox/benchmarks/</loc>
-         <lastmod>2026-08-20</lastmod>
+         <lastmod>2026-08-24</lastmod>
     </url>
     <url>
          <loc>https://oxpull.com/django-ox/changelog/</loc>
-         <lastmod>2026-08-20</lastmod>
+         <lastmod>2026-08-24</lastmod>
+    </url>
+    <url>
+         <loc>https://oxpull.com/django-ox/choosing/</loc>
+         <lastmod>2026-08-24</lastmod>
     </url>
     <url>
          <loc>https://oxpull.com/django-ox/configuration/</loc>
-         <lastmod>2026-08-20</lastmod>
+         <lastmod>2026-08-24</lastmod>
     </url>
     <url>
          <loc>https://oxpull.com/django-ox/migrating/</loc>
-         <lastmod>2026-08-20</lastmod>
+         <lastmod>2026-08-24</lastmod>
     </url>
     <url>
          <loc>https://oxpull.com/django-ox/monitoring/</loc>
-         <lastmod>2026-08-20</lastmod>
+         <lastmod>2026-08-24</lastmod>
     </url>
     <url>
          <loc>https://oxpull.com/django-ox/patterns/</loc>
-         <lastmod>2026-08-20</lastmod>
+         <lastmod>2026-08-24</lastmod>
     </url>
     <url>
          <loc>https://oxpull.com/django-ox/pro/</loc>
-         <lastmod>2026-08-20</lastmod>
+         <lastmod>2026-08-24</lastmod>
     </url>
     <url>
          <loc>https://oxpull.com/django-ox/production/</loc>
-         <lastmod>2026-08-20</lastmod>
+         <lastmod>2026-08-24</lastmod>
     </url>
     <url>
          <loc>https://oxpull.com/django-ox/recurring-tasks/</loc>
-         <lastmod>2026-08-20</lastmod>
+         <lastmod>2026-08-24</lastmod>
     </url>
     <url>
          <loc>https://oxpull.com/django-ox/stability/</loc>
-         <lastmod>2026-08-20</lastmod>
+         <lastmod>2026-08-24</lastmod>
     </url>
 </urlset>

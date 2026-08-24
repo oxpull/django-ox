@@ -413,6 +413,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../choosing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing a backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../production/" class="md-nav__link">
         
   
@@ -656,6 +683,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    For AI assistants
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../changelog/" class="md-nav__link">
         
   
@@ -789,21 +843,52 @@ change, and which Python and Django versions are supported. It is a
 promise about compatibility, so you can pin <code>django-ox</code> with confidence.</p>
 <h2 id="public-api">Public API</h2>
 <p>These are the supported surfaces. Changes to them are versioned and
-announced in the <a href="../changelog/">changelog</a>.</p>
+announced in the <a href="../changelog/">changelog</a>. This page, not a module's
+<code>__all__</code>, is the statement of what is public; today the two agree.</p>
 <ul>
 <li><strong>The backend path</strong> <code>django_ox.backend.OxBackend</code>, referenced as a
-  string in the <code>TASKS</code> setting, and every <code>OPTIONS</code> key it reads:
-  <code>MAX_ATTEMPTS</code>, <code>LOCK_TIMEOUT</code>, <code>BACKOFF_INITIAL</code>, <code>BACKOFF_MAX</code>,
-  <code>QUEUES</code>, and <code>SCHEDULES</code> (with its documented per-schedule keys).</li>
+  string in the <code>TASKS</code> setting, <code>QUEUES</code> beside <code>OPTIONS</code>, and every
+  <code>OPTIONS</code> key it reads: <code>MAX_ATTEMPTS</code>, <code>LOCK_TIMEOUT</code>,
+  <code>BACKOFF_INITIAL</code>, <code>BACKOFF_MAX</code>, <code>TASK_TIMEOUT</code>, <code>TASK_TIMEOUTS</code>,
+  <code>TASK_TIMEOUT_GRACE</code>, and <code>SCHEDULES</code> (with its documented
+  per-schedule keys).</li>
 <li><strong>The management commands</strong> and their flags: <code>ox_worker</code>, <code>ox_prune</code>,
-  <code>ox_health</code>.</li>
-<li><strong>The metrics module</strong> <code>django_ox.stats</code>: the functions listed in its
-  <code>__all__</code> (<code>queue_stats</code>, <code>ready_count</code>, <code>oldest_ready_age</code>,
-  <code>throughput</code>, <code>failure_rate</code>, <code>last_claim_age</code>) and the <code>QueueStats</code>
-  dataclass.</li>
-<li><strong>The exception</strong> <code>django_ox.exceptions.TaskAbandoned</code>, recorded against
-  tasks whose worker stopped reporting with no attempts left. It records the
-  lost lease, not a cause of failure.</li>
+  <code>ox_health</code>. <code>ox_worker</code>'s exit codes: 0 after a drain, 130 on a forced
+  exit, 75 when the worker recycles itself after a stuck task thread.
+  Under <code>--processes</code>, the supervisor exits 0 when every worker drained
+  or recycled, 1 when a slot hit the restart cap, and otherwise with the
+  first other non-zero worker code.</li>
+<li><strong>The timeout helpers</strong> <code>django_ox.deadline()</code> and <code>django_ox.remaining()</code>,
+  callable from inside a task.</li>
+<li><strong>The metrics module</strong> <code>django_ox.stats</code>: <code>queue_stats</code>, <code>ready_count</code>,
+  <code>oldest_ready_age</code>, <code>throughput</code>, <code>failure_rate</code>, <code>last_claim_age</code>, the
+  <code>QueueStats</code> dataclass, and <code>DEFAULT_WINDOW</code>, the trailing window the
+  rate functions default to.</li>
+<li><strong>The Prometheus surface</strong>: <code>django_ox.metrics.render_prometheus</code>,
+  <code>render_openmetrics</code> and <code>collector</code>, the view <code>django_ox.views.metrics</code>,
+  the <code>django_ox.urls</code> module with its <code>metrics</code> route name, and the metric
+  names and label names listed on the <a href="../monitoring/#prometheus">Monitoring</a>
+  page. <code>METRIC_NAMES</code> is that list in code; <code>CONTENT_TYPE_PROMETHEUS</code> and
+  <code>CONTENT_TYPE_OPENMETRICS</code> are the content types the view serves. A
+  scraped name is a contract with every dashboard that reads it, so a
+  rename is a breaking change. Help text is not part of the contract.</li>
+<li><strong>The actions module</strong> <code>django_ox.actions</code>: <code>retry</code> and <code>discard</code>, their
+  accepted states, and their return values; <code>retry_many</code> and
+  <code>discard_many</code>, the selections they accept and their <code>(changed, skipped)</code>
+  return. <code>RETRYABLE_STATUSES</code> and <code>DISCARDABLE_STATUSES</code> are those
+  accepted states in code; <code>UPDATE_CHUNK_SIZE</code> is exported for reading and
+  its value may change. The admin page that calls
+  them is a convenience over this module; its layout is not a contract,
+  the two action names are.</li>
+<li><strong>The bulk module</strong> <code>django_ox.bulk</code>: <code>enqueue_many(task, calls)</code>, its
+  <code>(args, kwargs)</code> call shape, the input-order return and the
+  all-or-nothing write. <code>INSERT_CHUNK_SIZE</code> is exported for reading; its
+  value may change.</li>
+<li><strong>The exceptions</strong> <code>django_ox.exceptions.TaskAbandoned</code>, recorded against
+  tasks whose worker stopped reporting with no attempts left (it records the
+  lost lease, not a cause of failure), and <code>django_ox.exceptions.TaskTimeout</code>,
+  a <code>TimeoutError</code> raised inside a task that ran past its <code>TASK_TIMEOUT</code> and
+  recorded against the attempt.</li>
 <li><strong>The structured-log contract</strong>: the event names and stable <code>extra</code> keys
   documented on the <a href="../monitoring/">Monitoring</a> page.</li>
 <li><strong>The database schema</strong> of <code>OxTask</code> and <code>OxScheduleTick</code>, evolved only
@@ -817,21 +902,23 @@ contract.</p>
 <p>Everything else is an implementation detail and may change in any release
 without notice. That covers the <code>django_ox.worker.Worker</code> internals, the cron
 parser (<code>django_ox.cron</code>), the row-to-dataclass conversion
-(<code>django_ox.results</code>), the schedule loader (<code>django_ox.schedules</code>), and any name
-starting with an underscore. The exact SQL a claim emits and the
+(<code>django_ox.results</code>), the schedule loader (<code>django_ox.schedules</code>), the
+supervisor behind <code>--processes</code> (<code>django_ox.supervisor</code>) and the hidden
+<code>--worker-index</code> flag it starts each child with, and any name starting
+with an underscore. The exact SQL a claim emits and the
 model's non-schema helper methods are not part of the contract.</p>
 <h2 id="versioning">Versioning</h2>
 <p>django-ox follows <a href="https://semver.org/">Semantic Versioning</a>. Before 1.0,
 the pre-1.0 rule applies:</p>
 <ul>
-<li><strong>0.x minor releases (0.1 to 0.2) may contain breaking changes.</strong> Any
+<li><strong>0.x minor releases may contain breaking changes.</strong> Any
   break to a public surface above is called out in the changelog under a
   <code>Changed</code> or <code>Removed</code> heading, with the migration step.</li>
 <li><strong>0.x.y patch releases are bug fixes only</strong> and never break a public
   surface.</li>
 </ul>
-<p>Pin accordingly: <code>django-ox~=0.1.0</code> accepts patch releases only;
-<code>django-ox&gt;=0.1,&lt;0.2</code> accepts the current minor line.</p>
+<p>Pin accordingly: <code>django-ox~=0.3.0</code> accepts patch releases only;
+<code>django-ox&gt;=0.3,&lt;0.4</code> accepts the current minor line.</p>
 <p>Once 1.0 ships, breaking changes to the public API will require a major
 version bump, in the usual SemVer way.</p>
 <h2 id="deprecation-policy">Deprecation policy</h2>
@@ -849,8 +936,9 @@ dropped outright:</p>
 vulnerability open may change in a patch release. That is documented in the
 changelog, and in a security advisory where relevant.</p>
 <h2 id="supported-python-and-django">Supported Python and Django</h2>
-<p>Each django-ox release is tested against the matrix below in CI (SQLite
-and PostgreSQL); these are the supported combinations.</p>
+<p>Each django-ox release is tested against the matrix below in CI, on SQLite
+and PostgreSQL 16 across the grid and MySQL 8 on the oldest and newest
+corners; these are the supported combinations.</p>
 <table>
 <thead>
 <tr>

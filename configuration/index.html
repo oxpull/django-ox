@@ -565,6 +565,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../choosing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing a backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../production/" class="md-nav__link">
         
   
@@ -681,6 +708,33 @@
     
   
     Pro
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    For AI assistants
   
 
     
@@ -883,6 +937,9 @@ three management commands. A full entry with every option spelled out:</p>
             <span class="s2">&quot;LOCK_TIMEOUT&quot;</span><span class="p">:</span> <span class="mi">300</span><span class="p">,</span>
             <span class="s2">&quot;BACKOFF_INITIAL&quot;</span><span class="p">:</span> <span class="mi">5</span><span class="p">,</span>
             <span class="s2">&quot;BACKOFF_MAX&quot;</span><span class="p">:</span> <span class="mi">600</span><span class="p">,</span>
+            <span class="s2">&quot;TASK_TIMEOUT&quot;</span><span class="p">:</span> <span class="kc">None</span><span class="p">,</span>
+            <span class="s2">&quot;TASK_TIMEOUTS&quot;</span><span class="p">:</span> <span class="p">{},</span>
+            <span class="s2">&quot;TASK_TIMEOUT_GRACE&quot;</span><span class="p">:</span> <span class="mi">30</span><span class="p">,</span>
             <span class="s2">&quot;SCHEDULES&quot;</span><span class="p">:</span> <span class="p">{},</span>  <span class="c1"># see the Recurring tasks page</span>
         <span class="p">},</span>
     <span class="p">}</span>
@@ -956,6 +1013,21 @@ retry. Add options when you have a reason to.</p>
 <td>Ceiling on the retry delay, in seconds.</td>
 </tr>
 <tr>
+<td><code>TASK_TIMEOUT</code></td>
+<td><code>None</code></td>
+<td>Seconds one attempt may run. <code>None</code> means no limit. At the deadline the worker raises <code>django_ox.exceptions.TaskTimeout</code> inside the task, on the task's own thread, and records the attempt as failed: retried on the usual backoff, or FAILED when attempts are spent. An async task is cancelled at the deadline instead. See <a href="../production/#task-timeouts">Task timeouts</a>.</td>
+</tr>
+<tr>
+<td><code>TASK_TIMEOUTS</code></td>
+<td><code>{}</code></td>
+<td>Per-queue timeouts, <code>{"queue name": seconds}</code>. A queue in the mapping uses its own value instead of <code>TASK_TIMEOUT</code>; <code>None</code> as a value exempts that queue. Every key must be a queue named in <code>QUEUES</code>, unless <code>QUEUES</code> is <code>[]</code>. Per queue rather than per task because <code>django.tasks</code> gives a task no field a backend could read a timeout from, and a queue is its unit of routing.</td>
+</tr>
+<tr>
+<td><code>TASK_TIMEOUT_GRACE</code></td>
+<td><code>30</code></td>
+<td>Seconds a timed-out attempt gets to stop. A thread still running after that is treated as stuck, which usually means it is in a call that never returns to Python, where the exception cannot land: the worker records the attempt as failed, stops claiming, drains its other tasks and exits with code 75 so its supervisor restarts it. A task that catches <code>TaskTimeout</code> has the same deadline to return or raise.</td>
+</tr>
+<tr>
 <td><code>SCHEDULES</code></td>
 <td><code>{}</code></td>
 <td>Recurring task definitions. Documented on the <a href="../recurring-tasks/">Recurring tasks</a> page.</td>
@@ -991,7 +1063,12 @@ jitter.</p>
 <tr>
 <td><code>--concurrency</code></td>
 <td><code>1</code></td>
-<td>Tasks executed concurrently, as a thread pool inside the process.</td>
+<td>Tasks executed concurrently, as a thread pool inside each worker process.</td>
+</tr>
+<tr>
+<td><code>--processes</code></td>
+<td><code>1</code></td>
+<td>Worker processes to run. At <code>1</code> the command is the worker. Above <code>1</code> it supervises that many copies of itself, each a full worker with its own connections, lease renewal, reaper and <code>--concurrency</code> thread pool, so <code>--processes 2 --concurrency 4</code> runs eight tasks at once. See <a href="../production/#threads-and-processes">Threads and processes</a>.</td>
 </tr>
 <tr>
 <td><code>--interval</code></td>
@@ -1007,7 +1084,11 @@ jitter.</p>
 </table>
 <p>The command also honors Django's standard <code>-v/--verbosity</code>: at the default
 verbosity it logs worker lifecycle and warnings to stderr, and <code>-v 2</code>
-enables debug logging. <code>-v 0</code> attaches no log handler.</p>
+enables debug logging. <code>-v 0</code> attaches no log handler. With <code>--processes</code>
+above 1 every flag is passed on to each worker process unchanged, including
+<code>--settings</code> and <code>--pythonpath</code>, and each worker process is started the way
+the supervisor was (<code>manage.py</code> by absolute path, or <code>python -m django</code>), so
+the command works from any working directory.</p>
 <p>Two intervals are derived rather than flagged:</p>
 <ul>
 <li>The reaper runs every <code>min(30, max(lock_timeout / 2, 1))</code> seconds.</li>
@@ -1048,8 +1129,8 @@ raising the global value and delaying recovery for everything else:</p>
 </code></pre></div>
 <p>If you embed the worker programmatically, <code>django_ox.worker.Worker</code>
 accepts <code>reap_interval</code>, <code>renew_interval</code>, <code>schedule_interval</code>,
-<code>backoff_initial</code> and <code>backoff_max</code> keyword overrides in addition to the flag
-equivalents.</p>
+<code>backoff_initial</code>, <code>backoff_max</code>, <code>task_timeout</code> and <code>task_timeout_grace</code>
+keyword overrides, which have no flag; they win over the <code>OPTIONS</code> values.</p>
 <h2 id="ox_prune">ox_prune</h2>
 <p>Finished task rows stay in the table until pruned; the queue table doubles
 as the result store, and django-ox does not guess at your retention
@@ -1075,7 +1156,7 @@ page):</p>
 <tr>
 <td><code>--include-failed</code></td>
 <td>off</td>
-<td>Also delete FAILED and LOST rows. By default they are kept, because they hold the per-attempt tracebacks.</td>
+<td>Also delete FAILED and LOST rows. By default they are kept, because they hold the per-attempt tracebacks and can be retried.</td>
 </tr>
 <tr>
 <td><code>--batch-size</code></td>
@@ -1089,8 +1170,8 @@ page):</p>
 </tr>
 </tbody>
 </table>
-<p>Only SUCCESSFUL rows (and, with <code>--include-failed</code>, FAILED rows) whose
-<code>finished_at</code> is past the cutoff are deleted. READY and RUNNING rows are
+<p>Only SUCCESSFUL and DISCARDED rows (and, with <code>--include-failed</code>, FAILED and
+LOST rows) whose <code>finished_at</code> is past the cutoff are deleted. READY and RUNNING rows are
 never touched, whatever their age. Rows from the recurring-schedule tick
 log are pruned with the same cutoff, always keeping each schedule's most
 recent tick; that row anchors missed-tick recovery and deleting it would
@@ -1141,15 +1222,26 @@ alert are on the
 <h2 id="system-checks">System checks</h2>
 <p><code>manage.py check</code> validates the setup:</p>
 <ul>
-<li><code>django_ox.E001</code>: <code>django_ox</code> is missing from <code>INSTALLED_APPS</code>.</li>
+<li><code>django_ox.E001</code>: <code>django_ox</code> is missing from <code>INSTALLED_APPS</code>. The app
+  itself registers these checks with Django, so a project that also lacks
+  any other import of <code>django.tasks</code> gets no <code>E001</code> from <code>manage.py check</code>;
+  the reliable symptom is <code>Unknown command: 'ox_worker'</code>, because the
+  command ships with the app.</li>
 <li><code>django_ox.E002</code>: a <code>SCHEDULES</code> entry is invalid (task path does not
   import, cron expression does not parse or can never fire, arguments not
   JSON-serializable, bad queue name or priority).</li>
 <li><code>django_ox.E003</code>: the same schedule name is defined on more than one
   backend; schedule names must be unique across backends.</li>
+<li><code>django_ox.E004</code>: <code>TASK_TIMEOUT</code>, a <code>TASK_TIMEOUTS</code> value or
+  <code>TASK_TIMEOUT_GRACE</code> is not a positive, finite number of seconds, at most
+  a thousand years (the first two may also be <code>None</code>, which means no limit;
+  <code>float("inf")</code> does not), or <code>TASK_TIMEOUTS</code> is not a mapping keyed by
+  queue name. Every bad value is reported in one run.</li>
+<li><code>django_ox.E005</code>: a <code>TASK_TIMEOUTS</code> key names a queue that is not in
+  <code>QUEUES</code>, so the entry would never apply.</li>
 </ul>
-<p>The worker performs the same schedule validation at startup, so a bad
-deploy fails loudly rather than skipping dispatches.</p>
+<p>The worker performs the same schedule and timeout validation at startup, so
+a bad deploy fails loudly rather than skipping dispatches.</p>
 
 
 

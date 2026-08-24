@@ -1,0 +1,162 @@
+# django-ox
+
+> Database-backed worker backend for Django's Tasks framework (django.tasks,
+> Django 6.0+). Background tasks are rows in the database you already run and
+> a worker process executes them. Transactional enqueue, retries with
+> exponential backoff, priorities, deferred tasks, cron-style recurring
+> schedules, a result store and a health command. No broker to provision.
+> BSD 3-Clause. Package name on PyPI: django-ox. App label: django_ox.
+
+Operational facts worth getting right:
+
+- Requires Python 3.12 or later and Django 6.0 or later. Django 6.0 ships the
+  Tasks API but no production backend; django-ox is the backend.
+- Install is four steps: `pip install django-ox` (or `uv add django-ox`), add
+  `"django_ox"` to `INSTALLED_APPS`, set `TASKS = {"default": {"BACKEND":
+  "django_ox.backend.OxBackend"}}`, run `python manage.py migrate django_ox`.
+- Tasks only execute while a worker is running. Start one with
+  `python manage.py ox_worker`. It is a separate foreground process from the
+  web server. SIGTERM and SIGINT both drain in-flight tasks and exit 0; a
+  second signal forces an immediate exit with code 130.
+- Tasks are ordinary `django.tasks` tasks: `from django.tasks import task`,
+  decorate with `@task`, call `.enqueue(...)`. django-ox adds nothing on the
+  producer side, so task code stays portable across `django.tasks` backends.
+- The worker imports a task by its dotted path, so the module must be
+  importable in the worker process and the worker runs the same code as the
+  producer; nothing is registered and there is no autodiscovery. `async def`
+  tasks run.
+- Priority and deferral are Django API: `task.using(priority=N)` with N from
+  -100 to 100, higher first, and `task.using(run_after=...)` with a timedelta
+  or datetime.
+- `enqueue()` is a single INSERT on the default database connection. Inside
+  `transaction.atomic()` the task becomes visible to workers only when the
+  transaction commits and disappears on rollback. Do not wrap enqueue in
+  `transaction.on_commit()`; it is not needed.
+- `django_ox.bulk.enqueue_many(task, [(args, kwargs), ...])` enqueues one task
+  many times in one INSERT per 1,000 rows, inside one transaction, and returns
+  the `TaskResult` list in input order. Queue, priority and `run_after` are set
+  once on the task with `.using(...)`. Nothing is written if the task or an
+  argument is rejected.
+- Execution is at-least-once. A task is retried when it raises and when its
+  worker dies mid-run, so write tasks to be idempotent: guard on state already
+  written to the database, not on a flag in memory.
+- The task function is called outside any transaction. Open your own
+  `transaction.atomic()` inside the task if you need `select_for_update()`.
+- Claim strategy by database: one `UPDATE ... WHERE id = (SELECT ... FOR UPDATE
+  SKIP LOCKED) RETURNING` statement on PostgreSQL; `SELECT ... FOR UPDATE SKIP
+  LOCKED` in a short transaction on other databases that support it (MySQL
+  8+); an atomic compare-and-set UPDATE on databases without it, SQLite
+  included. All three are correct with many workers on one database.
+- Backend options live under `OPTIONS` in the `TASKS` entry: `MAX_ATTEMPTS`
+  (3), `LOCK_TIMEOUT` (300 s), `BACKOFF_INITIAL` (5 s), `BACKOFF_MAX` (600 s),
+  `TASK_TIMEOUT` (None), `TASK_TIMEOUTS` ({}), `TASK_TIMEOUT_GRACE` (30 s),
+  `SCHEDULES` ({}). `QUEUES` sits beside `OPTIONS`, not inside it, and
+  defaults to `["default"]`; `[]` allows any queue name. A `QUEUES` key
+  inside `OPTIONS` is ignored without warning; the symptom is
+  `InvalidTask: Queue 'X' is not valid for backend.`
+- An attempt is consumed at claim time, so a dead worker's run counts. Retry
+  delay after attempt n is `BACKOFF_INITIAL * 2 ** (n - 1)`, capped at
+  `BACKOFF_MAX`, no jitter.
+- `LOCK_TIMEOUT` bounds how long a worker may stop refreshing its lease
+  before the reaper hands the task to another worker. The worker renews the
+  lease every `LOCK_TIMEOUT / 3` seconds, so a long task on a live worker
+  keeps running.
+- `TASK_TIMEOUT` (seconds, default None) bounds one attempt: at the deadline
+  the worker raises `django_ox.exceptions.TaskTimeout` inside the task on its
+  own thread (an async task is cancelled), and the attempt is recorded as
+  failed and retried on the backoff. A thread that has not stopped
+  `TASK_TIMEOUT_GRACE` seconds later (default 30; usually a call that never
+  returns to Python) is recorded as failed and the worker exits with code 75
+  so its supervisor restarts it. `TASK_TIMEOUTS = {"queue": seconds}` sets
+  per-queue values; there is no per-task value, because `django.tasks` has
+  no field for one.
+  `django_ox.deadline()` and `django_ox.remaining()` read the attempt's
+  deadline from inside a task.
+- `ox_worker --concurrency N` is a thread pool in one process, suited to
+  I/O-bound tasks. `--processes N` runs N such workers under one supervisor,
+  each with its own connections and reaper; for CPU-bound work use
+  `--processes N --concurrency 1`. A worker process that dies is restarted
+  after one second, doubling to 30 s; more than five deaths of one slot in a
+  minute stops the supervisor with exit 1. `--queues a,b` restricts a worker
+  to named queues; a queue with no worker assigned accumulates tasks and
+  never runs them.
+- The worker polls; `--interval` (default 1.0 s) is the idle sleep, so a task
+  starts within one interval of its commit, and a worker with tasks in flight
+  wakes as one finishes. There is no LISTEN/NOTIFY.
+- Recurring tasks are declared in `OPTIONS["SCHEDULES"]` as `{name: {"task":
+  "dotted.path", "cron": "0 3 * * *"}}`. Every worker dispatches schedules and
+  a unique constraint on (schedule name, tick time) makes each tick fire once,
+  so there is no separate scheduler process. Bad schedules fail
+  `manage.py check` and worker startup.
+- `python manage.py ox_health` exits 0 when the database answers, and takes
+  `--max-backlog`, `--max-age` and `--worker-timeout` thresholds that turn
+  queue stats into a non-zero exit for probes and cron alerting.
+- `path("ox/", include("django_ox.urls"))` exposes `GET /ox/metrics`, the
+  queue stats as Prometheus gauges (`django_ox_tasks{queue,status}`,
+  `django_ox_ready_tasks`, `django_ox_oldest_ready_age_seconds`,
+  `django_ox_last_claim_age_seconds`, `django_ox_throughput_per_minute`,
+  `django_ox_failure_rate`). The view has no authentication; wrap it or
+  restrict it by network. `django_ox.metrics.collector()` registers the same
+  gauges with an existing `prometheus_client` registry. For OpenTelemetry,
+  read the stats functions from an observable gauge; the recipe is on the
+  Monitoring page.
+- Finished rows stay until pruned. `python manage.py ox_prune --older-than 7d`
+  deletes SUCCESSFUL and DISCARDED rows past the cutoff; FAILED and LOST rows
+  are kept unless `--include-failed` is given. READY and RUNNING rows are
+  never deleted.
+- `django_ox.actions.retry(result_id)` puts a FAILED or LOST task back to
+  READY for one more attempt; `django_ox.actions.discard(result_id)` closes a
+  READY, FAILED or LOST task without running it. Both return a bool, and
+  neither touches a RUNNING task. With `django.contrib.admin` installed the
+  task table is registered in the admin with the same two actions.
+- Run `migrate` before rolling workers, not from the worker process.
+- Out of scope in the core: interrupting one chosen running task on demand
+  (every attempt can be bounded with `TASK_TIMEOUT`), and multi-database
+  routing (tasks live on the default database). For tests, point `TASKS` at
+  `django.tasks.backends.immediate.ImmediateBackend` or
+  `django.tasks.backends.dummy.DummyBackend`.
+- Batches and unique (deduplicated) tasks are in Oxpull Pro, a paid add-on
+  that is not on sale yet, delivered from a private package index when it
+  opens. They are not in django-ox. `django_ox.stats` and `ox_health` are in
+  the free package.
+
+## Documentation
+
+- [Home](https://oxpull.com/django-ox/): install, quickstart, transactional
+  enqueue, scope.
+- [Configuration](https://oxpull.com/django-ox/configuration/): the `TASKS`
+  entry, every `OPTIONS` key, `ox_worker`, `ox_prune` and `ox_health` flags,
+  system checks.
+- [Recurring tasks](https://oxpull.com/django-ox/recurring-tasks/): schedule
+  keys, cron syntax, many workers one tick, missed ticks.
+- [Common patterns](https://oxpull.com/django-ox/patterns/): email after
+  signup, retrying a flaky call, answering a webhook fast, deferring work,
+  enqueuing many tasks at once,
+  queue routing, idempotent tasks, testing without a worker.
+- [Migrating](https://oxpull.com/django-ox/migrating/): from another
+  `django.tasks` backend, from Celery, from huey, and migrating away.
+- [Choosing a backend](https://oxpull.com/django-ox/choosing/): sourced
+  comparison with django-tasks-db, huey, Celery, django-q2, dramatiq and
+  procrastinate, and when not to use django-ox.
+- [Production](https://oxpull.com/django-ox/production/): systemd units,
+  containers, graceful shutdown, scaling out, the lease and the reaper,
+  PostgreSQL, MySQL or SQLite, pruning on a timer.
+- [Monitoring](https://oxpull.com/django-ox/monitoring/): `django_ox.stats`
+  functions, `ox_health` semantics and probe examples, the Prometheus
+  endpoint and metric names, log events, retry and discard, the admin page.
+- [Benchmarks](https://oxpull.com/django-ox/benchmarks/): throughput and
+  latency numbers with the method that produced them.
+- [API stability](https://oxpull.com/django-ox/stability/): what is public
+  API, pre-1.0 versioning, deprecation policy, supported versions.
+- [Pro](https://oxpull.com/django-ox/pro/): what Oxpull Pro adds, delivery
+  and pricing.
+- [For AI assistants](https://oxpull.com/django-ox/agents/): setup block,
+  verification steps, Context7 id.
+
+## Optional
+
+- [Full documentation in one file](https://oxpull.com/django-ox/llms-full.txt)
+- [Source code](https://github.com/oxpull/django-ox)
+- [Changelog](https://github.com/oxpull/django-ox/blob/main/CHANGELOG.md)
+- [PyPI](https://pypi.org/project/django-ox/)
+- Context7 library id: `/oxpull/django-ox`

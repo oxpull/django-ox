@@ -13,7 +13,7 @@
         <link rel="canonical" href="https://oxpull.com/django-ox/production/">
       
       
-        <link rel="prev" href="../migrating/">
+        <link rel="prev" href="../choosing/">
       
       
         <link rel="next" href="../monitoring/">
@@ -410,6 +410,33 @@
       
   
   
+  
+  
+    <li class="md-nav__item">
+      <a href="../choosing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing a backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
     
   
   
@@ -542,6 +569,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="The lease">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#task-timeouts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task timeouts
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -584,10 +628,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#postgresql-or-sqlite" class="md-nav__link">
+  <a href="#postgresql-mysql-or-sqlite" class="md-nav__link">
     <span class="md-ellipsis">
       
-        PostgreSQL or SQLite
+        PostgreSQL, MySQL or SQLite
       
     </span>
   </a>
@@ -739,6 +783,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    For AI assistants
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../changelog/" class="md-nav__link">
         
   
@@ -855,6 +926,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="The lease">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#task-timeouts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task timeouts
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -897,10 +985,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#postgresql-or-sqlite" class="md-nav__link">
+  <a href="#postgresql-mysql-or-sqlite" class="md-nav__link">
     <span class="md-ellipsis">
       
-        PostgreSQL or SQLite
+        PostgreSQL, MySQL or SQLite
       
     </span>
   </a>
@@ -969,14 +1057,18 @@ scaling, shutdown, the reaper, and monitoring.</p>
 <span class="na">Group</span><span class="o">=</span><span class="s">app</span>
 <span class="na">WorkingDirectory</span><span class="o">=</span><span class="s">/srv/myproject</span>
 <span class="na">Environment</span><span class="o">=</span><span class="s">DJANGO_SETTINGS_MODULE=myproject.settings</span>
-<span class="na">ExecStart</span><span class="o">=</span><span class="s">/srv/myproject/.venv/bin/python manage.py ox_worker --concurrency 4</span>
+<span class="na">ExecStart</span><span class="o">=</span><span class="s">/srv/myproject/.venv/bin/python manage.py ox_worker --processes 2 --concurrency 4</span>
 <span class="na">Restart</span><span class="o">=</span><span class="s">always</span>
 <span class="na">RestartSec</span><span class="o">=</span><span class="s">5</span>
 
 <span class="c1"># systemd sends SIGTERM on stop; the worker drains in-flight tasks and</span>
 <span class="c1"># exits 0. Give the drain at least as long as your longest task before</span>
-<span class="c1"># systemd escalates to SIGKILL.</span>
+<span class="c1"># systemd escalates to SIGKILL. KillMode=mixed sends that SIGTERM to the</span>
+<span class="c1"># supervisor alone, which forwards it once; the default of sending it to</span>
+<span class="c1"># every process in the group would reach each worker twice, and a second</span>
+<span class="c1"># signal is the force-exit.</span>
 <span class="na">KillSignal</span><span class="o">=</span><span class="s">SIGTERM</span>
+<span class="na">KillMode</span><span class="o">=</span><span class="s">mixed</span>
 <span class="na">TimeoutStopSec</span><span class="o">=</span><span class="s">300</span>
 
 <span class="k">[Install]</span>
@@ -985,10 +1077,18 @@ scaling, shutdown, the reaper, and monitoring.</p>
 <div class="highlight"><pre><span></span><code>sudo systemctl enable --now ox-worker
 journalctl -u ox-worker -f
 </code></pre></div>
-<p>To run several workers on one host, use a template unit
-(<code>ox-worker@.service</code> with the same <code>[Service]</code> body) and start
-<code>ox-worker@1</code>, <code>ox-worker@2</code>, and so on. No flag distinguishes the
-instances; every worker generates its own unique id.</p>
+<p>There are two ways to put several worker processes on one host. The unit
+above uses <code>--processes 2</code>: one unit, one supervisor, two workers, and one
+place to set the flags. The other is a template unit (<code>ox-worker@.service</code>
+with the same <code>[Service]</code> body and <code>--processes 1</code>), started as
+<code>ox-worker@1</code>, <code>ox-worker@2</code>, and so on, which makes each worker its own
+unit with its own journal entry and restart counter.</p>
+<p>Use <code>--processes</code> unless you need to stop, restart or give flags to one
+worker at a time. A supervisor that restarts a dead worker in a second, with
+one command to edit, is the common case. The template unit is the right
+shape when the workers differ, for instance one unit per queue with its own
+<code>--lock-timeout</code>, and for that a queue flag per unit says more than a
+process count.</p>
 <h2 id="running-in-containers">Running in containers</h2>
 <p>The worker is a foreground process that exits 0 on SIGTERM, so it needs no
 special entrypoint. The setting that matters is the grace period: give the
@@ -996,7 +1096,7 @@ runtime longer than your slowest task before it escalates to SIGKILL.</p>
 <div class="highlight"><pre><span></span><code><span class="nt">services</span><span class="p">:</span>
 <span class="w">  </span><span class="nt">worker</span><span class="p">:</span>
 <span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">myapp:latest</span>
-<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">python manage.py ox_worker --concurrency 4</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">python manage.py ox_worker --processes 2 --concurrency 4</span>
 <span class="w">    </span><span class="nt">stop_grace_period</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5m</span>
 <span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
 <span class="w">    </span><span class="nt">depends_on</span><span class="p">:</span>
@@ -1011,6 +1111,12 @@ runtime longer than your slowest task before it escalates to SIGKILL.</p>
 and leave the reaper to clean up. <code>stop_grace_period</code> is the container
 equivalent of <code>TimeoutStopSec</code>. On Kubernetes it is
 <code>terminationGracePeriodSeconds</code> on the pod spec.</p>
+<p><code>--processes</code> inside one container, or one worker per container with the
+replica count doing the scaling, both work. The runtime restarts a container,
+the supervisor restarts a worker process, and each takes about a second. One
+container per worker keeps the runtime's own health and restart accounting
+per worker, which is worth having on an orchestrator; <code>--processes</code> keeps the
+number of containers down on a single host.</p>
 <p>With no flags, <code>ox_health</code> checks that the database answers, which is what a
 per-container probe should test. Queue-wide checks belong in fleet alerting
 rather than in a probe: see
@@ -1019,6 +1125,13 @@ liveness probe example there for queues with steady traffic.</p>
 <p>Run migrations before rolling workers, as an init container or a job, not from
 the worker itself. Several workers starting at once would race the same
 migration.</p>
+<p>Roll every process before using a status the old version cannot read. 0.3.0
+adds DISCARDED: a 0.2.1 process that reads a discarded row raises
+<code>ValueError</code> from <code>get_result()</code> and <code>refresh()</code>, and its <code>ox_prune</code> cannot
+delete the row. Migrate, finish the rollout, then discard. A rollback to
+0.2.1 with discarded rows present keeps the crash until those rows are
+deleted by hand (<code>DELETE FROM django_ox_oxtask WHERE status = 'DISCARDED'</code>);
+reversing the migration does not remove them.</p>
 <h2 id="graceful-shutdown">Graceful shutdown</h2>
 <p>On SIGTERM or SIGINT the worker:</p>
 <ol>
@@ -1029,9 +1142,35 @@ migration.</p>
 <p>A second signal during the drain forces an immediate exit, code 130. Whatever
 was running is abandoned mid-flight. The reaper on a surviving worker reclaims
 it later, and it counts as a failed attempt.</p>
+<p>One other exit code exists. A worker exits 75 when it recycles itself after
+a task thread that its timeout could not stop; see
+<a href="#task-timeouts">Task timeouts</a>. A process manager on <code>Restart=always</code> or
+<code>Restart=on-failure</code> restarts it either way.</p>
 <p>This maps directly onto rolling deploys: send SIGTERM, wait, start the new
-version. The only tuning point is the supervisor's kill escalation
+version. The only tuning point is the process manager's kill escalation
 (<code>TimeoutStopSec</code> above) relative to your longest task.</p>
+<p>With <code>--processes</code> above 1, the signal goes to the supervisor, and SIGHUP
+counts as well as SIGTERM and SIGINT. The sequence is:</p>
+<ol>
+<li>First signal: the supervisor forwards SIGTERM to every worker process
+   and waits for each to drain. It exits 0 when all of them did, otherwise
+   with the first non-zero code.</li>
+<li>Second signal: forwarded again, which is the force-exit on each worker.
+   A worker that cannot act on it (stopped, stuck in a C call) gets five
+   seconds, then SIGKILL, logged as <code>supervisor_killed_workers</code> at ERROR.</li>
+<li>A third signal sends the SIGKILL at once.</li>
+</ol>
+<p>Send the signal to the supervisor only. A worker that also receives the
+terminal's copy of a Ctrl-C has seen two signals. That is why each worker
+runs in its own process group, and why the systemd unit above sets
+<code>KillMode=mixed</code>.</p>
+<p>A worker whose supervisor dies without signalling it (SIGKILL, an OOM kill)
+does not run on as an orphan. On Linux the kernel sends it SIGTERM the
+moment the supervisor exits (<code>PR_SET_PDEATHSIG</code>), so it drains through its
+ordinary signal path. Everywhere else, and on Linux in the window before
+that flag is set, the worker notices within one poll interval that its
+parent pid has changed, logs <code>worker_orphaned</code> at WARNING, drains and
+exits.</p>
 <h2 id="scaling-out">Scaling out</h2>
 <p>Run as many workers as you need, on as many hosts as you need, pointed at
 the same database. No coordinator, no leader election. Two things make
@@ -1054,9 +1193,51 @@ can retry against each other for the head of the queue.</li>
 <h3 id="threads-and-processes">Threads and processes</h3>
 <p><code>--concurrency N</code> is a thread pool inside one process. That fits the
 common Django task profile: email, HTTP calls to third parties, ORM work.
-For CPU-bound tasks the GIL makes threads the wrong tool. Run multiple worker
-processes with <code>--concurrency 1</code> instead. That is also the natural shape for
-systemd template units, or one container per worker.</p>
+For CPU-bound tasks the GIL makes threads the wrong tool; use
+<code>--processes N</code> there, with <code>--concurrency 1</code>, and the same command on one
+host gives you N interpreters.</p>
+<div class="highlight"><pre><span></span><code>python manage.py ox_worker --processes 4 --concurrency 1
+</code></pre></div>
+<p>Each process is a complete worker with its own database connections, lease
+renewal and reaper, and its own worker id with the slot number on the end, so
+<code>worker_ids</code> on a task row says which process ran it. Nothing is shared
+across the processes except the database: the supervisor starts each one as a
+fresh interpreter running <code>ox_worker --processes 1</code> with the same flags, so a
+worker under the supervisor is the same code as a worker started by hand. The
+supervisor itself never opens a database connection.</p>
+<p>The children start the way the supervisor was started. <code>python
+/srv/app/manage.py ox_worker --processes 2</code> from any working directory runs
+<code>/srv/app/manage.py</code> again for each child; <code>django-admin</code> or <code>python -m
+django</code> runs <code>python -m django</code> with <code>DJANGO_SETTINGS_MODULE</code> set in the
+child's environment. <code>--settings</code> and <code>--pythonpath</code> are passed on, and the
+children inherit the supervisor's working directory.</p>
+<p>A worker process that exits, whatever the cause and whatever the code, is a
+death: a crash, a kill, and a clean exit 0 all count the same, because a
+worker is meant to run until told to stop. The supervisor restarts the slot
+and logs <code>worker_process_restarted</code> with the exit code at WARNING. Its
+in-flight tasks go through the ordinary lease path: the reaper on a
+surviving process takes them back after <code>LOCK_TIMEOUT</code>. The restart policy
+is per slot:</p>
+<ul>
+<li>The first restart comes after one second. Each further death within 60
+  seconds of the slot's last start doubles the delay (1, 2, 4, 8, 16, 30
+  seconds, capped at 30). A slot that has run for 60 seconds starts the
+  sequence over at one second.</li>
+<li>More than five deaths of one slot inside one minute stops the supervisor:
+  it logs <code>supervisor_restart_cap</code> at ERROR with the slot index, drains the
+  other workers, and exits 1 whatever the children's own exit codes were, so
+  a unit on <code>Restart=on-failure</code> restarts it too. A worker that cannot stay
+  up hands the fault to the process manager and its restart policy rather
+  than logging a restart a second forever.</li>
+<li>Because the count is per slot, every worker dying at once (a database
+  restart, a deploy that changes a connection string) is one restart each,
+  not a trip. Six workers that all die in the same second all come back a
+  second later.</li>
+</ul>
+<p>Two things <code>--processes</code> does not do. It does not run on Windows, where
+there are no POSIX signals to forward; run one <code>ox_worker</code> per process there.
+And it does not replace a process manager: the supervisor is a foreground
+process that expects to be restarted itself, like the single worker.</p>
 <h2 id="the-lease">The lease</h2>
 <p>A worker that claims a task takes a lease on it: the row records who holds
 it, when the lock was last refreshed, and a lease number that goes up by one
@@ -1087,6 +1268,109 @@ columns carry naive local time, and reading one against the other would make
 <code>ox_prune --older-than</code> treat rows that finished seconds ago as hours old.
 Under that setting, keep <code>TIME_ZONE</code> and the timezone your workers run in the
 same, which is what Django assumes of it anyway.</p>
+<h3 id="task-timeouts">Task timeouts</h3>
+<p><code>TASK_TIMEOUT</code> bounds how long one attempt may run. It is off by default.
+With it set, the worker raises <code>django_ox.exceptions.TaskTimeout</code> inside the
+task when the deadline passes:</p>
+<ul>
+<li><strong>A sync task</strong> gets the exception on its own thread, at the next line of
+  Python it executes. <code>finally</code> blocks run, an open <code>transaction.atomic()</code>
+  rolls back, and the thread returns to the pool. The worker then drops the
+  thread's database connections, since the exception may have landed inside
+  the driver with a statement in flight, and records the outcome on a fresh
+  one. The task may catch <code>TaskTimeout</code> to clean up and then re-raise it.
+  Inside the task the exception is bare: <code>str(exc)</code> is empty and
+  <code>exc.timeout</code> is <code>None</code>, and the worker fills both in when it records the
+  attempt. A task that catches it and returns is allowed, and the attempt
+  is recorded as whatever the task went on to do, provided it returns or
+  raises within <code>TASK_TIMEOUT_GRACE</code>; one still running then is treated as
+  a thread that did not stop, below. An exception raised while the task
+  unwinds from <code>TaskTimeout</code> (a cleanup that fails, say) is recorded as the
+  timeout, with that exception in the traceback. <code>raise ... from None</code>
+  breaks that chain, and the attempt is then recorded as the exception it
+  names, with no <code>task_timed_out</code> event.</li>
+<li><strong>An async task</strong> is cancelled inside its event loop at the deadline. The
+  coroutine sees <code>asyncio.CancelledError</code> at the <code>await</code> it was on, as any
+  cancelled coroutine does, and should let it propagate; the worker records
+  the attempt with <code>TaskTimeout</code>. <code>except TaskTimeout</code> inside an async task
+  never fires, because nothing can raise another class at a running
+  coroutine's <code>await</code>.</li>
+</ul>
+<p>The attempt is recorded as failed with a <code>TaskTimeout</code> error that names the
+timeout. The attempt was consumed at claim time, so the retry rule is the
+ordinary one: back to READY on the backoff while attempts remain, FAILED
+when they are spent. The worker logs <code>task_timed_out</code> at WARNING, then the
+usual <code>task_retrying</code> or <code>task_failed</code>. <code>TaskTimeout</code> subclasses
+<code>TimeoutError</code>, so code written for one treats it as one.</p>
+<p>A long loop can check the clock instead of being interrupted between two
+steps. <code>django_ox.deadline()</code> returns the attempt's deadline as a <code>datetime</code>,
+and <code>django_ox.remaining()</code> the seconds left; both return <code>None</code> when no
+timeout applies.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">django_ox</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>
+
+
+<span class="nd">@task</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">export</span><span class="p">(</span><span class="n">report_id</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="n">chunks_of</span><span class="p">(</span><span class="n">report_id</span><span class="p">):</span>
+        <span class="n">left</span> <span class="o">=</span> <span class="n">django_ox</span><span class="o">.</span><span class="n">remaining</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">left</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">left</span> <span class="o">&lt;</span> <span class="mi">5</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;paused_at&quot;</span><span class="p">:</span> <span class="n">chunk</span><span class="o">.</span><span class="n">offset</span><span class="p">}</span>
+        <span class="n">write</span><span class="p">(</span><span class="n">chunk</span><span class="p">)</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;done&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">}</span>
+</code></pre></div>
+<p><strong>A thread that does not stop.</strong> The exception is delivered when the thread
+next executes Python, so under a pool of CPU-bound threads it can lag the
+deadline by a few multiples of the interpreter's 5 ms switch interval. A
+thread blocked in a C call stays blocked until the call returns: a socket
+read with no timeout, <code>time.sleep()</code>, a lock, a long statement waiting on the
+database. The exception lands when the call returns, and if that is within
+the grace the attempt is an ordinary timeout. <code>TASK_TIMEOUT_GRACE</code> (default
+30 seconds) is how long the worker waits for the thread after the deadline.
+A task that caught <code>TaskTimeout</code> and is still running then looks the same
+from outside, and is treated the same way. If the thread is still running at
+the grace, the worker:</p>
+<ol>
+<li>Records the attempt as failed, with a <code>TaskTimeout</code> whose message says
+   the thread did not stop within the grace, and moves the lease number in
+   the same write, the
+   way the reaper does when it takes a row off a worker that went quiet.
+   The outcome the thread eventually reports is refused by that number.</li>
+<li>Logs <code>task_stuck</code> at ERROR and <code>worker_recycling</code> at WARNING.</li>
+<li>Stops claiming, drains its other in-flight tasks, and exits with code 75
+   (<code>EX_TEMPFAIL</code>). The stuck thread dies with the process.</li>
+</ol>
+<p>Under <code>--processes</code> (the unit above) the supervisor restarts the slot after
+one second, logs <code>worker_process_recycled</code>, and does not count the exit
+against the restart cap; systemd sees nothing. A single-process worker
+under systemd comes back on <code>Restart=always</code>, and on <code>Restart=on-failure</code>,
+since 75 is non-zero. A container runtime on <code>restart: unless-stopped</code> does
+the same.</p>
+<p>Between the stuck record and the process exit the task may run twice: its
+retry is claimable the moment the record lands, and the stuck thread keeps
+executing until the worker's other in-flight tasks have drained. The thread
+cannot write its outcome to the row, but its side effects are real. That is
+the at-least-once contract every task already lives under: write tasks to be
+safe to run twice.</p>
+<p>Put timeouts on sockets and HTTP clients where you can. A task that returns
+to Python regularly is one the soft timeout stops cleanly; the recycle is the
+backstop.</p>
+<p>Set per-queue values where one number does not fit:</p>
+<div class="highlight"><pre><span></span><code><span class="s2">&quot;QUEUES&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;default&quot;</span><span class="p">,</span> <span class="s2">&quot;exports&quot;</span><span class="p">,</span> <span class="s2">&quot;webhooks&quot;</span><span class="p">],</span>
+<span class="s2">&quot;OPTIONS&quot;</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">&quot;TASK_TIMEOUT&quot;</span><span class="p">:</span> <span class="mi">60</span><span class="p">,</span>
+    <span class="s2">&quot;TASK_TIMEOUTS&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;exports&quot;</span><span class="p">:</span> <span class="mi">3600</span><span class="p">,</span> <span class="s2">&quot;webhooks&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">},</span>
+    <span class="s2">&quot;TASK_TIMEOUT_GRACE&quot;</span><span class="p">:</span> <span class="mi">30</span><span class="p">,</span>
+<span class="p">},</span>
+</code></pre></div>
+<p>A queue in <code>TASK_TIMEOUTS</code> uses its own value; <code>None</code> there exempts the
+queue from the global limit. Every queue named there must be in <code>QUEUES</code>
+(<code>django_ox.E005</code> otherwise), unless <code>QUEUES</code> is <code>[]</code>. A timeout longer than
+<code>LOCK_TIMEOUT</code> is fine: the lease is renewed for as long as the task runs.</p>
+<p>Timeouts use CPython's own facility for raising an exception in another
+thread, which every supported Python has. On an interpreter without it, the
+worker logs <code>timeouts_backstop_only</code> once at startup and enforces timeouts
+by the grace backstop alone.</p>
 <h2 id="the-reaper">The reaper</h2>
 <p>Workers still die: OOM kills, node failures, <code>kill -9</code>. A dead worker stops
 refreshing its lock, and the reaper picks the task up. It runs inside every
@@ -1119,7 +1403,9 @@ not coming back.</p>
 <p>The row keeps the distinction the four statuses cannot carry. Its status
 column is LOST rather than FAILED, <code>queue_stats()</code> reports it in its own
 <code>lost</code> column, and <code>ox_prune --include-failed</code> treats it like a failed row
-for retention.</p>
+for retention. Like a failed row it can be retried or discarded, from the
+admin or with <code>django_ox.actions</code>; see
+<a href="../monitoring/#retrying-and-discarding">Retrying and discarding</a>.</p>
 <p>One case is worth knowing about before it surprises you. If the worker
 holding a LOST task was starved rather than dead, and it comes back and
 records a success, the row becomes SUCCESSFUL and a caller reading it twice
@@ -1151,13 +1437,15 @@ go unresponsive.</p>
 is retried both when it raises and when its worker dies mid-run. Write
 task bodies so that running twice is harmless (upserts, idempotency keys,
 "already sent?" checks).</p>
-<h2 id="postgresql-or-sqlite">PostgreSQL or SQLite</h2>
-<p>Both are fully supported and both run the full worker suite (221 tests
-each). Guidance:</p>
+<h2 id="postgresql-mysql-or-sqlite">PostgreSQL, MySQL or SQLite</h2>
+<p>All three run the full worker suite in CI. Guidance:</p>
 <ul>
 <li><strong>PostgreSQL</strong> is the production recommendation. It gets the
   single-statement <code>SKIP LOCKED</code> claim path, and it handles many workers
   and high write concurrency the way you would expect.</li>
+<li><strong>MySQL 8</strong> claims with <code>SELECT ... FOR UPDATE SKIP LOCKED</code> in a short
+  transaction and runs the full suite in CI on the oldest and newest Python
+  and Django corners.</li>
 <li><strong>SQLite</strong> is fine for development, tests, and small single-host
   deployments in the same situations where SQLite is fine as your Django
   database at all. Claiming uses the compare-and-set path and remains
@@ -1176,6 +1464,8 @@ summary:</p>
   depth and backlog age are the two numbers worth alerting on.</li>
 <li><strong><code>manage.py ox_health</code></strong> turns thresholds on those numbers into an
   exit code, for cron alerting and container probes.</li>
+<li><strong>The Prometheus endpoint.</strong> Mounting <code>django_ox.urls</code> serves the same
+  numbers as gauges at <code>GET /ox/metrics</code>.</li>
 <li><strong>Logs.</strong> The worker logs to the <code>django_ox</code> logger: lifecycle at
   INFO, retries and reaper reclaims at WARNING, terminal failures and
   unhandled worker errors at ERROR, each with stable extra keys for JSON
@@ -1243,7 +1533,7 @@ default so tracebacks survive until you have looked at them; add
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../migrating/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Migrating">
+          <a href="../choosing/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Choosing a backend">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
@@ -1253,7 +1543,7 @@ default so tracebacks survive until you have looked at them; add
                 Previous
               </span>
               <div class="md-ellipsis">
-                Migrating
+                Choosing a backend
               </div>
             </div>
           </a>

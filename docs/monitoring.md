@@ -258,6 +258,7 @@ The message text is not part of the contract. The keys are.
 | `supervisor_started` | INFO | `ox_worker --processes N` started its worker processes. |
 | `worker_process_restarted` | WARNING | A worker process exited on its own and is being restarted. |
 | `worker_process_recycled` | WARNING | A worker process exited with code 75 after a stuck task thread and is being restarted. Not counted against the restart cap. |
+| `worker_process_stopped_early` | INFO | A stop signal reached a worker process before it had finished starting, so it died on the signal rather than draining. It had claimed no work, and the supervisor does not count it as a failure. |
 | `supervisor_restart_cap` | ERROR | More than five deaths of one slot in a minute; the supervisor is stopping with exit code 1. |
 | `supervisor_killed_workers` | ERROR | Worker processes still running five seconds after the second stop signal were sent SIGKILL. |
 | `supervisor_stopped` | INFO | Every worker process has exited. |

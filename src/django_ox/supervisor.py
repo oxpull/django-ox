@@ -14,7 +14,9 @@ in ``ps``.
 The supervisor never opens a database connection. It starts the children,
 forwards SIGTERM, SIGINT and SIGHUP to them, restarts a slot that dies while
 the supervisor is not stopping, and exits with the children's worst exit
-code, or 1 when a slot tripped the restart cap.
+code, or 1 when a slot tripped the restart cap. A child that the forwarded
+SIGTERM killed before it had installed its own handler is not one of those
+codes: see _record_exit.
 """
 
 import logging
@@ -187,6 +189,36 @@ class Supervisor:
                 with suppress(ProcessLookupError):
                     proc.send_signal(signum)
 
+    def _record_exit(self, index: int, code: int) -> None:
+        """
+        Record how one slot ended, as the supervisor's own exit code sees it.
+
+        A child dies *from* SIGTERM only in the window between its exec and
+        the moment it installs its handler; from there on the signal drains
+        it and it exits 0. So a child that died this way, while the
+        supervisor was stopping, was killed by the SIGTERM the supervisor
+        itself had just forwarded, before it had opened a database
+        connection or claimed a task. Nothing was lost and nothing failed.
+
+        Reporting it upwards would say otherwise. A stop that lands during
+        startup is ordinary -- a restart, a deploy that rolls twice, a
+        health check that never went green -- and a unit on
+        ``Restart=on-failure`` would read the 143 as a fault and start the
+        service again.
+        """
+        if self._stopping and code == -signal.SIGTERM:
+            logger.info(
+                "Worker process %d was still starting when it was stopped; "
+                "it had claimed no work",
+                index,
+                extra={
+                    "event": "worker_process_stopped_early",
+                    "worker_index": index,
+                },
+            )
+            code = 0
+        self._exit_codes[index] = code
+
     def _next_delay(self, index: int, now: float) -> float:
         """The restart delay for this death of ``index``, with backoff."""
         lived = now - self._started_at.get(index, now)
@@ -203,7 +235,7 @@ class Supervisor:
             if code is None:
                 continue
             del self._children[index]
-            self._exit_codes[index] = code
+            self._record_exit(index, code)
             if self._stopping:
                 continue
             now = time.monotonic()
@@ -353,7 +385,7 @@ class Supervisor:
             self.request_stop()
             self._signal_children(signal.SIGTERM)
             for index, proc in self._children.items():
-                self._exit_codes[index] = proc.wait()
+                self._record_exit(index, proc.wait())
             self._children.clear()
         # A recycle that lands during a stop is a worker that finished the
         # job it was asked to do, not a failure to report upwards.

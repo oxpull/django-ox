@@ -62,11 +62,15 @@ def start_worker(
     )
 
 
-def scratch_project(tmp_path: Path) -> Path:
+def scratch_project(tmp_path: Path, startup_delay: float = 0.0) -> Path:
     """
     A project directory with its own manage.py and settings package, the way
     a deployment has one. The settings re-export the test settings so the
     children reach the test database.
+
+    ``startup_delay`` holds the children inside the settings import, which is
+    the window before their signal handlers exist. Only the children: the
+    supervisor's own argv carries no --worker-index.
     """
     project = tmp_path / "proj"
     (project / "scratchproj").mkdir(parents=True)
@@ -80,6 +84,12 @@ def scratch_project(tmp_path: Path) -> Path:
     (project / "scratchproj" / "settings.py").write_text(
         f"import sys\nsys.path.insert(0, {str(REPO)!r})\n"
         f"from {settings.SETTINGS_MODULE} import *  # noqa: F403\n"
+        + (
+            "if '--worker-index' in sys.argv:\n"
+            f"    import time; time.sleep({startup_delay})\n"
+            if startup_delay
+            else ""
+        )
     )
     return project
 
@@ -96,9 +106,18 @@ def slot_pid(supervisor: Supervisor, index: int) -> int | None:
     return proc.pid if proc is not None and proc.poll() is None else None
 
 
-def in_process_env(monkeypatch) -> None:
+def in_process_env(monkeypatch, tmp_path: Path | None = None) -> None:
+    """
+    Give this process the environment a child worker needs, so a Supervisor
+    run from the test itself starts children against the test database.
+
+    With ``tmp_path``, the children also append their lifecycle lines to
+    ``worker.log`` under it, which is what ``wait_for_workers`` reads.
+    """
     for key, value in child_env().items():
         monkeypatch.setenv(key, value)
+    if tmp_path is not None:
+        monkeypatch.setenv("OX_TEST_LOG_FILE", str(tmp_path / "worker.log"))
 
 
 def stop_worker(proc: subprocess.Popen[bytes], tmp_path: Path) -> tuple[int, str]:
@@ -111,6 +130,26 @@ def stop_worker(proc: subprocess.Popen[bytes], tmp_path: Path) -> tuple[int, str
         proc.kill()
         code = proc.wait()
     return code, (tmp_path / "worker.log").read_text()
+
+
+WORKER_STARTED = re.compile(r"Worker \S+ starting: queues=")
+
+
+def wait_for_workers(tmp_path: Path, count: int, timeout: float = 20.0) -> bool:
+    """
+    Wait until ``count`` children have logged the line they log once running.
+
+    Until a child reaches that line it has not installed its signal handler,
+    and a stop lands on the default disposition instead: it dies, having
+    claimed nothing. The supervisor treats that as a clean stop
+    (TestStopDuringStartup), so a test about draining live workers has to
+    wait past the window or it is a test about the window.
+    """
+    log = tmp_path / "worker.log"
+    return wait_for(
+        lambda: log.exists() and len(WORKER_STARTED.findall(log.read_text())) >= count,
+        timeout=timeout,
+    )
 
 
 def child_pids(proc: subprocess.Popen[bytes]) -> list[int]:
@@ -190,16 +229,26 @@ class TestProcessesTwo:
                 ),
                 timeout=20,
             )
+            # A running task proves one child is up. This test is about two
+            # live workers draining, so wait for the second one as well; a
+            # stop during a child's startup is TestStopDuringStartup.
+            assert wait_for_workers(tmp_path, 2)
             pids = child_pids(proc)
             assert len(pids) == 2
         finally:
             code, log = stop_worker(proc, tmp_path)
 
-        assert code == 0
+        assert code == 0, log
         assert not any(alive(pid) for pid in pids)
         assert not OxTask.objects.filter(status=OxTask.Status.RUNNING).exists()
         assert OxTask.objects.get(id=result.id).status == OxTask.Status.SUCCESSFUL
+        # Both children took the signal and drained on it. Without this the
+        # exit code alone cannot tell a drain apart from a child that died
+        # in its startup window, which also exits the supervisor zero.
+        assert len(re.findall(r"Worker \S+ received SIGTERM; draining", log)) == 2
+        assert len(re.findall(r"Worker \S+ stopped", log)) == 2
         assert "worker_process_restarted" not in log
+        # Covers the startup-window line too: it also begins "Worker process".
         assert "Worker process" not in log
 
     @needs_pgrep
@@ -238,10 +287,14 @@ class TestProcessesTwo:
             after = set(child_pids(proc))
             assert len(after) == 2
             assert holder_pid not in after
+            # Three starts: the original two and the replacement. The stop
+            # below is about draining live workers, not about catching the
+            # replacement mid-import.
+            assert wait_for_workers(tmp_path, 3)
         finally:
             code, log = stop_worker(proc, tmp_path)
 
-        assert code == 0
+        assert code == 0, log
         assert re.search(
             r"Worker process \d exited with signal SIGKILL; restarting", log
         )
@@ -263,27 +316,15 @@ class TestReinvocation:
                 ),
                 timeout=20,
             )
-            # Both children must be past their import window, handlers
-            # installed, before the stop: a SIGTERM that lands while a
-            # child is still importing Django kills it with 143.
-            assert wait_for(
-                lambda: (
-                    len(
-                        re.findall(
-                            r"Worker \S+ starting: queues=",
-                            (tmp_path / "worker.log").read_text(),
-                        )
-                    )
-                    == 2
-                ),
-                timeout=20,
-            )
+            # Both children live before the stop: this test is about two
+            # reinvoked workers, so it has to see two of them.
+            assert wait_for_workers(tmp_path, 2)
         finally:
             code, log = stop_worker(proc, tmp_path)
         assert code == 0, log
         assert "ModuleNotFoundError" not in log
         assert "Worker process" not in log
-        assert len(re.findall(r"Worker \S+ starting: queues=", log)) == 2
+        assert len(WORKER_STARTED.findall(log)) == 2
 
     def test_absolute_manage_py_from_another_cwd(self, tmp_path):
         project = scratch_project(tmp_path)
@@ -319,6 +360,76 @@ class TestReinvocation:
             env=env,
         )
         self._runs_two_workers(tmp_path, proc)
+
+
+class TestStopDuringStartup:
+    """
+    A child cannot act on a signal until it has installed its handler, and
+    that is after Django has been imported. A stop that lands before then
+    kills the child outright, on the default disposition, with the very
+    SIGTERM the supervisor forwarded.
+
+    That window is not a test artefact. Anything that stops a service
+    shortly after starting it -- a restart, a deploy that rolls twice, a
+    health check that never goes green -- lands in it. The supervisor used
+    to report the child's 143 as its own exit code, which a unit on
+    ``Restart=on-failure`` reads as a fault and starts again.
+    """
+
+    # How long the children sit inside their settings import. The stop is
+    # sent as soon as both child processes exist, so this only has to
+    # outlast one pgrep; a slower machine makes the test more certain, not
+    # less. Nothing waits it out: the children die inside it.
+    IMPORT_SECONDS = 15.0
+
+    @needs_pgrep
+    def test_a_stop_in_the_startup_window_is_not_a_failure(self, tmp_path):
+        project = scratch_project(tmp_path, startup_delay=self.IMPORT_SECONDS)
+        env = child_env()
+        del env["DJANGO_SETTINGS_MODULE"]
+        proc = start_worker(
+            tmp_path,
+            "--pythonpath",
+            str(project),
+            "--settings",
+            "scratchproj.settings",
+            "--processes",
+            "2",
+            "--interval",
+            "0.05",
+            cwd=Path("/"),
+            env=env,
+        )
+        try:
+            assert wait_for(lambda: len(child_pids(proc)) == 2, timeout=20)
+            pids = child_pids(proc)
+        finally:
+            code, log = stop_worker(proc, tmp_path)
+
+        assert code == 0, log
+        # The window is what was tested: neither child ever got as far as
+        # the line it logs once it is running, so neither could have
+        # handled the signal.
+        assert not WORKER_STARTED.search(log), log
+        assert log.count("was still starting when it was stopped") == 2, log
+        assert not any(alive(pid) for pid in pids)
+        assert "worker_process_restarted" not in log
+
+    def test_a_child_killed_outside_a_stop_is_still_a_failure(self):
+        """
+        The rule is about the supervisor's own signal, not about 143 in
+        general. A worker something else killed is a death like any other.
+        """
+        supervisor = Supervisor(processes=1, worker_args=[])
+        supervisor._record_exit(0, -signal.SIGTERM)
+        assert supervisor._exit_codes == {0: -signal.SIGTERM}
+
+        supervisor.request_stop()
+        supervisor._record_exit(0, -signal.SIGTERM)
+        assert supervisor._exit_codes == {0: 0}
+        # A child that ignored the signal and had to be killed still counts.
+        supervisor._record_exit(1, -signal.SIGKILL)
+        assert supervisor._exit_codes[1] == -signal.SIGKILL
 
 
 class TestRestartCap:
@@ -365,8 +476,11 @@ class TestRestartCap:
         assert cap[0].worker_index == 0
         assert cap[0].exit_code == 0
 
-    def test_every_slot_dying_at_once_is_one_restart_each(self, monkeypatch):
-        in_process_env(monkeypatch)
+    def test_every_slot_dying_at_once_is_one_restart_each(
+        self, caplog, monkeypatch, tmp_path
+    ):
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        in_process_env(monkeypatch, tmp_path)
         supervisor = Supervisor(
             processes=4,
             worker_args=["--interval", "0.05", "--verbosity", "0"],
@@ -374,9 +488,10 @@ class TestRestartCap:
         )
         thread, result = run_in_thread(supervisor)
         try:
-            assert wait_for(
-                lambda: all(slot_pid(supervisor, i) for i in range(4)), timeout=20
-            )
+            # Four running workers, not four processes that exist: what is
+            # under test is what the supervisor does when live slots die
+            # together.
+            assert wait_for_workers(tmp_path, 4)
             before = [slot_pid(supervisor, i) for i in range(4)]
             for pid in before:
                 os.kill(pid, signal.SIGKILL)
@@ -388,12 +503,19 @@ class TestRestartCap:
             )
             assert thread.is_alive()
             assert not supervisor.stopping
-            time.sleep(1.0)  # let the new children install their signal handlers
+            # Eight starts: four originals and four replacements. The drain
+            # below is the claim being tested, so it has to find four live
+            # workers rather than four that are still importing.
+            assert wait_for_workers(tmp_path, 8)
         finally:
             supervisor.request_stop()
             supervisor._signal_children(signal.SIGTERM)
             thread.join(timeout=20)
         assert result == [0]
+        # Four deaths, four restarts: one each, not a slot counted twice.
+        events = [getattr(r, "event", None) for r in caplog.records]
+        assert events.count("worker_process_restarted") == 4
+        assert events.count("supervisor_restart_cap") == 0
 
     def test_one_slot_over_the_cap_stops_the_supervisor(self, caplog, monkeypatch):
         caplog.set_level(logging.WARNING, logger="django_ox")
@@ -537,10 +659,10 @@ class TestOrphans:
 
 class TestEscalation:
     def test_second_signal_kills_a_stuck_child_after_the_grace(
-        self, caplog, monkeypatch
+        self, caplog, monkeypatch, tmp_path
     ):
         caplog.set_level(logging.INFO, logger="django_ox")
-        in_process_env(monkeypatch)
+        in_process_env(monkeypatch, tmp_path)
         supervisor = Supervisor(
             processes=2,
             worker_args=["--interval", "0.05", "--verbosity", "0"],
@@ -552,7 +674,10 @@ class TestEscalation:
             assert wait_for(
                 lambda: all(slot_pid(supervisor, i) for i in range(2)), timeout=20
             )
-            time.sleep(1.0)  # let the children install their signal handlers
+            # Both children running, handlers installed: what is under test
+            # is a worker that will not act on a signal it can receive, not
+            # one that never reached the point of receiving it.
+            assert wait_for_workers(tmp_path, 2)
             stuck = slot_pid(supervisor, 0)
             os.kill(stuck, signal.SIGSTOP)
             started = time.monotonic()

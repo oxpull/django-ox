@@ -137,7 +137,12 @@ counts as well as SIGTERM and SIGINT. The sequence is:
 
 1. First signal: the supervisor forwards SIGTERM to every worker process
    and waits for each to drain. It exits 0 when all of them did, otherwise
-   with the first non-zero code.
+   with the first non-zero code. A worker process cannot act on a signal
+   until it has installed its handler, which is after Django is imported,
+   so a stop that lands in that window kills it outright. It had claimed
+   no work, so the supervisor logs `worker_process_stopped_early` and
+   still exits 0. A restart, or a deploy that rolls twice, is not a
+   failure to report to the process manager.
 2. Second signal: forwarded again, which is the force-exit on each worker.
    A worker that cannot act on it (stopped, stuck in a C call) gets five
    seconds, then SIGKILL, logged as `supervisor_killed_workers` at ERROR.

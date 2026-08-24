@@ -85,7 +85,7 @@ the pre-1.0 rule applies:
 - **0.x.y patch releases are bug fixes only** and never break a public
   surface.
 
-Pin accordingly: `django-ox~=0.3.0` accepts patch releases only;
+Pin accordingly: `django-ox~=0.3.1` accepts patch releases only;
 `django-ox>=0.3,<0.4` accepts the current minor line.
 
 Once 1.0 ships, breaking changes to the public API will require a major

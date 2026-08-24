@@ -61,11 +61,20 @@ class TestLeaseClockAgreesWithColumns:
             "offset old, and a delete is not reversible."
         )
 
-    def test_last_claim_age_is_small_and_not_negative(self, worker):
+    def test_last_claim_age_is_small_in_either_direction(self, worker):
+        # The two sides of this reading come from two clocks: timezone.now()
+        # is this process, last_attempted_at was stamped by the database. The
+        # gap between the claim and the reading is a few milliseconds, so a
+        # server whose clock is milliseconds ahead -- one on another host, or
+        # one in a VM that drifts from the host it runs on -- reads as a
+        # negative age for reasons that are nobody's bug. The bound is the
+        # same in both directions for that reason. What it is here to catch
+        # is a whole UTC offset, an hour at the least, and TOLERANCE is
+        # nowhere near an hour either way.
         run_one(worker)
         age = last_claim_age()
         assert age is not None
-        assert timedelta(0) <= age < TOLERANCE, (
+        assert -TOLERANCE < age < TOLERANCE, (
             f"last_claim_age reports {age}, so ox_health --worker-timeout "
             "either always fails or can never fail."
         )

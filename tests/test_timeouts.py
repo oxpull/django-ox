@@ -278,6 +278,23 @@ def run_in_thread(worker):
     return start_worker_thread(worker)
 
 
+def assert_stopped_at_the_deadline(elapsed, *, timeout, task_seconds):
+    """
+    The claim every timeout test here makes about the clock: the worker came
+    back before the task would have finished on its own.
+
+    That is the whole proposition, and the task's own duration is the only
+    bound that states it. A number picked somewhere between the deadline and
+    the task's end reads as tighter but proves nothing more, and it fails on
+    a machine that is merely slow: a loaded runner under a coverage tracer
+    can spend a second on the claim and the result write alone.
+    """
+    # A task that would end before its own deadline says nothing about the
+    # deadline; the bound below has to have something to cut short.
+    assert timeout < task_seconds, (timeout, task_seconds)
+    assert elapsed < task_seconds, (elapsed, task_seconds)
+
+
 def row(result):
     return OxTask.objects.get(id=result.id)
 
@@ -516,20 +533,32 @@ class TestOptions:
 
 @pytest.mark.django_db(transaction=True)
 class TestSoftTimeout:
-    def _timed_out(self, task=spin, seconds=2.0, timeout=0.2, **kwargs):
+    # The deadline under test, and how long these tasks would run without
+    # one. Every bound in this class is one of the two: what is asserted is
+    # that the worker returns at the deadline rather than at the task's own
+    # end, and those are the only numbers that say it.
+    TIMEOUT = 0.2
+    TASK_SECONDS = 2.0
+
+    def _timed_out(self, task=spin, seconds=None, **kwargs):
+        seconds = self.TASK_SECONDS if seconds is None else seconds
+        kwargs.setdefault("task_timeout", self.TIMEOUT)
         worker = Worker(backoff_initial=60, poll_interval=0.05, **kwargs)
         result = task.enqueue(seconds)
         started = time.monotonic()
         assert worker.run_once()
-        elapsed = time.monotonic() - started
-        return worker, result, elapsed
+        # The task stopped at the deadline, not when its own loop ended.
+        assert_stopped_at_the_deadline(
+            time.monotonic() - started,
+            timeout=kwargs["task_timeout"],
+            task_seconds=seconds,
+        )
+        return worker, result
 
     def test_raised_inside_the_task_and_recorded(
         self, task_state, interruptible_attempts
     ):
-        worker, result, elapsed = self._timed_out(task_timeout=0.2)
-        # The task stopped at the deadline, not when its loop ended.
-        assert elapsed < 1.0
+        worker, result = self._timed_out()
         assert task_state.get("caught") is True
         assert task_state.get("finally_ran") is True
 
@@ -564,7 +593,7 @@ class TestSoftTimeout:
         assert result.errors[-1].exception_class is TaskTimeout
 
     def test_retried_on_the_backoff_and_not_before(self, interruptible_attempts):
-        worker, result, _ = self._timed_out(task_timeout=0.2)
+        worker, result = self._timed_out()
         assert not worker.run_once()
         assert row(result).attempts == 1
         OxTask.objects.filter(id=result.id).update(run_after=None)
@@ -573,11 +602,11 @@ class TestSoftTimeout:
 
     def test_logs_the_timeout_event(self, caplog, interruptible_attempts):
         caplog.set_level(logging.WARNING, logger="django_ox")
-        _, result, _ = self._timed_out(task_timeout=0.2)
+        _, result = self._timed_out()
         (timed_out,) = events(caplog, "task_timed_out")
         assert timed_out.task_id == str(result.id)
-        assert timed_out.timeout_s == 0.2
-        assert timed_out.duration_ms >= 200
+        assert timed_out.timeout_s == self.TIMEOUT
+        assert timed_out.duration_ms >= self.TIMEOUT * 1000
         assert timed_out.levelno == logging.WARNING
         assert events(caplog, "task_retrying")
         assert not events(caplog, "task_stuck")
@@ -624,11 +653,17 @@ class TestSoftTimeout:
         )
 
     def test_a_task_may_catch_it_and_return(self, interruptible_attempts):
-        worker = Worker(task_timeout=0.2, backoff_initial=0, poll_interval=0.05)
-        result = swallow_timeout.enqueue(2.0)
+        worker = Worker(
+            task_timeout=self.TIMEOUT, backoff_initial=0, poll_interval=0.05
+        )
+        result = swallow_timeout.enqueue(self.TASK_SECONDS)
         started = time.monotonic()
         assert worker.run_once()
-        assert time.monotonic() - started < 1.0
+        assert_stopped_at_the_deadline(
+            time.monotonic() - started,
+            timeout=self.TIMEOUT,
+            task_seconds=self.TASK_SECONDS,
+        )
         result.refresh()
         assert result.status == TaskResultStatus.SUCCESSFUL
         assert result.return_value == "cleaned up"
@@ -732,23 +767,40 @@ def row_count(status):
 
 @pytest.mark.django_db(transaction=True)
 class TestDeadline:
+    # The deadline is set when the attempt starts, so what a task reads back
+    # is the timeout, minus however long the worker took to get from the
+    # enqueue to the task body. SLACK is the room for that: a sixth of the
+    # timeout, which is far more than the trip costs and far less than the
+    # distance to any other number the worker could have used, so a report
+    # derived from something else still fails.
+    TIMEOUT = 30.0
+    SLACK = TIMEOUT / 6
+
     def test_deadline_and_remaining_inside_a_task(self):
-        worker = Worker(task_timeout=30, backoff_initial=0, poll_interval=0.05)
+        worker = Worker(
+            task_timeout=self.TIMEOUT, backoff_initial=0, poll_interval=0.05
+        )
         result = report_deadline.enqueue()
         before = timezone.now()
         assert worker.run_once()
         result.refresh()
         reported = result.return_value
         deadline = datetime.fromisoformat(reported["deadline"])
-        assert 29 < (deadline - before).total_seconds() <= 31
-        assert 29 < reported["remaining"] <= 30
+        # The deadline is a whole timeout past the moment the attempt began,
+        # which is at or after `before`; it can only be late, never early.
+        out = (deadline - before).total_seconds()
+        assert self.TIMEOUT <= out <= self.TIMEOUT + self.SLACK, out
+        # What is left of it when the task looks can only be less.
+        assert self.TIMEOUT - self.SLACK <= reported["remaining"] <= self.TIMEOUT
 
     def test_inside_an_async_task(self):
-        worker = Worker(task_timeout=30, backoff_initial=0, poll_interval=0.05)
+        worker = Worker(
+            task_timeout=self.TIMEOUT, backoff_initial=0, poll_interval=0.05
+        )
         result = async_report_deadline.enqueue()
         assert worker.run_once()
         result.refresh()
-        assert 29 < result.return_value <= 30
+        assert self.TIMEOUT - self.SLACK <= result.return_value <= self.TIMEOUT
 
     def test_none_without_a_timeout_and_outside_a_task(self):
         worker = Worker(backoff_initial=0, poll_interval=0.05)
@@ -774,13 +826,16 @@ class TestReleasesWhatItHeld:
         worker writes the outcome; nothing waits, nothing is reaped.
         """
         caplog.set_level(logging.WARNING, logger="django_ox")
+        timeout, task_seconds = 0.2, 5.0
         worker = Worker(
-            task_timeout=0.2, backoff_initial=60, poll_interval=0.05, lock_timeout=5
+            task_timeout=timeout, backoff_initial=60, poll_interval=0.05, lock_timeout=5
         )
-        result = spin_in_atomic.enqueue(5.0)
+        result = spin_in_atomic.enqueue(task_seconds)
         started = time.monotonic()
         assert worker.run_once()
-        assert time.monotonic() - started < 2.0
+        assert_stopped_at_the_deadline(
+            time.monotonic() - started, timeout=timeout, task_seconds=task_seconds
+        )
         assert task_state.get("writer_locked") is True
 
         db_task = row(result)
@@ -1087,12 +1142,23 @@ class TestReleasesWhatItHeld:
 
 @pytest.mark.django_db(transaction=True)
 class TestAsyncTimeout:
+    # As in TestSoftTimeout: the deadline, and how long the coroutine would
+    # run if nothing cancelled it.
+    TIMEOUT = 0.2
+    TASK_SECONDS = 5.0
+
     def test_coroutine_is_cancelled_and_recorded(self, task_state):
-        worker = Worker(task_timeout=0.2, backoff_initial=60, poll_interval=0.05)
-        result = async_spin.enqueue(5.0)
+        worker = Worker(
+            task_timeout=self.TIMEOUT, backoff_initial=60, poll_interval=0.05
+        )
+        result = async_spin.enqueue(self.TASK_SECONDS)
         started = time.monotonic()
         assert worker.run_once()
-        assert time.monotonic() - started < 1.0
+        assert_stopped_at_the_deadline(
+            time.monotonic() - started,
+            timeout=self.TIMEOUT,
+            task_seconds=self.TASK_SECONDS,
+        )
         assert task_state.get("cancelled") is True
         assert task_state["loop"].is_closed()
 
@@ -1152,6 +1218,11 @@ class TestBackstop:
         set; the stuck thread is not waited for.
         """
         caplog.set_level(logging.INFO, logger="django_ox")
+        # The stuck sleep outlasts the deadline, the grace and the drain of
+        # the other task put together, so a run() that returned before it
+        # ended is a run() that left the sleep behind. Judging that by any
+        # tighter number would be judging the machine.
+        stuck_seconds = 2.5
         worker = Worker(
             task_timeout=0.2,
             task_timeout_grace=0.3,
@@ -1160,7 +1231,7 @@ class TestBackstop:
             concurrency=2,
             lock_timeout=60,
         )
-        stuck = slow.enqueue(2.5)
+        stuck = slow.enqueue(stuck_seconds)
         OxTask.objects.filter(id=stuck.id).update(max_attempts=1)
         other = spin.using(queue_name="emails").enqueue(1.0)
         worker.timeouts.by_queue["emails"] = None
@@ -1173,7 +1244,7 @@ class TestBackstop:
         assert not thread.is_alive(), "run() did not return"
         assert worker.recycling
         # It returned before the stuck sleep ended: the drain skipped it.
-        assert returned_after < 2.3, returned_after
+        assert returned_after < stuck_seconds, returned_after
 
         db_task = row(stuck)
         assert db_task.status == OxTask.Status.FAILED
@@ -1199,7 +1270,7 @@ class TestBackstop:
         assert events(caplog, "worker_stopped")
 
         # The thread finishes its sleep, tries to write, and is refused.
-        assert wait_for(lambda: not worker_threads(), timeout=5)
+        assert wait_for(lambda: not worker_threads(), timeout=stuck_seconds * 4)
         # The injection was pending all along and lands as the sleep
         # returns, so what the thread tries to record is its own timeout.
         (lost,) = events(caplog, "task_lease_lost")
@@ -1545,12 +1616,15 @@ class TestUnderATracingTool:
         the timeout is raised inside the task, and nothing is degraded.
         """
         caplog.set_level(logging.WARNING, logger="django_ox")
-        worker = Worker(task_timeout=0.2, backoff_initial=60, poll_interval=0.05)
-        result = spin.enqueue(2.0)
+        timeout, task_seconds = 0.2, 2.0
+        worker = Worker(task_timeout=timeout, backoff_initial=60, poll_interval=0.05)
+        result = spin.enqueue(task_seconds)
         started = time.monotonic()
         assert worker.run_once()
 
-        assert time.monotonic() - started < 1.0
+        assert_stopped_at_the_deadline(
+            time.monotonic() - started, timeout=timeout, task_seconds=task_seconds
+        )
         assert task_state.get("caught") is True
         assert not events(caplog, "timeouts_backstop_only")
         error = row(result).errors[-1]
@@ -1593,14 +1667,17 @@ class TestUnderATracingTool:
         watched or not, and nothing is degraded.
         """
         caplog.set_level(logging.WARNING, logger="django_ox")
-        worker = Worker(task_timeout=0.2, backoff_initial=60, poll_interval=0.05)
-        result = async_spin.enqueue(5.0)
+        timeout, task_seconds = 0.2, 5.0
+        worker = Worker(task_timeout=timeout, backoff_initial=60, poll_interval=0.05)
+        result = async_spin.enqueue(task_seconds)
 
         started = time.monotonic()
         with watching_this_thread():
             assert worker.run_once()
 
-        assert time.monotonic() - started < 2.0
+        assert_stopped_at_the_deadline(
+            time.monotonic() - started, timeout=timeout, task_seconds=task_seconds
+        )
         assert task_state.get("cancelled") is True
         assert row(result).errors[-1]["exception_class_path"] == TIMEOUT_PATH
         assert events(caplog, "task_timed_out")

@@ -60,8 +60,22 @@ class TestRetries:
         assert db_task.locked_by is None
         assert db_task.locked_at is None
 
-    def test_backoff_doubles_per_attempt(self):
-        worker = Worker(backoff_initial=10, backoff_max=25, poll_interval=0.05)
+    # A retry's delay is written as an absolute run_after, so the delay a
+    # test measures is the rule plus however long the attempt took to get
+    # there. SLACK is the room for that. The cap is set below the second
+    # attempt's doubling, so the two rules give 15 rather than 20, and the
+    # slack is nowhere near wide enough to reach the uncapped value: a cap
+    # that stopped working fails this test rather than passing it.
+    BACKOFF_INITIAL = 10.0
+    BACKOFF_MAX = 15.0
+    SLACK = 4.0
+
+    def test_backoff_doubles_per_attempt_up_to_the_cap(self):
+        worker = Worker(
+            backoff_initial=self.BACKOFF_INITIAL,
+            backoff_max=self.BACKOFF_MAX,
+            poll_interval=0.05,
+        )
         fail_always.enqueue()
 
         delays = []
@@ -73,9 +87,11 @@ class TestRetries:
             db_task.refresh_from_db()
             delays.append((db_task.run_after - before).total_seconds())
 
-        assert 10 <= delays[0] < 11
-        # Second delay is capped at backoff_max, not 20.
-        assert 20 <= delays[1] < 26
+        # The first attempt waits backoff_initial.
+        assert self.BACKOFF_INITIAL <= delays[0] < self.BACKOFF_INITIAL + self.SLACK
+        # The second would double to 20; the cap holds it at backoff_max.
+        assert self.BACKOFF_MAX <= delays[1] < self.BACKOFF_MAX + self.SLACK
+        assert self.BACKOFF_MAX + self.SLACK < self.BACKOFF_INITIAL * 2
 
     def test_retry_until_success(self, worker):
         result = flaky.enqueue(succeed_on=3)
@@ -1096,10 +1112,17 @@ class TestRunLoop:
         assert len(set(closer_threads)) == 2
         assert all(name.startswith("ox") for name in closer_threads)
 
+    # How long each of the two tasks below runs. Both are dispatched into a
+    # pool of two, so they overlap unless the second dispatch is a whole
+    # task behind the first; the length is what buys the room for that, and
+    # a machine slow enough to spend this long between two dispatches has
+    # not run them concurrently in any sense worth passing.
+    CONCURRENT_SECONDS = 1.0
+
     def test_run_loop_processes_tasks_concurrently(self, task_state):
         worker = Worker(concurrency=2, poll_interval=0.05, backoff_initial=0)
-        r1 = record_interval.enqueue(0.4)
-        r2 = record_interval.enqueue(0.4)
+        r1 = record_interval.enqueue(self.CONCURRENT_SECONDS)
+        r2 = record_interval.enqueue(self.CONCURRENT_SECONDS)
 
         thread = self._run_in_thread(worker)
         try:
@@ -1107,7 +1130,7 @@ class TestRunLoop:
                 lambda: (
                     OxTask.objects.filter(status=OxTask.Status.SUCCESSFUL).count() == 2
                 ),
-                timeout=5,
+                timeout=self.CONCURRENT_SECONDS * 10,
             )
         finally:
             worker.request_stop()

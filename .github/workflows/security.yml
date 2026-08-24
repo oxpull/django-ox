@@ -50,7 +50,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
-      - uses: github/codeql-action/init@f3712979fa5f215279b101dd0a2e3bdfb4353324  # v3
+      - uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28  # v3
         with:
           languages: python
           queries: security-extended

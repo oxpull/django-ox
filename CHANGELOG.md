@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.1] - 2026-08-24
 
+### Fixed
+
+- `ox_worker --processes N` exits 0 when a stop signal arrives while a
+  worker process is still starting up. A worker cannot act on a signal
+  until it has installed its handler, and that is after Django has been
+  imported. A signal landing before then killed the worker outright, and
+  the supervisor reported that worker's 143 as its own exit code. A unit
+  on `Restart=on-failure` reads that as a fault and starts the service
+  again. The worker had claimed no work, so there is nothing to report:
+  the supervisor now logs `worker_process_stopped_early` and exits 0.
+
 ### Changed
 
 - A worker enforces `TASK_TIMEOUT` on a sync task through the grace backstop

@@ -63,7 +63,7 @@ TASKS: dict[str, dict[str, Any]] = {
     }
 }
 
-LOGGING = {
+LOGGING: dict[str, Any] = {
     "version": 1,
     "disable_existing_loggers": False,
     "handlers": {"console": {"class": "logging.StreamHandler"}},
@@ -76,6 +76,18 @@ LOGGING = {
         },
     },
 }
+
+# Worker processes a test starts in-process, through Supervisor rather than
+# through a subprocess of its own, inherit the test runner's stderr and there
+# is nowhere to read their lifecycle lines from. Given a path, they append to
+# it as well, so a test can wait for a child to be running before it acts.
+if "OX_TEST_LOG_FILE" in os.environ:
+    LOGGING["handlers"]["file"] = {
+        "class": "logging.FileHandler",
+        "filename": os.environ["OX_TEST_LOG_FILE"],
+        "delay": True,
+    }
+    LOGGING["loggers"]["django_ox"]["handlers"].append("file")
 
 # Worker processes started from the test suite must hit the test database the
 # parent created, not the development one; the parent passes its name through.

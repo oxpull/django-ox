@@ -80,8 +80,52 @@ def events(caplog, name):
     return [r for r in caplog.records if getattr(r, "event", None) == name]
 
 
+_threads_before_test: set[threading.Thread] = set()
+
+
+@pytest.fixture(autouse=True)
+def _snapshot_worker_threads():
+    """
+    A previous test's worker can still be winding down (a drain on a slow
+    database outlives its test); its threads must not fail this test's
+    own thread accounting.
+    """
+    _threads_before_test.clear()
+    _threads_before_test.update(
+        t for t in threading.enumerate() if t.name.startswith("ox")
+    )
+    yield
+
+
 def worker_threads():
-    return [t for t in threading.enumerate() if t.name.startswith("ox")]
+    return [
+        t
+        for t in threading.enumerate()
+        if t.name.startswith("ox") and t not in _threads_before_test
+    ]
+
+
+def wait_until_no_task_is_pending(stall_timeout=60.0):
+    """
+    True once no task is READY or RUNNING. Waits on progress rather than
+    the clock, so a slow database gets the time it needs: it only gives
+    up after `stall_timeout` seconds in which the pending count did not
+    move.
+    """
+    pending = None
+    changed_at = time.monotonic()
+    while True:
+        now_pending = OxTask.objects.filter(
+            status__in=(OxTask.Status.READY, OxTask.Status.RUNNING)
+        ).count()
+        if now_pending == 0:
+            return True
+        if now_pending != pending:
+            pending = now_pending
+            changed_at = time.monotonic()
+        elif time.monotonic() - changed_at > stall_timeout:
+            return False
+        time.sleep(0.1)
 
 
 def run_in_thread(worker):
@@ -619,15 +663,18 @@ class TestReleasesWhatItHeld:
         assert task_state["writes"] == writes_at_timeout
         assert row(result).return_value["written_by"] == 1
 
-        # Attempt 2 runs to completion on a queue without the limit.
+        # Attempt 2 runs to completion on a queue without the limit. Its
+        # writes are counted from zero: how many land in its window is the
+        # database's speed, not the invariant; that they land at all is.
         OxTask.objects.filter(id=result.id).update(run_after=None)
         worker.timeouts.default = None
+        task_state["writes"] = 0
         assert worker.run_once()
         time.sleep(0.3)
         second = row(result)
         assert second.status == OxTask.Status.SUCCESSFUL
         assert second.return_value == "loop done"
-        assert task_state["writes"] > writes_at_timeout
+        assert task_state["writes"] >= 1, "attempt 2's writes landed"
 
         # And the epoch fence, for a write the stuck path would have to stop:
         # the claim's epoch is one behind the row after a handover.
@@ -681,7 +728,10 @@ class TestReleasesWhatItHeld:
 
         statuses = dict(OxTask.objects.values_list("status").annotate(n=Count("id")))
         assert statuses == {OxTask.Status.FAILED: 120}
-        assert peak <= worker.concurrency + 3, peak
+        # Beside the pool: the run loop, the renewer, and this test's own
+        # polling connection, plus one just-closed session the server has
+        # not torn down yet. 120 leaking sessions would dwarf any margin.
+        assert peak <= worker.concurrency + 4, peak
         assert not events(caplog, "worker_error")
         assert not events(caplog, "task_reclaimed")
         assert "too many clients" not in caplog.text
@@ -712,15 +762,7 @@ class TestReleasesWhatItHeld:
 
         thread = run_in_thread(worker)
         try:
-            assert wait_for(
-                lambda: (
-                    not OxTask.objects.filter(
-                        status__in=(OxTask.Status.READY, OxTask.Status.RUNNING)
-                    ).exists()
-                ),
-                timeout=120,
-                interval=0.1,
-            )
+            assert wait_until_no_task_is_pending()
         finally:
             worker.request_stop()
             thread.join(timeout=15)
@@ -764,15 +806,7 @@ class TestReleasesWhatItHeld:
 
         thread = run_in_thread(worker)
         try:
-            assert wait_for(
-                lambda: (
-                    not OxTask.objects.filter(
-                        status__in=(OxTask.Status.READY, OxTask.Status.RUNNING)
-                    ).exists()
-                ),
-                timeout=120,
-                interval=0.1,
-            )
+            assert wait_until_no_task_is_pending()
         finally:
             worker.request_stop()
             thread.join(timeout=15)

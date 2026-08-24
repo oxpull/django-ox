@@ -4,7 +4,9 @@
   "public_key": "pk_bMEQ94xqHcqvERACC7UDy",
   "projectTitle": "django-ox",
   "description": "Database-backed worker backend for Django's Tasks framework (django.tasks, Django 6.0+). Background tasks run on the database you already have. No broker to provision, secure or back up.",
-  "folders": [],
+  "folders": [
+    "docs"
+  ],
   "excludeFolders": [
     "tests",
     ".github",
@@ -28,7 +30,9 @@
     "code_of_conduct.md",
     "NEWS.md",
     "SECURITY.md",
-    "CONTRIBUTING.md"
+    "CONTRIBUTING.md",
+    "AGENTS.md",
+    "requirements.txt"
   ],
   "rules": [
     "Requires Django 6.0 or later and Python 3.12 or later.",

@@ -24,7 +24,8 @@ how to hear when it opens.
 
 Both run on the databases the free tier tests in CI: SQLite, PostgreSQL and
 MySQL 8. MariaDB 10.6+ takes the same claim path but is not part of the tested
-matrix. Batches are tested to 100,000 members in a single batch.
+matrix. Batches have been measured to 100,000 members in a single batch on
+SQLite and on PostgreSQL 16.
 
 ## What Pro is not
 

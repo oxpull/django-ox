@@ -6,10 +6,10 @@ graceful drain, priorities, deferred tasks, recurring tasks and pruning are
 the free tier, permanently. Nothing that works today moves behind the paid
 tier.
 
-**Oxpull Pro** is a paid add-on for two problems that show up once a queue is
-carrying real volume. Both are built and tested. It is not on sale yet: the
-purchase and delivery path is still being set up, and the waitlist below is
-how to hear when it opens.
+**Oxpull Pro** is a paid add-on for three problems that show up once a queue
+is carrying real volume. All three are built and tested. It is not on sale
+yet: the purchase and delivery path is still being set up, and the waitlist
+below is how to hear when it opens.
 
 ## What Pro adds
 
@@ -21,18 +21,27 @@ how to hear when it opens.
   callback once every member has settled. Completion is computed by querying
   the task rows rather than by counting signals, so a worker dying mid-task
   cannot strand a batch: the reconciler picks it up on the next tick.
+- **Rate limiting.** Cap how often a task starts. A named limit of N
+  admissions per period is declared on the task or in settings, and every
+  worker shares it through one row in the database. A throttled task stays
+  READY: it is not claimed, so it spends no retry attempt and holds no
+  lease. With one worker process the cap is exact, at most N per window.
+  With W worker processes at most N + W - 1 attempts start in a window,
+  and since windows are contiguous, an arbitrary interval of one period
+  can carry up to 2(N + W - 1).
 
-Both run on the databases the free tier tests in CI: SQLite, PostgreSQL and
-MySQL 8. MariaDB 10.6+ takes the same claim path but is not part of the tested
+All three run on the databases the free tier tests in CI: SQLite, PostgreSQL
+and MySQL 8. MariaDB 10.6+ takes the same claim path but is not part of the tested
 matrix. Batches have been measured to 100,000 members in a single batch on
 SQLite and on PostgreSQL 16.
 
 ## What Pro is not
 
-Workflows and chains are on the roadmap, undated. Rate limiting, a web
-dashboard and encrypted payloads are not in Pro and are not dated. Metrics
-stay free: the stats API and the health command are in the open source
-package and remain there.
+Workflows and chains are on the roadmap, undated. A web dashboard and
+encrypted payloads are not in Pro and are not dated. Rate limiting caps how
+often a task starts, not how many run at once; concurrency limiting is a
+different mechanism and is not in Pro. Metrics stay free: the stats API and
+the health command are in the open source package and remain there.
 
 ## Delivery
 
@@ -50,7 +59,7 @@ organisation and every environment, with a seven-day money-back period.
 ## Waitlist
 
 If Pro would earn its keep in your deployment, join the waitlist and say which
-of the two features matters to you. That ordering decides what gets built
+of the three features matters to you. That ordering decides what gets built
 after these.
 
 [Join the Pro waitlist](https://oxpull.com/#waitlist){ .md-button }

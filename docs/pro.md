@@ -22,18 +22,25 @@ below is how to hear when it opens.
   the task rows rather than by counting signals, so a worker dying mid-task
   cannot strand a batch: the reconciler picks it up on the next tick.
 - **Rate limiting.** Cap how often a task starts. A named limit of N
-  admissions per period is declared on the task or in settings, and every
-  worker shares it through one row in the database. A throttled task stays
-  READY: it is not claimed, so it spends no retry attempt and holds no
-  lease. With one worker process the cap is exact, at most N per window.
-  With W worker processes at most N + W - 1 attempts start in a window,
-  and since windows are contiguous, an arbitrary interval of one period
-  can carry up to 2(N + W - 1).
+  admissions per period is declared in settings, and every worker shares
+  it through one row in the database. A throttled task stays READY: it is
+  not claimed, so it spends no retry attempt and holds no lease.
 
-All three run on the databases the free tier tests in CI: SQLite, PostgreSQL
-and MySQL 8. MariaDB 10.6+ takes the same claim path but is not part of the tested
-matrix. Batches have been measured to 100,000 members in a single batch on
-SQLite and on PostgreSQL 16.
+  For a limit of N admissions per period P, with W `ox_worker` processes
+  claiming from the queues that carry the limit's tasks, the number of
+  task attempts started in any one window is at most N + W - 1. Add one
+  for each worker process that dies between claiming a limited task and
+  recording it. With a single worker process and no such death the
+  limiter is exact: at most N per window. Windows are contiguous, so an
+  arbitrary interval of length P that spans a boundary can carry up to
+  2(N + W - 1). A limit whose counter cannot be written stops admitting
+  rather than admitting without counting: three consecutive failed counts
+  close it until one succeeds.
+
+All three run on the databases the free tier tests in CI: SQLite,
+PostgreSQL and MySQL 8. MariaDB 10.6+ takes the same claim path but is not
+part of the tested matrix. Batches have been measured to 100,000 members
+in a single batch on SQLite and on PostgreSQL 16.
 
 ## What Pro is not
 

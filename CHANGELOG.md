@@ -5,14 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-09-01
 
 ### Added
 
 - `WORKER_CLASS` in a backend's `OPTIONS`: the dotted path of the `Worker`
   subclass `ox_worker` runs. Resolved from settings rather than from the
-  command line, so every child `ox_worker --processes N` starts runs the
-  same worker as the parent.
+  command line, so a worker chosen here is the worker in every child
+  process under `ox_worker --processes N`, not only in the parent.
 - `Worker.claim_filter_q()` and `Worker.claim_filter_sql()`, two hooks a
   subclass overrides to narrow what it may claim. The condition is applied
   inside the candidate select on all three claim paths, ahead of its
@@ -350,6 +350,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[0.4.0]: https://github.com/oxpull/django-ox/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/oxpull/django-ox/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/oxpull/django-ox/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/oxpull/django-ox/releases/tag/v0.2.1

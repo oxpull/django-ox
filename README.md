@@ -286,7 +286,7 @@ scope: interrupting one chosen running task on demand (every attempt can be
 bounded with `TASK_TIMEOUT`), and multi-database routing (tasks are stored on
 the default database for the model).
 
-Batches and unique tasks are in
+Batches, unique tasks and rate limiting are in
 [Oxpull Pro](https://oxpull.com/django-ox/pro/), a paid add-on that is not on
 sale yet; the waitlist is at <https://oxpull.com/>. Metrics stay in this
 package: `django_ox.stats` and `ox_health` are free and stay free.

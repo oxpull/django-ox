@@ -159,8 +159,9 @@ TASKS = {
   bounds every attempt. Tasks live on the default database.
 - In tests use `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend` for `TASKS`.
-- Batches and unique tasks are in [Oxpull Pro](pro.md), a paid add-on that
-  is not on sale yet. `django_ox.stats` and `ox_health` are in django-ox.
+- Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a
+  paid add-on that is not on sale yet. `django_ox.stats` and `ox_health`
+  are in django-ox.
 
 ## How to verify it works
 

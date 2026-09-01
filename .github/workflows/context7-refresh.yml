@@ -1,0 +1,62 @@
+name: Refresh Context7
+
+# Context7 serves this package's docs to coding assistants. It re-parses the
+# repository on its own schedule, and for a library this size that threshold is
+# 45 days, and only if the library has been requested recently. Between a docs
+# change and that reparse, assistants are served the old corpus.
+#
+# This workflow closes that window: every docs change on main asks Context7 to
+# re-parse immediately.
+#
+# It does not address exclusions. Files listed in context7.json's excludeFiles
+# and excludeFolders were still being served after a refresh on 2026-08-25, so
+# that is a separate problem and a refresh is not its fix.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "README.md"
+      - "context7.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The refresh reads context7.json from the default branch as it stands on
+      # Context7's side, so there is nothing to check out.
+      - name: Ask Context7 to re-parse the repository
+        env:
+          API_KEY: ${{ secrets.CONTEXT7_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${API_KEY}" ]; then
+            echo "::error::CONTEXT7_API_KEY is not set. Add it under" \
+                 "Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          # curl exits 0 on a 4xx, so the status code is captured and checked
+          # rather than trusted. A silent failure here is worse than a red run:
+          # it looks like the docs are current when they are months stale.
+          status=$(curl -sS -o response.json -w '%{http_code}' \
+            -X POST https://context7.com/api/v1/refresh \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${API_KEY}" \
+            -d '{"libraryName": "/oxpull/django-ox"}')
+
+          echo "HTTP ${status}"
+          cat response.json
+          echo
+
+          if [ "${status}" != "200" ]; then
+            echo "::error::Context7 refresh failed with HTTP ${status}"
+            exit 1
+          fi

@@ -40,6 +40,7 @@ from django.tasks.signals import task_finished, task_started
 from django.utils import timezone
 from django.utils.crypto import get_random_string
 from django.utils.json import normalize_json
+from django.utils.module_loading import import_string
 
 from .backend import OxBackend
 from .exceptions import TaskAbandoned, TaskTimeout
@@ -234,7 +235,7 @@ WHERE "id" = (
     SELECT "id" FROM "{table}"
     WHERE "status" = %(ready)s
         AND ("run_after" IS NULL OR "run_after" <= %(now)s)
-        {queue_clause}
+        {queue_clause}{extra_clause}
     ORDER BY "priority" DESC, "enqueued_at"
     FOR UPDATE SKIP LOCKED
     LIMIT 1
@@ -489,6 +490,30 @@ class Worker:
 
     # -- claiming ----------------------------------------------------------
 
+    def claim_filter_q(self) -> Q | None:
+        """
+        An extra condition on what this worker may claim, or None.
+
+        Applied to the candidate queryset on the two claim paths that build
+        one. claim_filter_sql() is the same condition for the path that does
+        not. A subclass that implements one and not the other narrows two of
+        the three supported databases and silently does nothing on the third.
+        """
+        return None
+
+    def claim_filter_sql(self) -> tuple[str, dict[str, Any]]:
+        """
+        claim_filter_q() as a WHERE fragment and its parameters, for the
+        PostgreSQL claim, which builds its own SQL.
+
+        The fragment is appended to the candidate select's conditions as a
+        bare ``AND ...`` conjunct against the task table, so it carries its
+        own leading separator. That placement is the contract; the statement
+        it lands in is not. Returning ("", {}) leaves the emitted SQL
+        unchanged.
+        """
+        return "", {}
+
     def _ready_queryset(self) -> QuerySet[OxTask]:
         # run_after stays on process time, on both sides of this comparison
         # and in the retry that writes it. Database-side time is the right
@@ -504,6 +529,9 @@ class Worker:
         )
         if self.queues:
             queryset = queryset.filter(queue_name__in=self.queues)
+        extra = self.claim_filter_q()
+        if extra is not None:
+            queryset = queryset.filter(extra)
         return queryset.order_by("-priority", "enqueued_at")
 
     def _claim_fields(self, candidate: OxTask) -> dict[str, Any]:
@@ -528,8 +556,11 @@ class Worker:
         # STATEMENT_TIMESTAMP(). See _ready_queryset for why run_after is
         # the exception.
         queue_clause = 'AND "queue_name" = ANY(%(queues)s)' if self.queues else ""
+        extra_clause, extra_params = self.claim_filter_sql()
         sql = POSTGRES_CLAIM_SQL.format(
-            table=OxTask._meta.db_table, queue_clause=queue_clause
+            table=OxTask._meta.db_table,
+            queue_clause=queue_clause,
+            extra_clause=extra_clause,
         )
         rows = OxTask.objects.raw(
             sql,
@@ -540,6 +571,7 @@ class Worker:
                 "worker_id_json": json.dumps([self.worker_id]),
                 "now": run_after_cutoff,
                 "queues": self.queues,
+                **extra_params,
             },
         )
         return next(iter(rows), None)
@@ -1734,3 +1766,25 @@ class Worker:
             if len(pending) <= self._stuck_alive():
                 return
             wait(pending, timeout=RECYCLE_DRAIN_POLL, return_when=FIRST_COMPLETED)
+
+
+def worker_class(backend_alias: str = DEFAULT_TASK_BACKEND_ALIAS) -> type[Worker]:
+    """
+    The Worker class for a backend, from its OPTIONS["WORKER_CLASS"].
+
+    Resolved from settings rather than chosen by the management command,
+    because the supervisor starts every child as `ox_worker`. A worker
+    selected any other way would be the configured worker at --processes 1
+    and the default one in every child above it.
+    """
+    backend = task_backends[backend_alias]
+    path = backend.options.get("WORKER_CLASS")
+    if not path:
+        return Worker
+    cls = import_string(path)
+    if not (isinstance(cls, type) and issubclass(cls, Worker)):
+        raise ImproperlyConfigured(
+            f"WORKER_CLASS {path!r} on backend {backend_alias!r} is not a "
+            "django_ox.worker.Worker subclass."
+        )
+    return cls

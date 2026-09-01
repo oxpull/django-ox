@@ -11,7 +11,7 @@ from django.tasks import DEFAULT_TASK_BACKEND_ALIAS
 
 from django_ox.supervisor import STOP_SIGNALS, Supervisor
 from django_ox.timeouts import RECYCLE_EXIT_CODE
-from django_ox.worker import Worker
+from django_ox.worker import worker_class
 
 logger = logging.getLogger("django_ox")
 
@@ -108,7 +108,7 @@ class Command(BaseCommand):
             if options["queues"]
             else None
         )
-        worker = Worker(
+        worker = worker_class(options["backend"])(
             backend_alias=options["backend"],
             queues=queues,
             concurrency=options["concurrency"],

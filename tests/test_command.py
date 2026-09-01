@@ -2,10 +2,11 @@ import pytest
 from django.core.management import CommandError, call_command
 
 from django_ox.management.commands import ox_worker
+from django_ox.worker import Worker
 
 
 class WorkerRecorder:
-    """Stands in for Worker to verify CLI flag wiring without a run loop."""
+    """Stands in for the worker class to verify CLI flag wiring without a run loop."""
 
     instances: list["WorkerRecorder"] = []
 
@@ -19,11 +20,36 @@ class WorkerRecorder:
         pass
 
 
+class StoppedWorker(Worker):
+    """Runs one pass and returns, so the command exits without a queue."""
+
+    started = False
+
+    def run(self):
+        StoppedWorker.started = True
+
+
 @pytest.fixture
 def recorded_worker(monkeypatch):
     WorkerRecorder.instances = []
-    monkeypatch.setattr(ox_worker, "Worker", WorkerRecorder)
+    monkeypatch.setattr(ox_worker, "worker_class", lambda alias: WorkerRecorder)
     return WorkerRecorder
+
+
+def test_command_runs_the_configured_worker_class(settings):
+    settings.TASKS = {
+        "default": {
+            "BACKEND": "django_ox.backend.OxBackend",
+            "OPTIONS": {"WORKER_CLASS": "tests.test_command.StoppedWorker"},
+        }
+    }
+    StoppedWorker.started = False
+
+    with pytest.raises(SystemExit) as excinfo:
+        call_command("ox_worker")
+
+    assert excinfo.value.code == 0
+    assert StoppedWorker.started is True
 
 
 def test_command_passes_flags_to_worker(recorded_worker):

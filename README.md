@@ -74,6 +74,27 @@ it (PostgreSQL, MySQL 8+) and an atomic compare-and-set UPDATE elsewhere
 Failed tasks retry with exponential backoff up to a configurable attempt
 limit, keeping the full traceback of every attempt.
 
+## Measured under worker kills
+
+A soak and chaos harness ran 0.3.1 for 21.5 minutes of sustained mixed load
+on PostgreSQL 16: 37,804 tasks, nine minutes of which SIGKILLed a random
+worker every 20 to 45 seconds. Eighteen kills, thirty interrupted
+executions. Every task reached a terminal state, every interrupted
+execution was re-executed inside the documented reclaim bound, and the
+median first-attempt latency under kills stayed within a millisecond of the
+undisturbed baseline.
+
+Execution is at-least-once, so a worker killed between finishing a task and
+recording the outcome leaves that task to run again. One task in that run
+executed twice for exactly that reason, and no task executed twice without
+a kill to account for it.
+
+Thirty-seven assertions ran and all thirty-seven passed. The harness
+design, every assertion and the caveats are in
+[SOAK-2026-09-01.md](https://github.com/oxpull/django-ox/blob/main/benchmarks/SOAK-2026-09-01.md),
+written from
+[the raw data](https://github.com/oxpull/django-ox/blob/main/benchmarks/soak-results-raw-2026-09-01.json).
+
 ## Configuration
 
 Every option has a default; add one when you have a reason to.

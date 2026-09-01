@@ -76,19 +76,30 @@ than a changed claim.
 ## Reliability under load
 
 Speed is not the product claim; the durability construction is. A
-separate soak and chaos harness ran django-ox 0.1.0 for 21.5 minutes of
-sustained mixed load on PostgreSQL 16: 37,802 tasks across three
+separate soak and chaos harness ran django-ox 0.3.1 for 21.5 minutes of
+sustained mixed load on PostgreSQL 16: 37,804 tasks across three
 scenarios, including 9 minutes in which a random worker was SIGKILLed
-every 20 to 45 seconds (16 kills total, 39 interrupted claims). Every
-task reached a terminal state, every interrupted claim was reclaimed and
-re-executed inside the documented bound, retry counts stayed bounded on
-every row, and zero tasks were lost or double-completed. Latency under
-kill-chaos was within noise of the undisturbed baseline (p50 0.217 s vs
-0.211 s).
+every 20 to 45 seconds (18 kills total, 30 interrupted executions).
+Thirty-seven assertions ran and all thirty-seven passed. Every task
+reached a terminal state, every interrupted execution was re-executed
+inside the documented bound (slowest reclaim 19.7 s against a bound of
+37.5 s), and retry counts stayed bounded on every row.
+
+One task executed twice, in the chaos scenario, after its worker was
+killed between finishing the task and recording the outcome. That is what
+at-least-once execution means, and it is the reason the harness asks
+whether a second execution is attributable to a kill rather than whether
+one happened: across 37,804 tasks, zero double executions could not be
+traced to a kill, and no task ran twice without one.
+
+Latency under kill-chaos was within a millisecond of the undisturbed
+baseline at the median (p50 0.123 s against 0.122 s).
 
 The full report, including the harness design, every assertion, and the
 caveats, is in
-[`benchmarks/SOAK-2026-08-16.md`](https://github.com/oxpull/django-ox/blob/main/benchmarks/SOAK-2026-08-16.md).
+[`benchmarks/SOAK-2026-09-01.md`](https://github.com/oxpull/django-ox/blob/main/benchmarks/SOAK-2026-09-01.md).
+The [previous run](https://github.com/oxpull/django-ox/blob/main/benchmarks/SOAK-2026-08-16.md)
+measured 0.1.0, which predates the lease fencing added in 0.2.0.
 
 ## What to take from this
 

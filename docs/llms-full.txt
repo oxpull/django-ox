@@ -2504,8 +2504,16 @@ below is how to hear when it opens.
 
 All three run on the databases the free tier tests in CI: SQLite,
 PostgreSQL and MySQL 8. MariaDB 10.6+ takes the same claim path but is not
-part of the tested matrix. Batches have been measured to 100,000 members
-in a single batch on SQLite and on PostgreSQL 16.
+part of the tested matrix. Batches have been measured to 1,000,000 members
+in a single batch on all three, with every count checked against the task
+rows rather than against what the API reports about itself.
+
+Sealing a batch that wide is cheap on SQLite and PostgreSQL and expensive
+on MySQL: about 34 ms, 0.7 s and 28 s respectively. Sealing takes a row
+lock per member on any database that offers one, and a million InnoDB
+locks in a single transaction is what that costs. Reconciling the same
+batch is 0.4 s on PostgreSQL 16, 4.9 s on SQLite and 7.3 s on MySQL,
+against a reconciler that runs on a one-minute tick.
 
 ## What Pro is not
 

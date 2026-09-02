@@ -12,14 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `WORKER_CLASS` in a backend's `OPTIONS`: the dotted path of the `Worker`
   subclass `ox_worker` runs. Resolved from settings rather than from the
   command line, so a worker chosen here is the worker in every child
-  process under `ox_worker --processes N`, not only in the parent.
+  process under `ox_worker --processes N`, not only at `--processes 1`.
 - `Worker.claim_filter_q()` and `Worker.claim_filter_sql()`, two hooks a
   subclass overrides to narrow what it may claim. The condition is applied
   inside the candidate select on all three claim paths, ahead of its
   ordering and its limit, so a narrowed worker still claims runnable work
-  behind rows it declines. Overriding `_ready_queryset()` reached only two
-  of the three paths and did nothing at all on PostgreSQL. Both hooks
-  return nothing by default and the emitted SQL is unchanged without them.
+  behind rows it declines. `claim_filter_q()` covers the two paths that
+  build a queryset and `claim_filter_sql()` the PostgreSQL claim, which
+  builds its own SQL, so implement both. The defaults are `None` and an
+  empty fragment, so the emitted SQL is unchanged without them.
 
 ## [0.3.1] - 2026-08-24
 
@@ -86,22 +87,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   log events: `task_timed_out`, `task_stuck`, `worker_recycling`,
   `worker_process_recycled` and `timeouts_backstop_only`.
 - `ox_worker --processes N`. Above 1, the command supervises N copies of
-  itself, each a full worker with its own database connections, lease
-  renewal, reaper and `--concurrency` thread pool, so `--processes 2
-  --concurrency 4` runs eight tasks at once. Every worker id ends in its slot
-  number. SIGTERM, SIGINT or SIGHUP to the supervisor is forwarded once and
-  the supervisor exits 0 when every worker drained, or with the first
-  non-zero code; a second signal is the force-exit, and a worker that has
-  not exited five seconds later is SIGKILLed. A worker process that dies,
-  by any exit code, is restarted with `worker_process_restarted` at
-  WARNING, after one second and then with a doubling delay up to 30
-  seconds; more than five deaths of one slot in a minute stops the
-  supervisor with exit code 1 and `supervisor_restart_cap` at ERROR. A
-  worker whose supervisor dies drains and exits (`worker_orphaned`). The
-  children are started the way the supervisor was, `manage.py` by absolute
-  path or `python -m django`, with `--settings` and `--pythonpath` passed
-  on, so the command works from any working directory. `--processes 1`, the
-  default, is the worker as before. POSIX only.
+  itself, each a full worker with its own database connections, lease renewal,
+  reaper and `--concurrency` thread pool, so `--processes 2 --concurrency 4`
+  runs eight tasks at once. Every worker id ends in its slot number. SIGTERM,
+  SIGINT or SIGHUP to the supervisor is forwarded once and the supervisor exits
+  0 when every worker drained or recycled, or with the first other non-zero
+  code; a second signal is the force-exit, and a worker that has not exited
+  five seconds later is SIGKILLed. A worker process that dies is restarted with
+  `worker_process_restarted` at WARNING, after one second and then with a
+  doubling delay up to 30 seconds; a worker that recycled itself, exit code 75,
+  comes back after one second under `worker_process_recycled`, outside the
+  death count and the backoff. More than five deaths of one slot in a minute
+  stops the supervisor with exit code 1 and `supervisor_restart_cap` at ERROR.
+  A worker whose supervisor dies drains and exits (`worker_orphaned`). The
+  children are started the way the supervisor was, `manage.py` by absolute path
+  or `python -m django`, with `--settings` and `--pythonpath` passed on, so the
+  command works from any working directory. `--processes 1`, the default, is
+  the worker as before. POSIX only.
 - A Prometheus endpoint. `path("ox/", include("django_ox.urls"))` mounts
   `GET /ox/metrics`, which renders the `django_ox.stats` numbers as gauges in
   the Prometheus text format (OpenMetrics on request), from the standard
@@ -156,8 +158,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   django_ox` when you upgrade. It adds the new status choice.
 - `QueueStats` has a sixth field, `discarded`, keyword-defaulted like `lost`.
 - A queued task can now be discarded and a failed or lost one retried, and
-  every attempt can be bounded with `TASK_TIMEOUT`; interrupting one chosen
-  running task on demand stays outside scope.
+  every attempt can be bounded with `TASK_TIMEOUT`.
 - A worker that is already draining, because it is recycling, treats the
   operator's first signal as the drain it is doing rather than as the
   force-exit; the second signal is still the force-exit.
@@ -166,12 +167,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- A task that succeeded after its lease was lost no longer keeps the reaper's
-  lost-lease record in `errors`. That record says the outcome was never
-  observed, and the success write is that observation, so anything reading
-  `result.errors` was handed an exception nobody raised on a task that worked.
-  A failure resolving the same way already dropped it, and the two now agree. A task that is still LOST keeps the record: it is
-  the only thing on the row that says why the result reads as failed.
+- A task that succeeds after its lease was lost drops the reaper's
+  lost-lease record from `errors`. That record says the outcome was never
+  observed, and the success write is that observation, so nothing reading
+  `result.errors` is handed an exception nobody raised. Every earlier
+  attempt's traceback stays on the row. A failure resolving the same way
+  already dropped it, and the two now agree. A task that is still LOST
+  keeps the record: it is the only thing on the row that says why the
+  result reads as failed.
 
 ### Added
 
@@ -193,11 +196,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that number in its WHERE clause, so a write from a worker that no longer
   holds the task matches nothing and is dropped instead of applied. No
   completion is signalled for a dropped write.
-- The reaper no longer records a failure it did not observe. When a lock aged
-  out with no attempts left it wrote FAILED and invented a `TaskAbandoned`
-  exception to explain it, on no evidence beyond a clock. It now records the
-  task as LOST, which says the worker stopped reporting and the outcome was
-  never seen, and nothing more.
+- A lock that ages out with no attempts left is recorded as LOST rather than
+  FAILED. LOST says the worker stopped reporting and the outcome was never
+  seen, and nothing more. The `TaskAbandoned` record the reaper leaves in
+  `errors` is the lost lease, not a cause of failure.
 - Lock timestamps are written and compared using the database server's clock
   rather than each worker's own, so two hosts with drifting clocks no longer
   produce false reclaims. This applies when `USE_TZ` is on. With `USE_TZ` off
@@ -310,7 +312,7 @@ Initial release.
 - `ox_prune` management command: batched deletion of finished task rows
   (`--older-than`, `--include-failed`, `--batch-size`, `--dry-run`).
 - `django_ox.stats`: read-only queue metrics as plain ORM queries, on
-  both supported databases: per-queue status counts, backlog depth and
+  every supported database: per-queue status counts, backlog depth and
   age, throughput and failure rate over a trailing window, and time
   since the last task claim.
 - `ox_health` management command: exits non-zero with a one-line reason

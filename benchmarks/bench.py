@@ -230,11 +230,9 @@ def migrate(backend_name: str) -> None:
 def truncate(backend_name: str) -> None:
     # CASCADE because oxscheduletick carries a nullable foreign key to
     # oxtask, and PostgreSQL refuses to truncate a table another one
-    # references even when the referencing table is empty. The schedules
-    # table arrived in migration 0002, after the 2026-08-13 numbers were
-    # taken, so a plain TRUNCATE had nothing to trip over then and has
-    # been unable to run since. Both benchmark databases exist only for
-    # this harness, so cascading is a reset, not a loss.
+    # references even when the referencing table is empty. Both benchmark
+    # databases exist only for this harness, so cascading is a reset, not
+    # a loss.
     cfg = BACKENDS[backend_name]
     with pg_connect(cfg["database"]) as conn:
         conn.execute(f'TRUNCATE "{cfg["table"]}" CASCADE')
@@ -499,12 +497,12 @@ def orchestrate(runs: int, smoke: bool = False, resume: bool = False) -> None:
                 checkpoint()
 
             if name == "ox" and not have("e2e_diagnostic", run=run):
-                # Diagnostic row, NOT part of the defaults comparison: the
-                # default worker loop sleeps its full poll interval whenever
-                # the single executor slot is momentarily busy, which caps
-                # concurrency-1 throughput near 1/interval for fast tasks.
-                # This run lowers --interval to 0.1 purely to confirm that
-                # diagnosis; the defaults row above is the honest headline.
+                # Diagnostic row, NOT part of the defaults comparison. The
+                # worker wakes as soon as an in-flight task settles, so the
+                # poll interval governs only how often an idle worker looks
+                # for new work. This run repeats concurrency 1 with
+                # --interval 0.1 to check that property on every run: it
+                # should match the default-interval cell above.
                 print(
                     f"[run {run}] {name}: DIAGNOSTIC end-to-end {E2E_COUNT} tasks, "
                     "concurrency 1, --interval 0.1 (non-default)..."

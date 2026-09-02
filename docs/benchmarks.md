@@ -61,13 +61,13 @@ than a changed claim.
   sub-millisecond round trips. Real deployments have network latency
   between app and database, which changes end-to-end numbers materially
   and increases the weight of per-task statement count.
-- **The concurrency-4 comparison is imperfect by construction.**
-  django-tasks-db's worker has no concurrency option, so its
-  "concurrency 4" is four separate processes: four interpreters without a
-  shared GIL, four Django boots inside the timed window. django-ox's is
-  four threads in one process. This is the fairest available mapping, though
-  still an approximation. (It also means django-ox wins that cell
-  while sharing one interpreter.)
+- **Two different shapes at concurrency 4.** django-tasks-db's worker has
+  no concurrency option, so its "concurrency 4" is four separate
+  processes: four interpreters without a shared GIL, four Django boots
+  inside the timed window. django-ox's is four threads in one process.
+  This is the fairest available mapping, and the two differences pull in
+  opposite directions: the first helps django-tasks-db, the second costs
+  it.
 - **Small N.** 2,000 tasks and 500 latency samples separate the backends
   here but say nothing about p99+ tails or sustained load. Sustained load
   and worker-failure behavior are covered separately by the
@@ -103,10 +103,11 @@ measured 0.1.0, which predates the lease fencing added in 0.2.0.
 
 ## What to take from this
 
-The shipped worker beats the reference implementation on every measured
-cell or ties it, and holds its documented guarantees under sustained load
-and repeated worker kills. But throughput on no-op tasks is not why you
-choose django-ox. The claim is the durability construction: transactional
-enqueue, at-least-once execution with a reaper, bounded retries with
-per-attempt tracebacks. The benchmark exists to show that choosing those
-semantics costs you nothing on worker performance.
+On the 0.1.0 matrix above, django-ox leads django-tasks-db on enqueue
+throughput and concurrency-1 end-to-end in all three runs. Under
+sustained load and repeated worker kills, django-ox 0.3.1 held its
+documented guarantees. But throughput on no-op tasks is not why you
+choose django-ox. The claim is the durability construction:
+transactional enqueue, at-least-once execution with a reaper, bounded
+retries with per-attempt tracebacks. The benchmark exists to show that
+on this workload those semantics cost no throughput.

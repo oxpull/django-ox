@@ -95,6 +95,43 @@ def test_processes_one_never_starts_a_supervisor(recorded_worker, monkeypatch):
     assert worker.kwargs["worker_index"] is None
 
 
+def test_a_supervisor_child_runs_the_configured_worker_class(settings, monkeypatch):
+    """
+    The reason WORKER_CLASS is a setting rather than a second command.
+
+    Supervisor.child_command spawns children by the name ``ox_worker``, so a
+    worker class supplied on the parent's command line would not reach them:
+    every child above --processes 1 would silently run the stock worker. The
+    class comes from settings, which the child reads for itself, and this
+    asserts the child really does.
+    """
+    settings.TASKS = {
+        "default": {
+            "BACKEND": "django_ox.backend.OxBackend",
+            "OPTIONS": {"WORKER_CLASS": "tests.test_command.StoppedWorker"},
+        }
+    }
+    StoppedWorker.started = False
+    monkeypatch.setattr(ox_worker, "_die_with_parent", lambda: None)
+
+    with pytest.raises(SystemExit) as excinfo:
+        call_command("ox_worker", "--worker-index=0", verbosity=0)
+
+    assert excinfo.value.code == 0
+    assert StoppedWorker.started is True
+
+
+def test_the_child_command_the_supervisor_spawns_is_ox_worker(settings):
+    """
+    The other half of the pair above. If this name ever changes, the child
+    stops being the command that reads WORKER_CLASS and the test above stops
+    covering anything real.
+    """
+    from django_ox.supervisor import child_command
+
+    assert "ox_worker" in child_command([], 0, argv0="manage.py")
+
+
 def test_processes_below_one_is_rejected(recorded_worker):
     with pytest.raises(CommandError):
         call_command("ox_worker", "--processes=0", verbosity=0)

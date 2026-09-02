@@ -8,6 +8,7 @@ from typing import NamedTuple
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.db import DatabaseError, connections
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from django_ox.compat import (
@@ -535,6 +536,25 @@ class TestLeaseFencesTerminalWrites:
         assert claimed.finished_at == db_task.finished_at
         assert claimed.locked_by is None
         assert claimed.locked_at is None
+
+    def test_the_success_write_costs_one_statement(self, worker):
+        # A finish write that reads a column back afterwards is a second
+        # round trip on the path every task takes, and one of those cost
+        # 13% of single-worker throughput on PostgreSQL across three
+        # releases before anyone counted the statements. _write_outcome
+        # takes values so the instance can be mirrored from what the caller
+        # already holds; nothing it is given may be an expression the
+        # database has to compute.
+        add.enqueue(1, 2)
+        claimed = worker.claim_one()
+
+        with CaptureQueriesContext(connections["default"]) as captured:
+            worker.execute(claimed)
+
+        assert len(captured) == 1, (
+            "an outcome is one UPDATE, but this wrote "
+            f"{[q['sql'] for q in captured.captured_queries]}"
+        )
 
     def test_live_lease_writes_retry_with_backoff_and_does_not_signal(self):
         worker = Worker(backoff_initial=30, poll_interval=0.05)

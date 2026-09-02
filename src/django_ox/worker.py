@@ -255,11 +255,6 @@ def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
 
-def _is_expression(value: object) -> bool:
-    """True for a value the database computes, such as Now() or Now() + delta."""
-    return isinstance(value, Combinable)
-
-
 def _lease_now() -> Combinable | datetime:
     """The clock that stamps lease timestamps.
 
@@ -282,6 +277,19 @@ def _lease_now() -> Combinable | datetime:
     do not. The second case is what every timestamp here used before the lease
     moved to database time, so it carries no behaviour that has not already
     shipped.
+
+    Only the lease is stamped this way: locked_at, the started_at and
+    last_attempted_at written beside it in the claim, and the cutoff the reaper
+    judges locked_at against. Two columns sit outside it on purpose. run_after
+    is one, and _ready_queryset says why. finished_at is the other: nothing
+    fences on it, the reaper never reads it, and it is written by the statement
+    that gives the lease up rather than by one that holds it. Every comparison
+    against it here -- ox_prune's cutoff, the throughput window in stats -- is
+    against timezone.now(), and django_ox.actions already stamps it from there,
+    so process time is the clock it is read on. Stamping it database-side also
+    cost a round trip per task, because a value the database computes has to be
+    read back before the in-memory row can be trusted, and _write_outcome is on
+    the path every task takes.
     """
     return Now() if settings.USE_TZ else timezone.now()
 
@@ -742,6 +750,13 @@ class Worker:
         one, so this write must still land there. It cannot land on anybody
         else's row, because no other execution ever holds that number.
 
+        Every field must be a value, never a database-side expression. The
+        mirror below is what makes the log line and the TaskResult describe
+        the row, and it can only copy what the caller already holds; an
+        expression would have to be read back afterwards, which is a second
+        round trip on the path every task takes. _lease_now says which
+        columns are worth that and which are not.
+
         Returns True when the write landed, having mirrored the stored
         values onto the in-memory instance so the log record and the
         TaskResult that follow describe what is actually in the row.
@@ -772,17 +787,8 @@ class Worker:
             )
             return False
         db_task.status = status
-        # _lease_now() hands back a database-side expression when the
-        # database holds the lease clock, and an expression is not a value,
-        # so it cannot be mirrored from here; read back exactly those
-        # columns.
-        # Everything else is already known.
-        deferred = [name for name, value in fields.items() if _is_expression(value)]
         for name, value in fields.items():
-            if name not in deferred:
-                setattr(db_task, name, value)
-        if deferred:
-            db_task.refresh_from_db(fields=deferred)
+            setattr(db_task, name, value)
         return True
 
     def execute(self, db_task: OxTask) -> None:
@@ -873,7 +879,8 @@ class Worker:
                 # succeeded. _handle_failure rebuilds errors from the same
                 # list, so both resolutions leave the same kind of record.
                 errors=db_task.errors,
-                finished_at=_lease_now(),
+                # Process time, not the lease clock; _lease_now says why.
+                finished_at=timezone.now(),
                 locked_by=None,
                 locked_at=None,
             ):
@@ -1371,7 +1378,8 @@ class Worker:
                 status=OxTask.Status.FAILED,
                 duration_ms=duration_ms,
                 errors=errors,
-                finished_at=_lease_now(),
+                # Process time, not the lease clock; _lease_now says why.
+                finished_at=timezone.now(),
                 locked_by=None,
                 locked_at=None,
                 **handover,
@@ -1473,7 +1481,8 @@ class Worker:
             if exhausted:
                 updates.update(
                     status=OxTask.Status.LOST,
-                    finished_at=_lease_now(),
+                    # Process time, not the lease clock; _lease_now says why.
+                    finished_at=timezone.now(),
                     errors=[
                         *db_task.errors,
                         {

@@ -182,9 +182,10 @@ decisions worth knowing before you commit:
   processes under one supervisor. See
   [Production](production.md#threads-and-processes).
 
-Batches and unique tasks are in [Oxpull Pro](pro.md), a paid add-on that is
-not on sale yet; the waitlist is at <https://oxpull.com/>. Metrics stay in
-this package: `django_ox.stats` and `ox_health` are free and stay free.
+Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a paid
+add-on that is not on sale yet; the waitlist is at <https://oxpull.com/>.
+Metrics stay in this package: `django_ox.stats` and `ox_health` are free and
+stay free.
 
 ## License
 
@@ -895,10 +896,10 @@ to exercise claiming and retries for real.
 
 ## Not in the core
 
-Batches and unique or deduplicated tasks are in [Oxpull Pro](pro.md), a paid
-add-on that is not on sale yet. Metrics are in the free tier: `django_ox.stats`
-and `manage.py ox_health` ship in the core. Chains and workflows are on the
-Pro roadmap, undated.
+Batches, unique or deduplicated tasks, and rate limiting are in
+[Oxpull Pro](pro.md), a paid add-on that is not on sale yet. Metrics are in the
+free tier: `django_ox.stats` and `manage.py ox_health` ship in the core. Chains
+and workflows are on the Pro roadmap, undated.
 
 ---
 
@@ -2270,13 +2271,13 @@ than a changed claim.
   sub-millisecond round trips. Real deployments have network latency
   between app and database, which changes end-to-end numbers materially
   and increases the weight of per-task statement count.
-- **The concurrency-4 comparison is imperfect by construction.**
-  django-tasks-db's worker has no concurrency option, so its
-  "concurrency 4" is four separate processes: four interpreters without a
-  shared GIL, four Django boots inside the timed window. django-ox's is
-  four threads in one process. This is the fairest available mapping, though
-  still an approximation. (It also means django-ox wins that cell
-  while sharing one interpreter.)
+- **Two different shapes at concurrency 4.** django-tasks-db's worker has
+  no concurrency option, so its "concurrency 4" is four separate
+  processes: four interpreters without a shared GIL, four Django boots
+  inside the timed window. django-ox's is four threads in one process.
+  This is the fairest available mapping, and the two differences pull in
+  opposite directions: the first helps django-tasks-db, the second costs
+  it.
 - **Small N.** 2,000 tasks and 500 latency samples separate the backends
   here but say nothing about p99+ tails or sustained load. Sustained load
   and worker-failure behavior are covered separately by the
@@ -2312,13 +2313,14 @@ measured 0.1.0, which predates the lease fencing added in 0.2.0.
 
 ## What to take from this
 
-The shipped worker beats the reference implementation on every measured
-cell or ties it, and holds its documented guarantees under sustained load
-and repeated worker kills. But throughput on no-op tasks is not why you
-choose django-ox. The claim is the durability construction: transactional
-enqueue, at-least-once execution with a reaper, bounded retries with
-per-attempt tracebacks. The benchmark exists to show that choosing those
-semantics costs you nothing on worker performance.
+On the 0.1.0 matrix above, django-ox leads django-tasks-db on enqueue
+throughput and concurrency-1 end-to-end in all three runs. Under
+sustained load and repeated worker kills, django-ox 0.3.1 held its
+documented guarantees. But throughput on no-op tasks is not why you
+choose django-ox. The claim is the durability construction:
+transactional enqueue, at-least-once execution with a reaper, bounded
+retries with per-attempt tracebacks. The benchmark exists to show that
+on this workload those semantics cost no throughput.
 
 ---
 
@@ -2340,14 +2342,20 @@ announced in the [changelog](changelog.md). This page, not a module's
   string in the `TASKS` setting, `QUEUES` beside `OPTIONS`, and every
   `OPTIONS` key it reads: `MAX_ATTEMPTS`, `LOCK_TIMEOUT`,
   `BACKOFF_INITIAL`, `BACKOFF_MAX`, `TASK_TIMEOUT`, `TASK_TIMEOUTS`,
-  `TASK_TIMEOUT_GRACE`, and `SCHEDULES` (with its documented
-  per-schedule keys).
+  `TASK_TIMEOUT_GRACE`, `SCHEDULES` (with its documented per-schedule
+  keys), and `WORKER_CLASS`, the dotted path of the `Worker` subclass
+  `ox_worker` runs.
 - **The management commands** and their flags: `ox_worker`, `ox_prune`,
   `ox_health`. `ox_worker`'s exit codes: 0 after a drain, 130 on a forced
   exit, 75 when the worker recycles itself after a stuck task thread.
   Under `--processes`, the supervisor exits 0 when every worker drained
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code.
+- **The claim filter hooks** `Worker.claim_filter_q()` and
+  `Worker.claim_filter_sql()`, and where their result is applied: the
+  fragment is conjoined to the conditions the candidate select filters on,
+  ahead of its ordering and its limit. The statement around it is not
+  promised.
 - **The timeout helpers** `django_ox.deadline()` and `django_ox.remaining()`,
   callable from inside a task.
 - **The metrics module** `django_ox.stats`: `queue_stats`, `ready_count`,
@@ -2411,8 +2419,8 @@ the pre-1.0 rule applies:
 - **0.x.y patch releases are bug fixes only** and never break a public
   surface.
 
-Pin accordingly: `django-ox~=0.3.1` accepts patch releases only;
-`django-ox>=0.3,<0.4` accepts the current minor line.
+Pin accordingly: `django-ox~=0.4.0` accepts patch releases only;
+`django-ox>=0.4,<0.5` accepts the current minor line.
 
 Once 1.0 ships, breaking changes to the public API will require a major
 version bump, in the usual SemVer way.
@@ -2458,57 +2466,97 @@ part of the tested matrix.
 
 # Pro
 
-Everything documented on this site is free, open source (BSD 3-Clause), and
-stays that way. The durable queue, transactional enqueue, retries, reaper,
-graceful drain, priorities, deferred tasks, recurring tasks and pruning are
-the free tier, permanently. Nothing that works today moves behind the paid
-tier.
+django-ox is free, open source (BSD 3-Clause), and stays that way. The
+durable queue, transactional enqueue, retries, reaper, graceful drain,
+priorities, deferred tasks, recurring tasks and pruning are the free tier,
+permanently. Nothing that works today moves behind the paid tier.
 
-**Oxpull Pro** is a paid add-on for two problems that show up once a queue is
-carrying real volume. Both are built and tested. It is not on sale yet: the
-purchase and delivery path is still being set up, and the waitlist below is
-how to hear when it opens.
+**Oxpull Pro** is a paid add-on for three problems that show up once a queue
+is carrying real volume. All three are built and tested. It is not on sale
+yet. The waitlist below is how to hear when it opens.
 
 ## What Pro adds
 
-- **Unique tasks.** Deduplicate at enqueue time, so the same job cannot be
-  queued twice. The lock is written in the same transaction as the task, so
-  the two commit or roll back together, and a lock whose task died is
-  released rather than stranded.
+- **Unique tasks.** Deduplicate at enqueue time: while a task with the same
+  key is READY or RUNNING, enqueueing it again returns the pending task's
+  result rather than inserting a second row. The lock is written in the
+  same transaction as the task, so the two commit or roll back together,
+  and a lock whose task settled or was pruned is released rather than
+  stranded.
+  A bulk enqueue is one INSERT that the deduplicating path never sees, so
+  `enqueue_many()` raises `InvalidTask` for a unique task and names it.
 - **Batches.** Enqueue a group, read its progress as a count, and fire a
   callback once every member has settled. Completion is computed by querying
   the task rows rather than by counting signals, so a worker dying mid-task
   cannot strand a batch: the reconciler picks it up on the next tick.
+  Batches take one setting: `oxpull.batches.reconcile` on a one-minute cron
+  in `OPTIONS["SCHEDULES"]`, run by the django-ox cron you already have.
+- **Rate limiting.** Cap how often a task starts. A named limit of N
+  admissions per period is declared in `OPTIONS["RATE_LIMITS"]`, and every
+  worker shares it through one row in the database. A throttled task stays
+  READY: it is not claimed, so it spends no retry attempt and holds no
+  lease. Set `OPTIONS["WORKER_CLASS"]` to `oxpull.worker.OxpullWorker`, the
+  worker that applies the limits. `manage.py check` reports `oxpull.E006`
+  when a limit is configured without it.
 
-Both run on the databases the free tier tests in CI: SQLite, PostgreSQL and
-MySQL 8. MariaDB 10.6+ takes the same claim path but is not part of the tested
-matrix. Batches have been measured to 100,000 members in a single batch on
-SQLite and on PostgreSQL 16.
+  For a limit of N admissions per period P, with W `ox_worker` processes
+  claiming from the queues that carry the limit's tasks, the number of
+  task attempts started in any one window is at most N + W - 1. Add one
+  for each worker process that dies between claiming a limited task and
+  recording it. With a single worker process and no such death the
+  limiter is exact: at most N per window. Windows are contiguous, so an
+  arbitrary interval of length P that spans a boundary can carry up to
+  2(N + W - 1). A count that cannot be written is logged and the
+  attempt runs; three consecutive failed counts on one limit close it
+  until a write lands.
+
+All three run on the databases the free tier tests in CI: SQLite,
+PostgreSQL and MySQL 8. MariaDB 10.6+ takes the same claim path but is not
+part of the tested matrix. Batches have been measured to 1,000,000 members
+in a single batch on all three, with every count checked against the task
+rows rather than against what the API reports about itself.
+
+Sealing a batch that wide is cheap on SQLite and PostgreSQL and expensive
+on MySQL: about 34 ms, 0.7 s and 28 s respectively. Sealing takes a row
+lock per member on any database that offers one, and a million InnoDB
+locks in a single transaction is what that costs. Reconciling the same
+batch is 4.9 s on SQLite, 0.4 s on PostgreSQL and 7.3 s on MySQL, against
+a reconciler that runs on a one-minute tick.
+
+Measured on an arm64 macOS host, with SQLite on a local file in WAL mode
+at `synchronous=NORMAL`, and stock PostgreSQL 16 and MySQL 8 images in
+Docker on localhost, each width against an empty database.
 
 ## What Pro is not
 
-Workflows and chains are on the roadmap, undated. Rate limiting, a web
-dashboard and encrypted payloads are not in Pro and are not dated. Metrics
-stay free: the stats API and the health command are in the open source
-package and remain there.
+Workflows and chains are on the roadmap, undated. A web dashboard and
+encrypted payloads are not in Pro and are not dated. Rate limiting caps how
+often a task starts, not how many run at once; concurrency limiting is a
+different mechanism and is not in Pro. Metrics stay free: the stats API and
+the health command are in the open source package and remain there.
 
 ## Delivery
 
-Pro will install from a private package index using credentials issued per
-company. There is no licence key and no runtime check. A licence check is one
-more thing of ours that can break your production, so we did not build one.
-The credential controls access to the index rather than to code you have
-already installed, so if it lapses, what is deployed keeps running.
+Pro installs from a private package index using credentials issued per
+company. There is no licence key and no runtime check. A licence check would
+put a validation step in the path of code that has to keep running, and it
+does nothing for a company that has already paid. Nothing in the package
+phones home: no network call to us, and no telemetry. The credential controls
+access to the index rather than to code you have already installed, so if it
+lapses, what is deployed keeps running.
 
 ## Pricing
 
 Planned at **$399 per year, per company**, flat. One licence to cover a whole
-organisation and every environment, with a seven-day money-back period.
+organisation and every environment, with a seven-day money-back period. The
+term is 12 months and renews for successive 12-month terms unless you cancel.
+Cancel by writing to support@oxpull.com. Cancellation takes effect at the end
+of the period you have paid for.
 
 ## Waitlist
 
 If Pro would earn its keep in your deployment, join the waitlist and say which
-of the two features matters to you. That ordering decides what gets built
+of the three features matters to you. That ordering decides what gets built
 after these.
 
 [Join the Pro waitlist](https://oxpull.com/#waitlist){ .md-button }
@@ -2678,8 +2726,9 @@ TASKS = {
   bounds every attempt. Tasks live on the default database.
 - In tests use `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend` for `TASKS`.
-- Batches and unique tasks are in [Oxpull Pro](pro.md), a paid add-on that
-  is not on sale yet. `django_ox.stats` and `ox_health` are in django-ox.
+- Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a
+  paid add-on that is not on sale yet. `django_ox.stats` and `ox_health`
+  are in django-ox.
 
 ## How to verify it works
 
@@ -2742,6 +2791,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.4.0] - 2026-09-01
+
+### Added
+
+- `WORKER_CLASS` in a backend's `OPTIONS`: the dotted path of the `Worker`
+  subclass `ox_worker` runs. Resolved from settings rather than from the
+  command line, so a worker chosen here is the worker in every child
+  process under `ox_worker --processes N`, not only at `--processes 1`.
+- `Worker.claim_filter_q()` and `Worker.claim_filter_sql()`, two hooks a
+  subclass overrides to narrow what it may claim. The condition is applied
+  inside the candidate select on all three claim paths, ahead of its
+  ordering and its limit, so a narrowed worker still claims runnable work
+  behind rows it declines. `claim_filter_q()` covers the two paths that
+  build a queryset and `claim_filter_sql()` the PostgreSQL claim, which
+  builds its own SQL, so implement both. The defaults are `None` and an
+  empty fragment, so the emitted SQL is unchanged without them.
 
 ## [0.3.1] - 2026-08-24
 
@@ -2808,22 +2874,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   log events: `task_timed_out`, `task_stuck`, `worker_recycling`,
   `worker_process_recycled` and `timeouts_backstop_only`.
 - `ox_worker --processes N`. Above 1, the command supervises N copies of
-  itself, each a full worker with its own database connections, lease
-  renewal, reaper and `--concurrency` thread pool, so `--processes 2
-  --concurrency 4` runs eight tasks at once. Every worker id ends in its slot
-  number. SIGTERM, SIGINT or SIGHUP to the supervisor is forwarded once and
-  the supervisor exits 0 when every worker drained, or with the first
-  non-zero code; a second signal is the force-exit, and a worker that has
-  not exited five seconds later is SIGKILLed. A worker process that dies,
-  by any exit code, is restarted with `worker_process_restarted` at
-  WARNING, after one second and then with a doubling delay up to 30
-  seconds; more than five deaths of one slot in a minute stops the
-  supervisor with exit code 1 and `supervisor_restart_cap` at ERROR. A
-  worker whose supervisor dies drains and exits (`worker_orphaned`). The
-  children are started the way the supervisor was, `manage.py` by absolute
-  path or `python -m django`, with `--settings` and `--pythonpath` passed
-  on, so the command works from any working directory. `--processes 1`, the
-  default, is the worker as before. POSIX only.
+  itself, each a full worker with its own database connections, lease renewal,
+  reaper and `--concurrency` thread pool, so `--processes 2 --concurrency 4`
+  runs eight tasks at once. Every worker id ends in its slot number. SIGTERM,
+  SIGINT or SIGHUP to the supervisor is forwarded once and the supervisor exits
+  0 when every worker drained or recycled, or with the first other non-zero
+  code; a second signal is the force-exit, and a worker that has not exited
+  five seconds later is SIGKILLed. A worker process that dies is restarted with
+  `worker_process_restarted` at WARNING, after one second and then with a
+  doubling delay up to 30 seconds; a worker that recycled itself, exit code 75,
+  comes back after one second under `worker_process_recycled`, outside the
+  death count and the backoff. More than five deaths of one slot in a minute
+  stops the supervisor with exit code 1 and `supervisor_restart_cap` at ERROR.
+  A worker whose supervisor dies drains and exits (`worker_orphaned`). The
+  children are started the way the supervisor was, `manage.py` by absolute path
+  or `python -m django`, with `--settings` and `--pythonpath` passed on, so the
+  command works from any working directory. `--processes 1`, the default, is
+  the worker as before. POSIX only.
 - A Prometheus endpoint. `path("ox/", include("django_ox.urls"))` mounts
   `GET /ox/metrics`, which renders the `django_ox.stats` numbers as gauges in
   the Prometheus text format (OpenMetrics on request), from the standard
@@ -2878,8 +2945,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   django_ox` when you upgrade. It adds the new status choice.
 - `QueueStats` has a sixth field, `discarded`, keyword-defaulted like `lost`.
 - A queued task can now be discarded and a failed or lost one retried, and
-  every attempt can be bounded with `TASK_TIMEOUT`; interrupting one chosen
-  running task on demand stays outside scope.
+  every attempt can be bounded with `TASK_TIMEOUT`.
 - A worker that is already draining, because it is recycling, treats the
   operator's first signal as the drain it is doing rather than as the
   force-exit; the second signal is still the force-exit.
@@ -2888,12 +2954,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- A task that succeeded after its lease was lost no longer keeps the reaper's
-  lost-lease record in `errors`. That record says the outcome was never
-  observed, and the success write is that observation, so anything reading
-  `result.errors` was handed an exception nobody raised on a task that worked.
-  A failure resolving the same way already dropped it, and the two now agree. A task that is still LOST keeps the record: it is
-  the only thing on the row that says why the result reads as failed.
+- A task that succeeds after its lease was lost drops the reaper's
+  lost-lease record from `errors`. That record says the outcome was never
+  observed, and the success write is that observation, so nothing reading
+  `result.errors` is handed an exception nobody raised. Every earlier
+  attempt's traceback stays on the row. A failure resolving the same way
+  already dropped it, and the two now agree. A task that is still LOST
+  keeps the record: it is the only thing on the row that says why the
+  result reads as failed.
 
 ### Added
 
@@ -2915,11 +2983,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that number in its WHERE clause, so a write from a worker that no longer
   holds the task matches nothing and is dropped instead of applied. No
   completion is signalled for a dropped write.
-- The reaper no longer records a failure it did not observe. When a lock aged
-  out with no attempts left it wrote FAILED and invented a `TaskAbandoned`
-  exception to explain it, on no evidence beyond a clock. It now records the
-  task as LOST, which says the worker stopped reporting and the outcome was
-  never seen, and nothing more.
+- A lock that ages out with no attempts left is recorded as LOST rather than
+  FAILED. LOST says the worker stopped reporting and the outcome was never
+  seen, and nothing more. The `TaskAbandoned` record the reaper leaves in
+  `errors` is the lost lease, not a cause of failure.
 - Lock timestamps are written and compared using the database server's clock
   rather than each worker's own, so two hosts with drifting clocks no longer
   produce false reclaims. This applies when `USE_TZ` is on. With `USE_TZ` off
@@ -3032,7 +3099,7 @@ Initial release.
 - `ox_prune` management command: batched deletion of finished task rows
   (`--older-than`, `--include-failed`, `--batch-size`, `--dry-run`).
 - `django_ox.stats`: read-only queue metrics as plain ORM queries, on
-  both supported databases: per-queue status counts, backlog depth and
+  every supported database: per-queue status counts, backlog depth and
   age, throughput and failure rate over a trailing window, and time
   since the last task claim.
 - `ox_health` management command: exits non-zero with a one-line reason
@@ -3072,6 +3139,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[0.4.0]: https://github.com/oxpull/django-ox/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/oxpull/django-ox/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/oxpull/django-ox/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/oxpull/django-ox/releases/tag/v0.2.1

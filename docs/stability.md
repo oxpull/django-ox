@@ -14,14 +14,20 @@ announced in the [changelog](changelog.md). This page, not a module's
   string in the `TASKS` setting, `QUEUES` beside `OPTIONS`, and every
   `OPTIONS` key it reads: `MAX_ATTEMPTS`, `LOCK_TIMEOUT`,
   `BACKOFF_INITIAL`, `BACKOFF_MAX`, `TASK_TIMEOUT`, `TASK_TIMEOUTS`,
-  `TASK_TIMEOUT_GRACE`, and `SCHEDULES` (with its documented
-  per-schedule keys).
+  `TASK_TIMEOUT_GRACE`, `SCHEDULES` (with its documented per-schedule
+  keys), and `WORKER_CLASS`, the dotted path of the `Worker` subclass
+  `ox_worker` runs.
 - **The management commands** and their flags: `ox_worker`, `ox_prune`,
   `ox_health`. `ox_worker`'s exit codes: 0 after a drain, 130 on a forced
   exit, 75 when the worker recycles itself after a stuck task thread.
   Under `--processes`, the supervisor exits 0 when every worker drained
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code.
+- **The claim filter hooks** `Worker.claim_filter_q()` and
+  `Worker.claim_filter_sql()`, and where their result is applied: the
+  fragment is conjoined to the conditions the candidate select filters on,
+  ahead of its ordering and its limit. The statement around it is not
+  promised.
 - **The timeout helpers** `django_ox.deadline()` and `django_ox.remaining()`,
   callable from inside a task.
 - **The metrics module** `django_ox.stats`: `queue_stats`, `ready_count`,
@@ -85,8 +91,8 @@ the pre-1.0 rule applies:
 - **0.x.y patch releases are bug fixes only** and never break a public
   surface.
 
-Pin accordingly: `django-ox~=0.3.1` accepts patch releases only;
-`django-ox>=0.3,<0.4` accepts the current minor line.
+Pin accordingly: `django-ox~=0.4.0` accepts patch releases only;
+`django-ox>=0.4,<0.5` accepts the current minor line.
 
 Once 1.0 ships, breaking changes to the public API will require a major
 version bump, in the usual SemVer way.

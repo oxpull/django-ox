@@ -228,9 +228,16 @@ def migrate(backend_name: str) -> None:
 
 
 def truncate(backend_name: str) -> None:
+    # CASCADE because oxscheduletick carries a nullable foreign key to
+    # oxtask, and PostgreSQL refuses to truncate a table another one
+    # references even when the referencing table is empty. The schedules
+    # table arrived in migration 0002, after the 2026-08-13 numbers were
+    # taken, so a plain TRUNCATE had nothing to trip over then and has
+    # been unable to run since. Both benchmark databases exist only for
+    # this harness, so cascading is a reset, not a loss.
     cfg = BACKENDS[backend_name]
     with pg_connect(cfg["database"]) as conn:
-        conn.execute(f'TRUNCATE "{cfg["table"]}"')
+        conn.execute(f'TRUNCATE "{cfg["table"]}" CASCADE')
 
 
 def count_status(backend_name: str, status: str) -> int:

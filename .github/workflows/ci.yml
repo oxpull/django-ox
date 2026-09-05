@@ -140,6 +140,59 @@ jobs:
       # the sqlite job.
       - run: timeout -s ABRT 1500 python -m pytest -q
 
+  # Every 5.2 leg above installs "django-tasks>=0.9", and pip resolves that to
+  # the newest release, so the declared floor was never the version under test.
+  # It was broken for three releases and CI could not have seen it: a >= install
+  # cannot test a floor. This leg pins the floor with == so a regression at the
+  # bottom of the supported range fails here.
+  #
+  # Measured 2026-09-05 on Django 5.2.17, Python 3.12, the whole suite:
+  #   0.9.0   105 failed, 368 passed
+  #   0.10.0   45 failed, 428 passed
+  #   0.11.0   collection error, 0 tests ran
+  #   0.12.0   all green
+  # Keep this pin and pyproject.toml's [project.optional-dependencies] backport
+  # floor in lockstep; raising one without the other silently stops testing it.
+  test-backport-floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: backport floor (django-tasks==0.12.0)
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ox
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PYTHONFAULTHANDLER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --group dev -e . "Django~=5.2.0"
+      # ==, not >=. That is the whole point of this job.
+      - run: python -m pip install "django-tasks==0.12.0"
+      # Fail loudly if resolution drifted off the pin.
+      - run: |
+          python - <<'PY'
+          import importlib.metadata as m
+          got = m.version("django-tasks")
+          assert got == "0.12.0", f"expected the floor 0.12.0, got {got}"
+          print("django-tasks", got)
+          PY
+      - run: timeout -s ABRT 1500 python -m pytest -q
+      - run: timeout -s ABRT 1500 python -m pytest -q
+        env:
+          DJANGO_SETTINGS_MODULE: tests.settings_postgres
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -204,7 +257,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [test-sqlite, test-postgres, test-mysql, lint, types, docs, packaging]
+    needs: [test-sqlite, test-postgres, test-backport-floor, test-mysql, lint, types, docs, packaging]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

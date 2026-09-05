@@ -41,7 +41,26 @@ classifiers = [
 # Django ships the Tasks framework from 6.0. On Django 5.2 LTS the same
 # framework comes from the django-tasks backport, and django-ox targets it
 # through django_ox.compat. Nothing else changes.
-backport = ["django-tasks>=0.9"]
+#
+# The floor is 0.12 because that is the oldest release the suite passes on, not
+# because it is the newest release. Measured 2026-09-05, whole suite, Django
+# 5.2.17 on Python 3.12, one version swapped into one venv:
+#
+#   0.9.0    105 failed, 368 passed  -- Task.__init__() missing a required
+#                                       keyword-only argument 'enqueue_on_commit'
+#   0.10.0    45 failed, 428 passed  -- OxTask.Status.SUCCESSFUL is not a valid
+#                                       TaskResultStatus
+#   0.11.0   collection error, 0 ran -- OxBackend cannot be instantiated without
+#                                       the abstract method 'save_metadata'
+#   0.12.0   473 passed, 5 skipped
+#
+# These are framework API changes across the backport's own releases, not
+# incidental breakage, so do not lower this floor without running the suite
+# against the lower version first. The CI job `test-backport-floor` pins this
+# exact version with == and exists solely to keep that true; a `>=` install
+# always resolves to the newest release and can never test a floor. Raise the
+# two together or the floor silently stops being tested.
+backport = ["django-tasks>=0.12"]
 
 [project.urls]
 Homepage = "https://github.com/oxpull/django-ox"

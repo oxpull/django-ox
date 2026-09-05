@@ -29,9 +29,11 @@ PostgreSQL and MySQL, and the suite covers all of them.
 
 - `finished_at` is stamped from the process clock instead of being computed by
   the database and read back. An outcome write is one statement again rather
-  than two. Measured on PostgreSQL 16 with 2,000 no-op tasks and one worker,
-  five runs per arm: 114.9 tasks per second, against 103.6 for the same
-  benchmark run against django-tasks-db 0.12. The lease is untouched.
+  than two. The benchmark on the docs site measured 114.9 tasks per second
+  against django-tasks-db 0.12's 103.6, on PostgreSQL 16 with 2,000 no-op
+  tasks, one worker and five runs per arm. That run predates this change by
+  eighteen minutes, so it measured the extra round trip and understates what
+  ships here. The lease is untouched.
   `locked_at` and the reaper's cutoff stay on the database clock, which is
   where a lease is judged.
 - The `backport` extra requires `django-tasks>=0.12`. Earlier backport releases

@@ -8,10 +8,16 @@ was discarded.
 
 ## What was measured
 
-The worker path that ships as 1.0.0. It was measured on 2026-09-05, before
-the release was tagged. The only source changes between the measurement and
-the tag were the version string and the import re-routing through
-`django_ox.compat`, neither of which touches the worker path.
+The worker path as it stood on 2026-09-05, which is **not** quite the path
+that ships as 1.0.0. One change landed after this run: the outcome write no
+longer reads `finished_at` back off the database, so the shipped worker does
+one fewer round trip per task than the one measured here.
+
+That difference runs in our favour on the single-worker rows, which therefore
+understate the shipped code. It also means the concurrency-4 row, where
+django-tasks-db comes out ahead, was measured on the slower build and has not
+been re-run since. Treat that comparison as unsettled rather than as a
+measured loss.
 
 Environment: Apple M1 Max, 10 logical CPUs, macOS 26.6.2, Python 3.12.13,
 Django 6.0.8, PostgreSQL 16.14 in Docker on the same machine,

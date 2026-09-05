@@ -2234,10 +2234,16 @@ was discarded.
 
 ## What was measured
 
-The worker path that ships as 1.0.0. It was measured on 2026-09-05, before
-the release was tagged. The only source changes between the measurement and
-the tag were the version string and the import re-routing through
-`django_ox.compat`, neither of which touches the worker path.
+The worker path as it stood on 2026-09-05, which is **not** quite the path
+that ships as 1.0.0. One change landed after this run: the outcome write no
+longer reads `finished_at` back off the database, so the shipped worker does
+one fewer round trip per task than the one measured here.
+
+That difference runs in our favour on the single-worker rows, which therefore
+understate the shipped code. It also means the concurrency-4 row, where
+django-tasks-db comes out ahead, was measured on the slower build and has not
+been re-run since. Treat that comparison as unsettled rather than as a
+measured loss.
 
 Environment: Apple M1 Max, 10 logical CPUs, macOS 26.6.2, Python 3.12.13,
 Django 6.0.8, PostgreSQL 16.14 in Docker on the same machine,
@@ -2918,9 +2924,11 @@ PostgreSQL and MySQL, and the suite covers all of them.
 
 - `finished_at` is stamped from the process clock instead of being computed by
   the database and read back. An outcome write is one statement again rather
-  than two. Measured on PostgreSQL 16 with 2,000 no-op tasks and one worker,
-  five runs per arm: 114.9 tasks per second, against 103.6 for the same
-  benchmark run against django-tasks-db 0.12. The lease is untouched.
+  than two. The benchmark on the docs site measured 114.9 tasks per second
+  against django-tasks-db 0.12's 103.6, on PostgreSQL 16 with 2,000 no-op
+  tasks, one worker and five runs per arm. That run predates this change by
+  eighteen minutes, so it measured the extra round trip and understates what
+  ships here. The lease is untouched.
   `locked_at` and the reaper's cutoff stay on the database clock, which is
   where a lease is judged.
 - The `backport` extra requires `django-tasks>=0.12`. Earlier backport releases

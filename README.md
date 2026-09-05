@@ -97,8 +97,9 @@ recording the outcome leaves that task to run again. One task in that run
 executed twice for exactly that reason, and no task executed twice without
 a kill to account for it.
 
-The soak ran 0.3.1. The outcome-write path changed after it, so the soak does
-not cover the worker path in the throughput figures below.
+The soak ran 0.3.1, and the outcome-write path changed after both it and the
+throughput run below. Neither measurement covers the shipped worker exactly;
+the benchmarks page says which way the difference runs.
 
 Thirty-seven assertions ran and all thirty-seven passed. The harness
 design, every assertion and the caveats are in

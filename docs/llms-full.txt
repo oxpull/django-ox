@@ -172,7 +172,7 @@ That is the whole integration. Next steps:
 
 ## Scope
 
-The core is deliberately small: a durable queue, a worker, recurring
+The core is finite on purpose: a durable queue, a worker, recurring
 schedules, and monitoring, with nothing extra to operate. Design
 decisions worth knowing before you commit:
 
@@ -2395,7 +2395,8 @@ promise about compatibility, so you can pin `django-ox` with confidence.
 
 These are the supported surfaces. Changes to them are versioned and
 announced in the [changelog](changelog.md). This page, not a module's
-`__all__`, is the statement of what is public; today the two agree.
+`__all__`, is the statement of what is public. A module's `__all__` may
+export names this page does not list; those names are not public.
 
 - **The backend path** `django_ox.backend.OxBackend`, referenced as a
   string in the `TASKS` setting, `QUEUES` beside `OPTIONS`, and every
@@ -2469,8 +2470,7 @@ model's non-schema helper methods are not part of the contract.
 
 ## Versioning
 
-django-ox follows [Semantic Versioning](https://semver.org/). Before 1.0,
-SemVer applies from 1.0:
+django-ox follows [Semantic Versioning](https://semver.org/):
 
 - **Breaking changes to any public surface above require a major version.**
   They are called out in the changelog under a `Changed` or `Removed`

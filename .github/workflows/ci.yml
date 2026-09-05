@@ -188,8 +188,10 @@ jobs:
           assert got == "0.12.0", f"expected the floor 0.12.0, got {got}"
           print("django-tasks", got)
           PY
-      - run: timeout -s ABRT 1500 python -m pytest -q
-      - run: timeout -s ABRT 1500 python -m pytest -q
+      - name: Suite on SQLite at the floor
+        run: timeout -s ABRT 1500 python -m pytest -q
+      - name: Suite on PostgreSQL at the floor
+        run: timeout -s ABRT 1500 python -m pytest -q
         env:
           DJANGO_SETTINGS_MODULE: tests.settings_postgres
 

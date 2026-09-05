@@ -654,7 +654,7 @@ broker.
 
 ```python
 from django.db import transaction
-from django.tasks import task
+from django.tasks import task  # Django 6.0+; on 5.2: from django_tasks import task
 
 
 @task
@@ -1546,7 +1546,7 @@ timeout applies.
 
 ```python
 import django_ox
-from django.tasks import task
+from django.tasks import task  # Django 6.0+; on 5.2: from django_tasks import task
 
 
 @task
@@ -2232,8 +2232,10 @@ was discarded.
 
 ## What was measured
 
-The worker path in the repository on 2026-09-05, which was not a published
-version on that date. These numbers are not attributed to a release.
+The worker path that ships as 1.0.0. It was measured on 2026-09-05, before
+the release was tagged. The only source changes between the measurement and
+the tag were the version string and the import re-routing through
+`django_ox.compat`, neither of which touches the worker path.
 
 Environment: Apple M1 Max, 10 logical CPUs, macOS 26.6.2, Python 3.12.13,
 Django 6.0.8, PostgreSQL 16.14 in Docker on the same machine,
@@ -2419,7 +2421,13 @@ export names this page does not list; those names are not public.
   exit, 75 when the worker recycles itself after a stuck task thread.
   Under `--processes`, the supervisor exits 0 when every worker drained
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
-  first other non-zero worker code.
+  first other non-zero worker code. A worker killed by a signal reports
+  `128 + the signal number`, following the shell convention.
+- **The system check IDs** `django_ox.E001` through `django_ox.E005`, which
+  the configuration guide tells you to list in `SILENCED_SYSTEM_CHECKS`. The
+  IDs are stable; the messages are not.
+- **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy or when the
+  arguments are wrong.
 - **The claim filter hooks** `Worker.claim_filter_q()` and
   `Worker.claim_filter_sql()`, and where their result is applied: the
   fragment is conjoined to the conditions the candidate select filters on,
@@ -2746,7 +2754,8 @@ TASKS = {
 - `QUEUES` sits beside `OPTIONS`, not inside it. Inside `OPTIONS` it is
   ignored without warning; the symptom is `InvalidTask: Queue 'X' is not
   valid for backend.`
-- Tasks are plain `django.tasks` tasks. `from django.tasks import task`,
+- Tasks are plain Tasks-framework tasks. `from django.tasks import task` on
+  Django 6.0+, `from django_tasks import task` on 5.2 LTS,
   decorate with `@task`, call `.enqueue(...)`. Nothing is imported from
   `django_ox` in task code.
 - The worker imports a task by its dotted path, so the module must be
@@ -2824,7 +2833,7 @@ Define a task in any installed app:
 
 ```python
 # myapp/tasks.py
-from django.tasks import task
+from django.tasks import task  # Django 6.0+; on 5.2: from django_tasks import task
 
 
 @task

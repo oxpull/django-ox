@@ -97,6 +97,9 @@ recording the outcome leaves that task to run again. One task in that run
 executed twice for exactly that reason, and no task executed twice without
 a kill to account for it.
 
+The soak ran 0.3.1. The outcome-write path changed after it, so the soak does
+not cover the worker path in the throughput figures above.
+
 Thirty-seven assertions ran and all thirty-seven passed. The harness
 design, every assertion and the caveats are in
 [SOAK-2026-09-01.md](https://github.com/oxpull/django-ox/blob/main/benchmarks/SOAK-2026-09-01.md),
@@ -112,10 +115,11 @@ every one of the five control runs; the slowest was 112.6 and their fastest
 was 105.0. In-transaction enqueue latency was a tie at about six tenths of
 a millisecond at p50.
 
-At concurrency 4 the result reverses and django-tasks-db is about 5 percent
-ahead, 346.3 against 328.5. The two harnesses run different shapes there and
-[the benchmarks page](https://oxpull.com/django-ox/benchmarks/) says so, with
-the method and the raw data behind every figure.
+At concurrency 4 the result reverses and django-tasks-db is ahead: 346.3
+against 328.5 on the mean, about 5 percent, and wider on the median.
+[The benchmarks page](https://oxpull.com/django-ox/benchmarks/) carries that
+result, the reason the two harnesses are not measuring the same shape at that
+width, and the raw data behind every figure.
 
 ## Configuration
 

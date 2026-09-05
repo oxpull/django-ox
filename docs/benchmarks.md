@@ -8,8 +8,10 @@ was discarded.
 
 ## What was measured
 
-The worker path in the repository on 2026-09-05, which was not a published
-version on that date. These numbers are not attributed to a release.
+The worker path that ships as 1.0.0. It was measured on 2026-09-05, before
+the release was tagged. The only source changes between the measurement and
+the tag were the version string and the import re-routing through
+`django_ox.compat`, neither of which touches the worker path.
 
 Environment: Apple M1 Max, 10 logical CPUs, macOS 26.6.2, Python 3.12.13,
 Django 6.0.8, PostgreSQL 16.14 in Docker on the same machine,

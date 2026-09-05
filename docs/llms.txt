@@ -21,7 +21,8 @@ Operational facts worth getting right:
   `python manage.py ox_worker`. It is a separate foreground process from the
   web server. SIGTERM and SIGINT both drain in-flight tasks and exit 0; a
   second signal forces an immediate exit with code 130.
-- Tasks are ordinary `django.tasks` tasks: `from django.tasks import task`,
+- Tasks are ordinary Tasks-framework tasks: `from django.tasks import task` on
+  Django 6.0+, `from django_tasks import task` on 5.2 LTS,
   decorate with `@task`, call `.enqueue(...)`. django-ox adds nothing on the
   producer side, so task code stays portable across `django.tasks` backends.
 - The worker imports a task by its dotted path, so the module must be

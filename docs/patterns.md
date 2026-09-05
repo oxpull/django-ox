@@ -11,7 +11,7 @@ broker.
 
 ```python
 from django.db import transaction
-from django.tasks import task
+from django.tasks import task  # Django 6.0+; on 5.2: from django_tasks import task
 
 
 @task

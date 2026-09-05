@@ -106,7 +106,8 @@ TASKS = {
 - `QUEUES` sits beside `OPTIONS`, not inside it. Inside `OPTIONS` it is
   ignored without warning; the symptom is `InvalidTask: Queue 'X' is not
   valid for backend.`
-- Tasks are plain `django.tasks` tasks. `from django.tasks import task`,
+- Tasks are plain Tasks-framework tasks. `from django.tasks import task` on
+  Django 6.0+, `from django_tasks import task` on 5.2 LTS,
   decorate with `@task`, call `.enqueue(...)`. Nothing is imported from
   `django_ox` in task code.
 - The worker imports a task by its dotted path, so the module must be
@@ -184,7 +185,7 @@ Define a task in any installed app:
 
 ```python
 # myapp/tasks.py
-from django.tasks import task
+from django.tasks import task  # Django 6.0+; on 5.2: from django_tasks import task
 
 
 @task

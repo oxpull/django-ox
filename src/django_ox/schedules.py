@@ -15,11 +15,9 @@ from typing import Any
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from django.tasks.base import Task
-from django.tasks.exceptions import InvalidTask
-from django.utils.json import normalize_json
 from django.utils.module_loading import import_string
 
+from .compat import InvalidTask, Task, normalize_json
 from .cron import CronExpression
 
 SCHEDULE_NAME_MAX_LENGTH = 128

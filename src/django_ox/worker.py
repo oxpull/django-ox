@@ -34,13 +34,20 @@ from django.db import (
 from django.db.models import Max, Q, QuerySet
 from django.db.models.expressions import Combinable
 from django.db.models.functions import Now
-from django.tasks import DEFAULT_TASK_BACKEND_ALIAS, task_backends
-from django.tasks.base import Task, TaskContext, TaskResult
-from django.tasks.signals import task_finished, task_started
 from django.utils import timezone
 from django.utils.crypto import get_random_string
-from django.utils.json import normalize_json
 from django.utils.module_loading import import_string
+
+from django_ox.compat import (
+    DEFAULT_TASK_BACKEND_ALIAS,
+    Task,
+    TaskContext,
+    TaskResult,
+    normalize_json,
+    task_backends,
+    task_finished,
+    task_started,
+)
 
 from .backend import OxBackend
 from .exceptions import TaskAbandoned, TaskTimeout

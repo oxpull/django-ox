@@ -16,7 +16,11 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12", "3.13", "3.14"]
-        django-version: ["6.0", "6.1"]
+        django-version: ["5.2", "6.0", "6.1"]
+        exclude:
+          # Django 5.2 does not support Python 3.14.
+          - python-version: "3.14"
+            django-version: "5.2"
     name: sqlite py${{ matrix.python-version }} dj${{ matrix.django-version }}
     env:
       PYTHONFAULTHANDLER: "1"
@@ -27,6 +31,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
       - run: python -m pip install --group dev -e . "Django~=${{ matrix.django-version }}.0"
+      # Django ships the Tasks framework from 6.0. On 5.2 it comes from the
+      # backport, which django_ox.compat imports instead. Untested, that is a
+      # claim rather than a fact, so 5.2 runs the whole suite against it.
+      - if: matrix.django-version == '5.2'
+        run: python -m pip install "django-tasks>=0.9"
       # A run that hangs is cancelled at the job's 30-minute cap with
       # nothing in the log to say where it sat. SIGABRT at 25 minutes
       # makes faulthandler dump every thread's stack to the log first.
@@ -39,7 +48,11 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12", "3.13", "3.14"]
-        django-version: ["6.0", "6.1"]
+        django-version: ["5.2", "6.0", "6.1"]
+        exclude:
+          # Django 5.2 does not support Python 3.14.
+          - python-version: "3.14"
+            django-version: "5.2"
     name: postgres py${{ matrix.python-version }} dj${{ matrix.django-version }}
     services:
       postgres:
@@ -63,6 +76,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
       - run: python -m pip install --group dev -e . "Django~=${{ matrix.django-version }}.0"
+      # Django ships the Tasks framework from 6.0. On 5.2 it comes from the
+      # backport, which django_ox.compat imports instead. Untested, that is a
+      # claim rather than a fact, so 5.2 runs the whole suite against it.
+      - if: matrix.django-version == '5.2'
+        run: python -m pip install "django-tasks>=0.9"
       # SIGABRT with thread stacks instead of a silent cancellation; see
       # the sqlite job.
       - run: timeout -s ABRT 1500 python -m pytest -q
@@ -86,7 +104,7 @@ jobs:
       matrix:
         include:
           - python-version: "3.12"
-            django-version: "6.0"
+            django-version: "5.2"
           - python-version: "3.14"
             django-version: "6.1"
     name: mysql py${{ matrix.python-version }} dj${{ matrix.django-version }}
@@ -113,6 +131,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
       - run: python -m pip install --group dev -e . "Django~=${{ matrix.django-version }}.0" PyMySQL
+      # Django ships the Tasks framework from 6.0. On 5.2 it comes from the
+      # backport, which django_ox.compat imports instead. Untested, that is a
+      # claim rather than a fact, so 5.2 runs the whole suite against it.
+      - if: matrix.django-version == '5.2'
+        run: python -m pip install "django-tasks>=0.9"
       # SIGABRT with thread stacks instead of a silent cancellation; see
       # the sqlite job.
       - run: timeout -s ABRT 1500 python -m pytest -q

@@ -8,10 +8,14 @@ from typing import NamedTuple
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.db import DatabaseError, connections
-from django.tasks import TaskResultStatus, default_task_backend
-from django.tasks.signals import task_finished
 from django.utils import timezone
 
+from django_ox.compat import (
+    IMMEDIATE_BACKEND_PATH,
+    TaskResultStatus,
+    default_task_backend,
+    task_finished,
+)
 from django_ox.exceptions import TaskAbandoned
 from django_ox.models import OxTask
 from django_ox.worker import Worker
@@ -202,9 +206,7 @@ class TestClaiming:
         assert db_task.worker_ids == ["other-worker"]
 
     def test_worker_requires_ox_backend(self, settings):
-        settings.TASKS = {
-            "default": {"BACKEND": "django.tasks.backends.immediate.ImmediateBackend"}
-        }
+        settings.TASKS = {"default": {"BACKEND": IMMEDIATE_BACKEND_PATH}}
         with pytest.raises(ImproperlyConfigured):
             Worker()
 

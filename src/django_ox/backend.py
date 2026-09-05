@@ -7,12 +7,16 @@ from django.apps import apps
 from django.core import checks
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.db import transaction
-from django.tasks.backends.base import BaseTaskBackend
-from django.tasks.base import Task, TaskResult
-from django.tasks.exceptions import TaskResultDoesNotExist
-from django.tasks.signals import task_enqueued
 from django.utils import timezone
-from django.utils.json import normalize_json
+
+from .compat import (
+    BaseTaskBackend,
+    Task,
+    TaskResult,
+    TaskResultDoesNotExist,
+    normalize_json,
+    task_enqueued,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime

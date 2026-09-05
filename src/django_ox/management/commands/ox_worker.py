@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
-from django.tasks import DEFAULT_TASK_BACKEND_ALIAS
 
+from django_ox.compat import DEFAULT_TASK_BACKEND_ALIAS
 from django_ox.supervisor import STOP_SIGNALS, Supervisor
 from django_ox.timeouts import RECYCLE_EXIT_CODE
 from django_ox.worker import worker_class

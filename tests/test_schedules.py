@@ -2,9 +2,9 @@ from datetime import timedelta
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
-from django.tasks import default_task_backend
 from django.utils import timezone
 
+from django_ox.compat import default_task_backend
 from django_ox.models import OxScheduleTick, OxTask
 from django_ox.schedules import schedules_from_options
 from django_ox.worker import Worker

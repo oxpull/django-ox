@@ -8,11 +8,14 @@ Context7 library id: `/oxpull/django-ox`.
 
 ## Set up django-ox in this project
 
-Requires Python 3.12+ and Django 6.0+. Check before installing:
+Requires Python 3.12+ and Django 5.2+. Check before installing:
 
 ```
 python -c "import django, sys; print(django.__version__, sys.version.split()[0])"
 ```
+
+Django 6.0 and later ship the Tasks framework in core. On Django 5.2 LTS it
+comes from the `django-tasks` backport, so install the `backport` extra there.
 
 Install:
 
@@ -24,6 +27,18 @@ or, with uv:
 
 ```
 uv add django-ox
+```
+
+On Django 5.2 LTS:
+
+```
+pip install "django-ox[backport]"
+```
+
+or, with uv:
+
+```
+uv add "django-ox[backport]"
 ```
 
 Edit `settings.py`:

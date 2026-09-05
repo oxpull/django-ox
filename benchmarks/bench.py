@@ -20,6 +20,8 @@ import datetime
 import json
 import os
 import platform
+
+import django_ox
 import signal
 import statistics
 import subprocess
@@ -395,8 +397,16 @@ def collect_environment() -> dict:
         "python": platform.python_version(),
         "postgres_server": pg_version,
         "packages": {
-            name: version(name)
-            for name in ("Django", "django-ox", "django-tasks-db", "django-tasks", "psycopg")
+            # django-ox is reported from the imported module, not from
+            # importlib.metadata. Under an editable install the dist-info
+            # version goes stale the moment __version__ changes, and a
+            # results file that names the wrong version is worse than one
+            # that names none: the number is right and the label lies.
+            **{
+                name: version(name)
+                for name in ("Django", "django-tasks-db", "django-tasks", "psycopg")
+            },
+            "django-ox": django_ox.__version__,
         },
     }
 

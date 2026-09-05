@@ -3,9 +3,9 @@
 
 A published release is immutable. PyPI will not let you edit the description or
 the project URLs after upload, so anything wrong in the metadata is wrong until
-the next version. That happened once: 0.1.0 shipped without the Documentation
-URL because the URL was added to pyproject.toml after the upload, and its page
-kept rendering a superseded README. The only fix was another release.
+the next version. Metadata added to pyproject.toml after an upload does not
+reach the published page, so the URLs and the description are checked here,
+before the upload rather than after it.
 
 The source tree (`check_source`):
   1. pyproject version, `django_ox.__version__` and the newest CHANGELOG entry

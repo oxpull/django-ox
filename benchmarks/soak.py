@@ -22,9 +22,9 @@ a per-execution nonce to a side table (soak_ledger), so at-least-once vs
 exactly-once behavior is measured from side effects, not assumed.
 
 Run with a venv that has django-ox and psycopg installed, from this
-directory, against the standing plow-pg container:
+directory, against the standing ox-pg container:
 
-    docker run -d --name plow-pg -e POSTGRES_PASSWORD=plow -p 54329:5432 postgres:16
+    docker run -d --name ox-pg -e POSTGRES_PASSWORD=ox -p 54329:5432 postgres:16
     python soak.py            # full run, roughly 25-30 minutes wall clock
     python soak.py --smoke    # pipeline validation with short durations
 
@@ -54,11 +54,11 @@ PG = {
     "host": "127.0.0.1",
     "port": 54329,
     "user": "postgres",
-    "password": "plow",
+    "password": "ox",
 }
 DATABASE = "soak_ox"
 CONTAINER_RECIPE = (
-    "docker run -d --name plow-pg -e POSTGRES_PASSWORD=plow "
+    "docker run -d --name ox-pg -e POSTGRES_PASSWORD=ox "
     "-p 54329:5432 postgres:16"
 )
 

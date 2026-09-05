@@ -1,7 +1,7 @@
 # django-ox
 
-> Database-backed worker backend for Django's Tasks framework (django.tasks,
-> Django 6.0+). Background tasks are rows in the database you already run and
+> Database-backed worker backend for Django's Tasks framework (django.tasks),
+> on Django 5.2 LTS and later. Background tasks are rows in the database you already run and
 > a worker process executes them. Transactional enqueue, retries with
 > exponential backoff, priorities, deferred tasks, cron-style recurring
 > schedules, a result store and a health command. No broker to provision.
@@ -9,8 +9,11 @@
 
 Operational facts worth getting right:
 
-- Requires Python 3.12 or later and Django 6.0 or later. Django 6.0 ships the
+- Requires Python 3.12 or later and Django 5.2 or later. Django ships the
   Tasks API but no production backend; django-ox is the backend.
+- Django 6.0 and later ship the Tasks framework in core. On Django 5.2 LTS it
+  comes from the `django-tasks` backport, so install `django-ox[backport]`
+  there rather than plain `django-ox`.
 - Install is four steps: `pip install django-ox` (or `uv add django-ox`), add
   `"django_ox"` to `INSTALLED_APPS`, set `TASKS = {"default": {"BACKEND":
   "django_ox.backend.OxBackend"}}`, run `python manage.py migrate django_ox`.

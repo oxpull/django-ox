@@ -5,11 +5,11 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/django-ox)](https://pypi.org/project/django-ox/)
 [![License](https://img.shields.io/pypi/l/django-ox)](https://github.com/oxpull/django-ox/blob/main/LICENSE)
 
-A database-backed worker backend for Django's Tasks framework (`django.tasks`, Django 6.0+).
+A database-backed worker backend for Django's Tasks framework (`django.tasks`), on Django 5.2 LTS and later.
 
 Documentation: <https://oxpull.com/django-ox/>
 
-Django 6.0 ships the Tasks API but no production backend: the built-in
+Django ships the Tasks API but no production backend: the built-in
 `ImmediateBackend` and `DummyBackend` are for development and testing only.
 django-ox stores background tasks in the database you already run and executes
 them with a worker process. There is no broker to provision, secure, upgrade or
@@ -20,10 +20,15 @@ Comparing backends? See [Choosing a task backend](https://oxpull.com/django-ox/c
 
 ## Install
 
-Requires Python 3.12+ and Django 6.0+.
+Requires Python 3.12+ and Django 5.2+. Django 6.0 and later ship the Tasks
+framework in core. On Django 5.2 LTS it comes from the `django-tasks`
+backport, so install the `backport` extra there.
 
 ```
 pip install django-ox
+
+# on Django 5.2 LTS
+pip install "django-ox[backport]"
 ```
 
 ```python
@@ -280,7 +285,7 @@ firing for a time before it existed.
 
 ## Scope
 
-The core is deliberately small: a durable queue, a worker, recurring
+The core is finite on purpose: a durable queue, a worker, recurring
 schedules, monitoring, and nothing else to operate. Outside the current
 scope: interrupting one chosen running task on demand (every attempt can be
 bounded with `TASK_TIMEOUT`), and multi-database routing (tasks are stored on

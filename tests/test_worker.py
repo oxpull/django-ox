@@ -539,9 +539,8 @@ class TestLeaseFencesTerminalWrites:
 
     def test_the_success_write_costs_one_statement(self, worker):
         # A finish write that reads a column back afterwards is a second
-        # round trip on the path every task takes, and one of those cost
-        # 13% of single-worker throughput on PostgreSQL across three
-        # releases before anyone counted the statements. _write_outcome
+        # round trip on the path every task takes. This asserts the
+        # outcome write stays a single statement. _write_outcome
         # takes values so the instance can be mirrored from what the caller
         # already holds; nothing it is given may be an expression the
         # database has to compute.

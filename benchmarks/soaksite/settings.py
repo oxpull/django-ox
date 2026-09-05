@@ -1,5 +1,5 @@
 """
-Soak settings: django-ox on PostgreSQL 16 (container plow-pg, port 54329).
+Soak settings: django-ox on PostgreSQL 16 (container ox-pg, port 54329).
 
 LOCK_TIMEOUT is deliberately short (15 s against the 300 s default) so
 kill-and-reclaim cycles fit inside a scenario, and backoff is compressed so
@@ -22,7 +22,7 @@ DATABASES = {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": "soak_ox",
         "USER": "postgres",
-        "PASSWORD": "plow",
+        "PASSWORD": "ox",
         "HOST": "127.0.0.1",
         "PORT": "54329",
     }

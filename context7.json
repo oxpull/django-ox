@@ -3,7 +3,7 @@
   "url": "https://context7.com/oxpull/django-ox",
   "public_key": "pk_bMEQ94xqHcqvERACC7UDy",
   "projectTitle": "django-ox",
-  "description": "Database-backed worker backend for Django's Tasks framework (django.tasks, Django 6.0+). Background tasks run on the database you already have. No broker to provision, secure or back up.",
+  "description": "Database-backed worker backend for Django's Tasks framework (django.tasks), on Django 5.2 LTS and later. Background tasks run on the database you already have. No broker to provision, secure or back up.",
   "folders": [
     "docs"
   ],
@@ -35,7 +35,7 @@
     "requirements.txt"
   ],
   "rules": [
-    "Requires Django 6.0 or later and Python 3.12 or later.",
+    "Requires Python 3.12 or later and Django 5.2 or later. Django 6.0 and later ship the Tasks framework in core. On Django 5.2 LTS it comes from the django-tasks backport, so install django-ox[backport] there rather than plain django-ox.",
     "Add django_ox to INSTALLED_APPS and set BACKEND to django_ox.backend.OxBackend in the TASKS setting.",
     "Run python manage.py migrate django_ox before starting a worker.",
     "Start a worker with the ox_worker management command. It is a separate process from the web server, and tasks only execute while a worker is running.",

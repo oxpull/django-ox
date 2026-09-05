@@ -28,8 +28,8 @@ export names this page does not list; those names are not public.
 - **The system check IDs** `django_ox.E001` through `django_ox.E005`, which
   the configuration guide tells you to list in `SILENCED_SYSTEM_CHECKS`. The
   IDs are stable; the messages are not.
-- **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy or when the
-  arguments are wrong.
+- **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy or when an
+  argument value is rejected. Argparse errors, such as an unknown flag, exit 2.
 - **The claim filter hooks** `Worker.claim_filter_q()` and
   `Worker.claim_filter_sql()`, and where their result is applied: the
   fragment is conjoined to the conditions the candidate select filters on,

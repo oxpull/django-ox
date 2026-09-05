@@ -98,7 +98,7 @@ executed twice for exactly that reason, and no task executed twice without
 a kill to account for it.
 
 The soak ran 0.3.1. The outcome-write path changed after it, so the soak does
-not cover the worker path in the throughput figures above.
+not cover the worker path in the throughput figures below.
 
 Thirty-seven assertions ran and all thirty-seven passed. The harness
 design, every assertion and the caveats are in
@@ -315,8 +315,8 @@ bounded with `TASK_TIMEOUT`), and multi-database routing (tasks are stored on
 the default database for the model).
 
 Batches, unique tasks and rate limiting are in
-[Oxpull Pro](https://oxpull.com/django-ox/pro/), a paid add-on that is not on
-sale yet; the waitlist is at <https://oxpull.com/>. Metrics stay in this
+[Oxpull Pro](https://oxpull.com/django-ox/pro/), a paid add-on. See
+<https://oxpull.com/> for its status and pricing. Metrics stay in this
 package: `django_ox.stats` and `ox_health` are free and stay free.
 
 ## Stability

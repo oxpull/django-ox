@@ -91,7 +91,7 @@ request.session["report_task_id"] = result.id
 ```
 
 ```python
-from django.tasks import TaskResultStatus
+from django.tasks import TaskResultStatus  # 5.2: from django_tasks import TaskResultStatus
 
 result = build_report.get_result(request.session["report_task_id"])
 result.refresh()
@@ -250,11 +250,13 @@ process.
 
 ```python
 # runs tasks inline, so an assertion right after enqueue sees the effect
+# On Django 5.2 LTS the path is django_tasks.backends.immediate.ImmediateBackend
 TASKS = {"default": {"BACKEND": "django.tasks.backends.immediate.ImmediateBackend"}}
 ```
 
 ```python
 # records tasks without running them, for asserting what was enqueued
+# On Django 5.2 LTS the path is django_tasks.backends.dummy.DummyBackend
 TASKS = {"default": {"BACKEND": "django.tasks.backends.dummy.DummyBackend"}}
 ```
 

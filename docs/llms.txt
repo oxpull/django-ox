@@ -124,9 +124,10 @@ Operational facts worth getting right:
   (every attempt can be bounded with `TASK_TIMEOUT`), and multi-database
   routing (tasks live on the default database). For tests, point `TASKS` at
   `django.tasks.backends.immediate.ImmediateBackend` or
-  `django.tasks.backends.dummy.DummyBackend`.
+  `django.tasks.backends.dummy.DummyBackend` on Django 6.0+; on Django 5.2 LTS
+  the same paths under `django_tasks.backends.`.
 - Batches, unique (deduplicated) tasks and rate limiting are in Oxpull Pro,
-  a paid add-on that is not on sale yet, delivered from a private package
+  a paid add-on delivered from a private package
   index when it opens. They are not in django-ox. `django_ox.stats` and
   `ox_health` are in the free package.
 

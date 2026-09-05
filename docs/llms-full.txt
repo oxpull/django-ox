@@ -734,7 +734,7 @@ request.session["report_task_id"] = result.id
 ```
 
 ```python
-from django.tasks import TaskResultStatus
+from django.tasks import TaskResultStatus  # 5.2: from django_tasks import TaskResultStatus
 
 result = build_report.get_result(request.session["report_task_id"])
 result.refresh()
@@ -893,11 +893,13 @@ process.
 
 ```python
 # runs tasks inline, so an assertion right after enqueue sees the effect
+# On Django 5.2 LTS the path is django_tasks.backends.immediate.ImmediateBackend
 TASKS = {"default": {"BACKEND": "django.tasks.backends.immediate.ImmediateBackend"}}
 ```
 
 ```python
 # records tasks without running them, for asserting what was enqueued
+# On Django 5.2 LTS the path is django_tasks.backends.dummy.DummyBackend
 TASKS = {"default": {"BACKEND": "django.tasks.backends.dummy.DummyBackend"}}
 ```
 
@@ -2313,8 +2315,9 @@ Two properties of the worker's claim path drive the end-to-end results:
   poll interval, so `--interval` only governs how often an idle worker
   checks for new work.
 
-Both properties are proven by published cells: the statement count by the
-single-worker rows, the completion wake-up by the diagnostic cell. A
+The completion wake-up is shown by the diagnostic cell. The statement count is
+read from the code path rather than isolated by a cell here: no run compares
+this worker against itself with the read-back restored. A
 regression in either shows up as a changed number rather than a changed
 claim.
 
@@ -2426,8 +2429,8 @@ export names this page does not list; those names are not public.
 - **The system check IDs** `django_ox.E001` through `django_ox.E005`, which
   the configuration guide tells you to list in `SILENCED_SYSTEM_CHECKS`. The
   IDs are stable; the messages are not.
-- **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy or when the
-  arguments are wrong.
+- **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy or when an
+  argument value is rejected. Argparse errors, such as an unknown flag, exit 2.
 - **The claim filter hooks** `Worker.claim_filter_q()` and
   `Worker.claim_filter_sql()`, and where their result is applied: the
   fragment is conjoined to the conditions the candidate select filters on,
@@ -2821,8 +2824,10 @@ TASKS = {
   with the same two actions.
 - A particular running task cannot be interrupted on demand; `TASK_TIMEOUT`
   bounds every attempt. Tasks live on the default database.
-- In tests use `django.tasks.backends.immediate.ImmediateBackend` or
-  `django.tasks.backends.dummy.DummyBackend` for `TASKS`.
+- In tests use the framework's own backends for `TASKS`:
+  `django.tasks.backends.immediate.ImmediateBackend` or
+  `django.tasks.backends.dummy.DummyBackend` on Django 6.0+, and the same
+  paths under `django_tasks.backends.` on Django 5.2 LTS.
 - Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a
   paid add-on that is not on sale yet. `django_ox.stats` and `ox_health`
   are in django-ox.

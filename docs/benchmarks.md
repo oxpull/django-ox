@@ -89,8 +89,9 @@ Two properties of the worker's claim path drive the end-to-end results:
   poll interval, so `--interval` only governs how often an idle worker
   checks for new work.
 
-Both properties are proven by published cells: the statement count by the
-single-worker rows, the completion wake-up by the diagnostic cell. A
+The completion wake-up is shown by the diagnostic cell. The statement count is
+read from the code path rather than isolated by a cell here: no run compares
+this worker against itself with the read-back restored. A
 regression in either shows up as a changed number rather than a changed
 claim.
 

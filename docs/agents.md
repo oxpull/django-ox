@@ -173,8 +173,10 @@ TASKS = {
   with the same two actions.
 - A particular running task cannot be interrupted on demand; `TASK_TIMEOUT`
   bounds every attempt. Tasks live on the default database.
-- In tests use `django.tasks.backends.immediate.ImmediateBackend` or
-  `django.tasks.backends.dummy.DummyBackend` for `TASKS`.
+- In tests use the framework's own backends for `TASKS`:
+  `django.tasks.backends.immediate.ImmediateBackend` or
+  `django.tasks.backends.dummy.DummyBackend` on Django 6.0+, and the same
+  paths under `django_tasks.backends.` on Django 5.2 LTS.
 - Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a
   paid add-on that is not on sale yet. `django_ox.stats` and `ox_health`
   are in django-ox.

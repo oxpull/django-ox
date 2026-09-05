@@ -103,8 +103,8 @@ dropped outright:
 - The deprecation is documented in the changelog and, where it can be,
   surfaced at runtime (a `DeprecationWarning` or a `manage.py check`
   message).
-- A deprecated surface keeps working for **at least one full major release**
-  before it is removed.
+- A deprecated surface is announced in a minor release and removed no earlier
+  than the next major release.
 
 Security fixes are exempt. A surface that cannot be kept without leaving a
 vulnerability open may change in a patch release. That is documented in the

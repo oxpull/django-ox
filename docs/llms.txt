@@ -156,7 +156,7 @@ Operational facts worth getting right:
 - [Benchmarks](https://oxpull.com/django-ox/benchmarks/): throughput and
   latency numbers with the method that produced them.
 - [API stability](https://oxpull.com/django-ox/stability/): what is public
-  API, pre-1.0 versioning, deprecation policy, supported versions.
+  API, versioning, deprecation policy, supported versions.
 - [Pro](https://oxpull.com/django-ox/pro/): what Oxpull Pro adds, delivery
   and pricing.
 - [For AI assistants](https://oxpull.com/django-ox/agents/): setup block,

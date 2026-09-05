@@ -88,7 +88,10 @@ coming back. The mechanics, and the one case worth knowing about, are in
 
 Requires Python 3.12+ and Django 5.2+. Django 6.0 and later ship the Tasks
 framework in core. On Django 5.2 LTS it comes from the `django-tasks`
-backport, so install the `backport` extra there.
+backport, so install the `backport` extra there. **Your own imports differ
+with it**: on Django 6.0+ you write `from django.tasks import task`, and on
+Django 5.2 you write `from django_tasks import task`. django-ox itself
+handles both.
 
 ```
 pip install django-ox
@@ -125,7 +128,9 @@ the producer side.
 
 ```python
 # myapp/tasks.py
-from django.tasks import task
+from django.tasks import task  # Django 6.0+
+# On Django 5.2 the Tasks framework comes from the backport:
+# from django_tasks import task
 
 
 @task

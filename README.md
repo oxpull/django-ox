@@ -22,7 +22,10 @@ Comparing backends? See [Choosing a task backend](https://oxpull.com/django-ox/c
 
 Requires Python 3.12+ and Django 5.2+. Django 6.0 and later ship the Tasks
 framework in core. On Django 5.2 LTS it comes from the `django-tasks`
-backport, so install the `backport` extra there.
+backport, so install the `backport` extra there. **Your own imports differ
+with it**: on Django 6.0+ you write `from django.tasks import task`, and on
+Django 5.2 you write `from django_tasks import task`. django-ox itself
+handles both.
 
 ```
 pip install django-ox
@@ -100,6 +103,20 @@ design, every assertion and the caveats are in
 written from
 [the raw data](https://github.com/oxpull/django-ox/blob/main/benchmarks/soak-results-raw-2026-09-01.json).
 
+## Measured against the alternative
+
+Against `django-tasks-db` on PostgreSQL 16, 2,000 no-op tasks, one worker,
+five runs per arm on one machine: django-ox completed the batch at 114.9
+tasks per second against 103.6. Every one of the five django-ox runs beat
+every one of the five control runs; the slowest was 112.6 and their fastest
+was 105.0. In-transaction enqueue latency was a tie at about six tenths of
+a millisecond at p50.
+
+At concurrency 4 the result reverses and django-tasks-db is about 5 percent
+ahead, 346.3 against 328.5. The two harnesses run different shapes there and
+[the benchmarks page](https://oxpull.com/django-ox/benchmarks/) says so, with
+the method and the raw data behind every figure.
+
 ## Configuration
 
 Every option has a default; add one when you have a reason to.
@@ -122,7 +139,9 @@ TASKS = {
 ## Quickstart
 
 ```python
-from django.tasks import task
+from django.tasks import task  # Django 6.0+
+# On Django 5.2 the Tasks framework comes from the backport:
+# from django_tasks import task
 
 
 @task
@@ -298,7 +317,7 @@ package: `django_ox.stats` and `ox_health` are free and stay free.
 
 ## Stability
 
-What counts as public API, the pre-1.0 versioning and deprecation policy,
+What counts as public API, the versioning and deprecation policy,
 and the supported Python and Django versions are documented in
 [the stability policy](https://oxpull.com/django-ox/stability/).
 

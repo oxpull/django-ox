@@ -70,7 +70,7 @@
   <meta property="og:image" content="https://oxpull.com/django-ox/assets/social-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="django-ox: Django 6 shipped Tasks, the production worker is missing.">
+  <meta property="og:image:alt" content="django-ox: the production worker for Django Tasks. Your database is the queue.">
 
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Common patterns - django-ox">
@@ -965,7 +965,7 @@ where django-ox behaves differently from a broker.</p>
 <p>The common case, and the one where a database queue behaves differently from a
 broker.</p>
 <div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django.db</span><span class="w"> </span><span class="kn">import</span> <span class="n">transaction</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>  <span class="c1"># Django 6.0+; on 5.2: from django_tasks import task</span>
 
 
 <span class="nd">@task</span>
@@ -1024,7 +1024,8 @@ failed to record, or record one that never gets processed.</p>
 <div class="highlight"><pre><span></span><code><span class="n">result</span> <span class="o">=</span> <span class="n">build_report</span><span class="o">.</span><span class="n">enqueue</span><span class="p">(</span><span class="n">month</span><span class="o">=</span><span class="s2">&quot;2026-08&quot;</span><span class="p">)</span>
 <span class="n">request</span><span class="o">.</span><span class="n">session</span><span class="p">[</span><span class="s2">&quot;report_task_id&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">id</span>
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">TaskResultStatus</span>
+<div class="highlight"><pre><span></span><code><span class="c1"># On Django 5.2: from django_tasks import TaskResultStatus</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">TaskResultStatus</span>
 
 <span class="n">result</span> <span class="o">=</span> <span class="n">build_report</span><span class="o">.</span><span class="n">get_result</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">session</span><span class="p">[</span><span class="s2">&quot;report_task_id&quot;</span><span class="p">])</span>
 <span class="n">result</span><span class="o">.</span><span class="n">refresh</span><span class="p">()</span>
@@ -1144,18 +1145,20 @@ one, as above.</p>
 <p>Point the test settings at Django's own backends. No django-ox tables, no worker
 process.</p>
 <div class="highlight"><pre><span></span><code><span class="c1"># runs tasks inline, so an assertion right after enqueue sees the effect</span>
+<span class="c1"># On Django 5.2 LTS the path is django_tasks.backends.immediate.ImmediateBackend</span>
 <span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django.tasks.backends.immediate.ImmediateBackend&quot;</span><span class="p">}}</span>
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><span class="c1"># records tasks without running them, for asserting what was enqueued</span>
+<span class="c1"># On Django 5.2 LTS the path is django_tasks.backends.dummy.DummyBackend</span>
 <span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;default&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;BACKEND&quot;</span><span class="p">:</span> <span class="s2">&quot;django.tasks.backends.dummy.DummyBackend&quot;</span><span class="p">}}</span>
 </code></pre></div>
 <p>Keep django-ox in the settings you use for integration tests, where the point is
 to exercise claiming and retries for real.</p>
 <h2 id="not-in-the-core">Not in the core</h2>
-<p>Batches and unique or deduplicated tasks are in <a href="../pro/">Oxpull Pro</a>, a paid
-add-on that is not on sale yet. Metrics are in the free tier: <code>django_ox.stats</code>
-and <code>manage.py ox_health</code> ship in the core. Chains and workflows are on the
-Pro roadmap, undated.</p>
+<p>Batches, unique or deduplicated tasks, and rate limiting are in
+<a href="../pro/">Oxpull Pro</a>, a paid add-on that is not on sale yet. Metrics are in the
+free tier: <code>django_ox.stats</code> and <code>manage.py ox_health</code> ship in the core. Chains
+and workflows are on the Pro roadmap, undated.</p>
 
 
 

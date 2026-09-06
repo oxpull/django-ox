@@ -70,7 +70,7 @@
   <meta property="og:image" content="https://oxpull.com/django-ox/assets/social-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="django-ox: Django 6 shipped Tasks, the production worker is missing.">
+  <meta property="og:image:alt" content="django-ox: the production worker for Django Tasks. Your database is the queue.">
 
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Pro - django-ox">
@@ -826,47 +826,87 @@
 
 
 <h1 id="pro">Pro</h1>
-<p>Everything documented on this site is free, open source (BSD 3-Clause), and
-stays that way. The durable queue, transactional enqueue, retries, reaper,
-graceful drain, priorities, deferred tasks, recurring tasks and pruning are
-the free tier, permanently. Nothing that works today moves behind the paid
-tier.</p>
-<p><strong>Oxpull Pro</strong> is a paid add-on for two problems that show up once a queue is
-carrying real volume. Both are built and tested. It is not on sale yet: the
-purchase and delivery path is still being set up, and the waitlist below is
-how to hear when it opens.</p>
+<p>django-ox is free, open source (BSD 3-Clause), and stays that way. The
+durable queue, transactional enqueue, retries, reaper, graceful drain,
+priorities, deferred tasks, recurring tasks and pruning are the free tier,
+permanently. Nothing that works today moves behind the paid tier.</p>
+<p><strong>Oxpull Pro</strong> is a paid add-on for three problems that show up once a queue
+is carrying real volume. All three are built and tested. It is not on sale
+yet. The waitlist below is how to hear when it opens.</p>
+<p>Pro requires Django 6.0 or later. It builds on <code>django.tasks</code>, which is part
+of Django core from 6.0. django-ox itself also runs on Django 5.2 LTS through
+the <code>django-tasks</code> backport; Pro does not.</p>
 <h2 id="what-pro-adds">What Pro adds</h2>
 <ul>
-<li><strong>Unique tasks.</strong> Deduplicate at enqueue time, so the same job cannot be
-  queued twice. The lock is written in the same transaction as the task, so
-  the two commit or roll back together, and a lock whose task died is
-  released rather than stranded.</li>
+<li><strong>Unique tasks.</strong> Deduplicate at enqueue time: while a task with the same
+  key is READY or RUNNING, enqueueing it again returns the pending task's
+  result rather than inserting a second row. The lock is written in the
+  same transaction as the task, so the two commit or roll back together,
+  and a lock whose task settled or was pruned is released rather than
+  stranded.
+  A bulk enqueue is one INSERT that the deduplicating path never sees, so
+  <code>enqueue_many()</code> raises <code>InvalidTask</code> for a unique task and names it.</li>
 <li><strong>Batches.</strong> Enqueue a group, read its progress as a count, and fire a
   callback once every member has settled. Completion is computed by querying
   the task rows rather than by counting signals, so a worker dying mid-task
-  cannot strand a batch: the reconciler picks it up on the next tick.</li>
+  cannot strand a batch: the reconciler picks it up on the next tick.
+  Batches take one setting: <code>oxpull.batches.reconcile</code> on a one-minute cron
+  in <code>OPTIONS["SCHEDULES"]</code>, run by the django-ox cron you already have.</li>
+<li><strong>Rate limiting.</strong> Cap how often a task starts. A named limit of N
+  admissions per period is declared in <code>OPTIONS["RATE_LIMITS"]</code>, and every
+  worker shares it through one row in the database. A throttled task stays
+  READY: it is not claimed, so it spends no retry attempt and holds no
+  lease. Set <code>OPTIONS["WORKER_CLASS"]</code> to <code>oxpull.worker.OxpullWorker</code>, the
+  worker that applies the limits. <code>manage.py check</code> reports <code>oxpull.E006</code>
+  when a limit is configured without it.</li>
 </ul>
-<p>Both run on the databases the free tier tests in CI: SQLite, PostgreSQL and
-MySQL 8. MariaDB 10.6+ takes the same claim path but is not part of the tested
-matrix. Batches have been measured to 100,000 members in a single batch on
-SQLite and on PostgreSQL 16.</p>
+<p>For a limit of N admissions per period P, with W <code>ox_worker</code> processes
+  claiming from the queues that carry the limit's tasks, the number of
+  task attempts started in any one window is at most N + W - 1. Add one
+  for each worker process that dies between claiming a limited task and
+  recording it. With a single worker process and no such death the
+  limiter is exact: at most N per window. Windows are contiguous, so an
+  arbitrary interval of length P that spans a boundary can carry up to
+  2(N + W - 1). A count that cannot be written is logged and the
+  attempt runs; three consecutive failed counts on one limit close it
+  until a write lands.</p>
+<p>All three run on the databases the free tier tests in CI: SQLite,
+PostgreSQL and MySQL 8. MariaDB 10.6+ takes the same claim path but is not
+part of the tested matrix. Batches have been measured to 1,000,000 members
+in a single batch on all three, with every count checked against the task
+rows rather than against what the API reports about itself.</p>
+<p>Sealing a batch that wide is cheap on SQLite and PostgreSQL and expensive
+on MySQL: about 34 ms, 0.7 s and 28 s respectively. Sealing takes a row
+lock per member on any database that offers one, and a million InnoDB
+locks in a single transaction is what that costs. Reconciling the same
+batch is 4.9 s on SQLite, 0.4 s on PostgreSQL and 7.3 s on MySQL, against
+a reconciler that runs on a one-minute tick.</p>
+<p>Measured on an arm64 macOS host, with SQLite on a local file in WAL mode
+at <code>synchronous=NORMAL</code>, and stock PostgreSQL 16 and MySQL 8 images in
+Docker on localhost, each width against an empty database.</p>
 <h2 id="what-pro-is-not">What Pro is not</h2>
-<p>Workflows and chains are on the roadmap, undated. Rate limiting, a web
-dashboard and encrypted payloads are not in Pro and are not dated. Metrics
-stay free: the stats API and the health command are in the open source
-package and remain there.</p>
+<p>Workflows and chains are on the roadmap, undated. A web dashboard and
+encrypted payloads are not in Pro and are not dated. Rate limiting caps how
+often a task starts, not how many run at once; concurrency limiting is a
+different mechanism and is not in Pro. Metrics stay free: the stats API and
+the health command are in the open source package and remain there.</p>
 <h2 id="delivery">Delivery</h2>
-<p>Pro will install from a private package index using credentials issued per
-company. There is no licence key and no runtime check. A licence check is one
-more thing of ours that can break your production, so we did not build one.
-The credential controls access to the index rather than to code you have
-already installed, so if it lapses, what is deployed keeps running.</p>
+<p>Pro installs from a private package index using credentials issued per
+company. There is no licence key and no runtime check. A licence check would
+put a validation step in the path of code that has to keep running, and it
+does nothing for a company that has already paid. Nothing in the package
+phones home: no network call to us, and no telemetry. The credential controls
+access to the index rather than to code you have already installed, so if it
+lapses, what is deployed keeps running.</p>
 <h2 id="pricing">Pricing</h2>
 <p>Planned at <strong>$399 per year, per company</strong>, flat. One licence to cover a whole
-organisation and every environment, with a seven-day money-back period.</p>
+organisation and every environment, with a seven-day money-back period. The
+term is 12 months and renews for successive 12-month terms unless you cancel.
+Cancel by writing to support@oxpull.com. Cancellation takes effect at the end
+of the period you have paid for.</p>
 <h2 id="waitlist">Waitlist</h2>
 <p>If Pro would earn its keep in your deployment, join the waitlist and say which
-of the two features matters to you. That ordering decides what gets built
+of the three features matters to you. That ordering decides what gets built
 after these.</p>
 <p><a class="md-button" href="https://oxpull.com/#waitlist">Join the Pro waitlist</a></p>
 

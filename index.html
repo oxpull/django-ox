@@ -66,7 +66,7 @@
   <meta property="og:image" content="https://oxpull.com/django-ox/assets/social-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="django-ox: Django 6 shipped Tasks, the production worker is missing.">
+  <meta property="og:image:alt" content="django-ox: the production worker for Django Tasks. Your database is the queue.">
 
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="django-ox">
@@ -889,8 +889,8 @@
 
 <h1 id="django-ox">django-ox</h1>
 <p>A database-backed worker backend for Django's Tasks framework
-(<code>django.tasks</code>, Django 6.0+).</p>
-<p>Django 6.0 ships the Tasks API but no production backend: the built-in
+(<code>django.tasks</code>), on Django 5.2 LTS and later.</p>
+<p>Django ships the Tasks API but no production backend: the built-in
 <code>ImmediateBackend</code> runs tasks inline and <code>DummyBackend</code> runs nothing.
 django-ox stores background tasks in the database you already run and executes
 them with a worker process. You get a durable queue with retries, priorities,
@@ -960,8 +960,16 @@ coming back. The mechanics, and the one case worth knowing about, are in
   events, and an admin page with retry and discard.</li>
 </ul>
 <h2 id="install">Install</h2>
-<p>Requires Python 3.12+ and Django 6.0+.</p>
+<p>Requires Python 3.12+ and Django 5.2+. Django 6.0 and later ship the Tasks
+framework in core. On Django 5.2 LTS it comes from the <code>django-tasks</code>
+backport, so install the <code>backport</code> extra there. <strong>Your own imports differ
+with it</strong>: on Django 6.0+ you write <code>from django.tasks import task</code>, and on
+Django 5.2 you write <code>from django_tasks import task</code>. django-ox itself
+handles both.</p>
 <div class="highlight"><pre><span></span><code>pip install django-ox
+
+# on Django 5.2 LTS
+pip install &quot;django-ox[backport]&quot;
 </code></pre></div>
 <p>Add the app and point the Tasks framework at the backend:</p>
 <div class="highlight"><pre><span></span><code><span class="n">INSTALLED_APPS</span> <span class="o">=</span> <span class="p">[</span>
@@ -982,7 +990,9 @@ coming back. The mechanics, and the one case worth knowing about, are in
 <p>Tasks are plain <code>django.tasks</code> tasks. django-ox adds nothing to learn on
 the producer side.</p>
 <div class="highlight"><pre><span></span><code><span class="c1"># myapp/tasks.py</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>  <span class="c1"># Django 6.0+</span>
+<span class="c1"># On Django 5.2 the Tasks framework comes from the backport:</span>
+<span class="c1"># from django_tasks import task</span>
 
 
 <span class="nd">@task</span>
@@ -1011,7 +1021,7 @@ the producer side.</p>
   semantics.</li>
 </ul>
 <h2 id="scope">Scope</h2>
-<p>The core is deliberately small: a durable queue, a worker, recurring
+<p>The core is finite on purpose: a durable queue, a worker, recurring
 schedules, and monitoring, with nothing extra to operate. Design
 decisions worth knowing before you commit:</p>
 <ul>
@@ -1026,9 +1036,10 @@ decisions worth knowing before you commit:</p>
   processes under one supervisor. See
   <a href="production/#threads-and-processes">Production</a>.</li>
 </ul>
-<p>Batches and unique tasks are in <a href="pro/">Oxpull Pro</a>, a paid add-on that is
-not on sale yet; the waitlist is at <a href="https://oxpull.com/">https://oxpull.com/</a>. Metrics stay in
-this package: <code>django_ox.stats</code> and <code>ox_health</code> are free and stay free.</p>
+<p>Batches, unique tasks and rate limiting are in <a href="pro/">Oxpull Pro</a>, a paid
+add-on that is not on sale yet; the waitlist is at <a href="https://oxpull.com/">https://oxpull.com/</a>.
+Metrics stay in this package: <code>django_ox.stats</code> and <code>ox_health</code> are free and
+stay free.</p>
 <h2 id="license">License</h2>
 <p>BSD 3-Clause.</p>
 

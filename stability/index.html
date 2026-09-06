@@ -70,7 +70,7 @@
   <meta property="og:image" content="https://oxpull.com/django-ox/assets/social-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="django-ox: Django 6 shipped Tasks, the production worker is missing.">
+  <meta property="og:image:alt" content="django-ox: the production worker for Django Tasks. Your database is the queue.">
 
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="API stability - django-ox">
@@ -844,20 +844,33 @@ promise about compatibility, so you can pin <code>django-ox</code> with confiden
 <h2 id="public-api">Public API</h2>
 <p>These are the supported surfaces. Changes to them are versioned and
 announced in the <a href="../changelog/">changelog</a>. This page, not a module's
-<code>__all__</code>, is the statement of what is public; today the two agree.</p>
+<code>__all__</code>, is the statement of what is public. A module's <code>__all__</code> may
+export names this page does not list; those names are not public.</p>
 <ul>
 <li><strong>The backend path</strong> <code>django_ox.backend.OxBackend</code>, referenced as a
   string in the <code>TASKS</code> setting, <code>QUEUES</code> beside <code>OPTIONS</code>, and every
   <code>OPTIONS</code> key it reads: <code>MAX_ATTEMPTS</code>, <code>LOCK_TIMEOUT</code>,
   <code>BACKOFF_INITIAL</code>, <code>BACKOFF_MAX</code>, <code>TASK_TIMEOUT</code>, <code>TASK_TIMEOUTS</code>,
-  <code>TASK_TIMEOUT_GRACE</code>, and <code>SCHEDULES</code> (with its documented
-  per-schedule keys).</li>
+  <code>TASK_TIMEOUT_GRACE</code>, <code>SCHEDULES</code> (with its documented per-schedule
+  keys), and <code>WORKER_CLASS</code>, the dotted path of the <code>Worker</code> subclass
+  <code>ox_worker</code> runs.</li>
 <li><strong>The management commands</strong> and their flags: <code>ox_worker</code>, <code>ox_prune</code>,
   <code>ox_health</code>. <code>ox_worker</code>'s exit codes: 0 after a drain, 130 on a forced
   exit, 75 when the worker recycles itself after a stuck task thread.
   Under <code>--processes</code>, the supervisor exits 0 when every worker drained
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
-  first other non-zero worker code.</li>
+  first other non-zero worker code. A worker killed by a signal reports
+  <code>128 + the signal number</code>, following the shell convention.</li>
+<li><strong>The system check IDs</strong> <code>django_ox.E001</code> through <code>django_ox.E005</code>, which
+  the configuration guide tells you to list in <code>SILENCED_SYSTEM_CHECKS</code>. The
+  IDs are stable; the messages are not.</li>
+<li><strong><code>ox_health</code>'s exit codes</strong>: 0 when healthy, 1 when unhealthy or when an
+  argument value is rejected. Argparse errors, such as an unknown flag, exit 2.</li>
+<li><strong>The claim filter hooks</strong> <code>Worker.claim_filter_q()</code> and
+  <code>Worker.claim_filter_sql()</code>, and where their result is applied: the
+  fragment is conjoined to the conditions the candidate select filters on,
+  ahead of its ordering and its limit. The statement around it is not
+  promised.</li>
 <li><strong>The timeout helpers</strong> <code>django_ox.deadline()</code> and <code>django_ox.remaining()</code>,
   callable from inside a task.</li>
 <li><strong>The metrics module</strong> <code>django_ox.stats</code>: <code>queue_stats</code>, <code>ready_count</code>,
@@ -908,19 +921,16 @@ supervisor behind <code>--processes</code> (<code>django_ox.supervisor</code>) a
 with an underscore. The exact SQL a claim emits and the
 model's non-schema helper methods are not part of the contract.</p>
 <h2 id="versioning">Versioning</h2>
-<p>django-ox follows <a href="https://semver.org/">Semantic Versioning</a>. Before 1.0,
-the pre-1.0 rule applies:</p>
+<p>django-ox follows <a href="https://semver.org/">Semantic Versioning</a>:</p>
 <ul>
-<li><strong>0.x minor releases may contain breaking changes.</strong> Any
-  break to a public surface above is called out in the changelog under a
-  <code>Changed</code> or <code>Removed</code> heading, with the migration step.</li>
-<li><strong>0.x.y patch releases are bug fixes only</strong> and never break a public
-  surface.</li>
+<li><strong>Breaking changes to any public surface above require a major version.</strong>
+  They are called out in the changelog under a <code>Changed</code> or <code>Removed</code>
+  heading, with the migration step.</li>
+<li><strong>Minor releases add, they do not break.</strong> Patch releases are bug fixes
+  only.</li>
 </ul>
-<p>Pin accordingly: <code>django-ox~=0.3.1</code> accepts patch releases only;
-<code>django-ox&gt;=0.3,&lt;0.4</code> accepts the current minor line.</p>
-<p>Once 1.0 ships, breaking changes to the public API will require a major
-version bump, in the usual SemVer way.</p>
+<p>Pin accordingly: <code>django-ox~=1.0.0</code> accepts patch releases only;
+<code>django-ox~=1.0</code> accepts the current major line.</p>
 <h2 id="deprecation-policy">Deprecation policy</h2>
 <p>When a public surface is going to be removed or changed incompatibly, and
 a compatible path exists, it is deprecated before removal rather than
@@ -929,8 +939,8 @@ dropped outright:</p>
 <li>The deprecation is documented in the changelog and, where it can be,
   surfaced at runtime (a <code>DeprecationWarning</code> or a <code>manage.py check</code>
   message).</li>
-<li>A deprecated surface keeps working for <strong>at least one full minor release</strong>
-  (pre-1.0) or one major release (post-1.0) before it is removed.</li>
+<li>A deprecated surface is announced in a minor release and removed no earlier
+  than the next major release.</li>
 </ul>
 <p>Security fixes are exempt. A surface that cannot be kept without leaving a
 vulnerability open may change in a patch release. That is documented in the
@@ -943,6 +953,7 @@ corners; these are the supported combinations.</p>
 <thead>
 <tr>
 <th></th>
+<th>Django 5.2 LTS</th>
 <th>Django 6.0</th>
 <th>Django 6.1</th>
 </tr>
@@ -952,19 +963,25 @@ corners; these are the supported combinations.</p>
 <td><strong>Python 3.12</strong></td>
 <td>tested</td>
 <td>tested</td>
+<td>tested</td>
 </tr>
 <tr>
 <td><strong>Python 3.13</strong></td>
 <td>tested</td>
 <td>tested</td>
+<td>tested</td>
 </tr>
 <tr>
 <td><strong>Python 3.14</strong></td>
+<td>not supported by Django 5.2</td>
 <td>tested</td>
 <td>tested</td>
 </tr>
 </tbody>
 </table>
+<p>Django 6.0 and later ship the Tasks framework in core. The Django 5.2 legs
+install the <code>django-tasks</code> backport and run the whole suite against it, which
+is what <code>django-ox[backport]</code> pulls in.</p>
 <p>The support floor tracks Django's own: when a Python or Django version
 reaches end of life upstream, a later django-ox minor release may drop it,
 announced in the changelog. Databases: PostgreSQL, SQLite and MySQL 8 are

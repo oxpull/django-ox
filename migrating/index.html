@@ -70,7 +70,7 @@
   <meta property="og:image" content="https://oxpull.com/django-ox/assets/social-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="django-ox: Django 6 shipped Tasks, the production worker is missing.">
+  <meta property="og:image:alt" content="django-ox: the production worker for Django Tasks. Your database is the queue.">
 
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Migrating - django-ox">
@@ -891,7 +891,9 @@ already have, so there is no broker to run.</p>
 <span class="n">send_confirmation</span><span class="o">.</span><span class="n">delay</span><span class="p">(</span><span class="n">order_id</span><span class="o">=</span><span class="mi">42</span><span class="p">)</span>
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><span class="c1"># after</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>  <span class="c1"># Django 6.0+</span>
+<span class="c1"># On Django 5.2 the Tasks framework comes from the backport:</span>
+<span class="c1"># from django_tasks import task</span>
 
 
 <span class="nd">@task</span>
@@ -968,7 +970,9 @@ SQLite or Postgres. What changes is the API, and where schedules live.</p>
 <span class="k">def</span><span class="w"> </span><span class="nf">nightly_report</span><span class="p">():</span> <span class="o">...</span>
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><span class="c1"># after</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>  <span class="c1"># Django 6.0+</span>
+<span class="c1"># On Django 5.2 the Tasks framework comes from the backport:</span>
+<span class="c1"># from django_tasks import task</span>
 
 
 <span class="nd">@task</span>

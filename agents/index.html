@@ -70,7 +70,7 @@
   <meta property="og:image" content="https://oxpull.com/django-ox/assets/social-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="django-ox: Django 6 shipped Tasks, the production worker is missing.">
+  <meta property="og:image:alt" content="django-ox: the production worker for Django Tasks. Your database is the queue.">
 
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="For AI assistants - django-ox">
@@ -810,14 +810,22 @@ copies: <a href="../llms.txt">llms.txt</a> (facts and links) and
 <a href="../llms-full.txt">llms-full.txt</a> (every page of this site in one file).
 Context7 library id: <code>/oxpull/django-ox</code>.</p>
 <h2 id="set-up-django-ox-in-this-project">Set up django-ox in this project</h2>
-<p>Requires Python 3.12+ and Django 6.0+. Check before installing:</p>
+<p>Requires Python 3.12+ and Django 5.2+. Check before installing:</p>
 <div class="highlight"><pre><span></span><code>python -c &quot;import django, sys; print(django.__version__, sys.version.split()[0])&quot;
 </code></pre></div>
+<p>Django 6.0 and later ship the Tasks framework in core. On Django 5.2 LTS it
+comes from the <code>django-tasks</code> backport, so install the <code>backport</code> extra there.</p>
 <p>Install:</p>
 <div class="highlight"><pre><span></span><code>pip install django-ox
 </code></pre></div>
 <p>or, with uv:</p>
 <div class="highlight"><pre><span></span><code>uv add django-ox
+</code></pre></div>
+<p>On Django 5.2 LTS:</p>
+<div class="highlight"><pre><span></span><code>pip install &quot;django-ox[backport]&quot;
+</code></pre></div>
+<p>or, with uv:</p>
+<div class="highlight"><pre><span></span><code>uv add &quot;django-ox[backport]&quot;
 </code></pre></div>
 <p>Edit <code>settings.py</code>:</p>
 <div class="highlight"><pre><span></span><code><span class="n">INSTALLED_APPS</span> <span class="o">=</span> <span class="p">[</span>
@@ -868,7 +876,8 @@ supervisor:</p>
 <li><code>QUEUES</code> sits beside <code>OPTIONS</code>, not inside it. Inside <code>OPTIONS</code> it is
   ignored without warning; the symptom is <code>InvalidTask: Queue 'X' is not
   valid for backend.</code></li>
-<li>Tasks are plain <code>django.tasks</code> tasks. <code>from django.tasks import task</code>,
+<li>Tasks are plain Tasks-framework tasks. <code>from django.tasks import task</code> on
+  Django 6.0+, <code>from django_tasks import task</code> on 5.2 LTS,
   decorate with <code>@task</code>, call <code>.enqueue(...)</code>. Nothing is imported from
   <code>django_ox</code> in task code.</li>
 <li>The worker imports a task by its dotted path, so the module must be
@@ -934,15 +943,18 @@ supervisor:</p>
   with the same two actions.</li>
 <li>A particular running task cannot be interrupted on demand; <code>TASK_TIMEOUT</code>
   bounds every attempt. Tasks live on the default database.</li>
-<li>In tests use <code>django.tasks.backends.immediate.ImmediateBackend</code> or
-  <code>django.tasks.backends.dummy.DummyBackend</code> for <code>TASKS</code>.</li>
-<li>Batches and unique tasks are in <a href="../pro/">Oxpull Pro</a>, a paid add-on that
-  is not on sale yet. <code>django_ox.stats</code> and <code>ox_health</code> are in django-ox.</li>
+<li>In tests use the framework's own backends for <code>TASKS</code>:
+  <code>django.tasks.backends.immediate.ImmediateBackend</code> or
+  <code>django.tasks.backends.dummy.DummyBackend</code> on Django 6.0+, and the same
+  paths under <code>django_tasks.backends.</code> on Django 5.2 LTS.</li>
+<li>Batches, unique tasks and rate limiting are in <a href="../pro/">Oxpull Pro</a>, a
+  paid add-on that is not on sale yet. <code>django_ox.stats</code> and <code>ox_health</code>
+  are in django-ox.</li>
 </ul>
 <h2 id="how-to-verify-it-works">How to verify it works</h2>
 <p>Define a task in any installed app:</p>
 <div class="highlight"><pre><span></span><code><span class="c1"># myapp/tasks.py</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>  <span class="c1"># Django 6.0+; on 5.2: from django_tasks import task</span>
 
 
 <span class="nd">@task</span>

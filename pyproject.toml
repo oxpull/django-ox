@@ -161,6 +161,14 @@ files = ["src"]
 strict = true
 plugins = ["mypy_django_plugin.main"]
 
+# The type checker reads the core names, which django-stubs describes, and the
+# runtime picks whichever package is installed. django_tasks is the optional
+# backport and is not installed in the type-check environment, so its import
+# has nothing to resolve against and does not need to.
+[[tool.mypy.overrides]]
+module = ["django_tasks", "django_tasks.*"]
+ignore_missing_imports = true
+
 [tool.django-stubs]
 django_settings_module = "tests.settings"
 

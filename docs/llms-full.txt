@@ -734,7 +734,8 @@ request.session["report_task_id"] = result.id
 ```
 
 ```python
-from django.tasks import TaskResultStatus  # 5.2: from django_tasks import TaskResultStatus
+# On Django 5.2: from django_tasks import TaskResultStatus
+from django.tasks import TaskResultStatus
 
 result = build_report.get_result(request.session["report_task_id"])
 result.refresh()

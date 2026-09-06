@@ -9,6 +9,10 @@ permanently. Nothing that works today moves behind the paid tier.
 is carrying real volume. All three are built and tested. It is not on sale
 yet. The waitlist below is how to hear when it opens.
 
+Pro requires Django 6.0 or later. It builds on `django.tasks`, which is part
+of Django core from 6.0. django-ox itself also runs on Django 5.2 LTS through
+the `django-tasks` backport; Pro does not.
+
 ## What Pro adds
 
 - **Unique tasks.** Deduplicate at enqueue time: while a task with the same

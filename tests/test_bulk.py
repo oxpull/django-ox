@@ -5,19 +5,23 @@ rejected. Runs on every database in the matrix; the parameter-count test is
 the one that matters on SQLite.
 """
 
+import math
 from datetime import timedelta
 
 import pytest
 from django.conf import settings
 from django.db import connection, transaction
-from django.tasks import TaskResultStatus
-from django.tasks.exceptions import InvalidTask
-from django.tasks.signals import task_enqueued
 from django.test import override_settings
 from django.utils import timezone
 
 from django_ox.backend import INSERT_CHUNK_SIZE
 from django_ox.bulk import enqueue_many
+from django_ox.compat import (
+    DUMMY_BACKEND_PATH,
+    InvalidTask,
+    TaskResultStatus,
+    task_enqueued,
+)
 from django_ox.models import OxTask
 
 from .tasks import STATE, add, record
@@ -124,7 +128,7 @@ def test_unknown_queue_is_rejected_before_any_write():
 @override_settings(
     TASKS={
         "default": settings.TASKS["default"],
-        "dummy": {"BACKEND": "django.tasks.backends.dummy.DummyBackend"},
+        "dummy": {"BACKEND": DUMMY_BACKEND_PATH},
     }
 )
 def test_task_on_another_backend_is_rejected():
@@ -146,14 +150,28 @@ def test_five_thousand_tasks_chunked_under_the_parameter_limit(worker):
 
     assert len(results) == 5000
     assert OxTask.objects.count() == 5000
-    assert len(captured.statements) == 5000 // INSERT_CHUNK_SIZE
+
+    # INSERT_CHUNK_SIZE is a ceiling, not the batch size. bulk_create lowers it
+    # to whatever the database's bound-parameter limit allows, and that limit
+    # moves: Django reports 999 for SQLite through 5.2 and 250,000 from 6.0,
+    # which is 112 statements on the one and 5 on the other for the same 5000
+    # rows. Assert the invariant, not the number.
+    rows_per_insert = min(
+        INSERT_CHUNK_SIZE,
+        connection.ops.bulk_batch_size(list(OxTask._meta.concrete_fields), results),
+    )
+    assert len(captured.statements) == math.ceil(5000 / rows_per_insert)
     if connection.vendor == "sqlite":
         # One bound variable per column per row; PostgreSQL binds one array
         # per column instead, so the count is only meaningful here.
         columns = len(OxTask._meta.fields)
         for _sql, params in captured.statements:
-            assert len(params) == INSERT_CHUNK_SIZE * columns
+            assert len(params) % columns == 0
+            assert 0 < len(params) <= rows_per_insert * columns
             assert len(params) <= connection.features.max_query_params
+        assert sum(len(params) for _sql, params in captured.statements) == (
+            5000 * columns
+        )
 
     # An inline worker drains all of them. Every row in one call shares an
     # enqueued_at, so the claim order among them is not promised.

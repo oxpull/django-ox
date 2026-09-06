@@ -3,7 +3,7 @@
   "url": "https://context7.com/oxpull/django-ox",
   "public_key": "pk_bMEQ94xqHcqvERACC7UDy",
   "projectTitle": "django-ox",
-  "description": "Database-backed worker backend for Django's Tasks framework (django.tasks, Django 6.0+). Background tasks run on the database you already have. No broker to provision, secure or back up.",
+  "description": "Database-backed worker backend for Django's Tasks framework (django.tasks), on Django 5.2 LTS and later. Background tasks run on the database you already have. No broker to provision, secure or back up.",
   "folders": [
     "docs"
   ],
@@ -35,7 +35,7 @@
     "requirements.txt"
   ],
   "rules": [
-    "Requires Django 6.0 or later and Python 3.12 or later.",
+    "Requires Python 3.12 or later and Django 5.2 or later. Django 6.0 and later ship the Tasks framework in core. On Django 5.2 LTS it comes from the django-tasks backport, so install django-ox[backport] there rather than plain django-ox.",
     "Add django_ox to INSTALLED_APPS and set BACKEND to django_ox.backend.OxBackend in the TASKS setting.",
     "Run python manage.py migrate django_ox before starting a worker.",
     "Start a worker with the ox_worker management command. It is a separate process from the web server, and tasks only execute while a worker is running.",
@@ -55,7 +55,7 @@
     "The task function is called outside any transaction. A task that needs select_for_update() or atomic writes opens its own transaction.atomic().",
     "ox_worker --concurrency N is a thread pool inside one process. ox_worker --processes N runs N worker processes under one supervisor, each with its own database connections. A worker process that dies is restarted after one second, doubling to 30 seconds; more than five deaths of one slot in a minute stops the supervisor with exit code 1. For CPU-bound tasks use --processes N --concurrency 1.",
     "django_ox.actions.retry(result_id) requeues a FAILED or LOST task for one more attempt; django_ox.actions.discard(result_id) closes a READY, FAILED or LOST task without running it. A particular running task cannot be interrupted on demand; TASK_TIMEOUT bounds every attempt. Tasks are stored on the default database.",
-    "For tests, point TASKS at django.tasks.backends.immediate.ImmediateBackend or django.tasks.backends.dummy.DummyBackend instead of django-ox.",
-    "Batches and unique tasks are not in django-ox. They are in Oxpull Pro, a paid add-on that is not on sale yet. django_ox.stats and ox_health are in the free package."
+    "For tests, point TASKS at django.tasks.backends.immediate.ImmediateBackend or django.tasks.backends.dummy.DummyBackend instead of django-ox. On Django 5.2 LTS those paths are django_tasks.backends.immediate.ImmediateBackend and django_tasks.backends.dummy.DummyBackend.",
+    "Batches, unique tasks and rate limiting are not in django-ox. They are in Oxpull Pro, a paid add-on; see oxpull.com for its status. django_ox.stats and ox_health are in the free package."
   ]
 }

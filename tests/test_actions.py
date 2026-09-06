@@ -7,10 +7,10 @@ import uuid
 
 import pytest
 from django.db import connections
-from django.tasks import TaskResultStatus, default_task_backend
 from django.utils import timezone
 
 from django_ox import actions, stats
+from django_ox.compat import TaskResultStatus, default_task_backend
 from django_ox.models import OxTask
 from django_ox.worker import Worker
 

@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-09-05
+
+This release marks django-ox as production ready. The public API is stable from
+here: anything documented keeps working until a 2.0, and breaking changes get a
+major version. The package runs on Django 5.2 LTS through 6.1, on SQLite,
+PostgreSQL and MySQL, and the suite covers all of them.
+
+### Added
+
+- Django 5.2 LTS support. Django ships the Tasks framework in core from 6.0;
+  on 5.2 the same framework comes from the `django-tasks` backport, and a new
+  `backport` extra pulls it in: `pip install "django-ox[backport]"`. Every
+  import of the framework now goes through `django_ox.compat`, which picks
+  core or the backport at runtime, so nothing else in the package changed.
+  CI runs the whole suite on 5.2 against the backport, on SQLite, PostgreSQL
+  and MySQL, because the two being the same API is a claim rather than a fact.
+  Python 3.14 is not in the 5.2 legs, since Django 5.2 does not support it.
+- `Django>=5.2` replaces `Django>=6.0` as the declared dependency, and
+  `Framework :: Django :: 5.2` joins the classifiers.
+
+### Changed
+
+- `finished_at` is stamped from the process clock instead of being computed by
+  the database and read back. An outcome write is one statement again rather
+  than two. The benchmark on the docs site measured 114.9 tasks per second
+  against django-tasks-db 0.12's 103.6, on PostgreSQL 16 with 2,000 no-op
+  tasks, one worker and five runs per arm. That run predates this change by
+  eighteen minutes, so it measured the extra round trip and understates what
+  ships here. The lease is untouched.
+  `locked_at` and the reaper's cutoff stay on the database clock, which is
+  where a lease is judged.
+- The `backport` extra requires `django-tasks>=0.12`. Earlier backport releases
+  change the framework API in ways django-ox does not support: 0.9.0 has no
+  `enqueue_on_commit` on `Task`, 0.10.0 rejects the result statuses django-ox
+  stores, and 0.11.0 adds an abstract `save_metadata` that the backend does not
+  implement. CI now installs the floor with `==` and asserts the resolved
+  version, so the floor is a version under test rather than a number in a file.
+- `Development Status :: 5 - Production/Stable` replaces the beta classifier.
+
 ## [0.4.0] - 2026-09-01
 
 ### Added
@@ -352,6 +391,8 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[Unreleased]: https://github.com/oxpull/django-ox/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/oxpull/django-ox/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/oxpull/django-ox/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/oxpull/django-ox/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/oxpull/django-ox/compare/v0.2.1...v0.3.0

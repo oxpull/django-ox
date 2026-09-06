@@ -1,9 +1,9 @@
 # django-ox
 
 A database-backed worker backend for Django's Tasks framework
-(`django.tasks`, Django 6.0+).
+(`django.tasks`), on Django 5.2 LTS and later.
 
-Django 6.0 ships the Tasks API but no production backend: the built-in
+Django ships the Tasks API but no production backend: the built-in
 `ImmediateBackend` runs tasks inline and `DummyBackend` runs nothing.
 django-ox stores background tasks in the database you already run and executes
 them with a worker process. You get a durable queue with retries, priorities,
@@ -86,10 +86,18 @@ coming back. The mechanics, and the one case worth knowing about, are in
 
 ## Install
 
-Requires Python 3.12+ and Django 6.0+.
+Requires Python 3.12+ and Django 5.2+. Django 6.0 and later ship the Tasks
+framework in core. On Django 5.2 LTS it comes from the `django-tasks`
+backport, so install the `backport` extra there. **Your own imports differ
+with it**: on Django 6.0+ you write `from django.tasks import task`, and on
+Django 5.2 you write `from django_tasks import task`. django-ox itself
+handles both.
 
 ```
 pip install django-ox
+
+# on Django 5.2 LTS
+pip install "django-ox[backport]"
 ```
 
 Add the app and point the Tasks framework at the backend:
@@ -120,7 +128,9 @@ the producer side.
 
 ```python
 # myapp/tasks.py
-from django.tasks import task
+from django.tasks import task  # Django 6.0+
+# On Django 5.2 the Tasks framework comes from the backport:
+# from django_tasks import task
 
 
 @task
@@ -160,7 +170,7 @@ That is the whole integration. Next steps:
 
 ## Scope
 
-The core is deliberately small: a durable queue, a worker, recurring
+The core is finite on purpose: a durable queue, a worker, recurring
 schedules, and monitoring, with nothing extra to operate. Design
 decisions worth knowing before you commit:
 

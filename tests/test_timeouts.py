@@ -29,11 +29,11 @@ from inspect import iscoroutinefunction
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connection, connections
-from django.tasks import TaskResultStatus, default_task_backend
 from django.utils import timezone
 
 import django_ox
 from django_ox.bulk import enqueue_many
+from django_ox.compat import TaskResultStatus, default_task_backend
 from django_ox.exceptions import TaskTimeout
 from django_ox.models import OxTask
 from django_ox.supervisor import RECYCLE_EXIT_CODE, Supervisor

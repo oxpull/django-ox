@@ -8,11 +8,14 @@ Context7 library id: `/oxpull/django-ox`.
 
 ## Set up django-ox in this project
 
-Requires Python 3.12+ and Django 6.0+. Check before installing:
+Requires Python 3.12+ and Django 5.2+. Check before installing:
 
 ```
 python -c "import django, sys; print(django.__version__, sys.version.split()[0])"
 ```
+
+Django 6.0 and later ship the Tasks framework in core. On Django 5.2 LTS it
+comes from the `django-tasks` backport, so install the `backport` extra there.
 
 Install:
 
@@ -24,6 +27,18 @@ or, with uv:
 
 ```
 uv add django-ox
+```
+
+On Django 5.2 LTS:
+
+```
+pip install "django-ox[backport]"
+```
+
+or, with uv:
+
+```
+uv add "django-ox[backport]"
 ```
 
 Edit `settings.py`:
@@ -91,7 +106,8 @@ TASKS = {
 - `QUEUES` sits beside `OPTIONS`, not inside it. Inside `OPTIONS` it is
   ignored without warning; the symptom is `InvalidTask: Queue 'X' is not
   valid for backend.`
-- Tasks are plain `django.tasks` tasks. `from django.tasks import task`,
+- Tasks are plain Tasks-framework tasks. `from django.tasks import task` on
+  Django 6.0+, `from django_tasks import task` on 5.2 LTS,
   decorate with `@task`, call `.enqueue(...)`. Nothing is imported from
   `django_ox` in task code.
 - The worker imports a task by its dotted path, so the module must be
@@ -157,8 +173,10 @@ TASKS = {
   with the same two actions.
 - A particular running task cannot be interrupted on demand; `TASK_TIMEOUT`
   bounds every attempt. Tasks live on the default database.
-- In tests use `django.tasks.backends.immediate.ImmediateBackend` or
-  `django.tasks.backends.dummy.DummyBackend` for `TASKS`.
+- In tests use the framework's own backends for `TASKS`:
+  `django.tasks.backends.immediate.ImmediateBackend` or
+  `django.tasks.backends.dummy.DummyBackend` on Django 6.0+, and the same
+  paths under `django_tasks.backends.` on Django 5.2 LTS.
 - Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a
   paid add-on that is not on sale yet. `django_ox.stats` and `ox_health`
   are in django-ox.
@@ -169,7 +187,7 @@ Define a task in any installed app:
 
 ```python
 # myapp/tasks.py
-from django.tasks import task
+from django.tasks import task  # Django 6.0+; on 5.2: from django_tasks import task
 
 
 @task

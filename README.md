@@ -5,11 +5,11 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/django-ox)](https://pypi.org/project/django-ox/)
 [![License](https://img.shields.io/pypi/l/django-ox)](https://github.com/oxpull/django-ox/blob/main/LICENSE)
 
-A database-backed worker backend for Django's Tasks framework (`django.tasks`, Django 6.0+).
+A database-backed worker backend for Django's Tasks framework (`django.tasks`), on Django 5.2 LTS and later.
 
 Documentation: <https://oxpull.com/django-ox/>
 
-Django 6.0 ships the Tasks API but no production backend: the built-in
+Django ships the Tasks API but no production backend: the built-in
 `ImmediateBackend` and `DummyBackend` are for development and testing only.
 django-ox stores background tasks in the database you already run and executes
 them with a worker process. There is no broker to provision, secure, upgrade or
@@ -20,10 +20,18 @@ Comparing backends? See [Choosing a task backend](https://oxpull.com/django-ox/c
 
 ## Install
 
-Requires Python 3.12+ and Django 6.0+.
+Requires Python 3.12+ and Django 5.2+. Django 6.0 and later ship the Tasks
+framework in core. On Django 5.2 LTS it comes from the `django-tasks`
+backport, so install the `backport` extra there. **Your own imports differ
+with it**: on Django 6.0+ you write `from django.tasks import task`, and on
+Django 5.2 you write `from django_tasks import task`. django-ox itself
+handles both.
 
 ```
 pip install django-ox
+
+# on Django 5.2 LTS
+pip install "django-ox[backport]"
 ```
 
 ```python
@@ -89,11 +97,30 @@ recording the outcome leaves that task to run again. One task in that run
 executed twice for exactly that reason, and no task executed twice without
 a kill to account for it.
 
+The soak ran 0.3.1, and the outcome-write path changed after both it and the
+throughput run below. Neither measurement covers the shipped worker exactly;
+the benchmarks page says which way the difference runs.
+
 Thirty-seven assertions ran and all thirty-seven passed. The harness
 design, every assertion and the caveats are in
 [SOAK-2026-09-01.md](https://github.com/oxpull/django-ox/blob/main/benchmarks/SOAK-2026-09-01.md),
 written from
 [the raw data](https://github.com/oxpull/django-ox/blob/main/benchmarks/soak-results-raw-2026-09-01.json).
+
+## Measured against the alternative
+
+Against `django-tasks-db` on PostgreSQL 16, 2,000 no-op tasks, one worker,
+five runs per arm on one machine: django-ox completed the batch at 114.9
+tasks per second against 103.6. Every one of the five django-ox runs beat
+every one of the five control runs; the slowest was 112.6 and their fastest
+was 105.0. In-transaction enqueue latency was a tie at about six tenths of
+a millisecond at p50.
+
+At concurrency 4 the result reverses and django-tasks-db is ahead: 346.3
+against 328.5 on the mean, about 5 percent, and wider on the median.
+[The benchmarks page](https://oxpull.com/django-ox/benchmarks/) carries that
+result, the reason the two harnesses are not measuring the same shape at that
+width, and the raw data behind every figure.
 
 ## Configuration
 
@@ -117,7 +144,9 @@ TASKS = {
 ## Quickstart
 
 ```python
-from django.tasks import task
+from django.tasks import task  # Django 6.0+
+# On Django 5.2 the Tasks framework comes from the backport:
+# from django_tasks import task
 
 
 @task
@@ -280,20 +309,20 @@ firing for a time before it existed.
 
 ## Scope
 
-The core is deliberately small: a durable queue, a worker, recurring
+The core is finite on purpose: a durable queue, a worker, recurring
 schedules, monitoring, and nothing else to operate. Outside the current
 scope: interrupting one chosen running task on demand (every attempt can be
 bounded with `TASK_TIMEOUT`), and multi-database routing (tasks are stored on
 the default database for the model).
 
 Batches, unique tasks and rate limiting are in
-[Oxpull Pro](https://oxpull.com/django-ox/pro/), a paid add-on that is not on
-sale yet; the waitlist is at <https://oxpull.com/>. Metrics stay in this
+[Oxpull Pro](https://oxpull.com/django-ox/pro/), a paid add-on. See
+<https://oxpull.com/> for its status and pricing. Metrics stay in this
 package: `django_ox.stats` and `ox_health` are free and stay free.
 
 ## Stability
 
-What counts as public API, the pre-1.0 versioning and deprecation policy,
+What counts as public API, the versioning and deprecation policy,
 and the supported Python and Django versions are documented in
 [the stability policy](https://oxpull.com/django-ox/stability/).
 

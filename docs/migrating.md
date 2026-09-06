@@ -65,7 +65,9 @@ send_confirmation.delay(order_id=42)
 
 ```python
 # after
-from django.tasks import task
+from django.tasks import task  # Django 6.0+
+# On Django 5.2 the Tasks framework comes from the backport:
+# from django_tasks import task
 
 
 @task
@@ -120,7 +122,9 @@ def nightly_report(): ...
 
 ```python
 # after
-from django.tasks import task
+from django.tasks import task  # Django 6.0+
+# On Django 5.2 the Tasks framework comes from the backport:
+# from django_tasks import task
 
 
 @task

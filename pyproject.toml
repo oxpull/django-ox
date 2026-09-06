@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "django-ox"
-version = "0.4.0"
+version = "1.0.0"
 description = "Database-backed worker backend for Django's Tasks framework."
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
-dependencies = ["Django>=6.0"]
+dependencies = ["Django>=5.2"]
 authors = [{ name = "Oxpull" }]
 keywords = [
     "django",
@@ -22,9 +22,10 @@ keywords = [
     "database",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Web Environment",
     "Framework :: Django",
+    "Framework :: Django :: 5.2",
     "Framework :: Django :: 6.0",
     "Framework :: Django :: 6.1",
     "Intended Audience :: Developers",
@@ -35,6 +36,31 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
+
+[project.optional-dependencies]
+# Django ships the Tasks framework from 6.0. On Django 5.2 LTS the same
+# framework comes from the django-tasks backport, and django-ox targets it
+# through django_ox.compat. Nothing else changes.
+#
+# The floor is 0.12 because that is the oldest release the suite passes on, not
+# because it is the newest release. Measured 2026-09-05, whole suite, Django
+# 5.2.17 on Python 3.12, one version swapped into one venv:
+#
+#   0.9.0    105 failed, 368 passed  -- Task.__init__() missing a required
+#                                       keyword-only argument 'enqueue_on_commit'
+#   0.10.0    45 failed, 428 passed  -- OxTask.Status.SUCCESSFUL is not a valid
+#                                       TaskResultStatus
+#   0.11.0   collection error, 0 ran -- OxBackend cannot be instantiated without
+#                                       the abstract method 'save_metadata'
+#   0.12.0   473 passed, 5 skipped
+#
+# These are framework API changes across the backport's own releases, not
+# incidental breakage, so do not lower this floor without running the suite
+# against the lower version first. The CI job `test-backport-floor` pins this
+# exact version with == and exists solely to keep that true; a `>=` install
+# always resolves to the newest release and can never test a floor. Raise the
+# two together or the floor silently stops being tested.
+backport = ["django-tasks>=0.12"]
 
 [project.urls]
 Homepage = "https://github.com/oxpull/django-ox"
@@ -134,6 +160,14 @@ ignore = [
 files = ["src"]
 strict = true
 plugins = ["mypy_django_plugin.main"]
+
+# The type checker reads the core names, which django-stubs describes, and the
+# runtime picks whichever package is installed. django_tasks is the optional
+# backport and is not installed in the type-check environment, so its import
+# has nothing to resolve against and does not need to.
+[[tool.mypy.overrides]]
+module = ["django_tasks", "django_tasks.*"]
+ignore_missing_imports = true
 
 [tool.django-stubs]
 django_settings_module = "tests.settings"

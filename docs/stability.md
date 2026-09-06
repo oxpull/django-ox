@@ -8,7 +8,8 @@ promise about compatibility, so you can pin `django-ox` with confidence.
 
 These are the supported surfaces. Changes to them are versioned and
 announced in the [changelog](changelog.md). This page, not a module's
-`__all__`, is the statement of what is public; today the two agree.
+`__all__`, is the statement of what is public. A module's `__all__` may
+export names this page does not list; those names are not public.
 
 - **The backend path** `django_ox.backend.OxBackend`, referenced as a
   string in the `TASKS` setting, `QUEUES` beside `OPTIONS`, and every
@@ -22,7 +23,13 @@ announced in the [changelog](changelog.md). This page, not a module's
   exit, 75 when the worker recycles itself after a stuck task thread.
   Under `--processes`, the supervisor exits 0 when every worker drained
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
-  first other non-zero worker code.
+  first other non-zero worker code. A worker killed by a signal reports
+  `128 + the signal number`, following the shell convention.
+- **The system check IDs** `django_ox.E001` through `django_ox.E005`, which
+  the configuration guide tells you to list in `SILENCED_SYSTEM_CHECKS`. The
+  IDs are stable; the messages are not.
+- **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy or when an
+  argument value is rejected. Argparse errors, such as an unknown flag, exit 2.
 - **The claim filter hooks** `Worker.claim_filter_q()` and
   `Worker.claim_filter_sql()`, and where their result is applied: the
   fragment is conjoined to the conditions the candidate select filters on,
@@ -82,20 +89,16 @@ model's non-schema helper methods are not part of the contract.
 
 ## Versioning
 
-django-ox follows [Semantic Versioning](https://semver.org/). Before 1.0,
-the pre-1.0 rule applies:
+django-ox follows [Semantic Versioning](https://semver.org/):
 
-- **0.x minor releases may contain breaking changes.** Any
-  break to a public surface above is called out in the changelog under a
-  `Changed` or `Removed` heading, with the migration step.
-- **0.x.y patch releases are bug fixes only** and never break a public
-  surface.
+- **Breaking changes to any public surface above require a major version.**
+  They are called out in the changelog under a `Changed` or `Removed`
+  heading, with the migration step.
+- **Minor releases add, they do not break.** Patch releases are bug fixes
+  only.
 
-Pin accordingly: `django-ox~=0.4.0` accepts patch releases only;
-`django-ox>=0.4,<0.5` accepts the current minor line.
-
-Once 1.0 ships, breaking changes to the public API will require a major
-version bump, in the usual SemVer way.
+Pin accordingly: `django-ox~=1.0.0` accepts patch releases only;
+`django-ox~=1.0` accepts the current major line.
 
 ## Deprecation policy
 
@@ -106,8 +109,8 @@ dropped outright:
 - The deprecation is documented in the changelog and, where it can be,
   surfaced at runtime (a `DeprecationWarning` or a `manage.py check`
   message).
-- A deprecated surface keeps working for **at least one full minor release**
-  (pre-1.0) or one major release (post-1.0) before it is removed.
+- A deprecated surface is announced in a minor release and removed no earlier
+  than the next major release.
 
 Security fixes are exempt. A surface that cannot be kept without leaving a
 vulnerability open may change in a patch release. That is documented in the
@@ -119,11 +122,15 @@ Each django-ox release is tested against the matrix below in CI, on SQLite
 and PostgreSQL 16 across the grid and MySQL 8 on the oldest and newest
 corners; these are the supported combinations.
 
-| | Django 6.0 | Django 6.1 |
-| --- | --- | --- |
-| **Python 3.12** | tested | tested |
-| **Python 3.13** | tested | tested |
-| **Python 3.14** | tested | tested |
+| | Django 5.2 LTS | Django 6.0 | Django 6.1 |
+| --- | --- | --- | --- |
+| **Python 3.12** | tested | tested | tested |
+| **Python 3.13** | tested | tested | tested |
+| **Python 3.14** | not supported by Django 5.2 | tested | tested |
+
+Django 6.0 and later ship the Tasks framework in core. The Django 5.2 legs
+install the `django-tasks` backport and run the whole suite against it, which
+is what `django-ox[backport]` pulls in.
 
 The support floor tracks Django's own: when a Python or Django version
 reaches end of life upstream, a later django-ox minor release may drop it,

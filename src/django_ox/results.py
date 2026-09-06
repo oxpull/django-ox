@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from django.tasks.base import Task, TaskError, TaskResult, TaskResultStatus
 from django.utils.module_loading import import_string
+
+from .compat import Task, TaskError, TaskResult, TaskResultStatus
 
 if TYPE_CHECKING:
     from .models import OxTask

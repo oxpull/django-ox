@@ -8,11 +8,15 @@ from pathlib import Path
 import pytest
 from django.core.management import call_command
 from django.db import transaction
-from django.tasks import TaskResultStatus, default_task_backend
-from django.tasks.exceptions import TaskResultDoesNotExist, TaskResultMismatch
-from django.tasks.signals import task_enqueued
 from django.utils import timezone
 
+from django_ox.compat import (
+    TaskResultDoesNotExist,
+    TaskResultMismatch,
+    TaskResultStatus,
+    default_task_backend,
+    task_enqueued,
+)
 from django_ox.models import OxTask
 
 from .tasks import STATE, add, async_add, echo, record, send_email, with_context

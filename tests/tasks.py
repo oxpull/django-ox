@@ -4,9 +4,9 @@ import asyncio
 import time
 
 from django.db import transaction
-from django.tasks import task
 
 import django_ox
+from django_ox.compat import task
 from django_ox.exceptions import TaskTimeout
 from django_ox.models import OxTask
 

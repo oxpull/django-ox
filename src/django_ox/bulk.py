@@ -20,10 +20,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from django.tasks.base import Task, TaskResult
-from django.tasks.exceptions import InvalidTask
-
 from .backend import INSERT_CHUNK_SIZE, OxBackend
+from .compat import InvalidTask, Task, TaskResult
 
 __all__ = ["INSERT_CHUNK_SIZE", "enqueue_many"]
 

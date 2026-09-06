@@ -4,7 +4,7 @@ Reproducible comparison of two database-backed backends for Django's Tasks
 API on identical workloads:
 
 1. **django-ox** (this package, installed editable from the repo)
-2. **django-tasks-db 0.12.0** (the incumbent ORM backend by Jake Howard,
+2. **django-tasks-db 0.12.0** (the incumbent ORM backend,
    installed from PyPI), driven per its own README: `db_worker` management
    command, `django_tasks_db.DatabaseBackend` in `TASKS`.
 

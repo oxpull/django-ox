@@ -87,7 +87,7 @@ or user input by string formatting.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.3.x   | yes       |
+| 1.0.x   | yes       |
 | older   | no        |
 
 ## Reporting a vulnerability

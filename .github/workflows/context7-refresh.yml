@@ -8,9 +8,11 @@ name: Refresh Context7
 # This workflow closes that window: every docs change on main asks Context7 to
 # re-parse immediately.
 #
-# It does not address exclusions. Files listed in context7.json's excludeFiles
-# and excludeFolders were still being served after a refresh on 2026-08-25, so
-# that is a separate problem and a refresh is not its fix.
+# A 200 here means the request was accepted, not that context7.json was applied.
+# A file that violates the published schema is rejected whole, and every list in
+# it, excludeFiles and excludeFolders included, is ignored with the rest.
+# tests/test_context7.py checks the file against those limits, so a refresh on a
+# tree that passes them is the case where the config is genuinely being read.
 
 on:
   push:

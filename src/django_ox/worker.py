@@ -1507,14 +1507,26 @@ class Worker:
                     status=OxTask.Status.READY,
                     lease_epoch=db_task.lease_epoch + 1,
                 )
-            # CAS on the lease epoch so a worker that finished (or another
-            # reaper) in the meantime is not overwritten. The epoch replaces
-            # the old compare on locked_at, which depended on a timestamp
-            # surviving a round trip unchanged.
+            # Two different races, so two predicates. The epoch catches a
+            # handover: a worker that finished, or another reaper that got
+            # here first, leaves a different epoch and this row is not
+            # overwritten. It cannot catch a renewal, because renewing does
+            # not change the epoch - `renew_leases` writes `locked_at` and
+            # nothing else. Without the expiry predicate here, a worker that
+            # was briefly late renewing and then renewed still loses its
+            # task: the row was selected while it looked expired, and by the
+            # time this UPDATE runs it is held and live. The reclaim would
+            # hand a running task to a second worker.
+            #
+            # Re-checking against the same cutoff the selection used asks the
+            # only question that matters: does this row STILL look abandoned.
+            # It compares an ordering, not a round-tripped timestamp for
+            # equality, which is what an earlier compare got wrong.
             changed = OxTask.objects.filter(
                 pk=db_task.pk,
                 status=OxTask.Status.RUNNING,
                 lease_epoch=db_task.lease_epoch,
+                locked_at__lt=cutoff,
             ).update(**updates)
             if changed:
                 reclaimed += 1

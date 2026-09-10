@@ -23,7 +23,6 @@ from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.db import (
-    DatabaseError,
     Error,
     IntegrityError,
     close_old_connections,
@@ -700,11 +699,23 @@ class Worker:
             while not stop.wait(self.renew_interval):
                 try:
                     self.renew_leases()
-                except DatabaseError:
+                except Exception:
                     # A missed renewal is survivable by design: the interval
                     # is a third of the timeout. Drop the connection so the
                     # next tick reconnects, and keep going, because giving
                     # up here would silently expire every live lease.
+                    #
+                    # Every exception, not a chosen class. This caught
+                    # DatabaseError, and `django.db.InterfaceError` does not
+                    # inherit from it - it sits beside it under
+                    # `django.db.Error` - so the one failure most likely to
+                    # arrive here, a connection dropped underneath the
+                    # thread, escaped and killed it. Nothing restarts this
+                    # thread and nothing checks it is alive, so every
+                    # in-flight lease then aged out and the reaper handed
+                    # every running task to another worker. The consequence
+                    # of guessing wrong is severe and silent, which is
+                    # exactly when a guess should not be made.
                     logger.warning(
                         "Lease renewal failed for worker %s; retrying in %.1fs",
                         self.worker_id,

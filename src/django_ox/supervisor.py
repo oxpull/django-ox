@@ -63,7 +63,22 @@ KILL_GRACE = 5.0
 # the restart delay and of the response to a stop request.
 POLL_INTERVAL = 0.1
 
-STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+# Built from what this platform has, rather than named outright. SIGHUP does
+# not exist on Windows, and naming it here raised AttributeError at import:
+# `ox_worker` imports this module unconditionally, so the failure landed
+# before argparse and before the command could tell anyone why. The single
+# worker that runs fine without any of this could not start at all, and the
+# check that is supposed to explain the limit sits inside handle(), which the
+# failed import never reached.
+STOP_SIGNALS = tuple(
+    getattr(signal, name)
+    for name in ("SIGTERM", "SIGINT", "SIGHUP")
+    if hasattr(signal, name)
+)
+
+# Same reason. Where there is no SIGKILL there is nothing stronger than
+# SIGTERM to escalate to, and sending it twice is the honest approximation.
+FORCE_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
 def child_command(
@@ -324,7 +339,7 @@ class Supervisor:
                 self.kill_grace,
                 extra={"event": "supervisor_killed_workers", "worker_indexes": alive},
             )
-        self._signal_children(signal.SIGKILL)
+        self._signal_children(FORCE_SIGNAL)
 
     # -- signals -----------------------------------------------------------
 

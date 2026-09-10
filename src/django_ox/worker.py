@@ -1590,7 +1590,25 @@ class Worker:
             try:
                 with transaction.atomic(using=self._db_alias):
                     result = None
-                    if last is not None:
+                    # Whether this is the first sighting is decided here,
+                    # from the log, rather than from the snapshot taken
+                    # before the loop. Another worker can commit this
+                    # schedule's anchor in between, and then this pass is
+                    # not the first sighting at all: anchoring again writes
+                    # a second no-task row, this time over a tick that had a
+                    # boundary and should have fired. The constraint then
+                    # suppresses that instant for good, so the schedule
+                    # silently skips a run.
+                    #
+                    # One extra query, and only while a schedule has no
+                    # ticks at all. Once it has one, `last` is set and this
+                    # never runs again.
+                    first_sighting = last is None and not (
+                        OxScheduleTick.objects.using(self._db_alias)
+                        .filter(schedule_name=schedule.name)
+                        .exists()
+                    )
+                    if not first_sighting:
                         result = schedule.task.enqueue(
                             *schedule.args, **schedule.kwargs
                         )

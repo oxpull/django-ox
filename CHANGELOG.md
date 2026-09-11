@@ -5,6 +5,96 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A worker that was briefly late renewing its lease, then renewed, could still
+  lose the task. The reaper selected rows whose lease looked expired and then
+  reclaimed each one on a compare-and-set that checked the lease epoch but not
+  the expiry, and renewing a lease writes `locked_at` without touching the
+  epoch. The row went back to READY and a second worker could claim and run a
+  task the first was still running. The reclaim now re-checks the expiry
+  against the same cutoff the selection used.
+- The lease renewal thread stopped on a dropped connection and nothing
+  restarted it or noticed. `locked_at` then froze on every in-flight row, and
+  after the lock timeout the reaper handed each of those tasks to another
+  worker while they were still running. The only symptom was a burst of
+  reclaims from workers that were visibly healthy.
+- A database error in the poll loop ended the worker. The supervisor replaced
+  the child, the replacement failed on its own first reap, and five deaths in
+  a minute stop the supervisor, so a brief outage took the fleet down and left
+  it down. One pass is now abandoned and retried on the next.
+- An exception while recording a stuck attempt ended the watchdog thread,
+  which is the whole timeout backstop for every attempt already armed. Each
+  stuck attempt is handled on its own now, and recording one is no longer
+  allowed to skip the recycle that frees the worker.
+- A worker whose timeout backstop gave up on a thread declined to recycle when
+  its own write had lost a race to the reaper, so the pool slot stayed
+  occupied for the life of the process and the drain waited on that thread
+  without bound. Whether the thread is still running is now asked of the
+  thread.
+- The drain could stop waiting while a healthy task was still running and let
+  the process exit from under it. It counted pool threads that were still
+  alive, and a pool thread stays alive and idle after an abandoned task
+  returns. It now counts only threads still inside the attempt that was
+  abandoned. A backstop that fires part way through an ordinary drain is also
+  observed, where before the drain read that flag once and waited forever.
+- Every statement in the claim protocol now runs on the database the worker
+  writes to. They routed themselves, and a read routes through `db_for_read`,
+  so with a read replica configured a claim could land off primary and a
+  re-read could miss a claim that had just succeeded. The PostgreSQL claim is
+  raw SQL, which Django cannot recognise as a write at all.
+- `enqueue_many` opened its transaction on the default connection while the
+  rows were written through the routed one, so under a database router its
+  all-or-nothing promise did not hold.
+- A worker subclass that narrows what it may claim by overriding
+  `claim_filter_q()` alone now takes the claim path that applies it. The
+  single-statement PostgreSQL claim reads `claim_filter_sql()` and could not
+  see the other hook, so such a subclass excluded rows on SQLite and MySQL and
+  claimed them on PostgreSQL. It says once per worker why it gave up the
+  faster path.
+- The PostgreSQL claim stamped the lease from the database server even when
+  `USE_TZ` is off, while the renewal and the reaper use the worker's clock
+  under that setting. Both now use the same clock as each other.
+- `LOCK_TIMEOUT`, `BACKOFF_INITIAL` and `BACKOFF_MAX` are checked at
+  `manage.py check` as `django_ox.E010`. Each was read and used unchecked, so
+  a zero or a negative reached the poll loop instead of stopping the deploy.
+- A schedule tick recorded in the future, which a worker with a fast clock can
+  leave behind, made every later pass enqueue a task and roll it back. The
+  task row never survived, but `task_enqueued` fires before the rollback, so
+  receivers saw an enqueue about once a second for a task that did not exist.
+- A signal receiver that raises is no longer charged to the task. A raising
+  `task_started` receiver spent an attempt and left the task retried without
+  its function ever running, and a raising `task_enqueued` receiver made
+  `enqueue()` raise over a row that was already committed, so a caller that
+  retried created a second task.
+- A task run through `run_once()` keeps its lease renewed. Only `run()` started
+  the renewal thread, so anything on that path outliving `LOCK_TIMEOUT` was
+  reclaimed while it was still running.
+- `KeyboardInterrupt` and `SystemExit` reach the caller when a task runs
+  through `run_once()`, instead of being recorded as a failed attempt. On the
+  worker pool they are still recorded, so one task calling `sys.exit()` cannot
+  stop a fleet.
+- The retry delay no longer raises on a deployment with a very large
+  `MAX_ATTEMPTS`. It doubled the initial backoff by the attempt count before
+  applying the cap, and the arithmetic overflowed on the failure path, leaving
+  the row RUNNING for the reaper to find.
+- `manage.py ox_worker` starts on platforms without every POSIX signal. The
+  supervisor named `SIGHUP` in a module-level constant and the command imports
+  it unconditionally, so on Windows the command failed at import, before it
+  could report anything, and the single-process worker the documentation
+  points Windows users at did not start at all.
+
+### Changed
+
+- The recurring-schedule and production pages say which databases give the
+  lease one shared clock. SQLite computes `Now()` inside the process that runs
+  the statement, so every worker uses its own clock there whatever `USE_TZ`
+  says; run SQLite on one host. With `USE_TZ` off, no database gives a shared
+  clock, and two workers whose clocks differ by more than `LOCK_TIMEOUT`
+  reclaim each other's live leases.
+
 ## [1.0.0] - 2026-09-05
 
 This release marks django-ox as production ready. The public API is stable from

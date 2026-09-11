@@ -1,7 +1,11 @@
 # Working in this repository
 
-Facts for anyone, human or tool, making changes to django-ox. User-facing
-guidance is on the docs site: https://oxpull.com/django-ox/agents/
+**If you are adding django-ox to an application, this is the wrong file.**
+Read https://oxpull.com/django-ox/agents/ instead. Nothing below applies to
+using the package, and the install command in the next section is a
+contributor's editable install, not the one you want.
+
+Facts for anyone, human or tool, making changes to django-ox itself.
 
 ## Layout
 
@@ -21,7 +25,7 @@ guidance is on the docs site: https://oxpull.com/django-ox/agents/
   `build_llms_full.py` (regenerates `docs/llms-full.txt`).
 - `benchmarks/`: benchmark harness and published results. Not shipped.
 
-## Setup
+## Contributor setup
 
 ```
 python -m venv .venv

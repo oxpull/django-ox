@@ -506,6 +506,33 @@ act on in the first place. If your callers cannot tolerate seeing it, raise
 `LOCK_TIMEOUT` until a merely slow worker is never reclaimed; the cost is that
 a genuinely dead one takes that much longer to notice.
 
+### Attempts count claims
+
+`attempts` on a task row, the `attempt` key on every log record, and
+`MAX_ATTEMPTS` all count **claims**, not invocations. The number goes up in the
+same statement that hands the task to a worker, before the function is reached.
+
+That is deliberate and it is what makes the bound hold. A worker that is killed
+mid-run reports nothing, so a count that only moved on a reported failure would
+never move for it, and a task that reliably kills its worker would be retried
+without end, every reaper pass another start.
+
+The cost of the choice is the case at the other end. A task that loses its
+worker between the claim and the call has used an attempt without running, and
+a task that does so as many times as `MAX_ATTEMPTS` allows reaches a terminal
+state having never executed. The window is small: a worker claims only when it
+has a free thread and hands the task straight to it. It is not zero.
+
+Two consequences worth knowing:
+
+- **Read `attempts` as "times this was handed out".** If you need "times this
+  actually ran", the per-attempt entries in `errors` are the record of
+  executions that reported something.
+- **A task that must not be retried on infrastructure loss** should be
+  idempotent, the same as it must be under any at-least-once queue. The lease
+  number stops a reaped worker writing its outcome over a later holder's; it
+  does not stop the work that worker already did.
+
 ### Tuning LOCK_TIMEOUT
 
 Set `LOCK_TIMEOUT` above the longest gap you expect between a worker's lease

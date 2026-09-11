@@ -256,7 +256,7 @@ retry. Add options when you have a reason to.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `MAX_ATTEMPTS` | `3` | Executions a task gets before it is marked FAILED. An attempt is consumed when a worker claims the task, so a worker dying mid-run counts too and retries stay bounded. |
+| `MAX_ATTEMPTS` | `3` | Claims a task gets before it is marked FAILED. The count is claims rather than invocations: it goes up in the statement that hands the task to a worker, before the function is reached. That is what keeps retries bounded when a worker dies mid-run, and it is what lets a task that loses its worker between the claim and the call use an attempt without running. See [Attempts count claims](production.md#attempts-count-claims). |
 | `LOCK_TIMEOUT` | `300` | Seconds a RUNNING task's lock may go unrefreshed before the reaper takes the task back. A worker refreshes the lock every `LOCK_TIMEOUT / 3` seconds while it is executing, so this is a limit on how long a worker may be unresponsive, not on how long a task may run. |
 | `BACKOFF_INITIAL` | `5` | Delay in seconds before the first retry. |
 | `BACKOFF_MAX` | `600` | Ceiling on the retry delay, in seconds. |
@@ -1741,6 +1741,33 @@ what reaches this state is a worker that went unresponsive for longer than
 act on in the first place. If your callers cannot tolerate seeing it, raise
 `LOCK_TIMEOUT` until a merely slow worker is never reclaimed; the cost is that
 a genuinely dead one takes that much longer to notice.
+
+### Attempts count claims
+
+`attempts` on a task row, the `attempt` key on every log record, and
+`MAX_ATTEMPTS` all count **claims**, not invocations. The number goes up in the
+same statement that hands the task to a worker, before the function is reached.
+
+That is deliberate and it is what makes the bound hold. A worker that is killed
+mid-run reports nothing, so a count that only moved on a reported failure would
+never move for it, and a task that reliably kills its worker would be retried
+without end, every reaper pass another start.
+
+The cost of the choice is the case at the other end. A task that loses its
+worker between the claim and the call has used an attempt without running, and
+a task that does so as many times as `MAX_ATTEMPTS` allows reaches a terminal
+state having never executed. The window is small: a worker claims only when it
+has a free thread and hands the task straight to it. It is not zero.
+
+Two consequences worth knowing:
+
+- **Read `attempts` as "times this was handed out".** If you need "times this
+  actually ran", the per-attempt entries in `errors` are the record of
+  executions that reported something.
+- **A task that must not be retried on infrastructure loss** should be
+  idempotent, the same as it must be under any at-least-once queue. The lease
+  number stops a reaped worker writing its outcome over a later holder's; it
+  does not stop the work that worker already did.
 
 ### Tuning LOCK_TIMEOUT
 

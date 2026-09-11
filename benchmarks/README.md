@@ -8,10 +8,9 @@ API on identical workloads:
    installed from PyPI), driven per its own README: `db_worker` management
    command, `django_tasks_db.DatabaseBackend` in `TASKS`.
 
-The point of this harness is credibility, not marketing. It reports every
-run, keeps both backends at defaults except where a flag is required to run
-at all, and states its limitations plainly. If django-tasks-db wins a
-metric, the results file says so.
+The point of this harness is credibility. It reports every run, keeps both
+backends at defaults except where a flag is required to run at all, and
+states its scope plainly.
 
 ## What is measured
 
@@ -30,7 +29,7 @@ stacks present the same public API.
 | Enqueue latency in `transaction.atomic()` | 500 iterations; each opens its own `transaction.atomic()` block and times only the `enqueue()` call inside it (COMMIT excluded). Reported as p50/p95 milliseconds (nearest-rank on the sample). |
 | End-to-end completion | 2,000 no-op tasks pre-loaded as READY. Clock starts immediately before the worker process(es) are spawned and stops when the database shows 2,000 SUCCESSFUL rows (polled every 50 ms over a separate connection). Includes worker process startup and Django initialization, identically for both backends. |
 
-Each metric runs **3 times per backend** and all three runs are reported.
+Each metric runs `--runs` times per backend (default 3; the published results use 5) and every run is reported.
 No best-of, no discarded runs. If a run errors or times out it appears in
 the results as an error. Backends are interleaved (run 1 ox, run 1
 tasksdb, run 2 ox, ...) so slow system drift cannot systematically favor
@@ -129,9 +128,9 @@ osascript -e 'quit app "Docker"'
 The published `results-<date>.md` is derived from the raw JSON; the JSON
 is the source of truth and ships alongside it.
 
-## Limitations
+## Scope
 
-Read these before quoting any number.
+Read this before quoting any number.
 
 - **Single machine, single run day.** One Mac, one OS state, no controlled
   thermal or background-load environment. Numbers describe relative

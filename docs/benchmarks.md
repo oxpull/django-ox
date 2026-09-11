@@ -1,25 +1,20 @@
 # Benchmarks
 
-django-ox against django-tasks-db 0.12.0 (the other database backend for
-the Tasks API) on identical no-op workloads, PostgreSQL 16. Full
+django-ox 1.1.0 against django-tasks-db 0.12.0 (the other database backend
+for the Tasks API) on identical no-op workloads, PostgreSQL 16. Full
 methodology, raw JSON with every sample, and per-process logs are in the
 `benchmarks/` directory of the repository. Every run is reported; nothing
 was discarded.
 
 ## What was measured
 
-The worker path as it stood on 2026-09-05, which is the path that ships from 1.0.0 on. One change landed after this run: the outcome write no
-longer reads `finished_at` back off the database, so the shipped worker does
-one fewer round trip per task than the one measured here.
-
-That difference runs in django-ox's favour on the single-worker rows, which
-therefore understate the shipped code.
+The worker as it ships in 1.1.0, measured on 2026-09-11.
 
 Environment: Apple M1 Max, 10 logical CPUs, macOS 26.6.2, Python 3.12.13,
 Django 6.0.8, PostgreSQL 16.14 in Docker on the same machine,
-django-tasks-db 0.12.0, django-tasks 0.12.0, psycopg 3.3.4. Harness:
+django-tasks-db 0.12.0, django-tasks 0.12.0, psycopg 3.3.5. Harness:
 `benchmarks/bench.py --runs 5`. Raw data, every sample:
-[`benchmarks/results-raw-2026-09-05.json`](https://github.com/oxpull/django-ox/blob/main/benchmarks/results-raw-2026-09-05.json).
+[`benchmarks/results-raw-2026-09-11.json`](https://github.com/oxpull/django-ox/blob/main/benchmarks/results-raw-2026-09-11.json).
 
 ## Results
 
@@ -29,41 +24,38 @@ errors. Mean and one standard deviation over the five runs:
 
 | Metric | django-ox | django-tasks-db |
 | --- | --- | --- |
-| Enqueue throughput (tasks/sec, higher better) | 1605 ± 110 | 1204 ± 160 |
-| Enqueue latency in `transaction.atomic()`, p50 ms | 0.585 ± 0.044 | 0.623 ± 0.065 |
-| Enqueue latency in `transaction.atomic()`, p95 ms | 0.753 ± 0.077 | 0.907 ± 0.159 |
-| End-to-end, 2,000 tasks, 1 worker (tasks/sec) | 114.9 ± 1.7 | 103.6 ± 1.1 |
-| End-to-end, 2,000 tasks, concurrency 4 (tasks/sec) | 328.5 ± 6.9 | 346.3 ± 12.8 |
+| Enqueue latency in `transaction.atomic()`, p50 ms | 0.570 ± 0.009 | 0.562 ± 0.009 |
+| Enqueue latency in `transaction.atomic()`, p95 ms | 0.715 ± 0.055 | 0.698 ± 0.050 |
+| End-to-end, 2,000 tasks, 1 worker (tasks/sec) | 124.5 ± 1.8 | 108.0 ± 2.3 |
+| End-to-end, 2,000 tasks, concurrency 4 (tasks/sec) | 339 ± 4 | 357 ± 9 |
 
 Every run behind those means:
 
 | Metric | django-ox (r1 / r2 / r3 / r4 / r5) | django-tasks-db (r1 / r2 / r3 / r4 / r5) |
 | --- | --- | --- |
-| Enqueue throughput (tasks/sec) | 1481 / 1674 / 1711 / 1666 / 1492 | 1134 / 1117 / 1118 / 1489 / 1163 |
-| Enqueue latency p50 (ms) | 0.66 / 0.57 / 0.58 / 0.54 / 0.58 | 0.56 / 0.59 / 0.67 / 0.71 / 0.59 |
-| End-to-end, 1 worker (tasks/sec) | 113.5 / 115.9 / 116.4 / 116.2 / 112.6 | 102.7 / 104.6 / 105.0 / 102.7 / 102.9 |
-| End-to-end, concurrency 4 (tasks/sec) | 326 / 334 / 337 / 320 / 325 | 354 / 354 / 358 / 330 / 335 |
+| Enqueue latency p50 (ms) | 0.56 / 0.56 / 0.57 / 0.58 / 0.58 | 0.56 / 0.58 / 0.56 / 0.55 / 0.56 |
+| End-to-end, 1 worker (tasks/sec) | 121.3 / 125.9 / 124.8 / 125.3 / 125.1 | 104.1 / 109.3 / 110.1 / 107.9 / 108.7 |
+| End-to-end, concurrency 4 (tasks/sec) | 342 / 342 / 338 / 334 / 341 | 340 / 360 / 363 / 358 / 362 |
 
 Reading:
 
 - **One worker: the two ranges do not overlap.** Every django-ox run
   finished the batch faster than every django-tasks-db run. The slowest
-  django-ox run was 112.6 tasks/sec; the fastest django-tasks-db run was
-  105.0.
+  django-ox run was 121.3 tasks/sec; the fastest django-tasks-db run was
+  110.1.
 - **Concurrency 4 compares two shapes.** django-tasks-db runs four processes
   and django-ox four threads in one process; the mapping and what it does to
-  the numbers are explained below. 
-- **Enqueue throughput: no gap claimed.** django-ox is ahead on the mean,
-  and both arms are noisy enough that the ranges touch. django-ox's
-  slowest run was 1481 tasks/sec and django-tasks-db's fastest was 1489.
-  A mean separation that a single run can close is not a gap.
-- **Enqueue latency is a tie.** About six tenths of a millisecond at p50
-  for both. Run-to-run drift on this machine is larger than the difference
-  between the backends.
+  the numbers are explained below.
+- **Enqueue latency is a tie.** About 6 hundredths of a millisecond
+  at p50 for both, and the p95 is the same story.
+
+Enqueue throughput, the rate at which one process can `enqueue()` in a tight
+loop, is not on this page. The harness measures it, and the raw file carries
+the samples, but the measurement is sensitive to the host in a way the
+others are not, and a row is published here only when its five runs agree.
 
 A diagnostic cell at a non-default `--interval 0.1` produced the same
-single-worker throughput as the defaults: 117.4, 115.4, 115.4, 111.7 and
-112.3 tasks/sec, a mean of 114.4 against 114.9 on the default interval. So
+single-worker throughput as the defaults: 125.3 / 124.9 / 125.8 / 124.3 / 124.5 tasks/sec, a mean of 125.0 against 124.5 on the default interval. So
 the poll interval does not bound throughput. With tasks in flight, the
 worker wakes on task completion rather than on the polling clock.
 

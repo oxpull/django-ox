@@ -2086,13 +2086,9 @@ class Worker:
                     # instant before doing the work means the losers do no
                     # work: they raise here and enqueue nothing.
                     #
-                    # Enqueueing first and letting the constraint refuse the
-                    # tick afterwards rolls the task row back, but enqueue()
-                    # saves and fires task_enqueued before the outer block
-                    # unwinds, so every loser announced a task that never
-                    # existed. With N workers on a per-minute schedule that
-                    # is N-1 phantom signals a minute, for as long as the
-                    # fleet runs.
+                    # enqueue() saves and fires task_enqueued before any outer
+                    # rollback could unwind it, which is why the constraint
+                    # has to decide before the enqueue and not after.
                     tick_row = OxScheduleTick.objects.using(self._db_alias).create(
                         schedule_name=schedule.name,
                         scheduled_for=scheduled_for,

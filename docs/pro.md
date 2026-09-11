@@ -54,8 +54,8 @@ part of the tested matrix. Batches have been measured to 1,000,000 members
 in a single batch on all three, with every count checked against the task
 rows rather than against what the API reports about itself.
 
-Sealing a batch that wide is cheap on SQLite and PostgreSQL and expensive
-on MySQL: about 34 ms, 0.7 s and 28 s respectively. Sealing takes a row
+Sealing a batch that wide takes about 34 ms on SQLite, 0.7 s on PostgreSQL
+and 28 s on MySQL. Sealing takes a row
 lock per member on any database that offers one, and a million InnoDB
 locks in a single transaction is what that costs. Reconciling the same
 batch is 4.9 s on SQLite, 0.4 s on PostgreSQL and 7.3 s on MySQL, against

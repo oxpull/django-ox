@@ -159,9 +159,10 @@ Coordination is a database unique constraint on (schedule name, tick time). It
 works like this:
 
 1. Every worker derives the same tick datetimes from the cron expression.
-2. Dispatch wraps the tick-log `INSERT` and the task enqueue in one transaction.
-3. When workers race the same tick, exactly one `INSERT` commits.
-4. The losers hit the constraint and roll back, task row included.
+2. Dispatch writes the tick-log row first, then enqueues the task, in one
+   transaction.
+3. When workers race the same tick, exactly one `INSERT` succeeds.
+4. The losers stop at the constraint and enqueue nothing.
 
 So each tick fires exactly once, whatever the worker count, and dispatch keeps
 working as long as one worker is alive. Scheduling is a property of the workers

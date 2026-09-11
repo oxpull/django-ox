@@ -50,9 +50,9 @@ Reading:
   finished the batch faster than every django-tasks-db run. The slowest
   django-ox run was 112.6 tasks/sec; the fastest django-tasks-db run was
   105.0.
-- **Concurrency 4 goes to django-tasks-db.** 346.3 tasks/sec against
-  django-ox's 328.5, roughly 5% ahead. The two workers are shaped
-  differently here, which is explained below, 
+- **Concurrency 4 compares two shapes.** django-tasks-db runs four processes
+  and django-ox four threads in one process; the mapping and what it does to
+  the numbers are explained below. 
 - **Enqueue throughput: no gap claimed.** django-ox is ahead on the mean,
   and both arms are noisy enough that the ranges touch. django-ox's
   slowest run was 1481 tasks/sec and django-tasks-db's fastest was 1489.

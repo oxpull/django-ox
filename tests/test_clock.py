@@ -65,8 +65,8 @@ class TestLeaseClockAgreesWithColumns:
         # The two sides of this reading come from two clocks: timezone.now()
         # is this process, last_attempted_at was stamped by the database. The
         # gap between the claim and the reading is a few milliseconds, so a
-        # server whose clock is milliseconds ahead -- one on another host, or
-        # one in a VM that drifts from the host it runs on -- reads as a
+        # server whose clock is milliseconds ahead (one on another host, or
+        # one in a VM that drifts from the host it runs on) reads as a
         # negative age for reasons that are nobody's bug. The bound is the
         # same in both directions for that reason. What it is here to catch
         # is a whole UTC offset, an hour at the least, and TOLERANCE is

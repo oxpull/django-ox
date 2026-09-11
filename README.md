@@ -96,8 +96,8 @@ recording the outcome leaves that task to run again. One task in that run
 executed twice for exactly that reason, and no task executed twice without
 a kill to account for it.
 
-Both runs were on 0.3.1. The outcome write has changed since; the benchmarks
-page says what changed and what it does to the numbers.
+The soak ran on 0.3.1 and the throughput matrix on the worker as of
+2026-09-05; the benchmarks page carries the method and the raw data for each.
 
 Thirty-seven assertions ran and all thirty-seven passed. The harness
 design, every assertion and the caveats are in

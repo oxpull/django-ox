@@ -3,10 +3,9 @@ A tick recorded in the future does not re-enqueue on every pass.
 
 The suppression compares the due tick against the newest tick in the log and
 requires that newest one to be in the past, so a clock-skewed worker's future
-write never short-circuits it. Dispatch then enqueues, the unique constraint
-refuses the tick row, and the whole transaction rolls back. But `enqueue()`
-saves and fires `task_enqueued` before that outer block rolls back, so every
-pass emits an enqueue signal for a task that will not exist.
+write never short-circuits it. The tick row is written before the task is
+enqueued, so a pass that loses the constraint enqueues nothing and
+`task_enqueued` fires only for a task that exists.
 """
 
 import logging

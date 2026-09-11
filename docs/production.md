@@ -230,9 +230,8 @@ is per slot:
   second later.
 
 `--processes` is POSIX-only; on Windows run one `ox_worker` per process. It
-expects a process manager above it, like the single worker does; run one `ox_worker` per process there.
-And it does not replace a process manager: the supervisor is a foreground
-process that expects to be restarted itself, like the single worker.
+does not replace a process manager: the supervisor is a foreground process
+that expects to be restarted itself, like the single worker.
 
 ## The lease
 
@@ -549,9 +548,7 @@ go unresponsive.
 refreshes it on every renewal. Every reaper judges that column rather than
 deriving a deadline from whatever it happens to be configured with, so you can
 change `LOCK_TIMEOUT` in a rolling deploy: each row keeps the lease it was
-granted and picks up the new value on its next claim. Without that, two
-settings in one fleet means the shorter one reclaims live work from a worker
-renewing correctly on the longer.
+granted and picks up the new value on its next claim.
 
 The trade is that a lease outlives the configuration that granted it. If you
 grant a very long one by mistake, changing the setting does not shorten the

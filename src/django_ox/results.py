@@ -29,7 +29,7 @@ def task_from_db(db_task: OxTask) -> Task[..., Any]:
     @task). A row whose task_path points at any other importable callable is
     rejected here rather than executed: the worker never calls an arbitrary
     dotted path pulled from the table, only functions the application
-    registered as tasks. The trust model is at https://oxpull.com/django-ox/stability/.
+    registered as tasks. The trust model is in SECURITY.md at https://github.com/oxpull/django-ox.
 
     Raises ImportError if the path no longer resolves, or resolves to a
     non-Task object; callers decide whether that is a hard error (get_result)

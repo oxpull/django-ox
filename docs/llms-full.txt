@@ -590,9 +590,10 @@ Coordination is a database unique constraint on (schedule name, tick time). It
 works like this:
 
 1. Every worker derives the same tick datetimes from the cron expression.
-2. Dispatch wraps the tick-log `INSERT` and the task enqueue in one transaction.
-3. When workers race the same tick, exactly one `INSERT` commits.
-4. The losers hit the constraint and roll back, task row included.
+2. Dispatch writes the tick-log row first, then enqueues the task, in one
+   transaction.
+3. When workers race the same tick, exactly one `INSERT` succeeds.
+4. The losers stop at the constraint and enqueue nothing.
 
 So each tick fires exactly once, whatever the worker count, and dispatch keeps
 working as long as one worker is alive. Scheduling is a property of the workers
@@ -1172,9 +1173,9 @@ function", open since 2020-12-19 with 98 upvotes [^celery-6552].
   one, but has no call that interrupts a particular running task on demand.
   Celery can revoke and terminate a running task, from Flower or the control
   API [^flower].
-- **The queue must live on a different database from your models.** Tasks are
-  stored on the default database. Every django-ox table lives on the database `OxTask` routes to, and a separate queue database would also give up the
-  transactional enqueue.
+- **The queue must live on a different database from your models.** Every django-ox table
+  lives on the database `OxTask` routes to, and a queue on a different
+  database from your models gives up the transactional enqueue.
 - **Throughput beyond what one database comfortably serves.** The
   [benchmarks](benchmarks.md) page gives measured numbers with the method.
   If your workload is above them, a broker-based queue is the right tool, and
@@ -1464,9 +1465,8 @@ is per slot:
   second later.
 
 `--processes` is POSIX-only; on Windows run one `ox_worker` per process. It
-expects a process manager above it, like the single worker does; run one `ox_worker` per process there.
-And it does not replace a process manager: the supervisor is a foreground
-process that expects to be restarted itself, like the single worker.
+does not replace a process manager: the supervisor is a foreground process
+that expects to be restarted itself, like the single worker.
 
 ## The lease
 
@@ -1783,9 +1783,7 @@ go unresponsive.
 refreshes it on every renewal. Every reaper judges that column rather than
 deriving a deadline from whatever it happens to be configured with, so you can
 change `LOCK_TIMEOUT` in a rolling deploy: each row keeps the lease it was
-granted and picks up the new value on its next claim. Without that, two
-settings in one fleet means the shorter one reclaims live work from a worker
-renewing correctly on the longer.
+granted and picks up the new value on its next claim.
 
 The trade is that a lease outlives the configuration that granted it. If you
 grant a very long one by mistake, changing the setting does not shorten the
@@ -2407,9 +2405,9 @@ Reading:
   finished the batch faster than every django-tasks-db run. The slowest
   django-ox run was 112.6 tasks/sec; the fastest django-tasks-db run was
   105.0.
-- **Concurrency 4 goes to django-tasks-db.** 346.3 tasks/sec against
-  django-ox's 328.5, roughly 5% ahead. The two workers are shaped
-  differently here, which is explained below, 
+- **Concurrency 4 compares two shapes.** django-tasks-db runs four processes
+  and django-ox four threads in one process; the mapping and what it does to
+  the numbers are explained below. 
 - **Enqueue throughput: no gap claimed.** django-ox is ahead on the mean,
   and both arms are noisy enough that the ranges touch. django-ox's
   slowest run was 1481 tasks/sec and django-tasks-db's fastest was 1489.
@@ -2723,8 +2721,8 @@ part of the tested matrix. Batches have been measured to 1,000,000 members
 in a single batch on all three, with every count checked against the task
 rows rather than against what the API reports about itself.
 
-Sealing a batch that wide is cheap on SQLite and PostgreSQL and expensive
-on MySQL: about 34 ms, 0.7 s and 28 s respectively. Sealing takes a row
+Sealing a batch that wide takes about 34 ms on SQLite, 0.7 s on PostgreSQL
+and 28 s on MySQL. Sealing takes a row
 lock per member on any database that offers one, and a million InnoDB
 locks in a single transaction is what that costs. Reconciling the same
 batch is 4.9 s on SQLite, 0.4 s on PostgreSQL and 7.3 s on MySQL, against
@@ -3020,20 +3018,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 index the claim reads and adds a second one; `0006_lease_expiry` adds a
 nullable column and its index. On PostgreSQL and MySQL, building an index
 takes a lock that blocks enqueues and claims for the duration. On a large task
-table, do it by hand and fake the migrations: `DROP INDEX CONCURRENTLY
-ox_dequeue_idx`, then `CREATE INDEX CONCURRENTLY` for the three indexes, then
-`migrate --fake django_ox 0006`. `sqlmigrate` prints the exact statements for
-each migration.
+table, build 0005's two indexes by hand and fake that migration: `DROP INDEX
+CONCURRENTLY ox_dequeue_idx`, `CREATE INDEX CONCURRENTLY` for
+`ox_dequeue_idx` and `ox_dequeue_queue_idx` as `sqlmigrate django_ox 0005`
+prints them, then `migrate --fake django_ox 0005`. Let 0006 run: it adds a
+nullable column, which is a catalogue change, and one index on a column that
+is empty at that moment.
 
 ### Added
 
 - `lease_expires_at` on the task row: when the lease stops being valid,
   written by the worker that took it and refreshed on every renewal. Every
   reaper judges that column instead of deriving a deadline from its own
-  `LOCK_TIMEOUT`, so the setting can be changed in a rolling deploy. Two
-  timeouts in one fleet used to mean the shorter one reclaiming live work from
-  a worker renewing correctly on the longer, and the lease number protects that
-  worker's finish write rather than the work it is doing.
+  `LOCK_TIMEOUT`, so the setting can be changed in a rolling deploy. 
 
   A row claimed before the column existed has it empty, and the reaper keeps
   comparing `locked_at` against its own timeout for those. The first renewal
@@ -3044,7 +3041,7 @@ each migration.
   lease granted with a timeout that turned out to be wrong outlives the
   configuration that granted it; this is how to shorten one. It does not stop
   the task.
-- `lease_expires_at` appears in the admin's change list and its Lease fieldset.
+- `lease_expires_at` appears in the admin's Lease fieldset.
 
 ### Fixed
 

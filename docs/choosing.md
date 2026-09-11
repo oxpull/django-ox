@@ -38,9 +38,9 @@ function", open since 2020-12-19 with 98 upvotes [^celery-6552].
   one, but has no call that interrupts a particular running task on demand.
   Celery can revoke and terminate a running task, from Flower or the control
   API [^flower].
-- **The queue must live on a different database from your models.** Tasks are
-  stored on the default database. Every django-ox table lives on the database `OxTask` routes to, and a separate queue database would also give up the
-  transactional enqueue.
+- **The queue must live on a different database from your models.** Every django-ox table
+  lives on the database `OxTask` routes to, and a queue on a different
+  database from your models gives up the transactional enqueue.
 - **Throughput beyond what one database comfortably serves.** The
   [benchmarks](benchmarks.md) page gives measured numbers with the method.
   If your workload is above them, a broker-based queue is the right tool, and

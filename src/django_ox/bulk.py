@@ -3,7 +3,8 @@ Enqueue many calls of one task in a single INSERT.
 
 ``enqueue_many(task, calls)`` is the bulk form of ``task.enqueue()``. It
 takes one ``django.tasks`` task and a list of ``(args, kwargs)`` pairs,
-writes one row per pair with ``bulk_create`` on the default connection, and
+writes one row per pair with ``bulk_create`` on the connection ``OxTask``
+routes to, and
 returns the ``TaskResult`` list in the order the calls were given. Each row
 is serialised exactly as ``enqueue()`` serialises it, so the worker path
 does not know the difference.

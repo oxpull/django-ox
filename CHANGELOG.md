@@ -11,20 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 index the claim reads and adds a second one; `0006_lease_expiry` adds a
 nullable column and its index. On PostgreSQL and MySQL, building an index
 takes a lock that blocks enqueues and claims for the duration. On a large task
-table, do it by hand and fake the migrations: `DROP INDEX CONCURRENTLY
-ox_dequeue_idx`, then `CREATE INDEX CONCURRENTLY` for the three indexes, then
-`migrate --fake django_ox 0006`. `sqlmigrate` prints the exact statements for
-each migration.
+table, build 0005's two indexes by hand and fake that migration: `DROP INDEX
+CONCURRENTLY ox_dequeue_idx`, `CREATE INDEX CONCURRENTLY` for
+`ox_dequeue_idx` and `ox_dequeue_queue_idx` as `sqlmigrate django_ox 0005`
+prints them, then `migrate --fake django_ox 0005`. Let 0006 run: it adds a
+nullable column, which is a catalogue change, and one index on a column that
+is empty at that moment.
 
 ### Added
 
 - `lease_expires_at` on the task row: when the lease stops being valid,
   written by the worker that took it and refreshed on every renewal. Every
   reaper judges that column instead of deriving a deadline from its own
-  `LOCK_TIMEOUT`, so the setting can be changed in a rolling deploy. Two
-  timeouts in one fleet used to mean the shorter one reclaiming live work from
-  a worker renewing correctly on the longer, and the lease number protects that
-  worker's finish write rather than the work it is doing.
+  `LOCK_TIMEOUT`, so the setting can be changed in a rolling deploy. 
 
   A row claimed before the column existed has it empty, and the reaper keeps
   comparing `locked_at` against its own timeout for those. The first renewal
@@ -35,7 +34,7 @@ each migration.
   lease granted with a timeout that turned out to be wrong outlives the
   configuration that granted it; this is how to shorten one. It does not stop
   the task.
-- `lease_expires_at` appears in the admin's change list and its Lease fieldset.
+- `lease_expires_at` appears in the admin's Lease fieldset.
 
 ### Fixed
 

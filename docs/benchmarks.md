@@ -114,43 +114,42 @@ claim.
 
 ## Reliability under load
 
-Speed is not the product claim; the durability construction is. A
-separate soak and chaos harness ran django-ox 0.3.1 for 21.5 minutes of
-sustained mixed load on PostgreSQL 16: 37,804 tasks across three
-scenarios, including 9 minutes in which a random worker was SIGKILLed
-every 20 to 45 seconds (18 kills total, 30 interrupted executions).
-Thirty-seven assertions ran and all thirty-seven passed. Every task
-reached a terminal state, every interrupted execution was re-executed
-inside the documented bound (slowest reclaim 19.7 s against a bound of
-37.5 s), and retry counts stayed bounded on every row.
+A separate
+soak and chaos harness ran django-ox 1.1.0 for 21.5 minutes of sustained
+mixed load on PostgreSQL 16: 37,804 tasks across three scenarios,
+including 9 minutes in which a random worker was SIGKILLed every 20 to 45
+seconds (18 kills total, 27 interrupted executions). Forty assertions
+ran and all forty passed. Every task reached a terminal state, every
+interrupted execution was re-executed inside the reclaim bound (slowest reclaim 19.6 s against a bound of 37.5 s;
+the harness runs `LOCK_TIMEOUT` at 15 s so that reclaims happen inside the
+run, where the shipped default is 300 s), retry counts stayed bounded on every
+row, and no row was marked LOST.
 
-One task executed twice, in the chaos scenario, after its worker was
-killed between finishing the task and recording the outcome. That is what
-at-least-once execution means, and it is the reason the harness asks
-whether a second execution is attributable to a kill rather than whether
-one happened: across 37,804 tasks, zero double executions could not be
-traced to a kill, and no task ran twice without one.
+No task executed twice this run. Execution is at-least-once, and a worker
+killed between finishing a task and recording the outcome leaves that task
+to run again; whether a kill lands in that window is a matter of timing,
+and the harness asserts the property that holds regardless: a second
+execution is only ever attributable to a kill.
 
-Latency under kill-chaos was within a millisecond of the undisturbed
-baseline at the median (p50 0.123 s against 0.122 s).
+Latency under kill-chaos was within two milliseconds of the undisturbed
+baseline at the median (p50 0.124 s against 0.126 s), and worker memory
+stayed flat through the twelve-minute steady scenario.
 
 The full report, including the harness design, every assertion, and the
 caveats, is in
-[`benchmarks/SOAK-2026-09-01.md`](https://github.com/oxpull/django-ox/blob/main/benchmarks/SOAK-2026-09-01.md).
-The [previous run](https://github.com/oxpull/django-ox/blob/main/benchmarks/SOAK-2026-08-16.md)
-measured 0.1.0, which predates the lease fencing added in 0.2.0. Neither
-soak covers the worker path measured in the tables above, which changed
-after 0.3.1.
+[`benchmarks/SOAK-2026-09-11.md`](https://github.com/oxpull/django-ox/blob/main/benchmarks/SOAK-2026-09-11.md),
+written from the raw data beside it. The
+[2026-09-01 run](https://github.com/oxpull/django-ox/blob/main/benchmarks/SOAK-2026-09-01.md)
+on 0.3.1 used the same kill schedule.
 
 ## What to take from this
 
 On the matrix above, django-ox finished the single-worker batch faster than
 django-tasks-db in every run, tied it on in-transaction enqueue latency, and at
 concurrency 4 the two worker shapes were within five percent. Under sustained
-load and repeated worker kills, django-ox 0.3.1 held its documented guarantees.
+load and repeated worker kills, django-ox 1.1.0 held its documented guarantees.
 
 Throughput on no-op tasks is the floor, not the reason to choose django-ox. The
 claim is the durability construction: transactional enqueue, at-least-once
 execution with a reaper, bounded retries with per-attempt tracebacks. The
-benchmark shows that the durability construction does not cost throughput: two
-statements per task, and the single-worker batch finishes 15 percent sooner.
+benchmark shows that the durability construction does not cost throughput: two statements per task, and 15 percent more throughput with one worker.

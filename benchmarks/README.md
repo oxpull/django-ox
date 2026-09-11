@@ -165,7 +165,7 @@ side table, so at-least-once vs exactly-once behaviour is measured from
 side effects and asserted from the database afterwards. It runs against
 the same PostgreSQL 16 container the test suite uses (`ox-pg`, port 54329;
 see CONTRIBUTING.md for the docker run command) with its own `soak_ox`
-database and the `soaksite/` settings module. Methodology, parameters, and results: [SOAK-2026-09-01.md](SOAK-2026-09-01.md),
+database and the `soaksite/` settings module. Methodology, parameters, and results: [SOAK-2026-09-11.md](SOAK-2026-09-11.md),
 raw data in `soak-results-raw-<date>.json`.
 
 ## Files

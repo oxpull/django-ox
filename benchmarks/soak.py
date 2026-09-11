@@ -30,7 +30,8 @@ directory, against the standing ox-pg container:
 
 Raw results (exact invocation, per-scenario config, every sample, every
 kill event, every assertion) checkpoint to soak-results-raw-<date>.json
-after each scenario; per-process logs land in logs/. The published SOAK-<date>.md is written from the raw JSON.
+after each scenario; per-process logs land in logs/. The published
+SOAK-<date>.md is written from the raw JSON.
 """
 
 import argparse
@@ -81,7 +82,10 @@ OVERDUE_AFTER = LOCK_TIMEOUT + REAP_INTERVAL + 5.0
 WORKER_POLL_INTERVAL = 0.2
 SAMPLE_INTERVAL = 5.0
 TICK = 0.5
-TERMINAL = ("SUCCESSFUL", "FAILED")
+# LOST is terminal for automatic retry: the reaper never revisits it, it is
+# not pending for completion counting, and it reads as FAILED through the
+# result API. DISCARDED is an operator closing a row without running it.
+TERMINAL = ("SUCCESSFUL", "FAILED", "LOST", "DISCARDED")
 
 # Producer mix (name, weight). quick gets a jittered per-enqueue duration;
 # the rest use their defaults from soaksite/tasks.py.
@@ -282,7 +286,7 @@ def db_counts() -> dict:
         ).fetchone()[0]
         ledger = conn.execute(f"SELECT count(*) FROM {LEDGER_TABLE}").fetchone()[0]
     counts = {status: n for status, n in rows}
-    for status in ("READY", "RUNNING", "SUCCESSFUL", "FAILED"):
+    for status in ("READY", "RUNNING", "SUCCESSFUL", "FAILED", "LOST"):
         counts.setdefault(status, 0)
     counts["overdue_running"] = overdue
     counts["ledger_rows"] = ledger
@@ -631,8 +635,12 @@ def analyze(
             )
         else:
             row = tasks[execution["task_id"]]
+            # An interrupted final attempt is written LOST by the reaper: the
+            # lease was lost with no attempts left and nothing observed the
+            # outcome. That is a resolution, not an unresolved execution.
             abandoned = (
-                row["status"] == "FAILED" and "TaskAbandoned" in row["errors"]
+                row["status"] in ("FAILED", "LOST")
+                and "TaskAbandoned" in row["errors"]
             )
             if not abandoned:
                 unresolved.append(execution["task_id"])
@@ -674,14 +682,41 @@ def analyze(
     for t in tasks.values():
         per_type[t["type"]][t["status"]] += 1
     doomed_rows = [t for t in tasks.values() if t["type"] == "doomed"]
+    # A doomed task ends FAILED, or LOST when a kill interrupted its final
+    # attempt: the reaper cannot know the attempt would have failed, so it
+    # records the lost lease rather than guessing an outcome.
     check(
-        "all doomed tasks FAILED with attempts == max_attempts",
+        "all doomed tasks exhausted their attempts, FAILED or LOST after a kill",
         all(
-            t["status"] == "FAILED" and t["attempts"] == t["max_attempts"]
+            t["attempts"] == t["max_attempts"]
+            and (
+                t["status"] == "FAILED"
+                or (t["status"] == "LOST" and "TaskAbandoned" in t["errors"])
+            )
             for t in doomed_rows
         ),
         f"doomed: {len(doomed_rows)}, "
-        f"failed: {sum(t['status'] == 'FAILED' for t in doomed_rows)}",
+        f"failed: {sum(t['status'] == 'FAILED' for t in doomed_rows)}, "
+        f"lost after a kill: {sum(t['status'] == 'LOST' for t in doomed_rows)}",
+    )
+    # 9. LOST is reachable only one way: a kill landed on an attempt with
+    # none left, the reaper found the lease expired, and no outcome was ever
+    # observed. Every LOST row must carry all three marks.
+    interrupted_task_ids = {e["task_id"] for e in interrupted}
+    lost_rows = [(tid, t) for tid, t in tasks.items() if t["status"] == "LOST"]
+    unexplained_lost = [
+        tid
+        for tid, t in lost_rows
+        if not (
+            t["attempts"] == t["max_attempts"]
+            and "TaskAbandoned" in t["errors"]
+            and tid in interrupted_task_ids
+        )
+    ]
+    check(
+        "LOST only from a kill on the final attempt",
+        not unexplained_lost,
+        f"lost: {len(lost_rows)}, unexplained: {len(unexplained_lost)}",
     )
     organic_failures = [
         tid

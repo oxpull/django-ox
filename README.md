@@ -83,33 +83,29 @@ limit, keeping the full traceback of every attempt.
 
 ## Measured under worker kills
 
-A soak and chaos harness ran 0.3.1 for 21.5 minutes of sustained mixed load
-on PostgreSQL 16: 37,804 tasks, nine minutes of which SIGKILLed a random
-worker every 20 to 45 seconds. Eighteen kills, thirty interrupted
-executions. Every task reached a terminal state, every interrupted
-execution was re-executed inside the documented reclaim bound, and the
-median latency under kills stayed within a millisecond of the
+A soak and chaos harness ran django-ox 1.1.0 for 21.5 minutes of sustained
+mixed load on PostgreSQL 16: 37,804 tasks, nine minutes of which SIGKILLed a random worker every 20 to 45 seconds.
+Eighteen kills in all, 27 interrupted executions. Every task reached a terminal state, every interrupted execution
+was re-executed inside the reclaim bound, no task executed twice in this
+run, and the median latency under kills stayed within two milliseconds of the
 undisturbed baseline.
 
 Execution is at-least-once, so a worker killed between finishing a task and
-recording the outcome leaves that task to run again. One task in that run
-executed twice for exactly that reason, and no task executed twice without
-a kill to account for it.
+recording the outcome leaves that task to run again. The harness asserts
+that a second execution is only ever attributable to a kill, and it held.
 
-Soak: django-ox 0.3.1, 2026-09-01. Throughput matrix below: django-ox 1.1.0,
-2026-09-11. The benchmarks page carries the method and the raw data for each.
-
-Thirty-seven assertions ran and all thirty-seven passed. The harness
-design, every assertion and the caveats are in
-[SOAK-2026-09-01.md](https://github.com/oxpull/django-ox/blob/main/benchmarks/SOAK-2026-09-01.md),
+Forty assertions ran and all forty passed. The harness design, every
+assertion and the caveats are in
+[SOAK-2026-09-11.md](https://github.com/oxpull/django-ox/blob/main/benchmarks/SOAK-2026-09-11.md),
 written from
-[the raw data](https://github.com/oxpull/django-ox/blob/main/benchmarks/soak-results-raw-2026-09-01.json).
+[the raw data](https://github.com/oxpull/django-ox/blob/main/benchmarks/soak-results-raw-2026-09-11.json).
+The soak and the comparison below both ran on 1.1.0 on 2026-09-11.
 
 ## Measured against the alternative
 
 Against `django-tasks-db` on PostgreSQL 16, 2,000 no-op tasks, one worker,
 five runs per arm on one machine: django-ox 1.1.0 completed the batch at about 125 tasks per second against
-108, five runs each. Every one of the five django-ox runs beat every one of
+108. Every one of the five django-ox runs beat every one of
 the five control runs; the slowest was 121.3 and their fastest was 110.1. In-transaction enqueue latency was a tie at about
 six tenths of a millisecond at p50, and django-ox enqueued faster on the mean.
 

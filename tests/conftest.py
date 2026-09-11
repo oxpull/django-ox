@@ -1,5 +1,6 @@
 import contextlib
 import os
+import pathlib
 import shutil
 import signal
 import subprocess
@@ -9,9 +10,34 @@ import time
 
 import pytest
 
+import django_ox
 from django_ox.worker import Worker
 
 from . import tasks
+
+
+def _assert_testing_this_checkout() -> None:
+    """
+    Fail loudly if the suite imported django_ox from somewhere else.
+
+    The shared venv installs django-ox as an editable pointing at one
+    checkout, so running pytest from a second one - a git worktree, a
+    clone - silently tests the first one's source instead of the code in
+    front of you. A passing suite then says nothing about the tree you are
+    editing, which has already happened here.
+    """
+    here = pathlib.Path(__file__).resolve().parent.parent
+    imported = pathlib.Path(django_ox.__file__).resolve()
+    if here not in imported.parents:
+        raise RuntimeError(
+            f"django_ox was imported from {imported}, which is outside the "
+            f"checkout under test at {here}. Run pytest with "
+            f"PYTHONPATH={here / 'src'} so this tree wins over the editable "
+            "install, or the results describe the wrong source."
+        )
+
+
+_assert_testing_this_checkout()
 
 
 def _descends_from(pid, ancestor):

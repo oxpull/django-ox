@@ -904,9 +904,13 @@ class Worker:
             setattr(db_task, name, value)
         return True
 
-    def execute(self, db_task: OxTask) -> None:
+    def execute(self, db_task: OxTask, *, inline: bool = False) -> None:
         """
         Run a claimed (RUNNING, locked) task to a terminal or retry state.
+
+        `inline` says this is running on the caller's own thread rather than
+        on the pool, which decides what happens to an exception that was
+        aimed at the process rather than at the task. See _run_attempt.
 
         Per-attempt bookkeeping (started_at, last_attempted_at, worker_ids)
         was already written by the claim UPDATE. The (pk, lease_epoch) pair
@@ -920,14 +924,14 @@ class Worker:
             self._in_flight.add(held)
             self._running_on[ident] = held
         try:
-            self._run_attempt(db_task)
+            self._run_attempt(db_task, inline=inline)
         finally:
             with self._in_flight_lock:
                 self._in_flight.discard(held)
                 if self._running_on.get(ident) == held:
                     del self._running_on[ident]
 
-    def _run_attempt(self, db_task: OxTask) -> None:
+    def _run_attempt(self, db_task: OxTask, *, inline: bool = False) -> None:
         from .results import task_from_db, task_result_from_db
 
         started = time.monotonic()
@@ -983,6 +987,19 @@ class Worker:
             )
             self._discard_connections()
             self._handle_failure(db_task, exc, duration_ms)
+        except (KeyboardInterrupt, SystemExit) as exc:
+            # Aimed at the process, not at this task. On the pool it is
+            # recorded as a failed attempt and kept there deliberately: one
+            # task calling sys.exit() must not be able to stop a fleet, and
+            # raising out of a pool thread would end only that thread anyway.
+            #
+            # Inline is the opposite. run_once() is called from somebody
+            # else's process, and swallowing their Ctrl-C into a task failure
+            # takes an interrupt they aimed at their own program and files it
+            # against the work.
+            if inline:
+                raise
+            self._handle_failure(db_task, exc, _elapsed_ms(started))
         except BaseException as exc:
             self._handle_failure(db_task, exc, _elapsed_ms(started))
         else:
@@ -1499,8 +1516,15 @@ class Worker:
     def recycling(self) -> bool:
         """
         True once the backstop has given up on a thread. run() then drains
-        and returns, and the process should exit with RECYCLE_EXIT_CODE
-        via os._exit, because the stuck thread would block a normal exit.
+        and returns, and the process must exit with RECYCLE_EXIT_CODE via
+        os._exit, because the stuck thread is not a daemon and would block a
+        normal exit at interpreter shutdown, which is the exact wait the
+        recycle exists to end.
+
+        `manage.py ox_worker` does that, and the supervisor reads the code and
+        replaces the child. Anyone embedding Worker.run() has to do it too:
+        returning from run() is not the end of it, and a caller who simply
+        falls out of main() hangs on the thread that was abandoned.
         """
         return self._recycling
 
@@ -1848,11 +1872,34 @@ class Worker:
     # -- lifecycle ---------------------------------------------------------
 
     def run_once(self) -> bool:
-        """Claim and execute a single task inline. Returns True if one ran."""
+        """
+        Claim and execute a single task inline. Returns True if one ran.
+
+        Renewed for the duration, the same as a task on the pool. `execute()`
+        puts the attempt in the renewal set, but only `run()` starts the
+        thread that services it, so a task run this way used to hold a lease
+        nothing refreshed: anything outliving LOCK_TIMEOUT was reaped
+        mid-flight and handed to a real worker while this call was still
+        inside the function. There is no underscore on this method and its
+        callers read it as public, so refusing long work here would be
+        publishing the trap rather than closing it.
+        """
         db_task = self.claim_one()
         if db_task is None:
             return False
-        self.execute(db_task)
+        stop = Event()
+        renewer = Thread(
+            target=self._renewal_loop,
+            args=(stop,),
+            name="ox-renew-inline",
+            daemon=True,
+        )
+        renewer.start()
+        try:
+            self.execute(db_task, inline=True)
+        finally:
+            stop.set()
+            renewer.join(timeout=self.renew_interval + 5)
         return True
 
     def request_stop(self) -> None:

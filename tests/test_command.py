@@ -209,3 +209,39 @@ def test_worker_args_forward_settings_and_pythonpath(tmp_path, monkeypatch):
         "--pythonpath",
         str(tmp_path.resolve() / "src"),
     ]
+
+
+class TestTheRecycleExitCodeIsPinned:
+    """
+    The exit code is the seam between the worker and the supervisor: the
+    command calls `os._exit(RECYCLE_EXIT_CODE)` and the supervisor reads that
+    number to tell a recycle from a crash. Nothing asserted the value, so a
+    change on either side would silently become a crash loop.
+    """
+
+    def test_the_code_is_75(self):
+        from django_ox.timeouts import RECYCLE_EXIT_CODE
+
+        assert RECYCLE_EXIT_CODE == 75
+
+    def test_the_command_exits_with_it_when_recycling(self):
+        import inspect
+
+        from django_ox.management.commands import ox_worker
+
+        source = inspect.getsource(ox_worker)
+        assert "os._exit(RECYCLE_EXIT_CODE)" in source, (
+            "the command no longer forces the exit, so an abandoned thread "
+            "blocks interpreter shutdown and the supervisor never gets its "
+            "replacement"
+        )
+
+    def test_the_supervisor_reads_the_same_code(self):
+        import inspect
+
+        from django_ox import supervisor
+
+        assert "RECYCLE_EXIT_CODE" in inspect.getsource(supervisor), (
+            "the supervisor stopped recognising a recycle, so it reads one "
+            "as a crash and spends its restart budget"
+        )

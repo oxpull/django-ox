@@ -201,3 +201,97 @@ class TestTheWatchdogThreadSurvivesAFailedRecord:
             "attempt already armed lost its deadline and its grace"
         )
         assert events(caplog, "watchdog_error"), "the failure was silent"
+
+
+class TestTheBackoffArithmeticStaysInRange:
+    """
+    `attempts` is a PositiveSmallIntegerField, so it reaches 32767. The delay
+    doubled the initial backoff by `attempts - 1` and only then took the
+    minimum, so a large `MAX_ATTEMPTS` raised OverflowError converting a value
+    the `min()` was about to discard. It raised inside `_handle_failure`, on
+    the failure path, leaving the row RUNNING until the reaper took it.
+    """
+
+    @pytest.mark.parametrize("attempts", [1, 2, 10, 64, 1100, 32767])
+    def test_a_failure_is_recorded_however_many_attempts_have_gone(
+        self, settings, attempts
+    ):
+        # A real backoff, not the zero the other fixtures use: 0 * (2 ** n) is
+        # 0 whatever n is, so a worker with no backoff never reaches the
+        # float conversion that overflows and the whole case is invisible.
+        settings.TASKS = {
+            "default": {
+                "BACKEND": "django_ox.backend.OxBackend",
+                "QUEUES": ["default"],
+                "OPTIONS": {},
+            }
+        }
+        worker = Worker(backoff_initial=5.0, backoff_max=600.0)
+        result = tasks.add.enqueue(1, 2)
+        OxTask.objects.filter(id=result.id).update(
+            max_attempts=32767, attempts=attempts
+        )
+        claimed = OxTask.objects.get(id=result.id)
+        claimed.status = OxTask.Status.RUNNING
+        claimed.locked_by = worker.worker_id
+        claimed.save()
+
+        worker._handle_failure(claimed, ValueError("nope"), 1)
+        row = OxTask.objects.get(id=result.id)
+        # READY with a retry, or FAILED once the attempts are spent. What
+        # matters is that the arithmetic did not raise and leave it RUNNING,
+        # where only the reaper could recover it.
+        assert row.status in (OxTask.Status.READY, OxTask.Status.FAILED), (
+            f"the failure path left the row {row.status}"
+        )
+
+    def test_the_delay_is_still_bounded_by_backoff_max(self, settings):
+        settings.TASKS = {
+            "default": {
+                "BACKEND": "django_ox.backend.OxBackend",
+                "QUEUES": ["default"],
+                "OPTIONS": {},
+            }
+        }
+        worker = Worker(backoff_initial=5.0, backoff_max=600.0)
+        result = tasks.add.enqueue(1, 2)
+        OxTask.objects.filter(id=result.id).update(max_attempts=32767, attempts=40)
+        claimed = OxTask.objects.get(id=result.id)
+        claimed.status = OxTask.Status.RUNNING
+        claimed.locked_by = worker.worker_id
+        claimed.save()
+        before = timezone.now()
+        worker._handle_failure(claimed, ValueError("nope"), 1)
+        row = OxTask.objects.get(id=result.id)
+        assert row.run_after is not None
+        assert (row.run_after - before).total_seconds() <= worker.backoff_max + 1
+
+
+class TestThePrivateDjangoAttributesStillExist:
+    """
+    `_discard_connections` resets five private attributes on Django's
+    connection wrapper. All five exist today; the package supports Django 5.2
+    LTS through 6.1, and a rename inside that window would make the reset a
+    no-op silently: the connection stays closed-inside-a-transaction, the
+    outcome write fails, the lease expires, and the task is retried after the
+    function already ran.
+    """
+
+    @pytest.mark.parametrize(
+        "attribute",
+        [
+            "in_atomic_block",
+            "savepoint_ids",
+            "atomic_blocks",
+            "needs_rollback",
+            "closed_in_transaction",
+        ],
+    )
+    def test_the_attribute_is_there(self, attribute):
+        from django.db import connections
+
+        wrapper = connections["default"]
+        assert hasattr(wrapper, attribute), (
+            f"Django no longer has BaseDatabaseWrapper.{attribute}, so "
+            "_discard_connections silently stops resetting it"
+        )

@@ -846,7 +846,14 @@ class Worker:
         enough for the reaper to requeue the row matches nothing and its
         UPDATE touches zero rows instead of overwriting whatever happened
         next. Handovers are the only thing that moves the number, and every
-        handover moves it.
+        handover that puts the row back on the queue moves it.
+
+        One deliberately does not: the reaper's exhausted branch writes LOST
+        and leaves the epoch alone, and says why. LOST is an open question
+        rather than a settled outcome, and the holder of that epoch is the
+        only party who could still answer it, so it keeps the right to write
+        over the top. Nothing can re-claim such a row, because the claim
+        filters on READY, so no second execution can share the epoch.
 
         WRITABLE_STATUSES is a second lock on the same door. The epoch alone
         is sufficient given that every handover bumps it, and this condition
@@ -1617,10 +1624,18 @@ class Worker:
                 ),
             )
         else:
-            delay = min(
-                self.backoff_initial * (2 ** (db_task.attempts - 1)),
-                self.backoff_max,
-            )
+            # The exponent is capped before the multiplication, not after.
+            # `attempts` is a PositiveSmallIntegerField, so it can reach
+            # 32767, and 2 ** 32766 raised OverflowError converting to float
+            # while computing a value the min() was about to throw away. It
+            # raised inside _handle_failure, on the failure path, so the row
+            # stayed RUNNING until the reaper took it: a deployment with a
+            # large MAX_ATTEMPTS turned every failure into a lost lease.
+            #
+            # Capping at 64 doublings is far past any backoff_max anyone
+            # configures and keeps the arithmetic in range.
+            doublings = min(max(db_task.attempts - 1, 0), 64)
+            delay = min(self.backoff_initial * (2**doublings), self.backoff_max)
             if not self._write_outcome(
                 db_task,
                 status=OxTask.Status.READY,

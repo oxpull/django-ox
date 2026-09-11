@@ -473,6 +473,8 @@ class Worker:
         # Set once the worker has said that a tracing tool is holding
         # timeouts to the backstop, so it is said once and not per attempt.
         self._backstop_only_notice = False
+        # Said once per worker, not once per claim.
+        self._claim_filter_notice = False
         self._backstop_only_lock = Lock()
         if self.timeouts.enabled and _inject_async_exc is None:
             self._backstop_only_notice = True
@@ -540,6 +542,48 @@ class Worker:
         """
         return "", {}
 
+    def _postgresql_honours_the_claim_filter(self) -> bool:
+        """
+        May the single-statement PostgreSQL claim be used?
+
+        Only when this worker's claim filter reaches it. The fast path builds
+        its own SQL, so it reads `claim_filter_sql()` and knows nothing about
+        `claim_filter_q()`. A subclass that overrides the queryset hook alone
+        therefore narrowed SQLite and MySQL and claimed the very rows it meant
+        to exclude on PostgreSQL, with nothing raised and nothing logged: the
+        one shape this project treats as the most serious kind of defect, a
+        mechanism that holds on two databases and silently does nothing on the
+        third.
+
+        Falling back to the `SELECT ... FOR UPDATE SKIP LOCKED` path rather
+        than refusing to start. Both hooks are a published stability surface,
+        so a subclass that works today on two databases has to keep working;
+        it gives up one statement per claim on PostgreSQL and gets the
+        exclusion it asked for. A subclass that implements both keeps the fast
+        path.
+        """
+        if self.claim_filter_q() is None:
+            return True
+        fragment, _ = self.claim_filter_sql()
+        if fragment:
+            return True
+        if not self._claim_filter_notice:
+            self._claim_filter_notice = True
+            logger.warning(
+                "%s overrides claim_filter_q() but not claim_filter_sql(), so "
+                "the single-statement PostgreSQL claim cannot apply it. Using "
+                "the SELECT ... FOR UPDATE SKIP LOCKED path instead, which "
+                "costs one extra statement per claim. Implement "
+                "claim_filter_sql() to keep the faster path.",
+                type(self).__name__,
+                extra={
+                    "event": "claim_filter_sql_missing",
+                    "worker_id": self.worker_id,
+                    "worker_class": type(self).__name__,
+                },
+            )
+        return False
+
     def _ready_queryset(self) -> QuerySet[OxTask]:
         # run_after stays on process time, on both sides of this comparison
         # and in the retry that writes it. Database-side time is the right
@@ -550,8 +594,10 @@ class Worker:
         # for up to a millisecond (measured: 86 of 200). Skew in run_after
         # only makes a retry early or late; mixing the two clocks across a
         # comparison would be worse than either clock consistently.
-        queryset = OxTask.objects.filter(status=OxTask.Status.READY).filter(
-            Q(run_after__isnull=True) | Q(run_after__lte=timezone.now())
+        queryset = (
+            OxTask.objects.using(self._db_alias)
+            .filter(status=OxTask.Status.READY)
+            .filter(Q(run_after__isnull=True) | Q(run_after__lte=timezone.now()))
         )
         if self.queues:
             queryset = queryset.filter(queue_name__in=self.queues)
@@ -588,7 +634,12 @@ class Worker:
             queue_clause=queue_clause,
             extra_clause=extra_clause,
         )
-        rows = OxTask.objects.raw(
+        # db_manager, not objects.raw: a RawQuerySet routes through
+        # db_for_read, and unlike select_for_update() it does not mark itself
+        # for write, so Django has no way to know this SQL is an UPDATE. With a
+        # read replica in the router the claim either raises on a read-only
+        # standby or lands off-primary, and neither is a claim.
+        rows = OxTask.objects.db_manager(self._db_alias).raw(
             sql,
             {
                 "running": OxTask.Status.RUNNING,
@@ -619,7 +670,11 @@ class Worker:
     def _claim_one(self) -> OxTask | None:
         connection = connections[self._db_alias]
         skip_locked = connection.features.has_select_for_update_skip_locked
-        if connection.vendor == "postgresql" and skip_locked:
+        if (
+            connection.vendor == "postgresql"
+            and skip_locked
+            and self._postgresql_honours_the_claim_filter()
+        ):
             return self._claim_one_postgresql(timezone.now())
         if skip_locked:
             with transaction.atomic(using=self._db_alias):
@@ -628,7 +683,7 @@ class Worker:
                 )
                 if candidate is None:
                     return None
-                OxTask.objects.filter(pk=candidate.pk).update(
+                OxTask.objects.using(self._db_alias).filter(pk=candidate.pk).update(
                     **self._claim_fields(candidate)
                 )
                 # The claim wrote database-side timestamps, which cannot be
@@ -644,12 +699,16 @@ class Worker:
         # writes.
         for candidate in self._ready_queryset()[:CLAIM_BATCH_SIZE]:
             granted_epoch = candidate.lease_epoch + 1
-            claimed = OxTask.objects.filter(
-                pk=candidate.pk,
-                status=OxTask.Status.READY,
-                attempts=candidate.attempts,
-                lease_epoch=candidate.lease_epoch,
-            ).update(**self._claim_fields(candidate))
+            claimed = (
+                OxTask.objects.using(self._db_alias)
+                .filter(
+                    pk=candidate.pk,
+                    status=OxTask.Status.READY,
+                    attempts=candidate.attempts,
+                    lease_epoch=candidate.lease_epoch,
+                )
+                .update(**self._claim_fields(candidate))
+            )
             if claimed:
                 held = self._reload_claimed(candidate.pk, granted_epoch)
                 if held is None:
@@ -675,7 +734,11 @@ class Worker:
         is the same statement, and the SKIP LOCKED path holds a row lock
         across it.
         """
-        return OxTask.objects.filter(pk=pk, lease_epoch=granted_epoch).first()
+        return (
+            OxTask.objects.using(self._db_alias)
+            .filter(pk=pk, lease_epoch=granted_epoch)
+            .first()
+        )
 
     # -- lease renewal -----------------------------------------------------
 
@@ -699,11 +762,15 @@ class Worker:
             pks = {pk for pk, _ in self._in_flight}
         if not pks:
             return 0
-        return OxTask.objects.filter(
-            pk__in=pks,
-            status=OxTask.Status.RUNNING,
-            locked_by=self.worker_id,
-        ).update(locked_at=_lease_now())
+        return (
+            OxTask.objects.using(self._db_alias)
+            .filter(
+                pk__in=pks,
+                status=OxTask.Status.RUNNING,
+                locked_by=self.worker_id,
+            )
+            .update(locked_at=_lease_now())
+        )
 
     def _renewal_loop(self, stop: Event) -> None:
         """Renew until stopped. Runs on its own thread, and its own connection."""
@@ -787,11 +854,15 @@ class Worker:
         must then abandon the rest of its branch, and in particular must not
         send task_finished for an outcome it does not own.
         """
-        updated = OxTask.objects.filter(
-            pk=db_task.pk,
-            lease_epoch=db_task.lease_epoch,
-            status__in=WRITABLE_STATUSES,
-        ).update(status=status, **fields)
+        updated = (
+            OxTask.objects.using(self._db_alias)
+            .filter(
+                pk=db_task.pk,
+                lease_epoch=db_task.lease_epoch,
+                status__in=WRITABLE_STATUSES,
+            )
+            .update(status=status, **fields)
+        )
         if not updated:
             logger.warning(
                 "Task id=%s path=%s lost its lease on attempt %d/%d; dropping "
@@ -1557,7 +1628,7 @@ class Worker:
         """
         cutoff = _lease_now() - timedelta(seconds=self.lock_timeout)
         reclaimed = 0
-        stuck = OxTask.objects.filter(
+        stuck = OxTask.objects.using(self._db_alias).filter(
             status=OxTask.Status.RUNNING, locked_at__lt=cutoff
         )
         for db_task in stuck:
@@ -1610,12 +1681,16 @@ class Worker:
             # only question that matters: does this row STILL look abandoned.
             # It compares an ordering, not a round-tripped timestamp for
             # equality, which is what an earlier compare got wrong.
-            changed = OxTask.objects.filter(
-                pk=db_task.pk,
-                status=OxTask.Status.RUNNING,
-                lease_epoch=db_task.lease_epoch,
-                locked_at__lt=cutoff,
-            ).update(**updates)
+            changed = (
+                OxTask.objects.using(self._db_alias)
+                .filter(
+                    pk=db_task.pk,
+                    status=OxTask.Status.RUNNING,
+                    lease_epoch=db_task.lease_epoch,
+                    locked_at__lt=cutoff,
+                )
+                .update(**updates)
+            )
             if changed:
                 reclaimed += 1
                 logger.warning(

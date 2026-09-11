@@ -45,3 +45,12 @@ DATABASES = {
 # parent created, not the development one; the parent passes its name through.
 if "OX_TEST_DB_NAME" in os.environ:
     DATABASES["default"]["NAME"] = os.environ["OX_TEST_DB_NAME"]
+
+# The routed-write tests need a second alias. SQLite whatever the primary
+# engine is: they exercise Django's routing, not anything engine-specific.
+DATABASES["alt"] = {
+    "ENGINE": "django.db.backends.sqlite3",
+    "NAME": BASE_DIR / "alt.sqlite3",  # noqa: F405
+    "OPTIONS": {"timeout": 20},
+    "TEST": {"NAME": BASE_DIR / f"test_alt_{os.getpid()}.sqlite3"},  # noqa: F405
+}

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, cast
 from django.apps import apps
 from django.core import checks
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.db import transaction
+from django.db import router, transaction
 from django.utils import timezone
 
 from .compat import (
@@ -31,11 +31,19 @@ class OxBackend(BaseTaskBackend):
     """
     Database-backed task backend.
 
-    enqueue() is a plain INSERT on the default database connection, so it
-    participates in the caller's open transaction: a task enqueued inside
-    transaction.atomic() becomes visible to workers only if the transaction
-    commits, and is discarded on rollback. This is the durability guarantee;
-    transaction.on_commit() is not needed with this backend.
+    enqueue() is a plain INSERT on the connection OxTask routes to, so it
+    participates in a caller's transaction on that same connection: a task
+    enqueued inside transaction.atomic() becomes visible to workers only if
+    the transaction commits, and is discarded on rollback. This is the
+    durability guarantee; transaction.on_commit() is not needed with this
+    backend.
+
+    On the default single-database setup that connection is the default one,
+    which is the case the guarantee is usually described in. Under a router
+    that sends OxTask elsewhere it is that database, and a caller whose own
+    rows are written on a different connection gets two transactions rather
+    than one. django_ox.E008 refuses the django-ox models being split across
+    databases; it cannot speak for the application's own models.
     """
 
     supports_defer = True
@@ -110,8 +118,14 @@ class OxBackend(BaseTaskBackend):
         enqueued_at = timezone.now()
         rows = [self._row(task, args, kwargs, enqueued_at) for args, kwargs in calls]
 
-        with transaction.atomic():
-            OxTask.objects.bulk_create(rows, batch_size=INSERT_CHUNK_SIZE)
+        # Pinned to the alias the rows are written through. An unpinned
+        # atomic() wraps the default connection while bulk_create routes
+        # itself, so with a router in play the block guarded a connection the
+        # INSERTs never touched and the all-or-nothing promise was void: a
+        # partial batch could survive an error.
+        alias = router.db_for_write(OxTask)
+        with transaction.atomic(using=alias):
+            OxTask.objects.using(alias).bulk_create(rows, batch_size=INSERT_CHUNK_SIZE)
 
         results = [
             cast("TaskResult[P, R]", task_result_from_db(row, task=task))

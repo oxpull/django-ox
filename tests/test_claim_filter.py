@@ -134,3 +134,82 @@ class TestWorkerClass:
         }
         with pytest.raises(ImproperlyConfigured, match="is not a"):
             worker_class()
+
+
+class _QOnly(Worker):
+    """A subclass that narrows what it may claim, the queryset hook only."""
+
+    def claim_filter_q(self):
+        return Q(queue_name="allowed")
+
+
+class _Both(_QOnly):
+    """The same exclusion, told to both claim paths."""
+
+    def claim_filter_sql(self):
+        return 'AND "queue_name" = %(only_queue)s', {"only_queue": "allowed"}
+
+
+@pytest.mark.django_db
+class TestAFilterThatReachesOnlyOneClaimPath:
+    """
+    The single-statement PostgreSQL claim builds its own SQL, so it reads
+    `claim_filter_sql()` and cannot see `claim_filter_q()`. A subclass that
+    overrides the queryset hook alone therefore narrowed SQLite and MySQL and
+    claimed the excluded rows on PostgreSQL, silently. That is the shape this
+    project treats as the most serious kind of defect.
+    """
+
+    def _settings(self, settings, worker_class_path):
+        settings.TASKS = {
+            "default": {
+                "BACKEND": "django_ox.backend.OxBackend",
+                "QUEUES": ["default", "allowed"],
+                "OPTIONS": {"WORKER_CLASS": worker_class_path},
+            }
+        }
+
+    def test_the_exclusion_holds_on_every_database(self, settings):
+        self._settings(settings, f"{__name__}._QOnly")
+        add.using(queue_name="default").enqueue(1, 2)
+        worker = _QOnly(backoff_initial=0)
+        assert worker.claim_one() is None, (
+            "a row the subclass excluded was claimed anyway; on PostgreSQL "
+            "the fast path never saw the filter"
+        )
+
+    def test_an_allowed_row_is_still_claimed(self, settings):
+        self._settings(settings, f"{__name__}._QOnly")
+        add.using(queue_name="allowed").enqueue(1, 2)
+        worker = _QOnly(backoff_initial=0)
+        claimed = worker.claim_one()
+        assert claimed is not None, "the filter excluded a row it allows"
+        assert claimed.queue_name == "allowed"
+
+    def test_it_says_why_it_gave_up_the_fast_path(self, settings, caplog):
+        import logging
+
+        self._settings(settings, f"{__name__}._QOnly")
+        worker = _QOnly(backoff_initial=0)
+        with caplog.at_level(logging.WARNING, logger="django_ox"):
+            # Asked directly: the check only runs on the PostgreSQL fast path,
+            # so going through claim_one() would say nothing on SQLite and
+            # this is about the notice being said once, not about the vendor.
+            worker._postgresql_honours_the_claim_filter()
+            worker._postgresql_honours_the_claim_filter()
+        said = [
+            r
+            for r in caplog.records
+            if getattr(r, "event", None) == "claim_filter_sql_missing"
+        ]
+        assert len(said) == 1, f"said it {len(said)} times; once per worker"
+
+    def test_a_subclass_that_implements_both_keeps_the_fast_path(self, settings):
+        self._settings(settings, f"{__name__}._Both")
+        worker = _Both(backoff_initial=0)
+        assert worker._postgresql_honours_the_claim_filter()
+
+    def test_a_worker_with_no_filter_keeps_the_fast_path(self, settings):
+        self._settings(settings, f"{__name__}._QOnly")
+        plain = Worker(backoff_initial=0)
+        assert plain._postgresql_honours_the_claim_filter()

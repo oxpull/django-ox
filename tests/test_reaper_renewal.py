@@ -34,6 +34,12 @@ class _RenewOnSelect:
     def __getattr__(self, name):
         return getattr(self._real, name)
 
+    def using(self, alias):
+        # The reaper pins every statement to its write alias, so the
+        # interception point is `objects.using(alias).filter(...)` rather than
+        # `objects.filter(...)`.
+        return _RenewOnSelect(self._real.using(alias), self._renew)
+
     def filter(self, **kwargs):
         queryset = self._real.filter(**kwargs)
         if set(kwargs) != {"status", "locked_at__lt"}:

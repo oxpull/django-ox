@@ -55,6 +55,18 @@ DATABASES = {
     }
 }
 
+# A second alias, so a routed deployment can be tested at all. Every django-ox
+# model must live on one database, but that database need not be the default
+# one: with a single alias configured, a statement pinned to the write alias
+# and one that routes itself are the same connection, and the difference the
+# claim protocol depends on cannot be observed.
+DATABASES["alt"] = {
+    "ENGINE": "django.db.backends.sqlite3",
+    "NAME": BASE_DIR / "alt.sqlite3",
+    "OPTIONS": {"timeout": 20},
+    "TEST": {"NAME": BASE_DIR / f"test_alt_{os.getpid()}.sqlite3"},
+}
+
 TASKS: dict[str, dict[str, Any]] = {
     "default": {
         "BACKEND": "django_ox.backend.OxBackend",

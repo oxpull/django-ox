@@ -96,7 +96,7 @@ recording the outcome leaves that task to run again. One task in that run
 executed twice for exactly that reason, and no task executed twice without
 a kill to account for it.
 
-The soak ran on 0.3.1; the throughput matrix below ran on 1.1.0 on
+Soak: django-ox 0.3.1, 2026-09-01. Throughput matrix below: django-ox 1.1.0,
 2026-09-11. The benchmarks page carries the method and the raw data for each.
 
 Thirty-seven assertions ran and all thirty-seven passed. The harness
@@ -108,11 +108,10 @@ written from
 ## Measured against the alternative
 
 Against `django-tasks-db` on PostgreSQL 16, 2,000 no-op tasks, one worker,
-five runs per arm on one machine: django-ox 1.1.0 completed the batch at
-124.5 tasks per second against 108.0. Every one of the five django-ox
-runs beat every one of the five control runs; the slowest was 121.3 and
-their fastest was 110.1. In-transaction enqueue latency was a tie at about
-six tenths of a millisecond at p50.
+five runs per arm on one machine: django-ox 1.1.0 completed the batch at about 125 tasks per second against
+108, five runs each. Every one of the five django-ox runs beat every one of
+the five control runs; the slowest was 121.3 and their fastest was 110.1. In-transaction enqueue latency was a tie at about
+six tenths of a millisecond at p50, and django-ox enqueued faster on the mean.
 
 [The benchmarks page](https://oxpull.com/django-ox/benchmarks/) has the
 full matrix, the concurrency-4 row and why the two workers are not the same

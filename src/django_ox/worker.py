@@ -1328,10 +1328,23 @@ class Worker:
             f"reports is refused by the lease.",
             timeout=watch.timeout,
         )
-        if self._handle_failure(db_task, exc, duration_ms, release=True):
-            # Only now is the thread known to be stuck: the write lost only
-            # if the thread's own outcome landed first, in which case it came
-            # back on its own and the drain must still wait for it.
+        self._handle_failure(db_task, exc, duration_ms, release=True)
+        # Whether the write landed and whether the thread is stuck are
+        # different questions, and this used to answer the second with the
+        # first. A lost write can mean the thread's own outcome landed ahead
+        # of it, in which case the thread did come back; it can equally mean
+        # a reaper requeued the row underneath us, which sets READY and moves
+        # the epoch, so the write matches nothing while the thread runs on.
+        # Reading that as "not stuck" left the worker un-recycled, the pool
+        # slot gone for the life of the process, the thread absent from the
+        # stuck set so the drain waited on it without bound, and the row
+        # available for anyone to claim and run alongside it.
+        #
+        # Ask the thread instead. It is still inside this attempt or it is
+        # not, and the answer does not depend on any database write.
+        with self._in_flight_lock:
+            still_running = self._running_on.get(watch.ident) == watch.attempt
+        if still_running:
             self._stuck[watch.ident] = watch.attempt
             self._recycle(db_task)
 

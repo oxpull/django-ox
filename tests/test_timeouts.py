@@ -1385,6 +1385,10 @@ class TestBackstop:
             grace_at=now,
         )
         watch.db_task.lease_epoch = claimed.lease_epoch
+        # Deliberately NOT registered as running: execute() returned above, so
+        # the thread came back. That is the whole premise here, and it is what
+        # separates this case from a genuinely wedged thread.
+        assert worker._running_on == {}
         worker._handle_stuck(watch)
 
         assert not worker.recycling
@@ -1587,6 +1591,10 @@ class TestUnderATracingTool:
             grace_at=now,
         )
         watch.db_task.lease_epoch = claimed.lease_epoch
+        # A stuck thread is one still inside its attempt. This test
+        # synthesises the watch rather than running a pool thread, so it
+        # has to state that precondition itself.
+        worker._running_on[watch.ident] = watch.attempt
         worker._handle_stuck(watch)
 
         assert worker.recycling

@@ -1375,6 +1375,7 @@ class TestBackstop:
         watch = _Watch(
             ident=threading.get_ident(),
             db_task=row(result),
+            attempt=(claimed.pk, claimed.lease_epoch),
             timeout=5,
             started=now - 6,
             deadline=now - 1,
@@ -1387,7 +1388,7 @@ class TestBackstop:
         worker._handle_stuck(watch)
 
         assert not worker.recycling
-        assert worker._stuck == set()
+        assert worker._stuck == {}
         assert row(result).status == OxTask.Status.SUCCESSFUL
         assert row(result).return_value == 3
         assert events(caplog, "task_stuck"), "the watchdog did see the grace pass"
@@ -1575,6 +1576,7 @@ class TestUnderATracingTool:
         watch = _Watch(
             ident=threading.get_ident(),
             db_task=row(result),
+            attempt=(row(result).pk, row(result).lease_epoch),
             timeout=5,
             started=now - 6,
             deadline=now - 1,

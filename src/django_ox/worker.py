@@ -196,6 +196,11 @@ class _Watch:
 
     ident: int
     db_task: OxTask
+    #: The attempt this watch was armed for, as the executing thread
+    #: registered it. Taken at arm time because the watchdog moves the epoch
+    #: on its own copy of db_task when it gives up, and the drain has to
+    #: recognise the attempt the pool thread is still inside.
+    attempt: tuple[Any, int]
     timeout: float
     started: float
     deadline: float
@@ -454,9 +459,16 @@ class Worker:
         self._watch_lock = Lock()
         self._watch_cv = Condition(self._watch_lock)
         self._watchdog: Thread | None = None
-        # Idents of pool threads the backstop gave up on. The drain does not
-        # wait for them; they die with the process.
-        self._stuck: set[int] = set()
+        # Pool threads the backstop gave up on, as ident -> the attempt it was
+        # running when we gave up. The drain does not wait for those; they die
+        # with the process. The attempt is part of the key because a pool
+        # thread is reused: its ident stays alive and idle after a stuck task
+        # finally returns, and again under the next task, so an ident alone
+        # cannot say whether the thread is still inside the work we abandoned.
+        self._stuck: dict[int, tuple[Any, int]] = {}
+        # What each pool thread is executing right now, ident -> attempt.
+        # Present only for the duration of an attempt.
+        self._running_on: dict[int, tuple[Any, int]] = {}
         self._recycling = False
         # Set once the worker has said that a tracing tool is holding
         # timeouts to the backstop, so it is said once and not per attempt.
@@ -813,13 +825,17 @@ class Worker:
         is not.
         """
         held = (db_task.pk, db_task.lease_epoch)
+        ident = threading.get_ident()
         with self._in_flight_lock:
             self._in_flight.add(held)
+            self._running_on[ident] = held
         try:
             self._run_attempt(db_task)
         finally:
             with self._in_flight_lock:
                 self._in_flight.discard(held)
+                if self._running_on.get(ident) == held:
+                    del self._running_on[ident]
 
     def _run_attempt(self, db_task: OxTask) -> None:
         from .results import task_from_db, task_result_from_db
@@ -1155,6 +1171,7 @@ class Worker:
             # epoch it moves is never mirrored onto the instance the stuck
             # thread still holds; that thread's own write stays fenced.
             db_task=copy.copy(db_task),
+            attempt=(db_task.pk, db_task.lease_epoch),
             timeout=timeout,
             started=now,
             deadline=now + timeout,
@@ -1315,7 +1332,7 @@ class Worker:
             # Only now is the thread known to be stuck: the write lost only
             # if the thread's own outcome landed first, in which case it came
             # back on its own and the drain must still wait for it.
-            self._stuck.add(watch.ident)
+            self._stuck[watch.ident] = watch.attempt
             self._recycle(db_task)
 
     def _recycle(self, db_task: OxTask) -> None:
@@ -1346,8 +1363,21 @@ class Worker:
         return self._recycling
 
     def _stuck_alive(self) -> int:
-        alive = {thread.ident for thread in threading.enumerate()}
-        return sum(1 for ident in self._stuck if ident in alive)
+        """
+        How many pool threads are still inside an attempt we gave up on.
+
+        Counted by the attempt, not by the thread being alive. A pool thread
+        is reused, so its ident is still alive and idle after a stuck task
+        finally returns, and alive again under the next task. Counting idents
+        therefore over-counts, and the drain would stop waiting for healthy
+        work and let the process exit out from under it.
+        """
+        with self._in_flight_lock:
+            return sum(
+                1
+                for ident, attempt in self._stuck.items()
+                if self._running_on.get(ident) == attempt
+            )
 
     def _handle_failure(
         self,
@@ -1815,12 +1845,16 @@ class Worker:
         a thread the backstop gave up on may never finish, and the point of
         the recycle is to stop waiting for it.
         """
-        if not self._recycling:
-            wait(in_flight)
-            return
         while True:
             pending = {future for future in in_flight if not future.done()}
-            if len(pending) <= self._stuck_alive():
+            if not pending:
+                return
+            # Re-read the flag every pass. The backstop can fire part way
+            # through an ordinary drain, and a flag read once on the way in
+            # would never see it: the drain would wait unbounded on the thread
+            # the recycle exists to abandon, and the supervisor would never
+            # get its replacement.
+            if self._recycling and len(pending) <= self._stuck_alive():
                 return
             wait(pending, timeout=RECYCLE_DRAIN_POLL, return_when=FIRST_COMPLETED)
 

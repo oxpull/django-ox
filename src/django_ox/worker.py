@@ -225,9 +225,15 @@ WRITABLE_STATUSES = (OxTask.Status.RUNNING, OxTask.Status.LOST)
 # UPDATE, and the per-attempt bookkeeping are one round trip, atomic in
 # autocommit. The equivalent multi-statement path costs 5 round trips.
 #
-# The claim's own timestamps are STATEMENT_TIMESTAMP(), which is what Django's
-# Now() compiles to on PostgreSQL, so the lock clock and the reaper's clock are
-# the same clock even when the worker and the reaper run on different hosts.
+# The claim's own timestamps come from {lease_clock}, which is
+# STATEMENT_TIMESTAMP() when USE_TZ is on and a parameter carrying the worker's
+# clock when it is off. That is not a style choice: _lease_now() makes the same
+# switch, and renew_leases and the reaper's cutoff both go through it. Hard
+# coding the server's clock here while the renewal used the worker's put two
+# clocks on one column, so on a deployment where the database and the worker
+# are different hosts, a worker whose clock ran behind the server renewed to a
+# timestamp the reaper already read as expired and lost its task on the first
+# renewal.
 # run_after is the exception and is still compared against the worker's clock,
 # because that is the clock the retry that wrote it used; see _ready_queryset.
 # lease_epoch advances here too: the increment and the claim are one statement,
@@ -236,11 +242,11 @@ POSTGRES_CLAIM_SQL = """
 UPDATE "{table}" SET
     "status" = %(running)s,
     "locked_by" = %(worker_id)s,
-    "locked_at" = STATEMENT_TIMESTAMP(),
+    "locked_at" = {lease_clock},
     "lease_epoch" = "lease_epoch" + 1,
     "attempts" = "attempts" + 1,
-    "started_at" = COALESCE("started_at", STATEMENT_TIMESTAMP()),
-    "last_attempted_at" = STATEMENT_TIMESTAMP(),
+    "started_at" = COALESCE("started_at", {lease_clock}),
+    "last_attempted_at" = {lease_clock},
     "worker_ids" = "worker_ids" || %(worker_id_json)s::jsonb
 WHERE "id" = (
     SELECT "id" FROM "{table}"
@@ -262,10 +268,17 @@ def _elapsed_ms(started: float) -> int:
 def _lease_now() -> Combinable | datetime:
     """The clock that stamps lease timestamps.
 
-    Database-side time is the right clock for a lease, because it is one clock
-    for every worker and for the reaper even when they run on different hosts.
-    It only agrees with what the columns already hold when USE_TZ is on, and
-    that is the whole of this function.
+    Database-side time is the right clock for a lease, because on PostgreSQL
+    and MySQL it is one clock for every worker and for the reaper even when
+    they run on different hosts. It only agrees with what the columns already
+    hold when USE_TZ is on, and that is the whole of this function.
+
+    Not on SQLite. Now() compiles there to STRFTIME(..., 'NOW'), which SQLite
+    evaluates in the process that ran the statement, so there is no server
+    clock to share and every worker stamps on its own whatever USE_TZ says.
+    That is a reason to run SQLite on one host rather than a reason to stamp
+    it differently: a shared file over a network filesystem has worse problems
+    than clock drift.
 
     Django's Now() compiles to STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW') on SQLite,
     and SQLite's 'now' is always UTC, so under USE_TZ=False it writes UTC into
@@ -629,10 +642,15 @@ class Worker:
         # the exception.
         queue_clause = 'AND "queue_name" = ANY(%(queues)s)' if self.queues else ""
         extra_clause, extra_params = self.claim_filter_sql()
+        # One clock stamps the lease, whichever it is. _lease_now() decides
+        # which; this statement has to agree with it or the renewal and the
+        # reaper are judging a column a different clock wrote.
+        lease_clock = "STATEMENT_TIMESTAMP()" if settings.USE_TZ else "%(lease_now)s"
         sql = POSTGRES_CLAIM_SQL.format(
             table=OxTask._meta.db_table,
             queue_clause=queue_clause,
             extra_clause=extra_clause,
+            lease_clock=lease_clock,
         )
         # db_manager, not objects.raw: a RawQuerySet routes through
         # db_for_read, and unlike select_for_update() it does not mark itself
@@ -647,6 +665,7 @@ class Worker:
                 "worker_id": self.worker_id,
                 "worker_id_json": json.dumps([self.worker_id]),
                 "now": run_after_cutoff,
+                "lease_now": _lease_now() if not settings.USE_TZ else None,
                 "queues": self.queues,
                 **extra_params,
             },

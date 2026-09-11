@@ -260,15 +260,25 @@ completion is signalled for it. This is arithmetic rather than timing: no
 pause is long enough to get around it, so a task that finished cannot be put
 back on the queue by a straggler.
 
-**Timestamps come from the database.** With `USE_TZ` on, the lock time is
-written by the database server and compared against the database server's
-clock, so two hosts with drifting clocks do not produce false reclaims. If you
-run workers on more than one host, that is the setting which gives them one
-clock, and it is Django's default.
+**Timestamps come from the database.** With `USE_TZ` on against PostgreSQL or
+MySQL, the lock time is written by the database server and compared against the
+database server's clock, so two hosts with drifting clocks do not produce false
+reclaims. If you run workers on more than one host, that is the setting which
+gives them one clock, and it is Django's default.
 
-With `USE_TZ` off the worker's clock is used instead. A database's own clock
-does not always match what these columns hold there: SQLite's is UTC while the
-columns carry naive local time, and reading one against the other would make
+SQLite is the exception, and it is a scope statement rather than a caveat:
+Django's `Now()` compiles there to `STRFTIME(..., 'NOW')`, which SQLite
+evaluates inside the process that ran the statement. There is no server to
+stamp it, so every worker uses its own clock whatever `USE_TZ` says. Run SQLite
+on one host. It is the deployment SQLite is for, and a shared file over a
+network filesystem does not give you working locking either.
+
+With `USE_TZ` off the worker's clock is used on every database. Two workers
+whose clocks differ by more than `LOCK_TIMEOUT` will then reclaim each other's
+live leases, and the task runs twice. That is the property `USE_TZ` on buys you
+on PostgreSQL and MySQL. A database's own clock also does not always match what
+these columns hold under that setting: SQLite's is UTC while the columns carry
+naive local time, and reading one against the other would make
 `ox_prune --older-than` treat rows that finished seconds ago as hours old.
 Under that setting, keep `TIME_ZONE` and the timezone your workers run in the
 same, which is what Django assumes of it anyway.

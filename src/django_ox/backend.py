@@ -167,7 +167,21 @@ class OxBackend(BaseTaskBackend):
                     id="django_ox.E002",
                 )
             )
-        from .timeouts import task_timeout_problems
+        from .timeouts import lease_timing_problems, task_timeout_problems
+
+        for problem in lease_timing_problems(self.options):
+            errors.append(
+                checks.Error(
+                    problem,
+                    hint=(
+                        "LOCK_TIMEOUT, BACKOFF_INITIAL and BACKOFF_MAX are each "
+                        "a positive, finite number of seconds. They were cast "
+                        "and used unchecked, so a bad value reached the poll "
+                        "loop instead of stopping the deploy."
+                    ),
+                    id="django_ox.E010",
+                )
+            )
 
         for problem in task_timeout_problems(self.options, self.queues):
             unknown_queue = "is not in QUEUES" in problem

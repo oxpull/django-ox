@@ -54,11 +54,17 @@ class BlockAdd(Worker):
 class TestRenderedClaimSql:
     def test_empty_fragment_renders_0_3_1_byte_for_byte(self):
         assert (
-            POSTGRES_CLAIM_SQL.format(table="ox_task", queue_clause="", extra_clause="")
+            POSTGRES_CLAIM_SQL.format(
+                lease_clock="STATEMENT_TIMESTAMP()",
+                table="ox_task",
+                queue_clause="",
+                extra_clause="",
+            )
             == CLAIM_SQL_0_3_1_NO_QUEUES
         )
         assert (
             POSTGRES_CLAIM_SQL.format(
+                lease_clock="STATEMENT_TIMESTAMP()",
                 table="ox_task",
                 queue_clause='AND "queue_name" = ANY(%(queues)s)',
                 extra_clause="",
@@ -68,6 +74,7 @@ class TestRenderedClaimSql:
 
     def test_fragment_lands_inside_the_candidate_select(self):
         sql = POSTGRES_CLAIM_SQL.format(
+            lease_clock="STATEMENT_TIMESTAMP()",
             table="ox_task",
             queue_clause="",
             extra_clause=' AND "task_path" <> ALL(%(blocked)s)',
@@ -213,3 +220,36 @@ class TestAFilterThatReachesOnlyOneClaimPath:
         self._settings(settings, f"{__name__}._QOnly")
         plain = Worker(backoff_initial=0)
         assert plain._postgresql_honours_the_claim_filter()
+
+
+class TestTheLeaseClockInTheRenderedSql:
+    """
+    One clock stamps the lease, and this statement has to agree with
+    `_lease_now()`. With USE_TZ on both are the database's. With it off
+    `_lease_now()` is the worker's clock, so hard coding the server's here
+    would put two clocks on one column: a worker whose clock ran behind the
+    server would renew to a timestamp the reaper already read as expired.
+    """
+
+    def test_with_time_zone_support_the_server_stamps_it(self, settings):
+        settings.USE_TZ = True
+        sql = POSTGRES_CLAIM_SQL.format(
+            lease_clock="STATEMENT_TIMESTAMP()",
+            table="ox_task",
+            queue_clause="",
+            extra_clause="",
+        )
+        assert '"locked_at" = STATEMENT_TIMESTAMP()' in sql
+
+    def test_without_it_the_worker_stamps_it(self):
+        sql = POSTGRES_CLAIM_SQL.format(
+            lease_clock="%(lease_now)s",
+            table="ox_task",
+            queue_clause="",
+            extra_clause="",
+        )
+        assert '"locked_at" = %(lease_now)s' in sql
+        assert "STATEMENT_TIMESTAMP()" not in sql, (
+            "one of the claim's three timestamps still comes from the server "
+            "while the renewal uses the worker's clock"
+        )

@@ -212,6 +212,9 @@ alert are on the
   queue name. Every bad value is reported in one run.
 - `django_ox.E005`: a `TASK_TIMEOUTS` key names a queue that is not in
   `QUEUES`, so the entry would never apply.
+- `django_ox.E010`: `LOCK_TIMEOUT`, `BACKOFF_INITIAL` or `BACKOFF_MAX` is not a
+  positive, finite number of seconds. Each of the three is read and used, so a
+  zero or a negative reached the poll loop instead of stopping the deploy.
 
 The worker performs the same schedule and timeout validation at startup, so
 a bad deploy fails loudly rather than skipping dispatches.

@@ -157,40 +157,36 @@ def _seconds(value: Any, where: str, *, unlimited: bool = True) -> float | None:
 #: has to clear. Every one of them was cast with a bare float() and used: a
 #: zero or a negative reached the poll loop and misbehaved there rather than
 #: at `manage.py check`, which is where a bad deploy is supposed to stop.
-LEASE_TIMINGS = (
-    ("LOCK_TIMEOUT", 300.0),
-    ("BACKOFF_INITIAL", 5.0),
-    ("BACKOFF_MAX", 600.0),
-)
+#: Options the worker reads as a number of seconds. Each was cast with a bare
+#: float() and used, so a zero, a negative or a bool reached the poll loop
+#: instead of stopping at `manage.py check`, which is where a bad deploy is
+#: supposed to stop.
+LEASE_TIMINGS = ("LOCK_TIMEOUT", "BACKOFF_INITIAL", "BACKOFF_MAX")
 
 
 def lease_timing_problems(options: Mapping[str, Any]) -> list[str]:
     """
     Every way the worker's timing options are invalid, one sentence each.
 
-    Deliberately not a check on the relationships between them. The digest
-    that prompted this named `renew_interval > lock_timeout` as the headline
-    case, and that pair is unreachable through configuration: the renewal
-    interval is derived from the lock timeout rather than read from options.
-    Checking it would be theatre.
+    Validated by the same helper as the timeout options, so the three lease
+    timings accept exactly what TASK_TIMEOUT accepts. That matters more than
+    it sounds: a hand-rolled float() cast here accepted `True` as one second
+    and 1e300 as a finite duration, which is the class of value this check
+    exists to refuse.
+
+    Deliberately not a check on the relationships between them.
+    `renew_interval > lock_timeout` would be the pair worth refusing, and it
+    cannot be configured: the renewal interval is derived from the lock
+    timeout rather than read from options.
     """
     problems: list[str] = []
-    for name, _default in LEASE_TIMINGS:
+    for name in LEASE_TIMINGS:
         if name not in options:
             continue
-        value = options[name]
         try:
-            seconds = float(value)
-        except (TypeError, ValueError):
-            problems.append(
-                f"OPTIONS[{name!r}] is {value!r}, which is not a number of seconds."
-            )
-            continue
-        if not math.isfinite(seconds) or seconds <= 0:
-            problems.append(
-                f"OPTIONS[{name!r}] is {value!r}; it is a positive, finite "
-                "number of seconds."
-            )
+            _seconds(options[name], f"OPTIONS[{name!r}]", unlimited=False)
+        except ImproperlyConfigured as exc:
+            problems.append(str(exc))
     return problems
 
 

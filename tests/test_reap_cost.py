@@ -80,8 +80,26 @@ class TestTheRequeueBranchCostsOneStatement:
         OxTask.objects.all().delete()
         abandoned_rows(200)
         with CaptureQueriesContext(connection) as many:
-            assert worker.reap() == 200
+            worker.reap()
         assert len(many.captured_queries) == len(few.captured_queries)
+
+    def test_a_pass_reads_at_most_reap_batch_rows(self, settings):
+        # The statement count was bounded before the row count was, so a large
+        # enough stuck set still meant the whole of it in memory and a WARNING
+        # per row, per worker, per pass.
+        settings.TASKS = {
+            "default": {
+                "BACKEND": "django_ox.backend.OxBackend",
+                "QUEUES": ["default"],
+                "OPTIONS": {},
+            }
+        }
+        worker = Worker(backoff_initial=0, reap_batch=10)
+        abandoned_rows(50)
+        assert worker.reap() == 10, "the requeue branch was not capped"
+        assert OxTask.objects.filter(status=OxTask.Status.READY).count() == 10
+        assert [worker.reap() for _ in range(4)] == [10, 10, 10, 10]
+        assert OxTask.objects.filter(status=OxTask.Status.RUNNING).count() == 0
 
 
 class TestTheExhaustedBranchIsBounded:
@@ -98,9 +116,10 @@ class TestTheExhaustedBranchIsBounded:
         with CaptureQueriesContext(connection) as captured:
             lost = worker.reap()
         assert lost == 10, "the pass was not capped"
-        # The requeue manifest and UPDATE, the select, and one compare-and-set
-        # per capped row. Unbounded, this is 51 and climbs with the backlog.
-        assert len(captured.captured_queries) == 13
+        # The requeue manifest (which finds nothing, so no UPDATE follows),
+        # the exhausted select, and one compare-and-set per capped row.
+        # Unbounded, this is 51 and climbs with the backlog.
+        assert len(captured.captured_queries) == 12
         assert OxTask.objects.filter(status=OxTask.Status.LOST).count() == 10
 
     def test_the_remainder_is_retired_by_later_passes(self, settings):

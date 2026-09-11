@@ -264,9 +264,7 @@ class TestARecycleFinishesEvenWithHealthyWorkOutstanding:
         }
         assert Worker(backoff_initial=0).recycle_drain_budget == 120.0
 
-    def test_a_healthy_task_that_finishes_in_time_is_still_waited_for(
-        self, settings
-    ):
+    def test_a_healthy_task_that_finishes_in_time_is_still_waited_for(self, settings):
         settings.TASKS = {
             "default": {
                 "BACKEND": "django_ox.backend.OxBackend",

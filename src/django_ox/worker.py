@@ -242,29 +242,57 @@ WRITABLE_STATUSES = (OxTask.Status.RUNNING, OxTask.Status.LOST)
 # Exhausted rows retired per reap pass. See Worker.reap.
 REAP_BATCH_DEFAULT = 100
 
-# The most of one traceback that is kept on the row, in characters. A
-# traceback's length is set by the failure, not by us: a deep recursion, a
-# chained exception, or a library that prints locals can produce megabytes,
-# and `errors` holds one per attempt. Both ends are worth keeping -- where the
-# call came from and what actually raised -- so an oversized traceback keeps
-# its head and its tail with a marker between them saying what was dropped.
+# The most of one traceback kept on the row, in BYTES of UTF-8. A traceback's
+# length is set by the failure, not by us: a deep recursion, a chained
+# exception, or a library that prints locals can produce megabytes, and
+# `errors` holds one per failed attempt. Both ends are worth keeping, where the
+# call came from and what actually raised, so an oversized traceback keeps its
+# head and its tail with a marker between them saying what was dropped.
+#
+# Bytes rather than characters because the column is sized in bytes and an
+# operator reads this number to size it. A character limit lets one emoji in an
+# exception message store four times the stated cap.
 MAX_STORED_TRACEBACK = 16384
 _TRACEBACK_HEAD = 4096
 
 
+def _utf8_prefix(text: str, limit: int) -> str:
+    """The longest prefix of `text` that encodes within `limit` bytes."""
+    encoded = text.encode()[:limit]
+    # A cut can land inside a multi-byte sequence; drop the partial character.
+    return encoded.decode(errors="ignore")
+
+
+def _utf8_suffix(text: str, limit: int) -> str:
+    """The longest suffix of `text` that encodes within `limit` bytes."""
+    if limit <= 0:
+        return ""
+    encoded = text.encode()[-limit:]
+    return encoded.decode(errors="ignore")
+
+
 def _stored_traceback(exc: BaseException) -> str:
-    """The exception's traceback, bounded, with any elision made visible."""
+    """
+    The exception's traceback, bounded in bytes, with any elision made visible.
+
+    The marker counts towards the bound, so the whole returned string encodes
+    within MAX_STORED_TRACEBACK. That is what the documentation promises and
+    what an operator sizing the column needs it to mean.
+    """
     text = "".join(format_exception(exc))
-    if len(text) <= MAX_STORED_TRACEBACK:
+    size = len(text.encode())
+    if size <= MAX_STORED_TRACEBACK:
         return text
-    tail = MAX_STORED_TRACEBACK - _TRACEBACK_HEAD
-    dropped = len(text) - MAX_STORED_TRACEBACK
-    return (
-        f"{text[:_TRACEBACK_HEAD]}\n"
-        f"... {dropped} characters of this traceback were not stored "
+    dropped = size - MAX_STORED_TRACEBACK
+    marker = (
+        f"\n... {dropped} bytes of this traceback were not stored "
         f"(limit {MAX_STORED_TRACEBACK}) ...\n"
-        f"{text[-tail:]}"
     )
+    budget = MAX_STORED_TRACEBACK - len(marker.encode())
+    if budget <= 0:  # pragma: no cover - only if the limit is set absurdly low
+        return _utf8_prefix(text, MAX_STORED_TRACEBACK)
+    head = min(_TRACEBACK_HEAD, budget)
+    return _utf8_prefix(text, head) + marker + _utf8_suffix(text, budget - head)
 
 
 POSTGRES_CLAIM_SQL = """
@@ -1519,12 +1547,17 @@ class Worker:
         )
         try:
             self._handle_failure(db_task, exc, duration_ms, release=True)
-        except Error:
-            # Recording the attempt is worth attempting and not worth the
-            # fleet. The thread is wedged whether or not the database is
-            # reachable, and the recycle below is what stops this worker
-            # keeping a dead pool slot and waiting for that thread forever.
-            # Letting this propagate would skip it.
+        except Exception:
+            # Every exception, not a chosen class. The thread is wedged
+            # whether or not this write succeeds, and the recycle below is
+            # what stops the worker keeping a dead pool slot and waiting for
+            # that thread forever; anything that escapes here skips it.
+            #
+            # `django.db.Error` is not a wide enough net. Django raises
+            # ValueError from adapt_datetimefield_value on a naive value, and
+            # a driver can raise UnicodeEncodeError on a traceback character
+            # the column's charset cannot hold. Neither is a database error
+            # by Django's taxonomy, and both arrive on exactly this path.
             logger.warning(
                 "Worker %s could not record the stuck attempt for task id=%s; "
                 "recycling anyway",
@@ -1759,36 +1792,46 @@ class Worker:
 
     def _requeue_abandoned(self, stuck: QuerySet[OxTask]) -> int:
         """
-        Put every abandoned row that still has attempts back on the queue.
+        Put abandoned rows that still have attempts back on the queue.
 
-        One UPDATE, whatever the number of rows, and the predicate that
-        chooses them is the predicate that takes them. That closes the window
-        a read-then-write reaper has to guard by hand: a lease renewed in
-        between no longer matches, so the row stays with the worker that
-        renewed it, and no extra statement is needed to ask.
+        One UPDATE per pass, whatever the number of rows, and it carries the
+        full lease predicate rather than trusting the read that chose them: a
+        lease renewed in between no longer matches, so the row stays with the
+        worker that renewed it.
 
         The cost is the reason. Every worker reaps on its own interval, so a
         fleet that has just lost half its members runs this on every survivor
-        at once, against a database that is still recovering. A statement per
-        row, times the workers, is a second outage on top of the first.
+        at once, against a database still recovering. A statement per row,
+        times the workers, is a second outage on top of the first.
 
-        The select above it is the log manifest, not the decision. It reads
-        four small columns so that each reclaimed task still gets its own
-        `task_reclaimed` record, and it is trusted to describe the UPDATE
-        only when the two agree on how many rows there were. When they
-        disagree the set moved underneath the pass -- a lease renewed, or one
-        more expired -- and naming tasks that may not have been reclaimed
-        would put a false positive in the one record an operator reaches for
-        to explain a task that ran twice. That pass reports the count and no
-        task.
+        Two bounds, and both of them matter:
+
+        - The pass takes at most `reap_batch` rows. The statement count was
+          bounded before this and the row count was not, so a large enough
+          stuck set still meant the whole of it in memory and a WARNING per
+          row per worker per pass. The remainder goes on the next pass.
+        - The UPDATE is restricted to the ids that were read. That is what
+          makes the log honest. `cutoff` is a database expression evaluated
+          per statement, so without the restriction the UPDATE's cutoff is
+          later than the SELECT's and rows can *enter* the set as well as
+          leave it. One entering and one leaving keeps the counts equal, and
+          the pass then names a task it did not reclaim, with its live holder
+          in `held_by`, in the one record an operator reads to explain a task
+          that ran twice.
+
+        Pinned to those ids the set can only shrink, so equal counts really do
+        mean the manifest describes the write. When it shrank, the pass
+        reports the count and names nobody.
         """
         requeue = stuck.filter(attempts__lt=F("max_attempts"))
         manifest = list(
-            requeue.values_list(
+            requeue.order_by("id").values_list(
                 "id", "task_path", "queue_name", "attempts", "locked_by"
-            )
+            )[: self.reap_batch]
         )
-        requeued = requeue.update(
+        if not manifest:
+            return 0
+        requeued = requeue.filter(pk__in=[row[0] for row in manifest]).update(
             status=OxTask.Status.READY,
             locked_by=None,
             locked_at=None,
@@ -1820,8 +1863,8 @@ class Worker:
                 )
         else:
             logger.warning(
-                "Reclaimed %d stuck task(s) -> %s; the set moved during the "
-                "pass, so this record names none of them",
+                "Reclaimed %d stuck task(s) -> %s; leases were renewed during "
+                "the pass, so this record names none of them",
                 requeued,
                 OxTask.Status.READY,
                 extra={

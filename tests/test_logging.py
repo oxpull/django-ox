@@ -115,9 +115,7 @@ class TestAReclaimNamesTheHolder:
     only the row knows that.
     """
 
-    def test_the_requeue_record_names_the_worker_that_went_quiet(
-        self, worker, caplog
-    ):
+    def test_the_requeue_record_names_the_worker_that_went_quiet(self, worker, caplog):
         caplog.set_level(logging.WARNING, logger="django_ox")
         add.enqueue(1, 2)
         db_task = worker.claim_one()

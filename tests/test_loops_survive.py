@@ -150,6 +150,60 @@ class TestTheWatchdogThreadSurvivesAFailedRecord:
         assert events(caplog, "task_stuck_unrecorded"), "the failure was silent"
         assert result is not None
 
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            # Django raises this from adapt_datetimefield_value on a naive
+            # value, and it is not a django.db.Error.
+            ValueError("naive datetime while time zone support is active"),
+            # A driver hitting a character the column's charset cannot hold.
+            UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed"),
+        ],
+    )
+    def test_a_failure_that_is_not_a_database_error_still_recycles(
+        self, worker, monkeypatch, caplog, failure
+    ):
+        """
+        The guard used to name `django.db.Error`, and the watchdog above it
+        catches `Exception`, so anything outside that taxonomy propagated
+        past the recycle. The pool slot was then gone for the life of the
+        process and the drain waited on a thread that will never finish.
+        """
+        from django_ox.worker import _Watch
+
+        tasks.add.enqueue(1, 2)
+        claimed = worker.claim_one()
+        assert claimed is not None
+        now = time.monotonic()
+        ident = threading.get_ident()
+        watch = _Watch(
+            ident=ident,
+            db_task=claimed,
+            attempt=(claimed.pk, claimed.lease_epoch),
+            timeout=5,
+            started=now - 6,
+            deadline=now - 1,
+            deadline_at=timezone.now(),
+            injectable=True,
+            fired=True,
+            grace_at=now,
+        )
+        worker._running_on[ident] = watch.attempt
+
+        def broken(*args, **kwargs):
+            raise failure
+
+        monkeypatch.setattr(worker, "_handle_failure", broken)
+        with caplog.at_level(logging.WARNING, logger="django_ox"):
+            worker._handle_stuck(watch)
+
+        assert worker.recycling, (
+            f"{type(failure).__name__} escaped the guard, so the worker kept "
+            "a dead pool slot and the drain waits for the wedged thread"
+        )
+        assert worker._stuck.get(ident) == watch.attempt
+        assert events(caplog, "task_stuck_unrecorded"), "the failure was silent"
+
     def test_one_bad_watch_does_not_kill_the_thread(self, worker, monkeypatch, caplog):
         """
         A raising `_handle_stuck` must not end `_watchdog_loop`. That thread is

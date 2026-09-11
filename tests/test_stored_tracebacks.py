@@ -35,8 +35,12 @@ def worker(settings):
 
 
 def an_oversized_exception(size):
+    return an_oversized_exception_of("x" * size)
+
+
+def an_oversized_exception_of(message):
     try:
-        raise ValueError("x" * size)
+        raise ValueError(message)
     except ValueError as exc:
         return exc
 
@@ -50,10 +54,27 @@ class TestATracebackIsBounded:
 
     def test_an_oversized_one_is_cut_to_the_documented_limit(self):
         stored = _stored_traceback(an_oversized_exception(MAX_STORED_TRACEBACK * 4))
-        # The marker is added, so the result is a little over the limit; what
-        # matters is that it is bounded rather than proportional to the failure.
-        assert len(stored) < MAX_STORED_TRACEBACK + 200
-        assert "characters of this traceback were not stored" in stored
+        # The whole string, marker included, fits the published cap. The cap is
+        # what an operator sizes the column from, so being "a little over" it
+        # is being wrong about it.
+        assert len(stored.encode()) <= MAX_STORED_TRACEBACK
+        assert "bytes of this traceback were not stored" in stored
+
+    def test_the_cap_is_bytes_and_not_characters(self):
+        # One emoji is four bytes. Counting characters stored four times the
+        # published limit for a traceback that happened to carry them.
+        exc = an_oversized_exception_of("\U0001f600" * MAX_STORED_TRACEBACK)
+        stored = _stored_traceback(exc)
+        assert len(stored.encode()) <= MAX_STORED_TRACEBACK, (
+            f"stored {len(stored.encode())} bytes against a "
+            f"{MAX_STORED_TRACEBACK} byte cap"
+        )
+
+    def test_a_cut_never_leaves_a_broken_character(self):
+        exc = an_oversized_exception_of("\u00e9" * MAX_STORED_TRACEBACK)
+        stored = _stored_traceback(exc)
+        # Would raise if either end had been cut mid-sequence.
+        stored.encode().decode()
 
     def test_both_ends_survive_the_cut(self):
         exc = an_oversized_exception(MAX_STORED_TRACEBACK * 4)

@@ -15,6 +15,7 @@ from django.conf import settings as django_settings
 from django.utils import timezone
 
 from django_ox.models import OxTask
+from django_ox.timeouts import lease_timing_problems
 from django_ox.worker import POSTGRES_CLAIM_SQL, Worker
 
 from . import tasks
@@ -168,3 +169,39 @@ class TestTheTimingOptionsAreChecked:
             "RENEW_INTERVAL became configurable, so the pair the digest named "
             "is now reachable and does need a check"
         )
+
+
+class TestTheLeaseTimingsRefuseWhatTheTimeoutOptionsRefuse:
+    """
+    One validator for both, because a second one written by hand drifted:
+    it accepted `True` as a one-second lock timeout and 1e300 as a finite
+    duration, which is the class of value the check exists to refuse.
+    """
+
+    @pytest.mark.parametrize("name", ["LOCK_TIMEOUT", "BACKOFF_INITIAL", "BACKOFF_MAX"])
+    @pytest.mark.parametrize(
+        "value",
+        [
+            True,
+            False,
+            1e400,
+            float("inf"),
+            float("nan"),
+            0,
+            -1,
+            "300",
+            None,
+            [300],
+        ],
+    )
+    def test_a_value_that_is_not_a_positive_finite_number_is_refused(self, name, value):
+        assert lease_timing_problems({name: value}), (
+            f"{name}={value!r} passed the check and would reach the poll loop"
+        )
+
+    @pytest.mark.parametrize("value", [1, 300, 0.5, 300.0])
+    def test_a_positive_finite_number_is_accepted(self, value):
+        assert lease_timing_problems({"LOCK_TIMEOUT": value}) == []
+
+    def test_an_absent_option_is_not_a_problem(self):
+        assert lease_timing_problems({}) == []

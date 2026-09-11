@@ -8,6 +8,7 @@ writes `locked_at` and nothing else, so an epoch compare alone cannot see it,
 and reclaiming anyway hands a running task to a second worker.
 """
 
+import logging
 from datetime import timedelta
 
 import pytest
@@ -170,3 +171,108 @@ class TestARenewedLeaseIsNotReclaimed:
         task.refresh_from_db()
         assert task.status == OxTask.Status.LOST
         assert task.errors, "the lost lease was not recorded"
+
+
+class _SwapTheStuckSet:
+    """`OxTask.objects` with the stuck set changing between read and write.
+
+    The reaper's cutoff is a database expression re-evaluated per statement,
+    so the write sees a later cutoff than the read. One row can leave the set
+    (its holder renewed) while another joins it (its lease aged out), which
+    leaves the count unchanged and the membership different.
+    """
+
+    def __init__(self, real, swap):
+        self._real = real
+        self._swap = swap
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def using(self, alias):
+        return _SwapTheStuckSet(self._real.using(alias), self._swap)
+
+    def filter(self, **kwargs):
+        queryset = self._real.filter(**kwargs)
+        if set(kwargs) != {"status", "locked_at__lt"}:
+            return queryset
+        return _SwapsBeforeTheWrite(queryset, self._swap)
+
+
+class _SwapsBeforeTheWrite:
+    def __init__(self, queryset, swap):
+        self._queryset = queryset
+        self._swap = swap
+
+    def _wrap(self, queryset):
+        return _SwapsBeforeTheWrite(queryset, self._swap)
+
+    def filter(self, *args, **kwargs):
+        return self._wrap(self._queryset.filter(*args, **kwargs))
+
+    def only(self, *args, **kwargs):
+        return self._wrap(self._queryset.only(*args, **kwargs))
+
+    def order_by(self, *args, **kwargs):
+        return self._wrap(self._queryset.order_by(*args, **kwargs))
+
+    def __getitem__(self, item):
+        return self._wrap(self._queryset[item])
+
+    def values_list(self, *args, **kwargs):
+        return self._queryset.values_list(*args, **kwargs)
+
+    def update(self, **kwargs):
+        self._swap()
+        return self._queryset.update(**kwargs)
+
+    def __iter__(self):
+        return iter(self._queryset)
+
+
+class TestAReclaimRecordNamesOnlyWhatItReclaimed:
+    """
+    This record is what an operator reads to explain a task that ran twice, so
+    a false entry in it is worse than no entry. Comparing how many rows were
+    read against how many were written is only an honest check if the set can
+    shrink and not grow: one row leaving and one joining keeps the numbers
+    equal and changes every name.
+    """
+
+    def test_a_set_that_swaps_members_names_nobody(self, worker, monkeypatch, caplog):
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        leaves = a_running_task(locked_by="worker-late")
+        joins = a_running_task(locked_by="worker-dying")
+        # `joins` is inside the cutoff when the set is read, so only `leaves`
+        # is on the manifest.
+        OxTask.objects.filter(pk=joins.pk).update(
+            locked_at=timezone.now() - timedelta(seconds=1)
+        )
+
+        def swap():
+            # The late worker renews, and the dying one's lease ages out.
+            OxTask.objects.filter(pk=leaves.pk).update(locked_at=timezone.now())
+            OxTask.objects.filter(pk=joins.pk).update(
+                locked_at=timezone.now() - timedelta(hours=2)
+            )
+
+        monkeypatch.setattr(OxTask, "objects", _SwapTheStuckSet(OxTask.objects, swap))
+        try:
+            worker.reap()
+        finally:
+            monkeypatch.undo()
+
+        leaves.refresh_from_db()
+        assert leaves.status == OxTask.Status.RUNNING, (
+            "the renewing worker lost its task"
+        )
+        for record in caplog.records:
+            if getattr(record, "event", None) != "task_reclaimed":
+                continue
+            if not hasattr(record, "task_id"):
+                continue  # the count-only record names nobody, which is fine
+            named = OxTask.objects.get(pk=record.task_id)
+            assert named.status == OxTask.Status.READY, (
+                f"named {record.task_id} ({named.status}) as reclaimed; "
+                f"held_by={getattr(record, 'held_by', None)}"
+            )

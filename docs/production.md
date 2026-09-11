@@ -104,8 +104,6 @@ Run migrations before rolling workers, as an init container or a job, not from
 the worker itself. Several workers starting at once would race the same
 migration.
 
-Roll every process before using a status the old version cannot read: migrate, finish the rollout, then use the new status.
-
 ## Graceful shutdown
 
 On SIGTERM or SIGINT the worker:
@@ -238,7 +236,7 @@ that expects to be restarted itself, like the single worker.
 A worker that claims a task takes a lease on it: the row records who holds
 it, when the lock was last refreshed, and a lease number that goes up by one
 every time the task changes hands. Three things follow from that number, and
-they are worth understanding together because they are what makes recovery
+they belong together because they are what makes recovery
 safe.
 
 **The worker keeps its own lease alive.** While a task is executing, its
@@ -269,15 +267,14 @@ stamp it, so every worker uses its own clock whatever `USE_TZ` says. Run SQLite
 on one host. It is the deployment SQLite is for, and a shared file over a
 network filesystem does not give you working locking either.
 
-With `USE_TZ` off the worker's clock is used on every database. Two workers
-whose clocks differ by more than `LOCK_TIMEOUT` will then reclaim each other's
-live leases, and the task runs twice. That is the property `USE_TZ` on buys you
-on PostgreSQL and MySQL. A database's own clock also does not always match what
-these columns hold under that setting: SQLite's is UTC while the columns carry
-naive local time, and reading one against the other would make
-`ox_prune --older-than` treat rows that finished seconds ago as hours old.
-Under that setting, keep `TIME_ZONE` and the timezone your workers run in the
-same, which is what Django assumes of it anyway.
+With `USE_TZ` off the worker's clock is used on every database. Keep worker
+clocks within two thirds of `LOCK_TIMEOUT` of each other, the timeout less
+the renewal interval: a worker whose clock runs further ahead than that would
+read a neighbour's live lease as expired just before its renewal lands,
+reclaim it, and the task would run twice. A shared clock is the property
+`USE_TZ` on buys you on PostgreSQL and MySQL. Under that setting, keep
+`TIME_ZONE` and the timezone your workers run in the same, which is what
+Django assumes of it anyway.
 
 ### Task timeouts
 
@@ -483,7 +480,7 @@ for retention. Like a failed row it can be retried or discarded, from the
 admin or with `django_ox.actions`; see
 [Retrying and discarding](monitoring.md#retrying-and-discarding).
 
-One case is worth knowing about before it surprises you. If the worker
+One case to know before it surprises you. If the worker
 holding a LOST task was starved rather than dead, and it comes back and
 records a success, the row becomes SUCCESSFUL and a caller reading it twice
 sees `FAILED` and then `SUCCESSFUL`. Only that one execution can do this, and
@@ -517,7 +514,7 @@ a task that does so as many times as `MAX_ATTEMPTS` allows reaches a terminal
 state having never executed. The window is small: a worker claims only when it
 has a free thread and hands the task straight to it. It is not zero.
 
-Two consequences worth knowing:
+Two consequences:
 
 - **Read `attempts` as "times this was handed out".** There is no column that
   counts successful runs: `errors` holds one entry per *failed* attempt, so a
@@ -567,8 +564,8 @@ task bodies so that running twice is harmless (upserts, idempotency keys,
 ### What the lease guarantees, precisely
 
 One worker holds the lease on a task at a time, and a task runs at least once.
-It is worth being exact about which of those the lease number enforces, because
-the two are not the same guarantee.
+Which of those the lease number enforces deserves precision, because the two
+are not the same guarantee.
 
 **Two workers cannot write the same row.** Every claim increments
 `lease_epoch`, and every write that ends an attempt carries the value the
@@ -588,9 +585,8 @@ the row, not the function. There are two ways to get there:
   is still executing; the reaper cannot tell it apart from a dead one and gives
   the task to somebody else.
 
-So the rule is the same one every at-least-once queue asks for, and it is worth
-saying that it *is* every at-least-once queue rather than a property of this
-one. Sidekiq's [reliability notes](https://github.com/sidekiq/sidekiq/wiki/Reliability)
+So the rule is the same one every at-least-once queue asks for, and it *is*
+every at-least-once queue rather than a property of this one. Sidekiq's [reliability notes](https://github.com/sidekiq/sidekiq/wiki/Reliability)
 say a job in flight is lost when a process is killed under the default fetch.
 Oban's [rescue plugin](https://github.com/oban-bg/oban/blob/main/lib/oban/lifeline.ex)
 documents that it "may transition jobs that are genuinely executing and cause
@@ -637,7 +633,7 @@ summary:
 
 - **The table is the queue.** `django_ox.stats` exposes queue depth,
   backlog age, throughput and failure rate as plain functions. Backlog
-  depth and backlog age are the two numbers worth alerting on.
+  depth and backlog age are the two numbers to alert on.
 - **`manage.py ox_health`** turns thresholds on those numbers into an
   exit code, for cron alerting and container probes.
 - **The Prometheus endpoint.** Mounting `django_ox.urls` serves the same

@@ -9,21 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Two migrations ship with this release.** `0005_dequeue_index` rebuilds the
 index the claim reads and adds a second one; `0006_lease_expiry` adds a
-nullable column and its index. On PostgreSQL and MySQL, building an index
-takes a lock that blocks enqueues and claims for the duration. On a large task
-table, build 0005's two indexes by hand and fake that migration: `DROP INDEX
-CONCURRENTLY ox_dequeue_idx`, `CREATE INDEX CONCURRENTLY` for
-`ox_dequeue_idx` and `ox_dequeue_queue_idx` as `sqlmigrate django_ox 0005`
-prints them, then `migrate --fake django_ox 0005`. Let 0006 run: it adds a
-nullable column, which is a catalogue change, and one index on a column that
-is empty at that moment.
+nullable column and an index on it. On PostgreSQL, `CREATE INDEX` takes a lock
+that blocks enqueues and claims for the duration; MySQL 8 builds a secondary
+index online. On a large PostgreSQL task table, run both migrations by hand
+and fake them: take the statements from `sqlmigrate django_ox 0005` and
+`sqlmigrate django_ox 0006`, run them with `CREATE INDEX CONCURRENTLY` in
+place of `CREATE INDEX` and `DROP INDEX CONCURRENTLY` for the index 0005
+replaces, then `migrate --fake django_ox 0006`. The `ADD COLUMN` in 0006 is
+nullable with no default, which is a catalogue change and runs as printed.
 
 ### Added
 
 - `lease_expires_at` on the task row: when the lease stops being valid,
   written by the worker that took it and refreshed on every renewal. Every
   reaper judges that column instead of deriving a deadline from its own
-  `LOCK_TIMEOUT`, so the setting can be changed in a rolling deploy. 
+  `LOCK_TIMEOUT`, so the setting can be changed in a rolling deploy.
 
   A row claimed before the column existed has it empty, and the reaper keeps
   comparing `locked_at` against its own timeout for those. The first renewal
@@ -50,8 +50,8 @@ is empty at that moment.
   cap.
 - The timeout watchdog handles each stuck attempt on its own. A failure
   recording one is logged as `watchdog_error` and every other armed attempt
-  keeps its deadline; recording one can no longer skip the recycle that frees
-  the worker.
+  keeps its deadline, and the recycle that frees the worker happens whether
+  or not the record was written.
 - A worker whose timeout backstop gives up on a thread recycles on whether
   that thread is still running, not on whether its own outcome write landed.
   The pool slot is freed and the drain does not wait on the thread.
@@ -61,8 +61,6 @@ is empty at that moment.
   part way through an ordinary drain.
 - The drain is safe to run while a second attempt goes stuck: the stuck set
   is written under the same lock the drain reads it under.
-- A recycling worker's wait is bounded, at `LOCK_TIMEOUT`. Past that it stops
-  renewing the leases it holds and exits, and the reaper requeues them.
 - Every statement in the claim protocol runs on the database the worker
   writes to, including the raw PostgreSQL claim, so a read replica cannot
   answer a question that decides who holds a task.
@@ -74,10 +72,11 @@ is empty at that moment.
   PostgreSQL claim to do so.
 - The PostgreSQL claim, the renewal and the reaper stamp and judge the lease
   on one clock: the database's with `USE_TZ` on, the worker's with it off.
-- The reaper requeues abandoned rows in one UPDATE per pass, whatever their
-  number, and retires rows whose attempts are spent in bounded batches. Its
-  cost no longer grows with how many workers died at once.
-- The reclaim record names only tasks the pass actually reclaimed. A pass
+- The reaper requeues abandoned rows in one UPDATE per pass, up to
+  `reap_batch` rows at a time, and retires rows whose attempts are spent in
+  the same bounded batches. Its cost per pass is bounded whatever the size of
+  the stuck set.
+- The reclaim record names only tasks the pass reclaimed. A pass
   whose stuck set changed while it ran reports a `count` and names nobody.
 - The claim reads its candidate out of an index, in order, for a worker that
   names one queue, several, or none. Two index shapes ship and the planner
@@ -121,8 +120,8 @@ is empty at that moment.
   tasks, at `LOCK_TIMEOUT`. Past that it stops renewing their leases and exits,
   and the reaper requeues them. This can end a task that was going to finish:
   it is recorded as a lost lease and retried, and one on its last attempt
-  reaches LOST. A worker recycles because a thread stopped responding to its
-  deadline, so the alternative is a process that never leaves.
+  reaches LOST. The bound is what makes a recycle certain on a process that
+  has stopped trusting one of its threads.
 - `MAX_ATTEMPTS` and the `attempt` log key count claims, not invocations. The
   behaviour is unchanged; the reference table now says so.
 - Five log events that only fire while something is wrong are documented:
@@ -141,9 +140,9 @@ is empty at that moment.
 - The production page says which databases give the lease one shared clock.
   SQLite computes `Now()` inside the process that runs the statement, so every
   worker uses its own clock there whatever `USE_TZ` says; run SQLite on one
-  host. With `USE_TZ` off, no database gives a shared
-  clock, and two workers whose clocks differ by more than `LOCK_TIMEOUT`
-  reclaim each other's live leases.
+  host. With `USE_TZ` off the lease is on the worker's clock on every
+  database, so keep worker clocks within two thirds of `LOCK_TIMEOUT` of
+  each other, the timeout less the renewal interval.
 
 ## [1.0.0] - 2026-09-05
 
@@ -160,7 +159,7 @@ PostgreSQL and MySQL, and the suite covers all of them.
   import of the framework now goes through `django_ox.compat`, which picks
   core or the backport at runtime, so nothing else in the package changed.
   CI runs the whole suite on 5.2 against the backport, on SQLite, PostgreSQL
-  and MySQL, so the backport is tested rather than assumed.
+  and MySQL.
   Python 3.14 is not in the 5.2 legs, since Django 5.2 does not support it.
 - `Django>=5.2` replaces `Django>=6.0` as the declared dependency, and
   `Framework :: Django :: 5.2` joins the classifiers.
@@ -168,20 +167,15 @@ PostgreSQL and MySQL, and the suite covers all of them.
 ### Changed
 
 - `finished_at` is stamped from the process clock instead of being computed by
-  the database and read back. An outcome write is one statement again rather
-  than two. The benchmark on the docs site measured 114.9 tasks per second
-  against django-tasks-db 0.12's 103.6, on PostgreSQL 16 with 2,000 no-op
-  tasks, one worker and five runs per arm. That run predates this change by
-  eighteen minutes, so it measured the extra round trip and understates what
-  ships here. The lease is untouched.
-  `locked_at` and the reaper's cutoff stay on the database clock, which is
-  where a lease is judged.
+  the database and read back, so an outcome write is one statement. The lease
+  is untouched: `locked_at` and the reaper's cutoff stay on the database
+  clock, which is where a lease is judged.
 - The `backport` extra requires `django-tasks>=0.12`. Earlier backport releases
   change the framework API in ways django-ox does not support: 0.9.0 has no
   `enqueue_on_commit` on `Task`, 0.10.0 rejects the result statuses django-ox
   stores, and 0.11.0 adds an abstract `save_metadata` that the backend does not
   implement. CI now installs the floor with `==` and asserts the resolved
-  version, so the floor is tested.
+  version.
 - `Development Status :: 5 - Production/Stable` replaces the beta classifier.
 
 ## [0.4.0] - 2026-09-01
@@ -398,8 +392,8 @@ PostgreSQL and MySQL, and the suite covers all of them.
   interval is `LOCK_TIMEOUT / 3`, overridable as `renew_interval` when
   embedding `Worker` directly.
 - `OxTask.Status.LOST`, a fifth value in django-ox's own status column. It
-  reads as `FAILED` through `django.tasks`, which has four statuses and gets no
-  fifth from us, and `is_finished` is true for it, so callers waiting on a
+  reads as `FAILED` through `django.tasks`, which has four statuses and no
+  fifth, and `is_finished` is true for it, so callers waiting on a
   result still terminate. The row keeps the distinction: `queue_stats()`
   reports a `lost` column and `ox_prune --include-failed` covers it. If the
   worker holding a LOST task comes back and records a real outcome, that
@@ -511,7 +505,7 @@ Initial release.
 - Strict cron validation: expressions that can never fire and step values
   larger than a field's range (such as `*/61` in the minute field) are
   rejected at parse time rather than misfiring silently. Schedule
-  dispatch is robust to clock skew between workers: a tick row dated in
+  dispatch holds under clock skew between workers: a tick row dated in
   the future cannot suppress ticks that are due.
 
 ### Security

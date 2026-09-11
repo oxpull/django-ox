@@ -63,7 +63,7 @@ If the worker is killed, the lease goes stale. After `LOCK_TIMEOUT` (default
 300 seconds) the reaper in any surviving worker takes the task back: to READY
 if attempts remain, or to LOST if they are spent. LOST reads as `FAILED`
 through the result API, so nothing waits forever on a worker that is not
-coming back. The mechanics, and the one case worth knowing about, are in
+coming back. The mechanics, and the one case to know about, are in
 [Production](production.md#the-lease).
 
 ## What you get
@@ -171,7 +171,7 @@ That is the whole integration. Next steps:
 
 The core is finite on purpose: a durable queue, a worker, recurring
 schedules, and monitoring, with nothing extra to operate. Design
-decisions worth knowing before you commit:
+decisions to know before you commit:
 
 - A queued task can be discarded before a worker claims it, and a failed
   one retried, from the admin or with `django_ox.actions`. `TASK_TIMEOUT`

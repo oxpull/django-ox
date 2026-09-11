@@ -215,7 +215,7 @@ python manage.py ox_prune --older-than 7d
 
 ## Make a task safe to run twice
 
-The one habit worth building. Execution is at-least-once, so a task retries both
+The one habit to build. Execution is at-least-once, so a task retries both
 when it raises and when its worker dies mid-run. Assume every task can run
 again.
 

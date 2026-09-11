@@ -1,8 +1,8 @@
 name: Refresh Context7
 
 # Context7 serves this package's docs to coding assistants. It re-parses the
-# repository on its own schedule, and for a library this size that threshold is
-# 45 days, and only if the library has been requested recently. Between a docs
+# repository on its own schedule, weeks apart for a library this size, and
+# only if the library has been requested recently. Between a docs
 # change and that reparse, assistants are served the old corpus.
 #
 # This workflow closes that window: every docs change on main asks Context7 to

@@ -24,7 +24,7 @@ from django_ox import stats
 
 stats.queue_stats()
 # [QueueStats(queue_name="default", ready=3, running=1, failed=0, successful=214, lost=0, discarded=0),
-#  QueueStats(queue_name="emails", ready=0, running=0, failed=2, successful=560)]
+#  QueueStats(queue_name="emails", ready=0, running=0, failed=2, successful=560, lost=0, discarded=0)]
 
 stats.ready_count()  # tasks eligible to run right now
 stats.oldest_ready_age()  # timedelta, or None when nothing waits

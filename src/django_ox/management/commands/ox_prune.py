@@ -112,15 +112,13 @@ class Command(BaseCommand):
         )
 
     def _delete_in_batches(self, prunable: QuerySet[Any], batch_size: int) -> int:
-        model = prunable.model
         deleted = 0
         while True:
             batch = list(prunable.values_list("pk", flat=True)[:batch_size])
             if not batch:
                 break
-            # Rows selected here are immutable for pruning purposes
-            # (terminal task rows never change status; tick rows never
-            # move), so deleting by pk alone cannot remove a row that
-            # became live since the SELECT.
-            deleted += model._default_manager.filter(pk__in=batch).delete()[0]
+            # The DELETE re-applies the selection predicate, so a row that
+            # left the set between the two statements (a FAILED row an
+            # operator retried, say) is not removed.
+            deleted += prunable.filter(pk__in=batch).delete()[0]
         return deleted

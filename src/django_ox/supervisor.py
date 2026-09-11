@@ -51,7 +51,7 @@ BACKOFF_RESET = 60.0
 # container runtime) then applies its own restart policy with its own
 # backoff, which is where a persistent fault belongs. The count is per slot
 # so that every slot dying at once (a database restart) is one restart each,
-# not a trip; five deaths of one slot in a minute is a fault, not a blip.
+# not a trip; a sixth death of one slot in a minute is a fault, not a blip.
 RESTART_CAP = 5
 RESTART_WINDOW = 60.0
 

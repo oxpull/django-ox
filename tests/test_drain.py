@@ -213,9 +213,8 @@ class TestARecycleFinishesEvenWithHealthyWorkOutstanding:
     """
     Abandoning the stuck thread is not enough on its own. The recycling worker
     still waits for that thread's healthy siblings, and a sibling on a queue
-    with no timeout has no obligation to finish -- so one of them could hold a
-    recycling worker open indefinitely. That made the recycle a request rather
-    than a guarantee, on the one path whose premise is that this process can
+    with no timeout has no obligation to finish, so the wait is bounded: a
+    recycle is certain on the one path whose premise is that this process can
     no longer be trusted with work.
 
     The budget is the lease: past `lock_timeout` a reaper may take these rows

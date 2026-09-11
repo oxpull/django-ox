@@ -3,13 +3,12 @@
 django-ox 1.1.0 against django-tasks-db 0.12.0 (the other database backend for
 the Tasks API) on identical no-op workloads, PostgreSQL 16. Full methodology,
 raw JSON with every sample, and per-process logs are in the `benchmarks/`
-directory of the repository. Every run is reported; nothing was discarded.
+directory of the repository. Every run is reported.
 
 ## What was measured
 
 The worker in 1.1.0, measured on 2026-09-11. Earlier raw files in the same
-directory are from 0.3.1 and the pre-release worker; the tables here are
-1.1.0.
+directory record 0.3.1; the tables here are 1.1.0.
 
 Environment: Apple M1 Max, 10 logical CPUs, macOS 26.6.2, Python 3.12.13,
 Django 6.0.8, PostgreSQL 16.14 in Docker on the same machine,
@@ -58,7 +57,6 @@ Reading:
 - **Enqueue latency is a tie.** About six tenths of a millisecond at p50 for both, and the p95 is the same
   story.
 
-
 A control cell at a non-default `--interval 0.1` produced the same
 single-worker throughput as the defaults: 125.3 / 124.9 / 125.8 / 124.3 / 124.5
 tasks/sec, a mean of 125.0 against 124.5 on the default interval. So the poll
@@ -83,9 +81,9 @@ Two properties of the worker's claim path drive the end-to-end results:
   poll interval, so `--interval` only governs how often an idle worker
   checks for new work.
 
-The completion wake-up is shown by the diagnostic cell.  A
-regression in either shows up as a changed number rather than a changed
-claim.
+The statement count is held by a test and the completion wake-up by the
+diagnostic cell, so a regression in either shows up as a changed number
+rather than a changed claim.
 
 ## How to read these numbers
 
@@ -117,8 +115,8 @@ claim.
 A separate
 soak and chaos harness ran django-ox 1.1.0 for 21.5 minutes of sustained
 mixed load on PostgreSQL 16: 37,804 tasks across three scenarios,
-including 9 minutes in which a random worker was SIGKILLed every 20 to 45
-seconds (18 kills total, 27 interrupted executions). Forty assertions
+including nine minutes in which a random worker was SIGKILLed every 20 to 45
+seconds; 18 kills over the run, 27 interrupted executions. Forty assertions
 ran and all forty passed. Every task reached a terminal state, every
 interrupted execution was re-executed inside the reclaim bound (slowest reclaim 19.6 s against a bound of 37.5 s;
 the harness runs `LOCK_TIMEOUT` at 15 s so that reclaims happen inside the
@@ -146,7 +144,7 @@ on 0.3.1 used the same kill schedule.
 
 On the matrix above, django-ox finished the single-worker batch faster than
 django-tasks-db in every run, tied it on in-transaction enqueue latency, and at
-concurrency 4 the two worker shapes were within five percent. Under sustained
+concurrency 4 the two worker shapes were within about five percent. Under sustained
 load and repeated worker kills, django-ox 1.1.0 held its documented guarantees.
 
 Throughput on no-op tasks is the floor, not the reason to choose django-ox. The

@@ -88,7 +88,7 @@ send_confirmation.enqueue(order_id=42)
 | Result backend | the same table, read through the standard result API. |
 | Flower | the [stats API, `ox_health`, the Prometheus endpoint and the admin page](monitoring.md) |
 
-One difference in behaviour is worth reading before you switch. With a broker,
+One difference in behaviour to read before you switch. With a broker,
 `enqueue` leaves your process immediately. If the surrounding transaction then
 rolls back, a worker can pick up an order that no longer exists. The usual fix
 is to wrap every call in `transaction.on_commit()`.
@@ -182,7 +182,7 @@ No drain window available? Run both. Old workers keep serving the old table
 while new work goes to django-ox. They cannot see each other's rows.
 
 Both systems run tasks at least once, so your tasks should already be
-idempotent. Worth confirming before you start rather than halfway through.
+idempotent. Confirm it before you start rather than halfway through.
 
 ## Migrating away
 
@@ -191,7 +191,7 @@ tasks stay ordinary `django.tasks` tasks and moving to another backend is a
 settings change and a drain, run in the same order as above with the roles
 reversed.
 
-One behaviour does not travel, and it is worth deciding about on the way in
+One behaviour does not travel, and it needs deciding on the way in
 rather than on the way out. Enqueueing inside `transaction.atomic()` ties the
 task to that transaction, so it disappears on rollback. A broker-based backend
 cannot do this: the enqueue leaves your process the moment you call it. Code

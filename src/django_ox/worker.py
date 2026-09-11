@@ -475,10 +475,10 @@ class Worker:
             if reap_interval is not None
             else min(30.0, max(self.lock_timeout / 2, 1.0))
         )
-        # How many exhausted rows one reap pass may retire. The requeue
-        # branch is a single statement and needs no cap; this one writes a
-        # record specific to each row, so it takes them in bounded batches
-        # and leaves the remainder to the next pass.
+        # Rows one reap pass may touch, on either branch. The requeue
+        # branch names what it requeues in its record and the exhausted
+        # branch writes a record specific to each row, so both take rows
+        # in bounded batches and leave the remainder to the next pass.
         self.reap_batch: int = (
             reap_batch if reap_batch is not None else REAP_BATCH_DEFAULT
         )
@@ -639,8 +639,10 @@ class Worker:
 
         Applied to the candidate queryset on the two claim paths that build
         one. claim_filter_sql() is the same condition for the path that does
-        not. A subclass that implements one and not the other narrows two of
-        the three supported databases and silently does nothing on the third.
+        not. A subclass that overrides this hook alone keeps its condition on
+        every database: on PostgreSQL the worker takes the
+        ``SELECT ... FOR UPDATE SKIP LOCKED`` path, which applies it, and logs
+        ``claim_filter_sql_missing`` once.
         """
         return None
 
@@ -1423,7 +1425,7 @@ class Worker:
         # 3.14 a with statement acquires the lock one instruction before
         # the block's cleanup covers it, so a delivery attributed to the
         # acquiring call would leave the lock held with nobody to release
-        # it. list(map(...)) makes the acquire and its record one
+        # it. extend(map(...)) makes the acquire and its record one
         # indivisible instruction: `held` is non-empty exactly when this
         # thread took the lock, whatever instruction the delivery hits,
         # and the finally is installed before any of it runs.
@@ -1586,7 +1588,7 @@ class Worker:
             # ValueError from adapt_datetimefield_value on a naive value, and
             # a driver can raise UnicodeEncodeError on a traceback character
             # the column's charset cannot hold. Neither is a database error
-            # by Django's taxonomy, and both arrive on exactly this path.
+            # by Django's taxonomy, and both reach this path.
             logger.warning(
                 "Worker %s could not record the stuck attempt for task id=%s; "
                 "recycling anyway",
@@ -1840,7 +1842,7 @@ class Worker:
           are bounded whatever the size of the stuck set. The remainder goes
           on the next pass.
         - The UPDATE is restricted to the ids that were read. That is what
-          makes the log honest. `cutoff` is a database expression evaluated
+          makes the record exact. `cutoff` is a database expression evaluated
           per statement, so without the restriction the UPDATE's cutoff is
           later than the SELECT's and rows can *enter* the set as well as
           leave it. One entering and one leaving keeps the counts equal, and
@@ -1922,7 +1924,7 @@ class Worker:
         Reading first means the write has to re-ask what the read assumed.
         Two predicates, two races: the epoch catches a handover, and the
         expiry catches a renewal, which the epoch cannot see because
-        renewing writes locked_at and nothing else.
+        renewing writes locked_at and lease_expires_at and nothing else.
         """
         lost = 0
         candidates = (
@@ -1965,9 +1967,9 @@ class Worker:
                             ),
                             "traceback": (
                                 f"Worker {db_task.locked_by!r} stopped renewing "
-                                f"its lease on this task; the claim aged past "
-                                f"{self.lock_timeout}s with no attempts "
-                                f"remaining. What the attempt did was never "
+                                f"its lease on this task; the lease expired "
+                                f"with no attempts remaining. What the "
+                                f"attempt did was never "
                                 f"observed: it may have succeeded, it may have "
                                 f"failed, it may not have got that far. This "
                                 f"record is the lost lease, not a cause."
@@ -2278,10 +2280,10 @@ class Worker:
                         claimed_any = True
                         in_flight.add(executor.submit(self._execute_in_thread, db_task))
                 except Error:
-                    # django.db.Error rather than DatabaseError, for the reason
-                    # the renewal loop learned: InterfaceError sits beside
-                    # DatabaseError under Error, and a connection dropped
-                    # underneath the worker is the likeliest failure here.
+                    # django.db.Error rather than DatabaseError: InterfaceError
+                    # sits beside DatabaseError under Error, and a connection
+                    # dropped underneath the worker is the likeliest failure
+                    # here.
                     #
                     # The envelope this package publishes says the database may
                     # go away and come back, and every loop here honours it:
@@ -2372,13 +2374,12 @@ class Worker:
         While recycling, the wait is also bounded. Abandoning the stuck thread
         is not enough on its own: the worker still waits for its healthy
         siblings, and a sibling on a queue with no timeout has no obligation
-        to finish. The bound is what makes the recycle a guarantee rather
-        than a request, on a process that has already decided it cannot be
-        trusted to run work.
+        to finish. The bound is what makes the recycle certain, on a process
+        that has already decided it cannot be trusted to run work.
 
         The budget defaults to `lock_timeout`, which is a generous allowance
-        rather than a free one, and the arithmetic is worth stating because it
-        is not what it first looks like. These leases are still being renewed
+        rather than a free one, and the arithmetic adds rather than
+        overlaps. These leases are still being renewed
         while the drain waits, so no reaper is entitled to the rows during the
         budget: the wait and the lease do not overlap, they add. Worst case
         from the backstop firing to another worker picking the row up is
@@ -2392,9 +2393,8 @@ class Worker:
 
         The cost is real and deliberate: a task cut short this way is recorded
         as a lost lease and retried, and one on its last attempt becomes LOST
-        instead of the success it was heading for. That is the price of making
-        the recycle a guarantee rather than a request, on a process that has
-        already decided it cannot be trusted with work.
+        instead of the success it was heading for. That is the price of a
+        recycle that is certain.
         """
         give_up_at: float | None = None
         while True:

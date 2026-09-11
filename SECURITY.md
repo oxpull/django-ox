@@ -78,9 +78,12 @@ behind the project's own policy before it is reachable from outside; the
 
 Every query is built through the Django ORM. The one raw statement (the
 PostgreSQL `UPDATE ... FOR UPDATE SKIP LOCKED` claim) interpolates only the
-model's own table name and a fixed clause chosen by branch; all runtime
-values are passed as bound parameters. No query is assembled from row data
-or user input by string formatting.
+model's own table name, two fixed clauses chosen by branch (the queue filter
+and the lease clock) and, for a `Worker` subclass, the fragment its
+`claim_filter_sql()` returns, which is application code on the trusted side
+of the boundary; every runtime value, that fragment's included, is passed as
+a bound parameter. No query is assembled from row data or user input by
+string formatting.
 
 ## Supported versions
 

@@ -69,7 +69,7 @@ the queue is a table.
 
 ## Transactional enqueue
 
-`enqueue()` is a single INSERT on your default database connection, so it
+`enqueue()` is a single INSERT on the connection the task table uses, so it
 participates in the caller's open transaction. A task enqueued inside
 `transaction.atomic()` becomes visible to workers only when the transaction
 commits, and disappears on rollback. There is no window where business data
@@ -84,8 +84,9 @@ limit, keeping the full traceback of every attempt.
 ## Measured under worker kills
 
 A soak and chaos harness ran django-ox 1.1.0 for 21.5 minutes of sustained
-mixed load on PostgreSQL 16: 37,804 tasks, nine minutes of which SIGKILLed a random worker every 20 to 45 seconds.
-Eighteen kills in all, 27 interrupted executions. Every task reached a terminal state, every interrupted execution
+mixed load on PostgreSQL 16, 37,804 tasks in all. For nine of those minutes a
+random worker was SIGKILLed every 20 to 45 seconds: 18 kills over the run,
+27 interrupted executions. Every task reached a terminal state, every interrupted execution
 was re-executed inside the reclaim bound, no task executed twice in this
 run, and the median latency under kills stayed within two milliseconds of the
 undisturbed baseline.
@@ -106,12 +107,14 @@ The soak and the comparison below both ran on 1.1.0 on 2026-09-11.
 Against `django-tasks-db` on PostgreSQL 16, 2,000 no-op tasks, one worker,
 five runs per arm on one machine: django-ox 1.1.0 completed the batch at about 125 tasks per second against
 108. Every one of the five django-ox runs beat every one of
-the five control runs; the slowest was 121.3 and their fastest was 110.1. In-transaction enqueue latency was a tie at about
-six tenths of a millisecond at p50, and django-ox enqueued faster on the mean.
+the five control runs; the slowest django-ox run was 121.3 and the fastest
+control run was 110.1. In-transaction enqueue latency was a tie, about six
+tenths of a millisecond at p50 and the same story at p95, and on enqueue
+throughput django-ox led on the mean.
 
 [The benchmarks page](https://oxpull.com/django-ox/benchmarks/) has the
-full matrix, the concurrency-4 row and why the two workers are not the same
-shape at that width, and the raw data behind every figure.
+full matrix, including the concurrency-4 row and the two worker shapes it
+compares, and the raw data behind every figure.
 
 ## Configuration
 

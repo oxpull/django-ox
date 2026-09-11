@@ -25,11 +25,11 @@ stacks present the same public API.
 | Metric | Definition |
 | --- | --- |
 | Enqueue throughput | Wall time for 2,000 sequential `noop.enqueue()` calls from a single producer process in autocommit mode. Reported as tasks/sec. |
-| Enqueue latency in `transaction.atomic()` | 500 iterations; each opens its own `transaction.atomic()` block and times only the `enqueue()` call inside it (COMMIT excluded). Reported as p50/p95 milliseconds, the value at index `int(q * n)` of the sorted sample. |
+| Enqueue latency in `transaction.atomic()` | 500 iterations; each opens its own `transaction.atomic()` block and times only the `enqueue()` call inside it (COMMIT excluded). Reported as p50/p95 milliseconds, the nearest-rank value of the sorted sample (rank `round(q * n + 0.5)`, counted from 1). |
 | End-to-end completion | 2,000 no-op tasks pre-loaded as READY. Clock starts immediately before the worker process(es) are spawned and stops when the database shows 2,000 SUCCESSFUL rows (polled every 50 ms over a separate connection). Includes worker process startup and Django initialization, identically for both backends. |
 
 Each metric runs `--runs` times per backend (default 3; the published results use 5) and every run is reported.
-No best-of, no discarded runs. If a run errors or times out it appears in
+If a run errors or times out it appears in
 the results as an error. Backends are interleaved (run 1 ox, run 1
 tasksdb, run 2 ox, ...) so slow system drift cannot systematically favour
 whichever ran last.
@@ -115,8 +115,7 @@ Cleanup afterwards (the script leaves the container up so runs can be
 repeated cheaply):
 
 ```
-docker --context desktop-linux rm -f ox-bench
-osascript -e 'quit app "Docker"'
+docker rm -f ox-bench
 ```
 
 The published results page is `docs/benchmarks.md`, written from the raw

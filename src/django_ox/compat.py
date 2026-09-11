@@ -150,7 +150,7 @@ def import_tasks_framework() -> None:
     Django registers its tasks system check, the one that calls every backend's
     check(), when django.tasks is first imported. A project whose settings and
     URLconf import it nowhere would otherwise run `manage.py check` without
-    ever reaching django_ox.E001 to E005.
+    ever reaching the django_ox.E0xx checks.
 
     The backport registers the same check, and the receivers that rebuild the
     backend handler when TASKS changes, from its AppConfig.ready() rather than

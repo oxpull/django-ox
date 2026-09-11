@@ -3,9 +3,9 @@ Soak settings: django-ox on PostgreSQL 16 (container ox-pg, port 54329).
 
 LOCK_TIMEOUT is deliberately short (15 s against the 300 s default) so
 kill-and-reclaim cycles fit inside a scenario, and backoff is compressed so
-retries drain quickly at scenario end. Every task body in soaksite.tasks
-sleeps for less than LOCK_TIMEOUT, preserving the documented sizing rule
-(a live task must never outlive its lock).
+retries drain quickly at scenario end. Task bodies in soaksite.tasks sleep
+for between 20 ms and 8 s, so a scenario drains in seconds once its
+producers stop.
 """
 
 SECRET_KEY = "soak-only"

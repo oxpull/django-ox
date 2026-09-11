@@ -13,9 +13,8 @@ permissions:
   contents: read
 
 jobs:
-  # Secret scanning. This project handles a PyPI publishing identity, and the
-  # standing rule is that no token goes through any channel. Trusted publishing
-  # means there should never be a credential in the tree; this proves it.
+  # Secret scanning. This project publishes through trusted publishing, so
+  # there is never a credential in the tree; this proves it.
   secrets:
     runs-on: ubuntu-latest
     steps:

@@ -10,14 +10,12 @@
 }
 
 [data-md-color-scheme="slate"] {
-  /* Brand palette, shared with oxpull.com. Material has no spruce, hence `primary: custom`. */
   --md-primary-fg-color: #16201b;
   --md-primary-fg-color--light: #2b3a32;
   --md-primary-fg-color--dark: #0b100d;
   --md-accent-fg-color: #7fd3a6;
   --md-accent-fg-color--transparent: rgba(127, 211, 166, 0.12);
   --md-typeset-a-color: #7fd3a6;
-  /* Brand palette, shared with oxpull.com. Material has no spruce, hence `primary: custom`. */
   --md-default-bg-color: #111713;
   --md-code-bg-color: #0b100d;
   --md-default-fg-color--lightest: #27312a;

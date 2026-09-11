@@ -10,7 +10,7 @@ class DjangoOxConfig(AppConfig):
         # The Tasks framework registers its system check, the one that calls
         # every backend's check(), on import. A project whose settings and
         # URLconf import it nowhere would otherwise run `manage.py check`
-        # without ever reaching django_ox.E001 to E005. See compat for what
+        # without ever reaching the django_ox.E0xx checks. See compat for what
         # the backport needs instead.
         from .compat import import_tasks_framework
 

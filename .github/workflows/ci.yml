@@ -184,8 +184,7 @@ jobs:
 
   # A >= install resolves to the newest release and cannot test a floor. This
   # leg pins the floor with == so a regression at the bottom of the supported
-  # range fails here. This leg pins the floor with == so a regression at the
-  # bottom of the supported range fails here.
+  # range fails here.
   #
   # Measured 2026-09-05 on Django 5.2.17, Python 3.12, the whole suite:
   #   0.9.0   105 failed, 368 passed

@@ -123,6 +123,40 @@ class TestPrune:
         assert "Would delete 2" in out
         assert OxTask.objects.count() == 2
 
+    def test_a_row_retried_after_its_batch_was_selected_survives(self):
+        """
+        The DELETE re-applies the selection predicate, so a FAILED row an
+        operator retries between the SELECT and the DELETE is left alone.
+        """
+        from django_ox.actions import retry
+        from django_ox.management.commands.ox_prune import Command
+
+        old = make_task(OxTask.Status.FAILED, finished_days_ago=30)
+        retried = make_task(OxTask.Status.FAILED, finished_days_ago=30)
+        cutoff = timezone.now() - timedelta(days=7)
+        prunable = OxTask.objects.filter(
+            status=OxTask.Status.FAILED, finished_at__lt=cutoff
+        )
+
+        class RetryAfterSelect:
+            """The queryset as _delete_in_batches sees it, with one row
+            retried after each SELECT and before the DELETE."""
+
+            def values_list(self, *args, **kwargs):
+                ids = list(prunable.values_list(*args, **kwargs))
+                retry(retried.pk)
+                return ids
+
+            def filter(self, **kwargs):
+                return prunable.filter(**kwargs)
+
+        deleted = Command()._delete_in_batches(RetryAfterSelect(), 100)
+
+        assert deleted == 1
+        assert not OxTask.objects.filter(pk=old.pk).exists()
+        retried.refresh_from_db()
+        assert retried.status == OxTask.Status.READY
+
     def test_deletes_in_batches(self, django_assert_num_queries):
         for _ in range(5):
             make_task(OxTask.Status.SUCCESSFUL, finished_days_ago=8)

@@ -250,7 +250,7 @@ class TestAReclaimRecordNamesOnlyWhatItReclaimed:
     """
     This record is what an operator reads to explain a task that ran twice, so
     a false entry in it is worse than no entry. Comparing how many rows were
-    read against how many were written is only an honest check if the set can
+    read against how many were written is only a meaningful check if the set can
     shrink and not grow: one row leaving and one joining keeps the numbers
     equal and changes every name.
     """

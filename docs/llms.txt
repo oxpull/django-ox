@@ -7,7 +7,7 @@
 > schedules, a result store and a health command. No broker to provision.
 > BSD 3-Clause. Package name on PyPI: django-ox. App label: django_ox.
 
-Operational facts worth getting right:
+Operational facts to get right:
 
 - Requires Python 3.12 or later and Django 5.2 or later. Django ships the
   Tasks API but no production backend; django-ox is the backend.

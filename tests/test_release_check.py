@@ -206,7 +206,7 @@ def test_stale_docs_pin_fails(tmp_path):
 def test_this_repository_is_consistent():
     """The gate applied to the tree it ships with, so a bump cannot skip it.
 
-    This is the assertion that makes the whole file worth having: it runs on
+    This is the assertion the file exists for: it runs on
     every test run, so a version bumped in one place and not the other fails on
     the commit that does it rather than at tag time.
     """

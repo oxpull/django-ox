@@ -228,7 +228,7 @@ def run_workers_until_no_task_is_pending(
 ):
     """
     Run a worker until no task is READY or RUNNING, starting a fresh one
-    whenever the grace backstop recycles the one before -- the
+    whenever the grace backstop recycles the one before: the
     supervisor's job in production, done inline here. Progress-based like
     wait_until_no_task_is_pending: the backstop resolves a stalled batch
     within one grace, so a drain that moves nothing for `stall_timeout`
@@ -359,9 +359,8 @@ class TestOptions:
     )
     def test_infinite_and_astronomical_values_are_rejected(self, options):
         """
-        inf is a plausible spelling of no limit, and it passed validation
-        while the deadline arithmetic on every attempt overflowed, so each
-        attempt failed with OverflowError before the task was called.
+        inf is a plausible spelling of no limit, and the deadline arithmetic
+        cannot represent it.
         None is the spelling; the message says so for the two options that
         take it.
         """
@@ -504,8 +503,7 @@ class TestOptions:
         settings.TASKS = tasks_setting(TASK_TIMEOUT=0)
         with pytest.raises(ImproperlyConfigured, match="TASK_TIMEOUT"):
             Worker()
-        # Used to start, then fail every attempt with OverflowError in the
-        # deadline arithmetic until the task was FAILED.
+        # Refused at construction, before any deadline arithmetic runs.
         with pytest.raises(ImproperlyConfigured, match="finite"):
             Worker(task_timeout=float("inf"))
         with pytest.raises(ImproperlyConfigured, match="finite"):
@@ -719,11 +717,10 @@ class TestSoftTimeout:
 
     def test_no_timeout_leaves_the_stored_traceback_as_it_was(self):
         """
-        With no timeout on the queue the worker calls the task the way it
-        did before timeouts existed: the stored traceback goes straight
+        With no timeout on the queue the stored traceback goes straight
         from _run_attempt into django.tasks and the task, with no frame of
-        the timeout machinery between them. Tooling that string-matches
-        traceback frames saw two new ones otherwise.
+        the timeout machinery between them, so tooling that string-matches
+        traceback frames sees the same frames on every queue.
         """
         from .tasks import fail_always
 
@@ -737,11 +734,10 @@ class TestSoftTimeout:
 
     def test_a_deadline_years_out_is_waited_for_in_steps(self, monkeypatch):
         """
-        The watchdog sleeps until the earliest deadline. A condition wait
-        longer than the platform allows raises OverflowError, which killed
-        the watchdog thread for any timeout past about 49 days on Windows
-        and past the end of time_t elsewhere; the largest accepted value
-        is well past both.
+        The watchdog sleeps until the earliest deadline, in steps no longer
+        than the platform's condition wait allows: about 49 days on Windows,
+        the end of time_t elsewhere. The largest accepted timeout is well
+        past both, so the step is what keeps the wait representable.
         """
         assert MAX_SECONDS > WATCHDOG_MAX_WAIT
         died: list[threading.ExceptHookArgs] = []
@@ -899,8 +895,8 @@ class TestReleasesWhatItHeld:
         until the test releases it, so no attempt can finish before its
         delivery lands. A delivery that cannot land within the grace is
         the backstop's case, exactly as documented: the attempt is
-        recorded as stuck, the worker recycles, and the replacement --
-        started here the way the supervisor would -- carries on. Either
+        recorded as stuck, the worker recycles, and the replacement,
+        started here the way the supervisor would, carries on. Either
         way, every attempt ends recorded, fenced, and off its connection.
         """
         caplog.set_level(logging.WARNING, logger="django_ox")
@@ -925,7 +921,7 @@ class TestReleasesWhatItHeld:
         def sessions():
             """
             (used, total) backends on this database. `used` is every
-            session that has run at least one statement -- the only kind
+            session that has run at least one statement, the only kind
             the worker's threads produce, since a claim, a renewal, an
             outcome write and a task body all query. A starved server
             also accumulates sessions that never got that far (connection
@@ -983,8 +979,8 @@ class TestReleasesWhatItHeld:
         assert peak_used <= 12 + 8 * (len(workers) - 1), (peak_used, len(workers))
         # The coarse cap on what the storm leaves behind on a slow
         # server: handshake debris and unreaped backends stay far from
-        # the server's limit, while a genuine pileup -- counted in
-        # attempts, 360 here -- would blow straight past it.
+        # the server's limit, while a genuine pileup, counted in
+        # attempts, 360 here, would blow straight past it.
         assert peak_total < 60, peak_total
         assert not events(caplog, "worker_error")
         assert not events(caplog, "task_reclaimed")
@@ -1008,7 +1004,7 @@ class TestReleasesWhatItHeld:
         timed out at 50 ms, land inside a statement often enough.
 
         A thread waiting inside the driver's C wait is out of the
-        exception's reach until the statement returns -- the documented
+        exception's reach until the statement returns: the documented
         limit of delivery, and the grace backstop's whole reason to
         exist. So the claim is the invariant, not the path: every attempt
         ends FAILED with TaskTimeout, recorded either where the delivery

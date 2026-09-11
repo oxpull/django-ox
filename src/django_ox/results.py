@@ -66,8 +66,8 @@ def public_status(db_status: str) -> TaskResultStatus:
     claim the row, and the only process that could still write to it is one
     there is positive reason to think has gone. Mapping to RUNNING would
     also leave TaskResult.is_finished permanently False, so every wait loop
-    over such a task spins forever, which is worse to hand somebody than a
-    wrong answer.
+    over such a task spins forever. FAILED is the answer a caller can act
+    on.
 
     A caller polling a LOST row sees FAILED; if the holder of the lease later
     records a success, the next read sees SUCCESSFUL. The row keeps the

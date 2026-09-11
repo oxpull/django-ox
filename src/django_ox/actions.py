@@ -138,7 +138,7 @@ def expire_lease(result_id: str | uuid.UUID) -> bool:
         return False
     # Process time, not the lease clock. This is an operator's instruction
     # rather than part of the lease protocol, and any reaper comparing against
-    # any clock must read it as past: a full timeout in the past is behind
+    # any clock must read it as past: a full day in the past is behind
     # every clock a fleet plausibly has.
     already_expired = timezone.now() - timedelta(days=1)
     updated = (

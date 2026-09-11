@@ -67,7 +67,7 @@ Docker on localhost, each width against an empty database.
 
 ## What Pro is not
 
-Workflows and chains are on the roadmap, undated.  Rate limiting caps how
+Workflows and chains are on the roadmap, undated. Rate limiting caps how
 often a task starts, not how many run at once; concurrency limiting is a
 different mechanism and is not in Pro. Metrics stay free: the stats API and
 the health command are in the open source package and remain there.

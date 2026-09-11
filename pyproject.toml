@@ -105,7 +105,7 @@ select = [
     "RUF", # ruff-specific
     "DJ",  # flake8-django
     "T20", # stray print()
-        "ERA", # commented-out code left in place
+    "ERA", # commented-out code left in place
     "TD",  # TODO markers without structure
     "FIX", # FIXME/HACK/XXX left behind
     "S",   # flake8-bandit: security defects in shipped code
@@ -162,6 +162,5 @@ branch = true
 
 [tool.coverage.report]
 show_missing = true
-# Measured 93.5% on SQLite (2026-08-16); the margin absorbs small drift
-# without letting coverage rot.
+# The floor sits under the measured SQLite figure, with room for small drift.
 fail_under = 91

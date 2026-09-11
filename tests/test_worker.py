@@ -923,9 +923,9 @@ class TestLeaseRenewalUnderTheReaper:
     slow and reclaims only workers that actually stopped reporting.
 
     The timings below are a ratio rather than a stopwatch. What is under
-    test is the shape the worker documents -- a renewal every
+    test is the shape the worker documents, a renewal every
     LOCK_TIMEOUT / 3, so two consecutive renewals can be missed before the
-    reaper is entitled to conclude anything -- and the ratio, not the
+    reaper is entitled to conclude anything, and the ratio, not the
     absolute value, is what these tests assert. The absolute values are
     scaled so that a single renewal round-trip on a networked database, or
     under a coverage tracer, still lands well inside the lease. A tighter

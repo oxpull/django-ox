@@ -136,7 +136,7 @@ class TestActions:
             task_path="tests.tasks.add",
             backend_name="default",
             status=OxTask.Status.FAILED,
-            enqueued_at="2026-01-01T00:00:00Z",
+            enqueued_at=timezone.now(),
         )
 
         response = client.get(reverse(CHANGELIST))

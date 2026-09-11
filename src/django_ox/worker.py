@@ -1233,7 +1233,26 @@ class Worker:
                         self._watch_cv.wait(min(remaining, WATCHDOG_MAX_WAIT))
                     stuck = self._fire_due()
                 for watch in stuck:
-                    self._handle_stuck(watch)
+                    try:
+                        self._handle_stuck(watch)
+                    except Exception:
+                        # This thread is the whole of the timeout backstop and
+                        # nothing restarts it mid-attempt: an exception here
+                        # used to kill it, leaving every attempt already armed
+                        # with no deadline and no grace, and the worker with no
+                        # record of why. _fire_due has already taken this watch
+                        # out of the table, so the loop carries on with the
+                        # others rather than retrying a watch whose grace has
+                        # passed.
+                        logger.exception(
+                            "Worker %s could not record a stuck attempt; the "
+                            "timeout backstop continues for the others",
+                            self.worker_id,
+                            extra={
+                                "event": "watchdog_error",
+                                "worker_id": self.worker_id,
+                            },
+                        )
         finally:
             connections.close_all()
 
@@ -1328,7 +1347,22 @@ class Worker:
             f"reports is refused by the lease.",
             timeout=watch.timeout,
         )
-        self._handle_failure(db_task, exc, duration_ms, release=True)
+        try:
+            self._handle_failure(db_task, exc, duration_ms, release=True)
+        except Error:
+            # Recording the attempt is worth attempting and not worth the
+            # fleet. The thread is wedged whether or not the database is
+            # reachable, and the recycle below is what stops this worker
+            # keeping a dead pool slot and waiting for that thread forever.
+            # Letting this propagate would skip it.
+            logger.warning(
+                "Worker %s could not record the stuck attempt for task id=%s; "
+                "recycling anyway",
+                self.worker_id,
+                db_task.id,
+                exc_info=True,
+                extra=self._log_extra("task_stuck_unrecorded", db_task),
+            )
         # Whether the write landed and whether the thread is stuck are
         # different questions, and this used to answer the second with the
         # first. A lost write can mean the thread's own outcome landed ahead
@@ -1787,23 +1821,63 @@ class Worker:
                     )
                     self.request_stop()
                     break
-                if time.monotonic() - last_reap >= self.reap_interval:
-                    self.reap()
-                    last_reap = time.monotonic()
-                if (
-                    self.schedules
-                    and time.monotonic() - last_dispatch >= self.schedule_interval
-                ):
-                    self.dispatch_schedules()
-                    last_dispatch = time.monotonic()
-                in_flight = {f for f in in_flight if not f.done()}
-                claimed_any = False
-                while len(in_flight) < self.concurrency and not self._stop.is_set():
-                    db_task = self.claim_one()
-                    if db_task is None:
-                        break
-                    claimed_any = True
-                    in_flight.add(executor.submit(self._execute_in_thread, db_task))
+                try:
+                    if time.monotonic() - last_reap >= self.reap_interval:
+                        self.reap()
+                        last_reap = time.monotonic()
+                    if (
+                        self.schedules
+                        and time.monotonic() - last_dispatch >= self.schedule_interval
+                    ):
+                        self.dispatch_schedules()
+                        last_dispatch = time.monotonic()
+                    in_flight = {f for f in in_flight if not f.done()}
+                    claimed_any = False
+                    while len(in_flight) < self.concurrency and not self._stop.is_set():
+                        db_task = self.claim_one()
+                        if db_task is None:
+                            break
+                        claimed_any = True
+                        in_flight.add(executor.submit(self._execute_in_thread, db_task))
+                except Error:
+                    # django.db.Error rather than DatabaseError, for the reason
+                    # the renewal loop learned: InterfaceError sits beside
+                    # DatabaseError under Error, and a connection dropped
+                    # underneath the worker is the likeliest failure here.
+                    #
+                    # The envelope this package publishes says the database may
+                    # go away and come back, and every other loop here already
+                    # honours that: the renewal thread survives it and so does
+                    # an attempt. This one did not, so one reconnect error
+                    # unwound out of run(). The supervisor then replaced the
+                    # child, the replacement failed on its own first reap, and
+                    # five deaths in a minute stop the supervisor for good - so
+                    # a blip the worker was built to ride out took the whole
+                    # fleet down and left it down.
+                    #
+                    # Reap, dispatch and claim are all retried on the next pass
+                    # by construction: nothing here holds state that a missed
+                    # pass loses. Dropping the connection is what makes the
+                    # next pass reconnect rather than reuse a broken one.
+                    logger.warning(
+                        "Worker %s could not reach the database this pass; "
+                        "retrying in %.1fs",
+                        self.worker_id,
+                        self.poll_interval,
+                        exc_info=True,
+                        extra={
+                            "event": "worker_poll_failed",
+                            "worker_id": self.worker_id,
+                        },
+                    )
+                    # close_old_connections rather than close_all: it drops
+                    # exactly the connections Django knows are unusable or past
+                    # their age, which is what makes the next pass reconnect,
+                    # and it is what the attempt path already does. close_all
+                    # would also tear down a connection the caller owns.
+                    close_old_connections()
+                    self._stop.wait(self.poll_interval)
+                    continue
                 if not claimed_any:
                     if in_flight:
                         # A slot may free up long before the poll interval

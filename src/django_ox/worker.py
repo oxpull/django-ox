@@ -30,7 +30,7 @@ from django.db import (
     router,
     transaction,
 )
-from django.db.models import F, Max, Q, QuerySet
+from django.db.models import DateTimeField, ExpressionWrapper, F, Max, Q, QuerySet
 from django.db.models.expressions import Combinable, CombinedExpression
 from django.db.models.functions import Now
 from django.utils import timezone
@@ -298,6 +298,7 @@ UPDATE "{table}" SET
     "status" = %(running)s,
     "locked_by" = %(worker_id)s,
     "locked_at" = {lease_clock},
+    "lease_expires_at" = {lease_clock} + %(lease_ttl)s,
     "lease_epoch" = "lease_epoch" + 1,
     "attempts" = "attempts" + 1,
     "started_at" = COALESCE("started_at", {lease_clock}),
@@ -364,6 +365,27 @@ def _lease_now() -> Combinable | datetime:
     the path every task takes.
     """
     return Now() if settings.USE_TZ else timezone.now()
+
+
+def _lease_expiry(seconds: float) -> Any:
+    """
+    When a lease taken now stops being valid, on the lease clock.
+
+    The same clock as _lease_now(), because the reaper compares the two and a
+    row whose expiry came from one clock and whose cutoff came from another is
+    exactly the disagreement storing it is meant to remove.
+    """
+    # Built on _lease_now() rather than repeating its choice, so anything that
+    # moves the lease clock moves the expiry with it. Stamping this from the
+    # process while locked_at came from the database, or the reverse, would put
+    # two clocks on one lease, which is the disagreement the stored expiry
+    # exists to remove rather than relocate.
+    now = _lease_now()
+    if settings.USE_TZ:
+        return ExpressionWrapper(
+            now + timedelta(seconds=seconds), output_field=DateTimeField()
+        )
+    return now + timedelta(seconds=seconds)
 
 
 class Worker:
@@ -710,6 +732,7 @@ class Worker:
             "status": OxTask.Status.RUNNING,
             "locked_by": self.worker_id,
             "locked_at": _lease_now(),
+            "lease_expires_at": _lease_expiry(self.lock_timeout),
             "lease_epoch": candidate.lease_epoch + 1,
             "attempts": candidate.attempts + 1,
             "started_at": candidate.started_at or _lease_now(),
@@ -748,6 +771,9 @@ class Worker:
                 "worker_id_json": json.dumps([self.worker_id]),
                 "now": run_after_cutoff,
                 "lease_now": _lease_now() if not settings.USE_TZ else None,
+                # psycopg adapts a timedelta to an interval, so this works
+                # against either lease clock without branching the SQL.
+                "lease_ttl": timedelta(seconds=self.lock_timeout),
                 "queues": self.queues,
                 **extra_params,
             },
@@ -870,7 +896,10 @@ class Worker:
                 status=OxTask.Status.RUNNING,
                 locked_by=self.worker_id,
             )
-            .update(locked_at=_lease_now())
+            .update(
+                locked_at=_lease_now(),
+                lease_expires_at=_lease_expiry(self.lock_timeout),
+            )
         )
 
     def _renewal_loop(self, stop: Event) -> None:
@@ -1111,6 +1140,7 @@ class Worker:
                 finished_at=timezone.now(),
                 locked_by=None,
                 locked_at=None,
+                lease_expires_at=None,
             ):
                 return
             logger.info(
@@ -1697,6 +1727,7 @@ class Worker:
                 finished_at=timezone.now(),
                 locked_by=None,
                 locked_at=None,
+                lease_expires_at=None,
                 **handover,
             ):
                 return False
@@ -1743,6 +1774,7 @@ class Worker:
                 run_after=timezone.now() + timedelta(seconds=delay),
                 locked_by=None,
                 locked_at=None,
+                lease_expires_at=None,
                 **handover,
             ):
                 return False
@@ -1791,8 +1823,20 @@ class Worker:
         may yet report its own.
         """
         cutoff = _lease_now() - timedelta(seconds=self.lock_timeout)
+        # The row's own expiry decides, and this worker's timeout only decides
+        # for a row that has none. Deriving the deadline here instead means
+        # every reaper answers with its own configuration, so a rolling deploy
+        # that changes LOCK_TIMEOUT puts two answers in one fleet and the
+        # shorter one reclaims live work from a worker renewing correctly on
+        # the longer.
+        #
+        # NULL is a lease taken before the column existed. Those keep the old
+        # comparison until their first renewal fills the column in, which is
+        # what lets a fleet upgrade one worker at a time with nothing to run.
         stuck = OxTask.objects.using(self._db_alias).filter(
-            status=OxTask.Status.RUNNING, locked_at__lt=cutoff
+            Q(lease_expires_at__lt=_lease_now())
+            | Q(lease_expires_at__isnull=True, locked_at__lt=cutoff),
+            status=OxTask.Status.RUNNING,
         )
         return self._requeue_abandoned(stuck) + self._abandon_exhausted(stuck, cutoff)
 
@@ -1841,6 +1885,7 @@ class Worker:
             status=OxTask.Status.READY,
             locked_by=None,
             locked_at=None,
+            lease_expires_at=None,
             lease_epoch=F("lease_epoch") + 1,
         )
         if not requeued:
@@ -1920,15 +1965,17 @@ class Worker:
             changed = (
                 OxTask.objects.using(self._db_alias)
                 .filter(
+                    Q(lease_expires_at__lt=_lease_now())
+                    | Q(lease_expires_at__isnull=True, locked_at__lt=cutoff),
                     pk=db_task.pk,
                     status=OxTask.Status.RUNNING,
                     lease_epoch=db_task.lease_epoch,
-                    locked_at__lt=cutoff,
                 )
                 .update(
                     status=OxTask.Status.LOST,
                     locked_by=None,
                     locked_at=None,
+                    lease_expires_at=None,
                     # Process time, not the lease clock; _lease_now says why.
                     finished_at=timezone.now(),
                     errors=[

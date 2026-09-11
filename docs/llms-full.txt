@@ -1785,6 +1785,28 @@ was discarded because the lease had already been reclaimed, and a steady
 trickle of it means the timeout is short relative to how long your workers
 go unresponsive.
 
+**The value travels with the lease, not with the reaper.** A worker writes
+`lease_expires_at` on the row when it claims, from its own `LOCK_TIMEOUT`, and
+refreshes it on every renewal. Every reaper judges that column rather than
+deriving a deadline from whatever it happens to be configured with, so you can
+change `LOCK_TIMEOUT` in a rolling deploy: each row keeps the lease it was
+granted and picks up the new value on its next claim. Without that, two
+settings in one fleet means the shorter one reclaims live work from a worker
+renewing correctly on the longer.
+
+The trade is that a lease outlives the configuration that granted it. If you
+grant a very long one by mistake, changing the setting does not shorten the
+leases already out; `django_ox.actions.expire_lease(result_id)` expires one so
+the next reaper pass takes it. It does not stop the task, and the lease number
+still refuses that task's finish write once somebody else holds the row, so it
+is the ordinary reclaim brought forward rather than a cancellation. Use
+`discard()` to close a task.
+
+A row claimed by a version before this column existed has it empty, and the
+reaper falls back to comparing `locked_at` against its own timeout for those.
+The first renewal after the upgrade fills it in, so a fleet converges lease by
+lease with no step to run.
+
 **Tasks must be idempotent.** Execution is at-least-once by design: a task
 is retried both when it raises and when its worker dies mid-run. Write
 task bodies so that running twice is harmless (upserts, idempotency keys,
@@ -2290,6 +2312,7 @@ actions.discard(result.id)  # True if the row was closed
 | Function | Accepts | Does |
 | --- | --- | --- |
 | `retry(result_id)` | FAILED, LOST | Sets the row back to READY for one more attempt, clears `run_after` so it is eligible at once, and raises `max_attempts` to `attempts + 1`. The count, `worker_ids` and every per-attempt traceback stay as they were, so the record still says what happened before. The lease number goes up, so a LOST row's last worker, if it is still alive somewhere, writes nothing over the retry. |
+| `expire_lease(result_id)` | RUNNING | Sets the lease's expiry into the past so the next reaper pass reclaims the task. The task itself keeps running; the lease number refuses its finish write once another worker holds the row, so this brings the ordinary reclaim forward rather than cancelling anything. For a lease granted with a timeout that turned out to be wrong: the row carries its own deadline, so changing the setting on the workers does not move it. |
 | `discard(result_id)` | READY, FAILED, LOST | Marks the row DISCARDED. A READY task that is discarded never runs; a discarded FAILED or LOST task is not retried. The attempt records stay. |
 
 `retry_many(selection)` and `discard_many(selection)` make the same move
@@ -2548,7 +2571,7 @@ export names this page does not list; those names are not public.
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   `128 + the signal number`, following the shell convention.
-- **The system check IDs** the `django_ox.E0xx` system check identifiers, which
+- **The system check IDs**, the `django_ox.E0xx` identifiers, which
   the configuration guide tells you to list in `SILENCED_SYSTEM_CHECKS`. The
   IDs are stable; the messages are not.
 - **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy or when an
@@ -2559,7 +2582,10 @@ export names this page does not list; those names are not public.
   ahead of its ordering and its limit. The statement around it is not
   promised.
 - **The timeout helpers** `django_ox.deadline()` and `django_ox.remaining()`,
-  callable from inside a task.
+  callable from inside a task. `deadline()` answers with a wall-clock time, and
+  `remaining()` with seconds measured on the same monotonic clock the worker
+  enforces the deadline with, so the two can differ by the size of a clock
+  correction. `remaining()` is the one the watchdog agrees with.
 - **The metrics module** `django_ox.stats`: `queue_stats`, `ready_count`,
   `oldest_ready_age`, `throughput`, `failure_rate`, `last_claim_age`, the
   `QueueStats` dataclass, and `DEFAULT_WINDOW`, the trailing window the
@@ -2620,8 +2646,8 @@ django-ox follows [Semantic Versioning](https://semver.org/):
 - **Minor releases add, they do not break.** Patch releases are bug fixes
   only.
 
-Pin accordingly: `django-ox~=1.0.0` accepts patch releases only;
-`django-ox~=1.0` accepts the current major line.
+Pin accordingly: `django-ox~=1.1.0` accepts patch releases only;
+`django-ox~=1.1` accepts the current major line.
 
 ## Deprecation policy
 
@@ -3016,14 +3042,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-09-11
 
-**A migration ships with this release.** `0005_dequeue_index` rebuilds the
-index the claim reads and adds a second one. On PostgreSQL and MySQL, building
-an index takes a lock that blocks enqueues and claims for the duration. On a
-large task table, create the two indexes by hand with `CREATE INDEX
-CONCURRENTLY` and then run `migrate --fake django_ox 0005`; `sqlmigrate` prints
-the exact statements.
+**Two migrations ship with this release.** `0005_dequeue_index` rebuilds the
+index the claim reads and adds a second one; `0006_lease_expiry` adds a
+nullable column and its index. On PostgreSQL and MySQL, building an index
+takes a lock that blocks enqueues and claims for the duration. On a large task
+table, create the three indexes by hand with `CREATE INDEX CONCURRENTLY` and
+then run `migrate --fake django_ox 0006`; `sqlmigrate` prints the exact
+statements for each migration.
+
+### Added
+
+- `lease_expires_at` on the task row: when the lease stops being valid,
+  written by the worker that took it and refreshed on every renewal. Every
+  reaper judges that column instead of deriving a deadline from its own
+  `LOCK_TIMEOUT`, so the setting can be changed in a rolling deploy. Two
+  timeouts in one fleet used to mean the shorter one reclaiming live work from
+  a worker renewing correctly on the longer, and the lease number protects that
+  worker's finish write rather than the work it is doing.
+
+  A row claimed before the column existed has it empty, and the reaper keeps
+  comparing `locked_at` against its own timeout for those. The first renewal
+  after the upgrade fills it in, so a fleet converges lease by lease with
+  nothing for an operator to run.
+- `django_ox.actions.expire_lease(result_id)` expires a RUNNING task's lease so
+  the next reaper pass reclaims it. The row carries its own deadline now, so a
+  lease granted with a timeout that turned out to be wrong outlives the
+  configuration that granted it; this is how to shorten one. It does not stop
+  the task.
+- `lease_expires_at` appears in the admin's change list and its Lease fieldset.
 
 ### Fixed
 
@@ -3559,6 +3607,7 @@ Initial release.
   window, and the supported Python and Django matrix.
 
 [Unreleased]: https://github.com/oxpull/django-ox/compare/v1.0.0...HEAD
+[1.1.0]: https://github.com/oxpull/django-ox/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/oxpull/django-ox/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/oxpull/django-ox/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/oxpull/django-ox/compare/v0.3.0...v0.3.1

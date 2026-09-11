@@ -42,9 +42,8 @@ def collect_task_finished():
 
 def reap_away(worker, db_task):
     """Age this claim past lock_timeout and let the reaper take the row."""
-    OxTask.objects.filter(pk=db_task.pk).update(
-        locked_at=timezone.now() - timedelta(seconds=worker.lock_timeout + 10)
-    )
+    stale = timezone.now() - timedelta(seconds=worker.lock_timeout + 10)
+    OxTask.objects.filter(pk=db_task.pk).update(locked_at=stale, lease_expires_at=stale)
     assert worker.reap() == 1
 
 
@@ -218,7 +217,7 @@ class TestReaper:
         add.enqueue(1, 2)
         db_task = worker.claim_one()
         stale = timezone.now() - timedelta(seconds=worker.lock_timeout + 10)
-        updates = {"locked_at": stale}
+        updates = {"locked_at": stale, "lease_expires_at": stale}
         if attempts is not None:
             updates["attempts"] = attempts
         OxTask.objects.filter(pk=db_task.pk).update(**updates)

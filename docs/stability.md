@@ -25,7 +25,7 @@ export names this page does not list; those names are not public.
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   `128 + the signal number`, following the shell convention.
-- **The system check IDs** the `django_ox.E0xx` system check identifiers, which
+- **The system check IDs**, the `django_ox.E0xx` identifiers, which
   the configuration guide tells you to list in `SILENCED_SYSTEM_CHECKS`. The
   IDs are stable; the messages are not.
 - **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy or when an
@@ -36,7 +36,10 @@ export names this page does not list; those names are not public.
   ahead of its ordering and its limit. The statement around it is not
   promised.
 - **The timeout helpers** `django_ox.deadline()` and `django_ox.remaining()`,
-  callable from inside a task.
+  callable from inside a task. `deadline()` answers with a wall-clock time, and
+  `remaining()` with seconds measured on the same monotonic clock the worker
+  enforces the deadline with, so the two can differ by the size of a clock
+  correction. `remaining()` is the one the watchdog agrees with.
 - **The metrics module** `django_ox.stats`: `queue_stats`, `ready_count`,
   `oldest_ready_age`, `throughput`, `failure_rate`, `last_claim_age`, the
   `QueueStats` dataclass, and `DEFAULT_WINDOW`, the trailing window the
@@ -97,8 +100,8 @@ django-ox follows [Semantic Versioning](https://semver.org/):
 - **Minor releases add, they do not break.** Patch releases are bug fixes
   only.
 
-Pin accordingly: `django-ox~=1.0.0` accepts patch releases only;
-`django-ox~=1.0` accepts the current major line.
+Pin accordingly: `django-ox~=1.1.0` accepts patch releases only;
+`django-ox~=1.1` accepts the current major line.
 
 ## Deprecation policy
 

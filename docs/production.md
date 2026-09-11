@@ -549,6 +549,28 @@ was discarded because the lease had already been reclaimed, and a steady
 trickle of it means the timeout is short relative to how long your workers
 go unresponsive.
 
+**The value travels with the lease, not with the reaper.** A worker writes
+`lease_expires_at` on the row when it claims, from its own `LOCK_TIMEOUT`, and
+refreshes it on every renewal. Every reaper judges that column rather than
+deriving a deadline from whatever it happens to be configured with, so you can
+change `LOCK_TIMEOUT` in a rolling deploy: each row keeps the lease it was
+granted and picks up the new value on its next claim. Without that, two
+settings in one fleet means the shorter one reclaims live work from a worker
+renewing correctly on the longer.
+
+The trade is that a lease outlives the configuration that granted it. If you
+grant a very long one by mistake, changing the setting does not shorten the
+leases already out; `django_ox.actions.expire_lease(result_id)` expires one so
+the next reaper pass takes it. It does not stop the task, and the lease number
+still refuses that task's finish write once somebody else holds the row, so it
+is the ordinary reclaim brought forward rather than a cancellation. Use
+`discard()` to close a task.
+
+A row claimed by a version before this column existed has it empty, and the
+reaper falls back to comparing `locked_at` against its own timeout for those.
+The first renewal after the upgrade fills it in, so a fleet converges lease by
+lease with no step to run.
+
 **Tasks must be idempotent.** Execution is at-least-once by design: a task
 is retried both when it raises and when its worker dies mid-run. Write
 task bodies so that running twice is harmless (upserts, idempotency keys,

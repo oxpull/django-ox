@@ -20,6 +20,16 @@ from django_ox.worker import Worker
 pytestmark = pytest.mark.django_db
 
 
+def _is_the_stuck_select(args, kwargs):
+    """Only the reaper's stuck-select has this shape.
+
+    It is one positional Q, the expiry-or-legacy-lock condition, plus
+    `status` as the single keyword. Everything else the reaper touches is
+    left alone so the interception lands on one statement.
+    """
+    return len(args) == 1 and set(kwargs) == {"status"}
+
+
 class _RenewOnReap:
     """`OxTask.objects`, with a renewal landing inside the reaper's window.
 
@@ -40,9 +50,9 @@ class _RenewOnReap:
         # `objects.filter(...)`.
         return _RenewOnReap(self._real.using(alias), self._renew)
 
-    def filter(self, **kwargs):
-        queryset = self._real.filter(**kwargs)
-        if set(kwargs) != {"status", "locked_at__lt"}:
+    def filter(self, *args, **kwargs):
+        queryset = self._real.filter(*args, **kwargs)
+        if not _is_the_stuck_select(args, kwargs):
             return queryset
         return _RenewsBeforeActing(queryset, self._renew)
 
@@ -101,6 +111,7 @@ def a_running_task(**over):
         "status": OxTask.Status.RUNNING,
         "locked_by": "worker-A",
         "locked_at": stale,
+        "lease_expires_at": stale,
         "lease_epoch": 12,
         "attempts": 1,
         "max_attempts": 3,
@@ -124,10 +135,15 @@ def worker(settings):
 
 def _reap_with_renewal(monkeypatch, worker, task, locked_by="worker-A"):
     def renew():
-        # Exactly what renew_leases writes: locked_at, nothing else.
+        # Exactly what renew_leases writes: the lock timestamp and the
+        # expiry that goes with it.
+        now = timezone.now()
         OxTask.objects.filter(
             pk=task.pk, status=OxTask.Status.RUNNING, locked_by=locked_by
-        ).update(locked_at=timezone.now())
+        ).update(
+            locked_at=now,
+            lease_expires_at=now + timedelta(seconds=300),
+        )
 
     monkeypatch.setattr(OxTask, "objects", _RenewOnReap(OxTask.objects, renew))
     try:
@@ -192,9 +208,9 @@ class _SwapTheStuckSet:
     def using(self, alias):
         return _SwapTheStuckSet(self._real.using(alias), self._swap)
 
-    def filter(self, **kwargs):
-        queryset = self._real.filter(**kwargs)
-        if set(kwargs) != {"status", "locked_at__lt"}:
+    def filter(self, *args, **kwargs):
+        queryset = self._real.filter(*args, **kwargs)
+        if not _is_the_stuck_select(args, kwargs):
             return queryset
         return _SwapsBeforeTheWrite(queryset, self._swap)
 
@@ -246,14 +262,19 @@ class TestAReclaimRecordNamesOnlyWhatItReclaimed:
         # `joins` is inside the cutoff when the set is read, so only `leaves`
         # is on the manifest.
         OxTask.objects.filter(pk=joins.pk).update(
-            locked_at=timezone.now() - timedelta(seconds=1)
+            locked_at=timezone.now() - timedelta(seconds=1),
+            lease_expires_at=timezone.now() + timedelta(seconds=299),
         )
 
         def swap():
             # The late worker renews, and the dying one's lease ages out.
-            OxTask.objects.filter(pk=leaves.pk).update(locked_at=timezone.now())
+            now = timezone.now()
+            OxTask.objects.filter(pk=leaves.pk).update(
+                locked_at=now, lease_expires_at=now + timedelta(seconds=300)
+            )
             OxTask.objects.filter(pk=joins.pk).update(
-                locked_at=timezone.now() - timedelta(hours=2)
+                locked_at=now - timedelta(hours=2),
+                lease_expires_at=now - timedelta(hours=1),
             )
 
         monkeypatch.setattr(OxTask, "objects", _SwapTheStuckSet(OxTask.objects, swap))

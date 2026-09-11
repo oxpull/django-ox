@@ -48,6 +48,7 @@ def abandoned_rows(count, *, attempts=1, max_attempts=3):
                 status=OxTask.Status.RUNNING,
                 locked_by=f"worker-{i}",
                 locked_at=stale,
+                lease_expires_at=stale,
                 lease_epoch=1,
                 attempts=attempts,
                 max_attempts=max_attempts,

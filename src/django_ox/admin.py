@@ -69,6 +69,7 @@ class OxTaskAdmin(_ModelAdmin):
         "finished_at",
         "locked_by",
         "locked_at",
+        "lease_expires_at",
         "lease_epoch",
         "attempt_errors",
     )
@@ -109,7 +110,17 @@ class OxTaskAdmin(_ModelAdmin):
                 )
             },
         ),
-        ("Lease", {"fields": ("locked_by", "locked_at", "lease_epoch")}),
+        (
+            "Lease",
+            {
+                "fields": (
+                    "locked_by",
+                    "locked_at",
+                    "lease_expires_at",
+                    "lease_epoch",
+                )
+            },
+        ),
     )
 
     # Rows are written by workers and by django_ox.actions only. The admin

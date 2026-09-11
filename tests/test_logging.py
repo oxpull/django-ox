@@ -59,8 +59,9 @@ class TestStructuredLogging:
         caplog.set_level(logging.WARNING, logger="django_ox")
         add.enqueue(1, 2)
         db_task = worker.claim_one()
+        stale = timezone.now() - timedelta(seconds=worker.lock_timeout + 10)
         OxTask.objects.filter(pk=db_task.pk).update(
-            locked_at=timezone.now() - timedelta(seconds=worker.lock_timeout + 10)
+            locked_at=stale, lease_expires_at=stale
         )
         assert worker.reap() == 1
 
@@ -73,9 +74,11 @@ class TestStructuredLogging:
         caplog.set_level(logging.WARNING, logger="django_ox")
         add.enqueue(1, 2)
         db_task = worker.claim_one()
+        stale = timezone.now() - timedelta(seconds=worker.lock_timeout + 10)
         OxTask.objects.filter(pk=db_task.pk).update(
             attempts=db_task.max_attempts,
-            locked_at=timezone.now() - timedelta(seconds=worker.lock_timeout + 10),
+            locked_at=stale,
+            lease_expires_at=stale,
         )
         assert worker.reap() == 1
 
@@ -119,9 +122,11 @@ class TestAReclaimNamesTheHolder:
         caplog.set_level(logging.WARNING, logger="django_ox")
         add.enqueue(1, 2)
         db_task = worker.claim_one()
+        stale = timezone.now() - timedelta(seconds=worker.lock_timeout + 10)
         OxTask.objects.filter(pk=db_task.pk).update(
             locked_by="worker-that-died",
-            locked_at=timezone.now() - timedelta(seconds=worker.lock_timeout + 10),
+            locked_at=stale,
+            lease_expires_at=stale,
         )
         assert worker.reap() == 1
 
@@ -133,10 +138,12 @@ class TestAReclaimNamesTheHolder:
         caplog.set_level(logging.WARNING, logger="django_ox")
         add.enqueue(1, 2)
         db_task = worker.claim_one()
+        stale = timezone.now() - timedelta(seconds=worker.lock_timeout + 10)
         OxTask.objects.filter(pk=db_task.pk).update(
             attempts=db_task.max_attempts,
             locked_by="worker-that-died",
-            locked_at=timezone.now() - timedelta(seconds=worker.lock_timeout + 10),
+            locked_at=stale,
+            lease_expires_at=stale,
         )
         assert worker.reap() == 1
 

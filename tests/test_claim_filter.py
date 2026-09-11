@@ -7,16 +7,21 @@ from django_ox.worker import POSTGRES_CLAIM_SQL, Worker, worker_class
 
 from .tasks import add, echo, send_email
 
-# What 0.3.1 emitted, spelled out rather than derived from the template: a
-# test that formatted the template twice would agree with any stray newline
-# the template grew. Written line by line because the condition line renders
-# as bare indentation when nothing filters, and an editor would strip it.
-CLAIM_SQL_0_3_1_NO_QUEUES = (
+# The statement this package emits, spelled out rather than derived from the
+# template: a test that formatted the template twice would agree with any stray
+# newline the template grew. Written line by line because the condition line
+# renders as bare indentation when nothing filters, and an editor would strip
+# it.
+#
+# Editing this fixture is how a change to the claim statement is declared
+# deliberate. The test exists to catch the other kind.
+EXPECTED_CLAIM_SQL_NO_QUEUES = (
     "\n"
     'UPDATE "ox_task" SET\n'
     '    "status" = %(running)s,\n'
     '    "locked_by" = %(worker_id)s,\n'
     '    "locked_at" = STATEMENT_TIMESTAMP(),\n'
+    '    "lease_expires_at" = STATEMENT_TIMESTAMP() + %(lease_ttl)s,\n'
     '    "lease_epoch" = "lease_epoch" + 1,\n'
     '    "attempts" = "attempts" + 1,\n'
     '    "started_at" = COALESCE("started_at", STATEMENT_TIMESTAMP()),\n'
@@ -34,7 +39,7 @@ CLAIM_SQL_0_3_1_NO_QUEUES = (
     "RETURNING *\n"
 )
 
-CLAIM_SQL_0_3_1_WITH_QUEUES = CLAIM_SQL_0_3_1_NO_QUEUES.replace(
+EXPECTED_CLAIM_SQL_WITH_QUEUES = EXPECTED_CLAIM_SQL_NO_QUEUES.replace(
     "        \n", '        AND "queue_name" = ANY(%(queues)s)\n'
 )
 
@@ -52,7 +57,7 @@ class BlockAdd(Worker):
 
 
 class TestRenderedClaimSql:
-    def test_empty_fragment_renders_0_3_1_byte_for_byte(self):
+    def test_the_statement_renders_byte_for_byte(self):
         assert (
             POSTGRES_CLAIM_SQL.format(
                 lease_clock="STATEMENT_TIMESTAMP()",
@@ -60,7 +65,7 @@ class TestRenderedClaimSql:
                 queue_clause="",
                 extra_clause="",
             )
-            == CLAIM_SQL_0_3_1_NO_QUEUES
+            == EXPECTED_CLAIM_SQL_NO_QUEUES
         )
         assert (
             POSTGRES_CLAIM_SQL.format(
@@ -69,7 +74,7 @@ class TestRenderedClaimSql:
                 queue_clause='AND "queue_name" = ANY(%(queues)s)',
                 extra_clause="",
             )
-            == CLAIM_SQL_0_3_1_WITH_QUEUES
+            == EXPECTED_CLAIM_SQL_WITH_QUEUES
         )
 
     def test_fragment_lands_inside_the_candidate_select(self):

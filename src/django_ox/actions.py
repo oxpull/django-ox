@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable
+from datetime import timedelta
 
 from django.db import transaction
 from django.db.models import F, QuerySet
@@ -33,6 +34,7 @@ __all__ = [
     "UPDATE_CHUNK_SIZE",
     "discard",
     "discard_many",
+    "expire_lease",
     "retry",
     "retry_many",
 ]
@@ -107,6 +109,42 @@ def retry(result_id: str | uuid.UUID) -> bool:
         finished_at=None,
         locked_by=None,
         locked_at=None,
+        lease_expires_at=None,
+    )
+    return updated == 1
+
+
+def expire_lease(result_id: str | uuid.UUID) -> bool:
+    """
+    Make a RUNNING task's lease expire now, so the next reaper pass takes it.
+
+    For the one case the stored expiry cannot fix by itself: a lease was
+    granted with a timeout that turned out to be wrong, and because the row
+    carries its own deadline, changing the setting on the workers does not
+    move it. A long lease outlives the mistake that configured it. This is how
+    an operator shortens one.
+
+    It does not stop the task. Whatever is holding the row keeps running, and
+    the lease number still refuses its finish write once somebody else has the
+    row, so this is the reaper's ordinary reclaim brought forward rather than a
+    cancellation. Use `discard()` to close a task, not this.
+
+    Returns True when the lease was expired, False when the row was not there
+    or was not RUNNING. Nothing is raised: the caller asked for a state change
+    and gets whether it happened.
+    """
+    pk = _pk(result_id)
+    if pk is None:
+        return False
+    # Process time, not the lease clock. This is an operator's instruction
+    # rather than part of the lease protocol, and any reaper comparing against
+    # any clock must read it as past: a full timeout in the past is behind
+    # every clock a fleet plausibly has.
+    already_expired = timezone.now() - timedelta(days=1)
+    updated = (
+        OxTask.objects.filter(pk=pk, status=OxTask.Status.RUNNING)
+        .exclude(locked_at=None)
+        .update(lease_expires_at=already_expired, locked_at=already_expired)
     )
     return updated == 1
 
@@ -144,6 +182,7 @@ def discard(result_id: str | uuid.UUID) -> bool:
         finished_at=timezone.now(),
         locked_by=None,
         locked_at=None,
+        lease_expires_at=None,
     )
     return updated == 1
 
@@ -202,6 +241,7 @@ def retry_many(
                 finished_at=None,
                 locked_by=None,
                 locked_at=None,
+                lease_expires_at=None,
             )
     return changed, len(ids) + malformed - changed
 
@@ -232,5 +272,6 @@ def discard_many(
                 finished_at=now,
                 locked_by=None,
                 locked_at=None,
+                lease_expires_at=None,
             )
     return changed, len(ids) + malformed - changed

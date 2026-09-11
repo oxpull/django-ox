@@ -5,14 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-09-11
 
-**A migration ships with this release.** `0005_dequeue_index` rebuilds the
-index the claim reads and adds a second one. On PostgreSQL and MySQL, building
-an index takes a lock that blocks enqueues and claims for the duration. On a
-large task table, create the two indexes by hand with `CREATE INDEX
-CONCURRENTLY` and then run `migrate --fake django_ox 0005`; `sqlmigrate` prints
-the exact statements.
+**Two migrations ship with this release.** `0005_dequeue_index` rebuilds the
+index the claim reads and adds a second one; `0006_lease_expiry` adds a
+nullable column and its index. On PostgreSQL and MySQL, building an index
+takes a lock that blocks enqueues and claims for the duration. On a large task
+table, create the three indexes by hand with `CREATE INDEX CONCURRENTLY` and
+then run `migrate --fake django_ox 0006`; `sqlmigrate` prints the exact
+statements for each migration.
+
+### Added
+
+- `lease_expires_at` on the task row: when the lease stops being valid,
+  written by the worker that took it and refreshed on every renewal. Every
+  reaper judges that column instead of deriving a deadline from its own
+  `LOCK_TIMEOUT`, so the setting can be changed in a rolling deploy. Two
+  timeouts in one fleet used to mean the shorter one reclaiming live work from
+  a worker renewing correctly on the longer, and the lease number protects that
+  worker's finish write rather than the work it is doing.
+
+  A row claimed before the column existed has it empty, and the reaper keeps
+  comparing `locked_at` against its own timeout for those. The first renewal
+  after the upgrade fills it in, so a fleet converges lease by lease with
+  nothing for an operator to run.
+- `django_ox.actions.expire_lease(result_id)` expires a RUNNING task's lease so
+  the next reaper pass reclaims it. The row carries its own deadline now, so a
+  lease granted with a timeout that turned out to be wrong outlives the
+  configuration that granted it; this is how to shorten one. It does not stop
+  the task.
+- `lease_expires_at` appears in the admin's change list and its Lease fieldset.
 
 ### Fixed
 
@@ -548,6 +570,7 @@ Initial release.
   window, and the supported Python and Django matrix.
 
 [Unreleased]: https://github.com/oxpull/django-ox/compare/v1.0.0...HEAD
+[1.1.0]: https://github.com/oxpull/django-ox/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/oxpull/django-ox/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/oxpull/django-ox/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/oxpull/django-ox/compare/v0.3.0...v0.3.1

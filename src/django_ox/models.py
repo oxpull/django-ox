@@ -64,6 +64,25 @@ class OxTask(models.Model):
     locked_by = models.CharField(max_length=64, null=True, blank=True)
     locked_at = models.DateTimeField(null=True, blank=True)
 
+    # When this lease stops being valid, written by the worker that took it.
+    #
+    # Without it every reaper derives an expiry from its own LOCK_TIMEOUT, so
+    # during a rolling deploy that changes the setting the fleet disagrees
+    # about which rows are abandoned: a worker renewing correctly on the old
+    # cadence is reclaimed mid-execution by one running the new one. The lease
+    # epoch protects that worker's finish write, not the work it is doing.
+    #
+    # Stored so every observer asks the same question. NULL means a lease
+    # taken before this column existed, and the reaper falls back to comparing
+    # locked_at against its own timeout for those; the first renewal after an
+    # upgrade fills it in, so a fleet converges lease by lease with no step an
+    # operator has to run.
+    #
+    # It does not give the two ends one clock. _lease_now() already decides
+    # which clock stamps the lease, and this is written by the same one; the
+    # production page says where that is shared and where it is not.
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+
     # Fencing token. Every claim, and every reaper requeue, increments it in
     # the same UPDATE that hands the row over, so it identifies one execution
     # rather than merely one task. A worker carries the value it was given
@@ -102,6 +121,10 @@ class OxTask(models.Model):
                 name="ox_dequeue_queue_idx",
             ),
             models.Index(fields=["status", "locked_at"], name="ox_reaper_idx"),
+            # The reaper's selection, once a row carries its own expiry.
+            models.Index(
+                fields=["status", "lease_expires_at"], name="ox_reaper_expiry_idx"
+            ),
         ]
 
     def __str__(self) -> str:

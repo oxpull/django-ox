@@ -85,8 +85,8 @@ limit, keeping the full traceback of every attempt.
 
 A soak and chaos harness ran django-ox 1.1.0 for 21.5 minutes of sustained
 mixed load on PostgreSQL 16, 37,804 tasks in all. For nine of those minutes a
-random worker was SIGKILLed every 20 to 45 seconds: 18 kills over the run,
-27 interrupted executions. Every task reached a terminal state, every interrupted execution
+random worker was SIGKILLed every 20 to 45 seconds; over the whole run, 18
+kills and 27 interrupted executions. Every task reached a terminal state, every interrupted execution
 was re-executed inside the reclaim bound, no task executed twice in this
 run, and the median latency under kills stayed within two milliseconds of the
 undisturbed baseline.
@@ -109,12 +109,10 @@ five runs per arm on one machine: django-ox 1.1.0 completed the batch at about 1
 108. Every one of the five django-ox runs beat every one of
 the five control runs; the slowest django-ox run was 121.3 and the fastest
 control run was 110.1. In-transaction enqueue latency was a tie, about six
-tenths of a millisecond at p50 and the same story at p95, and on enqueue
-throughput django-ox led on the mean.
+tenths of a millisecond at p50 and the same story at p95.
 
 [The benchmarks page](https://oxpull.com/django-ox/benchmarks/) has the
-full matrix, including the concurrency-4 row and the two worker shapes it
-compares, and the raw data behind every figure.
+full matrix and the raw data behind every figure.
 
 ## Configuration
 
@@ -309,11 +307,11 @@ firing for a time before it existed.
 The core is finite on purpose: a durable queue, a worker, recurring
 schedules, monitoring, and nothing else to operate. Outside the current
 scope: interrupting one chosen running task on demand (every attempt can be
-bounded with `TASK_TIMEOUT`), and multi-database routing (tasks are stored on
-the default database for the model).
+bounded with `TASK_TIMEOUT`), and multi-database routing (every django-ox
+table lives on the one database your router sends `OxTask` to).
 
 Batches, unique tasks and rate limiting are in
-[Oxpull Pro](https://oxpull.com/django-ox/pro/), a paid add-on. Pricing and how to get it are at <https://oxpull.com/>. Metrics stay in this
+[Oxpull Pro](https://oxpull.com/django-ox/pro/), a paid add-on; <https://oxpull.com/> has the details. Metrics stay in this
 package: `django_ox.stats` and `ox_health` are free and stay free.
 
 ## Stability

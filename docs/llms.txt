@@ -32,7 +32,7 @@ Operational facts to get right:
 - Priority and deferral are Django API: `task.using(priority=N)` with N from
   -100 to 100, higher first, and `task.using(run_after=...)` with a timedelta
   or datetime.
-- `enqueue()` is a single INSERT on the default database connection. Inside
+- `enqueue()` is a single INSERT on the connection the task table uses. Inside
   `transaction.atomic()` the task becomes visible to workers only when the
   transaction commits and disappears on rollback. Do not wrap enqueue in
   `transaction.on_commit()`; it is not needed.
@@ -122,12 +122,13 @@ Operational facts to get right:
 - Run `migrate` before rolling workers, not from the worker process.
 - Out of scope in the core: interrupting one chosen running task on demand
   (every attempt can be bounded with `TASK_TIMEOUT`), and multi-database
-  routing (tasks live on the default database). For tests, point `TASKS` at
+  routing (every table lives on the database your router sends `OxTask` to).
+  For tests, point `TASKS` at
   `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend` on Django 6.0+; on Django 5.2 LTS
   the same paths under `django_tasks.backends.`.
 - Batches, unique (deduplicated) tasks and rate limiting are in Oxpull Pro,
-  a paid add-on; pricing and how to get it are at <https://oxpull.com/>. They
+  a paid add-on; <https://oxpull.com/> has the details. They
   are not in django-ox. `django_ox.stats` and
   `ox_health` are in the free package.
 

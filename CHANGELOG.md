@@ -9,14 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Two migrations ship with this release.** `0005_dequeue_index` rebuilds the
 index the claim reads and adds a second one; `0006_lease_expiry` adds a
-nullable column and an index on it. On PostgreSQL, `CREATE INDEX` takes a lock
-that blocks enqueues and claims for the duration; MySQL 8 builds a secondary
-index online. On a large PostgreSQL task table, run both migrations by hand
-and fake them: take the statements from `sqlmigrate django_ox 0005` and
-`sqlmigrate django_ox 0006`, run them with `CREATE INDEX CONCURRENTLY` in
-place of `CREATE INDEX` and `DROP INDEX CONCURRENTLY` for the index 0005
-replaces, then `migrate --fake django_ox 0006`. The `ADD COLUMN` in 0006 is
-nullable with no default, which is a catalogue change and runs as printed.
+nullable column and an index on it. Migrate before rolling any process that
+imports django-ox 1.1.0, web processes included: `enqueue()` writes the column
+0006 adds.
+
+On PostgreSQL, `CREATE INDEX` takes a lock that blocks enqueues and claims for
+the duration; MySQL 8 builds a secondary index online. On a large PostgreSQL
+task table, build the indexes by hand and fake the migrations, in an order
+that keeps the claim indexed throughout. Build the replacement
+`ox_dequeue_idx` under a temporary name, swap it in, then add the other two:
+
+```
+CREATE INDEX CONCURRENTLY ox_dequeue_idx_new
+    ON django_ox_oxtask (status, priority DESC, enqueued_at);
+DROP INDEX CONCURRENTLY ox_dequeue_idx;
+ALTER INDEX ox_dequeue_idx_new RENAME TO ox_dequeue_idx;
+CREATE INDEX CONCURRENTLY ox_dequeue_queue_idx
+    ON django_ox_oxtask (status, queue_name, priority DESC, enqueued_at);
+ALTER TABLE django_ox_oxtask
+    ADD COLUMN lease_expires_at timestamp with time zone NULL;
+CREATE INDEX CONCURRENTLY ox_reaper_expiry_idx
+    ON django_ox_oxtask (status, lease_expires_at);
+```
+
+then `migrate --fake django_ox 0006`. The `ADD COLUMN` is nullable with no
+default, which is a catalogue change. `sqlmigrate django_ox 0005` and
+`sqlmigrate django_ox 0006` print the same statements without
+`CONCURRENTLY`, for checking against your settings.
 
 ### Added
 
@@ -28,7 +47,10 @@ nullable with no default, which is a catalogue change and runs as printed.
   A row claimed before the column existed has it empty, and the reaper keeps
   comparing `locked_at` against its own timeout for those. The first renewal
   after the upgrade fills it in, so a fleet converges lease by lease with
-  nothing for an operator to run.
+  nothing for an operator to run. An expiry older than the row's own
+  `locked_at` was left there by a worker that does not know the column and
+  counts as absent too, so with `LOCK_TIMEOUT` unchanged across the rollout
+  a 1.0.0 worker that re-claims a row is judged on `locked_at`.
 - `django_ox.actions.expire_lease(result_id)` expires a RUNNING task's lease so
   the next reaper pass reclaims it. The row carries its own deadline now, so a
   lease granted with a timeout that turned out to be wrong outlives the

@@ -173,6 +173,54 @@ class TestALeaseFromBeforeTheColumnExisted:
         )
 
 
+class TestAnExpiryOlderThanTheLockIsNotTrusted:
+    """
+    A 1.0.0 worker that re-claims a row during a rolling upgrade writes
+    locked_at and never the expiry, so the expiry it inherits is an earlier
+    holder's. The reaper judges such a row on locked_at, as 1.0.0 did.
+    """
+
+    def a_legacy_reclaim(self, *, locked_seconds_ago, attempts):
+        now = timezone.now()
+        return OxTask.objects.create(
+            task_path="tests.tasks.add",
+            args=[1, 2],
+            kwargs={},
+            queue_name="default",
+            status=OxTask.Status.RUNNING,
+            locked_by="worker-1.0.0",
+            locked_at=now - timedelta(seconds=locked_seconds_ago),
+            lease_expires_at=now - timedelta(minutes=10),
+            lease_epoch=3,
+            attempts=attempts,
+            max_attempts=3,
+            enqueued_at=now,
+        )
+
+    def test_a_fresh_lock_under_a_stale_expiry_is_left_alone(self, settings):
+        task = self.a_legacy_reclaim(locked_seconds_ago=5, attempts=2)
+        assert a_worker(settings, lock_timeout=300).reap() == 0
+        task.refresh_from_db()
+        assert task.status == OxTask.Status.RUNNING
+        assert task.lease_epoch == 3
+
+    def test_an_old_lock_under_a_stale_expiry_is_still_reclaimed(self, settings):
+        task = self.a_legacy_reclaim(locked_seconds_ago=400, attempts=2)
+        assert a_worker(settings, lock_timeout=300).reap() == 1
+        task.refresh_from_db()
+        assert task.status == OxTask.Status.READY
+        assert task.lease_epoch == 4
+
+    def test_the_exhausted_branch_trusts_the_lock_too(self, settings):
+        live = self.a_legacy_reclaim(locked_seconds_ago=5, attempts=3)
+        gone = self.a_legacy_reclaim(locked_seconds_ago=400, attempts=3)
+        assert a_worker(settings, lock_timeout=300).reap() == 1
+        live.refresh_from_db()
+        gone.refresh_from_db()
+        assert live.status == OxTask.Status.RUNNING
+        assert gone.status == OxTask.Status.LOST
+
+
 class TestExpiringALeaseByHand:
     def test_a_running_lease_can_be_expired_now(self, worker):
         tasks.add.enqueue(1, 2)

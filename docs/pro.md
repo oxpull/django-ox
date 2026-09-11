@@ -6,8 +6,7 @@ priorities, deferred tasks, recurring tasks and pruning are the free tier,
 permanently. Nothing that works today moves behind the paid tier.
 
 **Oxpull Pro** is a paid add-on for three problems that show up once a queue
-is carrying real volume. All three are built and tested. Pricing and how to
-get it are at <https://oxpull.com/>.
+is carrying real volume. All three are built and tested. <https://oxpull.com/> has the details.
 
 Pro requires Django 6.0 or later. It builds on `django.tasks`, which is part
 of Django core from 6.0. django-ox itself also runs on Django 5.2 LTS through

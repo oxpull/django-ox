@@ -41,8 +41,7 @@ whichever ran last.
 - django-tasks-db: its `db_worker` command is single-threaded and has **no
   concurrency option**, so "concurrency 4" is **4 worker processes**. This
   is its documented scaling model, but it is not the same thing as 4
-  threads in one process: 4 processes get 4 CPUs' worth of Python, while ox's threads share one interpreter and its GIL. Read the concurrency-4 rows with that asymmetry in mind; it is
-  the fairest mapping the two designs allow.
+  threads in one process: 4 processes get 4 CPUs' worth of Python, while ox's threads share one interpreter and its GIL. The results page reports that cell without ranking it, and django-ox's own `--processes 4` shape is not measured here.
 
 ### Control row (ox only, non-default interval)
 
@@ -142,8 +141,8 @@ Read this before quoting any number.
   per-task framework overhead measured here shrinks as a fraction of total
   runtime. This benchmark isolates framework overhead deliberately.
 - **Thread pool vs process model at concurrency 4.** See above; the two
-  backends scale by different mechanisms and the concurrency-4 comparison
-  maps them as fairly as their designs allow, which is not perfectly.
+  backends scale by different mechanisms, so the concurrency-4 cell is
+  reported without a ranking.
 - **End-to-end timer includes startup.** Worker process startup and Django
   initialisation are inside the timed window for both backends, once per
   worker process.

@@ -29,7 +29,6 @@ errors. Mean and one standard deviation over the five runs:
 | Enqueue latency inside `transaction.atomic()`, commit excluded, p50 ms | 0.570 ± 0.009 | 0.562 ± 0.009 |
 | Enqueue latency inside `transaction.atomic()`, commit excluded, p95 ms | 0.715 ± 0.055 | 0.698 ± 0.050 |
 | End-to-end, 2,000 tasks, 1 worker (tasks/sec) | 124.5 ± 1.8 | 108.0 ± 2.3 |
-| End-to-end, 2,000 tasks, concurrency 4 (tasks/sec) | 339 ± 4 | 357 ± 9 |
 
 Every run behind those means:
 
@@ -38,7 +37,6 @@ Every run behind those means:
 | Enqueue throughput (tasks/sec) | 887 / 1222 / 808 / 1455 / 1040 | 1593 / 681 / 814 / 576 / 702 |
 | Enqueue latency p50 (ms) | 0.56 / 0.56 / 0.57 / 0.58 / 0.58 | 0.56 / 0.58 / 0.56 / 0.55 / 0.56 |
 | End-to-end, 1 worker (tasks/sec) | 121.3 / 125.9 / 124.8 / 125.3 / 125.1 | 104.1 / 109.3 / 110.1 / 107.9 / 108.7 |
-| End-to-end, concurrency 4 (tasks/sec) | 342 / 342 / 338 / 334 / 341 | 340 / 360 / 363 / 358 / 362 |
 
 Reading:
 
@@ -46,9 +44,6 @@ Reading:
   finished the batch faster than every django-tasks-db run. The slowest
   django-ox run was 121.3 tasks/sec; the fastest django-tasks-db run was
   110.1.
-- **Concurrency 4 compares two shapes.** django-tasks-db runs four processes
-  and django-ox four threads in one process; the mapping and what it does to
-  the numbers are explained below.
 - **Enqueue throughput: django-ox ahead on the mean, no gap claimed.** About
   24 percent more enqueues per second on average, and both arms are
   noisy enough on this host that the ranges overlap. A mean separation that a
@@ -99,11 +94,13 @@ rather than a changed claim.
   sub-millisecond round trips. Real deployments have network latency
   between app and database, which changes end-to-end numbers materially
   and increases the weight of per-task statement count.
-- **Two different shapes at concurrency 4.** django-tasks-db's worker has no
-  concurrency option, so its "concurrency 4" is four separate processes:
-  four interpreters without a shared GIL, and four Django boots inside the
-  timed window. django-ox's is four threads in one process and one boot.
-  Separate interpreters help django-tasks-db on no-op bodies; the row is not a like-for-like comparison, and the mapping above is the closest the two workers allow.
+- **One cell is not ranked.** The harness also runs a concurrency-4 cell:
+  four django-tasks-db processes, since its worker has no concurrency
+  option, against one django-ox process running four threads
+  (`--concurrency 4`; one process is its default shape). Four interpreters and four Django boots against one of each is not
+  a like-for-like comparison, so this page does not rank that cell; the raw
+  file carries it. django-ox also runs `--processes 4`, which the harness
+  does not measure.
 - **Small N.** 2,000 tasks and 500 latency samples per run. Five runs
   separate the backends on the single-worker cell and say nothing about
   p99+ tails or sustained load. Sustained load and worker-failure
@@ -116,7 +113,7 @@ A separate
 soak and chaos harness ran django-ox 1.1.0 for 21.5 minutes of sustained
 mixed load on PostgreSQL 16: 37,804 tasks across three scenarios,
 including nine minutes in which a random worker was SIGKILLed every 20 to 45
-seconds; 18 kills over the run, 27 interrupted executions. Forty assertions
+seconds; over the whole run, 18 kills and 27 interrupted executions. Forty assertions
 ran and all forty passed. Every task reached a terminal state, every
 interrupted execution was re-executed inside the reclaim bound (slowest reclaim 19.6 s against a bound of 37.5 s;
 the harness runs `LOCK_TIMEOUT` at 15 s so that reclaims happen inside the
@@ -143,9 +140,9 @@ on 0.3.1 used the same kill schedule.
 ## What to take from this
 
 On the matrix above, django-ox finished the single-worker batch faster than
-django-tasks-db in every run, tied it on in-transaction enqueue latency, and at
-concurrency 4 the two worker shapes were within about five percent. Under sustained
-load and repeated worker kills, django-ox 1.1.0 held its documented guarantees.
+django-tasks-db in every run and tied it on in-transaction enqueue latency.
+Under sustained load and repeated worker kills, django-ox 1.1.0 held its
+documented guarantees.
 
 Throughput on no-op tasks is the floor, not the reason to choose django-ox. The
 claim is the durability construction: transactional enqueue, at-least-once

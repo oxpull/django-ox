@@ -171,7 +171,8 @@ TASKS = {
   With `django.contrib.admin` installed, the task table appears in the admin
   with the same two actions.
 - A particular running task cannot be interrupted on demand; `TASK_TIMEOUT`
-  bounds every attempt. Tasks live on the default database.
+  bounds every attempt. Every table lives on the database your router sends
+  `OxTask` to.
 - In tests use the framework's own backends for `TASKS`:
   `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend` on Django 6.0+, and the same

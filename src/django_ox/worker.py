@@ -1815,12 +1815,28 @@ class Worker:
         # NULL is a lease taken before the column existed. Those keep the old
         # comparison until their first renewal fills the column in, which is
         # what lets a fleet upgrade one worker at a time with nothing to run.
+        # An expiry older than the row's own locked_at was written by an
+        # earlier holder and left in place by a worker that does not know the
+        # column; it says nothing about the current lease, so the row is
+        # judged on locked_at like one with no expiry at all.
         stuck = OxTask.objects.using(self._db_alias).filter(
-            Q(lease_expires_at__lt=_lease_now())
-            | Q(lease_expires_at__isnull=True, locked_at__lt=cutoff),
+            self._abandoned_lease_q(cutoff),
             status=OxTask.Status.RUNNING,
         )
         return self._requeue_abandoned(stuck) + self._abandon_exhausted(stuck, cutoff)
+
+    @staticmethod
+    def _abandoned_lease_q(cutoff: Any) -> Q:
+        """
+        The lease looks abandoned: its stored expiry has passed, or it has no
+        usable expiry and its lock is older than the cutoff.
+        """
+        # Shaped so the planner can seek ox_reaper_expiry_idx on the expiry
+        # range: the expiry has passed, and either it belongs to this lease
+        # (not older than the lock) or the lock itself is past the cutoff.
+        return Q(lease_expires_at__lt=_lease_now()) & (
+            Q(lease_expires_at__gte=F("locked_at")) | Q(locked_at__lt=cutoff)
+        ) | Q(lease_expires_at__isnull=True, locked_at__lt=cutoff)
 
     def _requeue_abandoned(self, stuck: QuerySet[OxTask]) -> int:
         """
@@ -1945,8 +1961,7 @@ class Worker:
             changed = (
                 OxTask.objects.using(self._db_alias)
                 .filter(
-                    Q(lease_expires_at__lt=_lease_now())
-                    | Q(lease_expires_at__isnull=True, locked_at__lt=cutoff),
+                    self._abandoned_lease_q(cutoff),
                     pk=db_task.pk,
                     status=OxTask.Status.RUNNING,
                     lease_epoch=db_task.lease_epoch,

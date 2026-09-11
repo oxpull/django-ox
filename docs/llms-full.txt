@@ -192,7 +192,7 @@ up the transactional enqueue.
   processes under one supervisor. See
   [Production](production.md#threads-and-processes).
 
-Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a paid add-on. Pricing and how to get it are at <https://oxpull.com/>.
+Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a paid add-on; <https://oxpull.com/> has the details.
 Metrics stay in this package: `django_ox.stats` and `ox_health` are free and
 stay free.
 
@@ -1335,9 +1335,10 @@ rather than in a probe: see
 [which check goes where](monitoring.md#health-checks-ox_health), and the
 liveness probe example there for queues with steady traffic.
 
-Run migrations before rolling workers, as an init container or a job, not from
-the worker itself. Several workers starting at once would race the same
-migration.
+Run migrations before rolling any process that imports django-ox, web
+processes included: `enqueue()` writes every column the current schema has.
+Run them as an init container or a job, not from the worker itself; several
+workers starting at once would race the same migration.
 
 ## Graceful shutdown
 
@@ -1780,12 +1781,16 @@ go unresponsive.
 refreshes it on every renewal. Every reaper judges that column rather than
 deriving a deadline from whatever it happens to be configured with, so you can
 change `LOCK_TIMEOUT` in a rolling deploy: each row keeps the lease it was
-granted and picks up the new value on its next claim.
+granted and picks up the new value on its next claim. An expiry older than the
+row's own `locked_at` was left there by a worker that does not know the column
+and counts as absent: the row is judged on `locked_at`.
 
 The trade is that a lease outlives the configuration that granted it. If you
 grant a very long one by mistake, changing the setting does not shorten the
 leases already out; `django_ox.actions.expire_lease(result_id)` expires one so
-the next reaper pass takes it. It does not stop the task, and the lease number
+the next reaper pass takes it. A renewal that lands before that pass restores
+the lease, so read the result and call it again, or stop the worker. It does
+not stop the task, and the lease number
 still refuses that task's finish write once somebody else holds the row, so it
 is the ordinary reclaim brought forward rather than a cancellation. Use
 `discard()` to close a task.
@@ -2298,7 +2303,7 @@ actions.discard(result.id)  # True if the row was closed
 | Function | Accepts | Does |
 | --- | --- | --- |
 | `retry(result_id)` | FAILED, LOST | Sets the row back to READY for one more attempt, clears `run_after` so it is eligible at once, and raises `max_attempts` to `attempts + 1`. The count, `worker_ids` and every per-attempt traceback stay as they were, so the record still says what happened before. The lease number goes up, so a LOST row's last worker, if it is still alive somewhere, writes nothing over the retry. |
-| `expire_lease(result_id)` | RUNNING | Sets the lease's expiry into the past so the next reaper pass reclaims the task. The task itself keeps running; the lease number refuses its finish write once another worker holds the row, so this brings the ordinary reclaim forward rather than cancelling anything. For a lease granted with a timeout that turned out to be wrong: the row carries its own deadline, so changing the setting on the workers does not move it. |
+| `expire_lease(result_id)` | RUNNING | Sets the lease's expiry into the past so the next reaper pass reclaims the task; a renewal that lands before that pass restores the lease, so read the result and call it again if needed. The task itself keeps running; the lease number refuses its finish write once another worker holds the row, so this brings the ordinary reclaim forward rather than cancelling anything. For a lease granted with a timeout that turned out to be wrong: the row carries its own deadline, so changing the setting on the workers does not move it. |
 | `discard(result_id)` | READY, FAILED, LOST | Marks the row DISCARDED. A READY task that is discarded never runs; a discarded FAILED or LOST task is not retried. The attempt records stay. |
 
 `retry_many(selection)` and `discard_many(selection)` make the same move
@@ -2380,7 +2385,6 @@ errors. Mean and one standard deviation over the five runs:
 | Enqueue latency inside `transaction.atomic()`, commit excluded, p50 ms | 0.570 ± 0.009 | 0.562 ± 0.009 |
 | Enqueue latency inside `transaction.atomic()`, commit excluded, p95 ms | 0.715 ± 0.055 | 0.698 ± 0.050 |
 | End-to-end, 2,000 tasks, 1 worker (tasks/sec) | 124.5 ± 1.8 | 108.0 ± 2.3 |
-| End-to-end, 2,000 tasks, concurrency 4 (tasks/sec) | 339 ± 4 | 357 ± 9 |
 
 Every run behind those means:
 
@@ -2389,7 +2393,6 @@ Every run behind those means:
 | Enqueue throughput (tasks/sec) | 887 / 1222 / 808 / 1455 / 1040 | 1593 / 681 / 814 / 576 / 702 |
 | Enqueue latency p50 (ms) | 0.56 / 0.56 / 0.57 / 0.58 / 0.58 | 0.56 / 0.58 / 0.56 / 0.55 / 0.56 |
 | End-to-end, 1 worker (tasks/sec) | 121.3 / 125.9 / 124.8 / 125.3 / 125.1 | 104.1 / 109.3 / 110.1 / 107.9 / 108.7 |
-| End-to-end, concurrency 4 (tasks/sec) | 342 / 342 / 338 / 334 / 341 | 340 / 360 / 363 / 358 / 362 |
 
 Reading:
 
@@ -2397,9 +2400,6 @@ Reading:
   finished the batch faster than every django-tasks-db run. The slowest
   django-ox run was 121.3 tasks/sec; the fastest django-tasks-db run was
   110.1.
-- **Concurrency 4 compares two shapes.** django-tasks-db runs four processes
-  and django-ox four threads in one process; the mapping and what it does to
-  the numbers are explained below.
 - **Enqueue throughput: django-ox ahead on the mean, no gap claimed.** About
   24 percent more enqueues per second on average, and both arms are
   noisy enough on this host that the ranges overlap. A mean separation that a
@@ -2450,11 +2450,13 @@ rather than a changed claim.
   sub-millisecond round trips. Real deployments have network latency
   between app and database, which changes end-to-end numbers materially
   and increases the weight of per-task statement count.
-- **Two different shapes at concurrency 4.** django-tasks-db's worker has no
-  concurrency option, so its "concurrency 4" is four separate processes:
-  four interpreters without a shared GIL, and four Django boots inside the
-  timed window. django-ox's is four threads in one process and one boot.
-  Separate interpreters help django-tasks-db on no-op bodies; the row is not a like-for-like comparison, and the mapping above is the closest the two workers allow.
+- **One cell is not ranked.** The harness also runs a concurrency-4 cell:
+  four django-tasks-db processes, since its worker has no concurrency
+  option, against one django-ox process running four threads
+  (`--concurrency 4`; one process is its default shape). Four interpreters and four Django boots against one of each is not
+  a like-for-like comparison, so this page does not rank that cell; the raw
+  file carries it. django-ox also runs `--processes 4`, which the harness
+  does not measure.
 - **Small N.** 2,000 tasks and 500 latency samples per run. Five runs
   separate the backends on the single-worker cell and say nothing about
   p99+ tails or sustained load. Sustained load and worker-failure
@@ -2467,7 +2469,7 @@ A separate
 soak and chaos harness ran django-ox 1.1.0 for 21.5 minutes of sustained
 mixed load on PostgreSQL 16: 37,804 tasks across three scenarios,
 including nine minutes in which a random worker was SIGKILLed every 20 to 45
-seconds; 18 kills over the run, 27 interrupted executions. Forty assertions
+seconds; over the whole run, 18 kills and 27 interrupted executions. Forty assertions
 ran and all forty passed. Every task reached a terminal state, every
 interrupted execution was re-executed inside the reclaim bound (slowest reclaim 19.6 s against a bound of 37.5 s;
 the harness runs `LOCK_TIMEOUT` at 15 s so that reclaims happen inside the
@@ -2494,9 +2496,9 @@ on 0.3.1 used the same kill schedule.
 ## What to take from this
 
 On the matrix above, django-ox finished the single-worker batch faster than
-django-tasks-db in every run, tied it on in-transaction enqueue latency, and at
-concurrency 4 the two worker shapes were within about five percent. Under sustained
-load and repeated worker kills, django-ox 1.1.0 held its documented guarantees.
+django-tasks-db in every run and tied it on in-transaction enqueue latency.
+Under sustained load and repeated worker kills, django-ox 1.1.0 held its
+documented guarantees.
 
 Throughput on no-op tasks is the floor, not the reason to choose django-ox. The
 claim is the durability construction: transactional enqueue, at-least-once
@@ -2664,8 +2666,7 @@ priorities, deferred tasks, recurring tasks and pruning are the free tier,
 permanently. Nothing that works today moves behind the paid tier.
 
 **Oxpull Pro** is a paid add-on for three problems that show up once a queue
-is carrying real volume. All three are built and tested. Pricing and how to
-get it are at <https://oxpull.com/>.
+is carrying real volume. All three are built and tested. <https://oxpull.com/> has the details.
 
 Pro requires Django 6.0 or later. It builds on `django.tasks`, which is part
 of Django core from 6.0. django-ox itself also runs on Django 5.2 LTS through
@@ -2932,7 +2933,8 @@ TASKS = {
   With `django.contrib.admin` installed, the task table appears in the admin
   with the same two actions.
 - A particular running task cannot be interrupted on demand; `TASK_TIMEOUT`
-  bounds every attempt. Tasks live on the default database.
+  bounds every attempt. Every table lives on the database your router sends
+  `OxTask` to.
 - In tests use the framework's own backends for `TASKS`:
   `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend` on Django 6.0+, and the same
@@ -3007,14 +3009,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Two migrations ship with this release.** `0005_dequeue_index` rebuilds the
 index the claim reads and adds a second one; `0006_lease_expiry` adds a
-nullable column and an index on it. On PostgreSQL, `CREATE INDEX` takes a lock
-that blocks enqueues and claims for the duration; MySQL 8 builds a secondary
-index online. On a large PostgreSQL task table, run both migrations by hand
-and fake them: take the statements from `sqlmigrate django_ox 0005` and
-`sqlmigrate django_ox 0006`, run them with `CREATE INDEX CONCURRENTLY` in
-place of `CREATE INDEX` and `DROP INDEX CONCURRENTLY` for the index 0005
-replaces, then `migrate --fake django_ox 0006`. The `ADD COLUMN` in 0006 is
-nullable with no default, which is a catalogue change and runs as printed.
+nullable column and an index on it. Migrate before rolling any process that
+imports django-ox 1.1.0, web processes included: `enqueue()` writes the column
+0006 adds.
+
+On PostgreSQL, `CREATE INDEX` takes a lock that blocks enqueues and claims for
+the duration; MySQL 8 builds a secondary index online. On a large PostgreSQL
+task table, build the indexes by hand and fake the migrations, in an order
+that keeps the claim indexed throughout. Build the replacement
+`ox_dequeue_idx` under a temporary name, swap it in, then add the other two:
+
+```
+CREATE INDEX CONCURRENTLY ox_dequeue_idx_new
+    ON django_ox_oxtask (status, priority DESC, enqueued_at);
+DROP INDEX CONCURRENTLY ox_dequeue_idx;
+ALTER INDEX ox_dequeue_idx_new RENAME TO ox_dequeue_idx;
+CREATE INDEX CONCURRENTLY ox_dequeue_queue_idx
+    ON django_ox_oxtask (status, queue_name, priority DESC, enqueued_at);
+ALTER TABLE django_ox_oxtask
+    ADD COLUMN lease_expires_at timestamp with time zone NULL;
+CREATE INDEX CONCURRENTLY ox_reaper_expiry_idx
+    ON django_ox_oxtask (status, lease_expires_at);
+```
+
+then `migrate --fake django_ox 0006`. The `ADD COLUMN` is nullable with no
+default, which is a catalogue change. `sqlmigrate django_ox 0005` and
+`sqlmigrate django_ox 0006` print the same statements without
+`CONCURRENTLY`, for checking against your settings.
 
 ### Added
 
@@ -3026,7 +3047,10 @@ nullable with no default, which is a catalogue change and runs as printed.
   A row claimed before the column existed has it empty, and the reaper keeps
   comparing `locked_at` against its own timeout for those. The first renewal
   after the upgrade fills it in, so a fleet converges lease by lease with
-  nothing for an operator to run.
+  nothing for an operator to run. An expiry older than the row's own
+  `locked_at` was left there by a worker that does not know the column and
+  counts as absent too, so with `LOCK_TIMEOUT` unchanged across the rollout
+  a 1.0.0 worker that re-claims a row is judged on `locked_at`.
 - `django_ox.actions.expire_lease(result_id)` expires a RUNNING task's lease so
   the next reaper pass reclaims it. The row carries its own deadline now, so a
   lease granted with a timeout that turned out to be wrong outlives the

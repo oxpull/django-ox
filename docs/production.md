@@ -100,9 +100,10 @@ rather than in a probe: see
 [which check goes where](monitoring.md#health-checks-ox_health), and the
 liveness probe example there for queues with steady traffic.
 
-Run migrations before rolling workers, as an init container or a job, not from
-the worker itself. Several workers starting at once would race the same
-migration.
+Run migrations before rolling any process that imports django-ox, web
+processes included: `enqueue()` writes every column the current schema has.
+Run them as an init container or a job, not from the worker itself; several
+workers starting at once would race the same migration.
 
 ## Graceful shutdown
 
@@ -545,12 +546,16 @@ go unresponsive.
 refreshes it on every renewal. Every reaper judges that column rather than
 deriving a deadline from whatever it happens to be configured with, so you can
 change `LOCK_TIMEOUT` in a rolling deploy: each row keeps the lease it was
-granted and picks up the new value on its next claim.
+granted and picks up the new value on its next claim. An expiry older than the
+row's own `locked_at` was left there by a worker that does not know the column
+and counts as absent: the row is judged on `locked_at`.
 
 The trade is that a lease outlives the configuration that granted it. If you
 grant a very long one by mistake, changing the setting does not shorten the
 leases already out; `django_ox.actions.expire_lease(result_id)` expires one so
-the next reaper pass takes it. It does not stop the task, and the lease number
+the next reaper pass takes it. A renewal that lands before that pass restores
+the lease, so read the result and call it again, or stop the worker. It does
+not stop the task, and the lease number
 still refuses that task's finish write once somebody else holds the row, so it
 is the ordinary reclaim brought forward rather than a cancellation. Use
 `discard()` to close a task.

@@ -167,13 +167,15 @@ Run as many workers as you need, on as many hosts as you need, pointed at
 the same database. No coordinator, no leader election. Two things make
 concurrent workers safe:
 
-- **Claiming is atomic.** On PostgreSQL, a claim is one
+- **Claiming is atomic.** On PostgreSQL a claim is one
   `UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING`
-  statement, so workers never block each other on the head of the queue.
-  On other databases with `SKIP LOCKED` support (MySQL 8+), the worker
-  uses `SELECT ... FOR UPDATE SKIP LOCKED` in a short transaction. Databases without it, SQLite included, fall back to an optimistic
-compare-and-set UPDATE. That is atomic everywhere, but under contention workers
-can retry against each other for the head of the queue.
+  statement; on MySQL 8 it is `SELECT ... FOR UPDATE SKIP LOCKED` inside a
+  short transaction. Either way workers step past each other's rows rather
+  than queueing behind them, so a worker you add is a worker that works.
+  Databases without `SKIP LOCKED` claim through an optimistic
+  compare-and-set, which is atomic everywhere and gives one worker at a time
+  the head of the queue; [PostgreSQL, MySQL or SQLite](#postgresql-mysql-or-sqlite)
+  says where to spend concurrency there.
 - **Recurring schedules need no dedicated node.** Every worker dispatches;
   a unique constraint guarantees each tick fires once. See
   [Recurring tasks](recurring-tasks.md#many-workers-one-tick).
@@ -534,11 +536,15 @@ All three run the full worker suite in CI. Guidance:
 - **MySQL 8** claims with `SELECT ... FOR UPDATE SKIP LOCKED` in a short
   transaction and runs the full suite in CI on the oldest and newest Python
   and Django corners.
-- **SQLite** is fine for development, tests, and small single-host
-  deployments in the same situations where SQLite is fine as your Django
-  database at all. Claiming uses the compare-and-set path and remains
-  correct with multiple workers, but SQLite's single-writer nature makes
-  many busy workers on one file a poor fit.
+- **SQLite** is the right choice wherever SQLite is already the right choice
+  for your Django database: development, tests, and small single-host
+  deployments. Run one worker and give it threads -- `ox_worker
+  --concurrency 8` -- rather than several worker processes. A thread pool in
+  one process is how a single-writer database wants to be driven, and it
+  covers the email-and-webhook workload most single-host deployments
+  actually run. Claiming stays correct with more processes than that; they
+  just spend their turns reaching for the same row instead of dividing the
+  queue between them.
 
 The queue lives in your default database, inside your existing backup and
 migration story. That is the point: one system of record, one thing to

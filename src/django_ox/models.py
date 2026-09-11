@@ -75,8 +75,17 @@ class OxTask(models.Model):
 
     class Meta:
         indexes = [
+            # The dequeue query's ORDER BY, not its WHERE. `run_after` sat in
+            # the fourth position and was never usable there: it is a range,
+            # the two columns before it are the sort, and PostgreSQL responded
+            # by ignoring this index entirely -- bitmap-scanning the reaper's
+            # index instead and sorting the result on every claim. Ending on
+            # `enqueued_at` makes the index deliver rows in exactly the order
+            # the claim wants them, so the scan stops at the first runnable
+            # row and there is no sort at all. `run_after` stays a filter,
+            # which is what it was in practice before.
             models.Index(
-                fields=["status", "queue_name", "-priority", "run_after"],
+                fields=["status", "queue_name", "-priority", "enqueued_at"],
                 name="ox_dequeue_idx",
             ),
             models.Index(fields=["status", "locked_at"], name="ox_reaper_idx"),

@@ -280,8 +280,8 @@ class TestDispatch:
 
         # Both workers read the tick log before either fires: the classic
         # two-scheduler race. The unique constraint must arbitrate.
-        stale = other._latest_ticks()
-        monkeypatch.setattr(other, "_latest_ticks", lambda: stale)
+        stale = other._latest_ticks(timezone.now() - timedelta(days=1))
+        monkeypatch.setattr(other, "_latest_ticks", lambda since: stale)
 
         assert scheduled_worker.dispatch_schedules() == 1
         assert other.dispatch_schedules() == 0

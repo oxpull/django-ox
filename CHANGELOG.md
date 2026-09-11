@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The drain can no longer raise while a stuck attempt is still running. A
+  second attempt going stuck wrote to the set the drain iterates over without
+  taking the lock the drain holds, so the iteration could see the set change
+  size. The drain is what keeps the process alive until abandoned work has
+  stopped, so an exception there is not cosmetic.
+- `django_ox.remaining()` is measured on the clock the timeout is enforced
+  with. It read the wall clock while the watchdog fires on a monotonic one, so
+  for the length of an NTP correction the two disagreed about the same
+  instant: a backwards step told a cooperative task it had an hour in hand
+  with the timeout about to fire, and a forwards step made it give up early.
+  `django_ox.deadline()` still answers with a wall-clock time, which is the
+  right answer to "when".
+- One failure can no longer write an unbounded string onto its own row. The
+  traceback stored per attempt is capped at 16 KB, with a marker naming what
+  was dropped; both ends are kept, so where the call came from and what
+  actually raised both survive. The Monitoring page now says what `errors`
+  holds, who can read it in the admin, and which flag retires it.
+- The reaper no longer costs a statement per abandoned row. It read the whole
+  stuck set with no limit and wrote each row back one at a time, so a fleet
+  that lost half its members had every survivor issue that same unbounded
+  walk at once, against a database still recovering from the event that
+  caused it. Rows with attempts left now come back in a single UPDATE whose
+  predicate is the one that selected them, and rows whose attempts are spent
+  are retired in bounded batches.
+- The claim reads its candidate out of `ox_dequeue_idx` again. The index
+  ended on `run_after`, a range condition sitting behind the two columns that
+  carry the ordering, where no database could use it: PostgreSQL stopped
+  choosing the index at all and sorted a bitmap scan on every claim, and
+  SQLite built a temporary B-tree. It now ends on `enqueued_at`, so the scan
+  stops at the first runnable row. Migration `0005_dequeue_index` rebuilds it.
+- Dispatching schedules no longer reads the whole tick log. Finding each
+  schedule's newest tick meant a grouped aggregate over every tick ever
+  recorded, on every pass, by every worker; it is now bounded to the oldest
+  tick any configured schedule is asking about, which the unique index can
+  seek to. The read is also pinned to the database the worker writes to, so a
+  configured read replica cannot answer the question that decides an enqueue.
 - A worker that was briefly late renewing its lease, then renewed, could still
   lose the task. The reaper selected rows whose lease looked expired and then
   reclaimed each one on a compare-and-set that checked the lease epoch but not
@@ -88,6 +124,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `task_reclaimed` carries `held_by`: the worker that stopped refreshing the
+  lock. `worker_id` on that record is the reaper that noticed, which is not
+  the question anyone reads a reclaim record to answer.
+- Running several worker processes against SQLite is documented as spending
+  concurrency in the wrong place. `SKIP LOCKED` is what lets workers step past
+  each other, and without it they take the head of the queue one at a time; on
+  SQLite, one worker with `--concurrency` is the shape that works.
+- `task_reclaimed` is still one record per task on the ordinary path. When the
+  stuck set changes underneath a reap pass -- a lease renewed, or one more
+  expired -- that pass emits a single record carrying `count` and no
+  `task_id`, rather than naming tasks it cannot vouch for.
 - The recurring-schedule and production pages say which databases give the
   lease one shared clock. SQLite computes `Now()` inside the process that runs
   the statement, so every worker uses its own clock there whatever `USE_TZ`

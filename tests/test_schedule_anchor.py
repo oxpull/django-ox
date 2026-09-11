@@ -61,7 +61,7 @@ class TestASecondAnchorDoesNotSwallowATick:
         t0 = timezone.now().replace(second=0, microsecond=0)
         t1 = t0 + timedelta(minutes=1)
 
-        snapshot = b._latest_ticks()
+        snapshot = b._latest_ticks(t0 - timedelta(days=1))
         assert snapshot == {}, "the snapshot must predate the anchor"
 
         _at(a, monkeypatch, t0)
@@ -69,7 +69,7 @@ class TestASecondAnchorDoesNotSwallowATick:
         assert OxScheduleTick.objects.count() == 1, "A did not anchor"
         assert OxTask.objects.count() == 0, "an anchor must enqueue nothing"
 
-        monkeypatch.setattr(b, "_latest_ticks", lambda: snapshot)
+        monkeypatch.setattr(b, "_latest_ticks", lambda since: snapshot)
         _at(b, monkeypatch, t1)
         monkeypatch.undo()
 

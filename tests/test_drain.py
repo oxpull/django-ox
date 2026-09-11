@@ -207,3 +207,90 @@ class TestAReaperWinDoesNotCancelTheRecycle:
             "the wedged thread is not in the stuck set, so the drain will wait "
             "for it without bound"
         )
+
+
+class TestARecycleFinishesEvenWithHealthyWorkOutstanding:
+    """
+    Abandoning the stuck thread is not enough on its own. The recycling worker
+    still waits for that thread's healthy siblings, and a sibling on a queue
+    with no timeout has no obligation to finish -- so one of them could hold a
+    recycling worker open indefinitely. That made the recycle a request rather
+    than a guarantee, on the one path whose premise is that this process can
+    no longer be trusted with work.
+
+    The budget is the lease: past `lock_timeout` a reaper may take these rows
+    anyway, so waiting beyond it buys nothing.
+    """
+
+    def test_the_drain_gives_up_on_a_sibling_that_never_finishes(self, settings):
+        settings.TASKS = {
+            "default": {
+                "BACKEND": "django_ox.backend.OxBackend",
+                "QUEUES": ["default"],
+                "OPTIONS": {},
+            }
+        }
+        worker = Worker(backoff_initial=0, recycle_drain_budget=0.5)
+        ident = threading.get_ident()
+        worker._stuck[ident] = ("task-a", 3)
+        worker._running_on = {ident: ("task-a", 3)}
+        worker._recycling = True
+
+        abandoned, never_finishes = _pending(), _pending()
+        returned = []
+        drain = threading.Thread(
+            target=lambda: (
+                worker._drain({abandoned, never_finishes}),
+                returned.append(True),
+            ),
+            daemon=True,
+        )
+        drain.start()
+        drain.join(timeout=5)
+        assert returned, (
+            "the recycling worker waited forever on a task that never "
+            "finished, so the supervisor never got its replacement"
+        )
+        abandoned.set_result(None)
+        never_finishes.set_result(None)
+
+    def test_the_budget_defaults_to_the_lease(self, settings):
+        settings.TASKS = {
+            "default": {
+                "BACKEND": "django_ox.backend.OxBackend",
+                "QUEUES": ["default"],
+                "OPTIONS": {"LOCK_TIMEOUT": 120.0},
+            }
+        }
+        assert Worker(backoff_initial=0).recycle_drain_budget == 120.0
+
+    def test_a_healthy_task_that_finishes_in_time_is_still_waited_for(
+        self, settings
+    ):
+        settings.TASKS = {
+            "default": {
+                "BACKEND": "django_ox.backend.OxBackend",
+                "QUEUES": ["default"],
+                "OPTIONS": {},
+            }
+        }
+        worker = Worker(backoff_initial=0, recycle_drain_budget=30.0)
+        ident = threading.get_ident()
+        worker._stuck[ident] = ("task-a", 3)
+        worker._running_on = {}
+        worker._recycling = True
+
+        healthy = _pending()
+        returned = []
+        drain = threading.Thread(
+            target=lambda: (worker._drain({healthy}), returned.append(True)),
+            daemon=True,
+        )
+        drain.start()
+        time.sleep(0.6)
+        try:
+            assert not returned, "the budget cut a healthy task short"
+        finally:
+            healthy.set_result(None)
+            drain.join(timeout=2)
+        assert returned

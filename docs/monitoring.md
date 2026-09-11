@@ -248,7 +248,7 @@ The message text is not part of the contract. The keys are.
 | `timeouts_backstop_only` | WARNING | Once per worker: `TaskTimeout` is not raised inside a running sync task, because the interpreter cannot raise an exception inside another thread (`reason=interpreter`, logged at startup) or a coverage tool or debugger is watching the worker's threads (`reason=tracing_tool`, logged on the first attempt registered under it). `TASK_TIMEOUT_GRACE` is the whole enforcement while it stands. See [Task timeouts](production.md#task-timeouts). |
 | `task_retrying` | WARNING | An attempt failed with retries remaining. |
 | `task_failed` | ERROR | The task reached FAILED, out of attempts. |
-| `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. |
+| `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. One record per task. A pass whose stuck set changed while it ran -- a lease renewed, or one more lease expired -- instead emits a single record carrying `count` and no `task_id`, because it cannot say which tasks the reclaim covered. |
 | `task_lease_lost` | WARNING | A worker finished an attempt whose lease had already been reclaimed, so its write was dropped and no result was signalled. |
 | `lease_renew_failed` | WARNING | A lease renewal statement failed. The worker keeps going and tries again on the next interval. |
 | `schedule_dispatched` | INFO | A recurring tick enqueued its task. |
@@ -279,6 +279,8 @@ The message text is not part of the contract. The keys are.
 | `tracer` | `timeouts_backstop_only` with `reason=tracing_tool` | How the worker's threads are being watched: `sys.settrace` when a trace function is installed, which does not say which tool installed it, or `sys.monitoring (NAME)` for a registered tool, which names itself. |
 | `exception` | `task_retrying`, `task_failed` | Exception class name of the failure. |
 | `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `LOST` (out of attempts). |
+| `count` | `task_reclaimed` without `task_id` | How many tasks that pass reclaimed. Present only on the batch record described above. |
+| `held_by` | `task_reclaimed` | The worker that stopped refreshing the lock, from the row. `worker_id` on the same record is the reaper that noticed. |
 | `dropped_status` | `task_lease_lost` | Status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |
 | `schedule` | `schedule_dispatched` | Schedule name from `SCHEDULES`. |
 | `queues`, `concurrency` | `worker_started` | The worker's configuration. |
@@ -326,6 +328,25 @@ column from `queue_stats()` for it.
   tracebacks), `attempts` and `worker_ids` to see what died where. The
   admin page below shows the same fields, and the two actions close the
   loop once the cause is fixed.
+
+### What `errors` holds
+
+One entry per attempt, each with the exception's dotted class path and its
+formatted traceback. A traceback is whatever Python produced for that failure,
+so if an exception message or a chained cause carried a connection string, a
+token or a customer's data, that is what lands in the column -- the same
+material your application's own error reporting already receives. Treat the
+column as you treat those reports.
+
+Two things bound it. Each traceback is stored up to 16 KB, with a marker in
+place of anything past that, so one pathological failure cannot write an
+unbounded string onto the row. And `ox_prune --include-failed` is the retention
+control: FAILED and LOST rows are kept by default so tracebacks survive until
+somebody has looked at them, and that flag is what eventually removes them.
+
+The admin's task page renders `errors` in full to anyone who can open it, which
+is a staff user with view permission on the model. If that is a wider audience
+than your error reporting has, narrow the permission rather than the column.
 
 ## Retrying and discarding
 

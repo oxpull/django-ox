@@ -19,12 +19,11 @@ from django_ox.worker import Worker
 pytestmark = pytest.mark.django_db
 
 
-class _RenewOnSelect:
+class _RenewOnReap:
     """`OxTask.objects`, with a renewal landing inside the reaper's window.
 
     Only the reaper's stuck-select carries `{status, locked_at__lt}`, so this
-    leaves every other query alone and puts the renewal exactly between that
-    selection and the compare-and-set that follows it.
+    leaves every other query alone and wraps just that one.
     """
 
     def __init__(self, real, renew):
@@ -38,21 +37,57 @@ class _RenewOnSelect:
         # The reaper pins every statement to its write alias, so the
         # interception point is `objects.using(alias).filter(...)` rather than
         # `objects.filter(...)`.
-        return _RenewOnSelect(self._real.using(alias), self._renew)
+        return _RenewOnReap(self._real.using(alias), self._renew)
 
     def filter(self, **kwargs):
         queryset = self._real.filter(**kwargs)
         if set(kwargs) != {"status", "locked_at__lt"}:
             return queryset
-        rows = list(queryset)
-        renew = self._renew
+        return _RenewsBeforeActing(queryset, self._renew)
 
-        class _Selected:
-            def __iter__(self):
-                renew()
-                return iter(rows)
 
-        return _Selected()
+class _RenewsBeforeActing:
+    """The stuck set, renewed by its holder the instant before the reaper acts.
+
+    The reaper narrows that set and then either takes the whole of it in one
+    UPDATE or walks it a row at a time. Both are the moment it acts, so the
+    renewal goes immediately ahead of whichever one comes. A reclaim that
+    survives this is a reclaim that resolved the lease before writing, which
+    is the defect.
+    """
+
+    def __init__(self, queryset, renew):
+        self._queryset = queryset
+        self._renew = renew
+
+    def _wrap(self, queryset):
+        return _RenewsBeforeActing(queryset, self._renew)
+
+    def filter(self, *args, **kwargs):
+        return self._wrap(self._queryset.filter(*args, **kwargs))
+
+    def only(self, *args, **kwargs):
+        return self._wrap(self._queryset.only(*args, **kwargs))
+
+    def order_by(self, *args, **kwargs):
+        return self._wrap(self._queryset.order_by(*args, **kwargs))
+
+    def values_list(self, *args, **kwargs):
+        # The reclaim's log manifest. It reads, so the renewal goes ahead of
+        # it too; what matters is that the write below still refuses.
+        self._renew()
+        return self._queryset.values_list(*args, **kwargs)
+
+    def __getitem__(self, item):
+        return self._wrap(self._queryset[item])
+
+    def update(self, **kwargs):
+        self._renew()
+        return self._queryset.update(**kwargs)
+
+    def __iter__(self):
+        self._renew()
+        return iter(self._queryset)
 
 
 def a_running_task(**over):
@@ -93,7 +128,7 @@ def _reap_with_renewal(monkeypatch, worker, task, locked_by="worker-A"):
             pk=task.pk, status=OxTask.Status.RUNNING, locked_by=locked_by
         ).update(locked_at=timezone.now())
 
-    monkeypatch.setattr(OxTask, "objects", _RenewOnSelect(OxTask.objects, renew))
+    monkeypatch.setattr(OxTask, "objects", _RenewOnReap(OxTask.objects, renew))
     try:
         return worker.reap()
     finally:

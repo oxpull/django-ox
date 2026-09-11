@@ -30,8 +30,8 @@ from django.db import (
     router,
     transaction,
 )
-from django.db.models import Max, Q, QuerySet
-from django.db.models.expressions import Combinable
+from django.db.models import F, Max, Q, QuerySet
+from django.db.models.expressions import Combinable, CombinedExpression
 from django.db.models.functions import Now
 from django.utils import timezone
 from django.utils.crypto import get_random_string
@@ -55,6 +55,7 @@ from .schedules import schedule_name_collisions, schedules_from_options
 from .timeouts import (
     RECYCLE_EXIT_CODE,
     _deadline,
+    _deadline_monotonic,
     task_timeouts_from_options,
 )
 
@@ -238,6 +239,34 @@ WRITABLE_STATUSES = (OxTask.Status.RUNNING, OxTask.Status.LOST)
 # because that is the clock the retry that wrote it used; see _ready_queryset.
 # lease_epoch advances here too: the increment and the claim are one statement,
 # so no execution can share an epoch with another.
+# Exhausted rows retired per reap pass. See Worker.reap.
+REAP_BATCH_DEFAULT = 100
+
+# The most of one traceback that is kept on the row, in characters. A
+# traceback's length is set by the failure, not by us: a deep recursion, a
+# chained exception, or a library that prints locals can produce megabytes,
+# and `errors` holds one per attempt. Both ends are worth keeping -- where the
+# call came from and what actually raised -- so an oversized traceback keeps
+# its head and its tail with a marker between them saying what was dropped.
+MAX_STORED_TRACEBACK = 16384
+_TRACEBACK_HEAD = 4096
+
+
+def _stored_traceback(exc: BaseException) -> str:
+    """The exception's traceback, bounded, with any elision made visible."""
+    text = "".join(format_exception(exc))
+    if len(text) <= MAX_STORED_TRACEBACK:
+        return text
+    tail = MAX_STORED_TRACEBACK - _TRACEBACK_HEAD
+    dropped = len(text) - MAX_STORED_TRACEBACK
+    return (
+        f"{text[:_TRACEBACK_HEAD]}\n"
+        f"... {dropped} characters of this traceback were not stored "
+        f"(limit {MAX_STORED_TRACEBACK}) ...\n"
+        f"{text[-tail:]}"
+    )
+
+
 POSTGRES_CLAIM_SQL = """
 UPDATE "{table}" SET
     "status" = %(running)s,
@@ -358,6 +387,8 @@ class Worker:
         poll_interval: float = 1.0,
         lock_timeout: float | None = None,
         reap_interval: float | None = None,
+        reap_batch: int | None = None,
+        recycle_drain_budget: float | None = None,
         renew_interval: float | None = None,
         schedule_interval: float | None = None,
         backoff_initial: float | None = None,
@@ -393,6 +424,21 @@ class Worker:
             reap_interval
             if reap_interval is not None
             else min(30.0, max(self.lock_timeout / 2, 1.0))
+        )
+        # How many exhausted rows one reap pass may retire. The requeue
+        # branch is a single statement and needs no cap; this one writes a
+        # record specific to each row, so it takes them in bounded batches
+        # and leaves the remainder to the next pass.
+        self.reap_batch: int = (
+            reap_batch if reap_batch is not None else REAP_BATCH_DEFAULT
+        )
+        # How long a recycling worker waits on its healthy in-flight tasks
+        # before leaving them to the reaper. See _drain for why this is the
+        # lease and not a number of its own.
+        self.recycle_drain_budget: float = (
+            recycle_drain_budget
+            if recycle_drain_budget is not None
+            else self.lock_timeout
         )
         # A third of the timeout leaves room for two consecutive renewals to
         # be missed (a slow query, a blip, one skipped scheduling slot)
@@ -1096,6 +1142,7 @@ class Worker:
 
         ident = threading.get_ident()
         token = _deadline.set(None)
+        monotonic_token = _deadline_monotonic.set(None)
         try:
             try:
                 # Registered inside the try, so that a delivery landing
@@ -1104,6 +1151,7 @@ class Worker:
                 # the deregistration below like any other.
                 watch = self._arm(ident, db_task, timeout, injectable=True)
                 _deadline.set(watch.deadline_at)
+                _deadline_monotonic.set(watch.deadline)
                 return invoke()
             finally:
                 # The absorbing try lives in this frame on purpose: the
@@ -1129,6 +1177,7 @@ class Worker:
             ) from exc
         finally:
             _deadline.reset(token)
+            _deadline_monotonic.reset(monotonic_token)
 
     def _call_async(
         self,
@@ -1175,11 +1224,13 @@ class Worker:
         ident = threading.get_ident()
         watch = self._arm(ident, db_task, timeout, injectable=False)
         token = _deadline.set(watch.deadline_at)
+        monotonic_token = _deadline_monotonic.set(watch.deadline)
         try:
             return async_to_sync(run)()
         finally:
             self._disarm(ident)
             _deadline.reset(token)
+            _deadline_monotonic.reset(monotonic_token)
 
     def _timeout_message(
         self,
@@ -1495,10 +1546,19 @@ class Worker:
         #
         # Ask the thread instead. It is still inside this attempt or it is
         # not, and the answer does not depend on any database write.
+        #
+        # The write goes under the same lock as the read. `_stuck_alive`
+        # iterates this dict while holding `_in_flight_lock`, and a second
+        # attempt going stuck used to add to it without taking that lock, so
+        # the drain's iteration could see the dict change size underneath it
+        # and raise. The drain is what holds the process open while a stuck
+        # attempt is still running, so an exception there is not a cosmetic
+        # one.
         with self._in_flight_lock:
             still_running = self._running_on.get(watch.ident) == watch.attempt
+            if still_running:
+                self._stuck[watch.ident] = watch.attempt
         if still_running:
-            self._stuck[watch.ident] = watch.attempt
             self._recycle(db_task)
 
     def _recycle(self, db_task: OxTask) -> None:
@@ -1582,7 +1642,7 @@ class Worker:
                 "exception_class_path": (
                     f"{exception_type.__module__}.{exception_type.__qualname__}"
                 ),
-                "traceback": "".join(format_exception(exc)),
+                "traceback": _stored_traceback(exc),
             },
         ]
 
@@ -1692,19 +1752,134 @@ class Worker:
         may yet report its own.
         """
         cutoff = _lease_now() - timedelta(seconds=self.lock_timeout)
-        reclaimed = 0
         stuck = OxTask.objects.using(self._db_alias).filter(
             status=OxTask.Status.RUNNING, locked_at__lt=cutoff
         )
-        for db_task in stuck:
-            exhausted = db_task.attempts >= db_task.max_attempts
-            updates: dict[str, Any] = {
-                "locked_by": None,
-                "locked_at": None,
-            }
-            if exhausted:
-                updates.update(
+        return self._requeue_abandoned(stuck) + self._abandon_exhausted(stuck, cutoff)
+
+    def _requeue_abandoned(self, stuck: QuerySet[OxTask]) -> int:
+        """
+        Put every abandoned row that still has attempts back on the queue.
+
+        One UPDATE, whatever the number of rows, and the predicate that
+        chooses them is the predicate that takes them. That closes the window
+        a read-then-write reaper has to guard by hand: a lease renewed in
+        between no longer matches, so the row stays with the worker that
+        renewed it, and no extra statement is needed to ask.
+
+        The cost is the reason. Every worker reaps on its own interval, so a
+        fleet that has just lost half its members runs this on every survivor
+        at once, against a database that is still recovering. A statement per
+        row, times the workers, is a second outage on top of the first.
+
+        The select above it is the log manifest, not the decision. It reads
+        four small columns so that each reclaimed task still gets its own
+        `task_reclaimed` record, and it is trusted to describe the UPDATE
+        only when the two agree on how many rows there were. When they
+        disagree the set moved underneath the pass -- a lease renewed, or one
+        more expired -- and naming tasks that may not have been reclaimed
+        would put a false positive in the one record an operator reaches for
+        to explain a task that ran twice. That pass reports the count and no
+        task.
+        """
+        requeue = stuck.filter(attempts__lt=F("max_attempts"))
+        manifest = list(
+            requeue.values_list(
+                "id", "task_path", "queue_name", "attempts", "locked_by"
+            )
+        )
+        requeued = requeue.update(
+            status=OxTask.Status.READY,
+            locked_by=None,
+            locked_at=None,
+            lease_epoch=F("lease_epoch") + 1,
+        )
+        if not requeued:
+            return 0
+        if requeued == len(manifest):
+            for task_id, task_path, queue_name, attempts, held_by in manifest:
+                logger.warning(
+                    "Reclaimed stuck task id=%s path=%s (attempt %d) -> %s",
+                    task_id,
+                    task_path,
+                    attempts,
+                    OxTask.Status.READY,
+                    extra={
+                        "event": "task_reclaimed",
+                        "task_id": str(task_id),
+                        "task_path": task_path,
+                        "queue": queue_name,
+                        "attempt": attempts,
+                        "worker_id": self.worker_id,
+                        # The reaper's own id answers "who noticed". The
+                        # question an operator is actually asking of this
+                        # record is "who stopped", and only the row knows.
+                        "held_by": held_by,
+                        "status": str(OxTask.Status.READY),
+                    },
+                )
+        else:
+            logger.warning(
+                "Reclaimed %d stuck task(s) -> %s; the set moved during the "
+                "pass, so this record names none of them",
+                requeued,
+                OxTask.Status.READY,
+                extra={
+                    "event": "task_reclaimed",
+                    "worker_id": self.worker_id,
+                    "status": str(OxTask.Status.READY),
+                    "count": requeued,
+                },
+            )
+        return requeued
+
+    def _abandon_exhausted(
+        self, stuck: QuerySet[OxTask], cutoff: datetime | CombinedExpression
+    ) -> int:
+        """
+        Mark abandoned rows whose attempts are spent LOST.
+
+        This branch writes something specific to each row -- the holder that
+        went quiet, appended to that row's own error list -- so it cannot
+        collapse into a single statement the way the requeue does. It is
+        bounded instead: `reap_batch` rows per pass, the rest on the next
+        one. Exhausting every attempt is the exception, and a reaper that
+        walks an unbounded set of them is the same outage the requeue path
+        was rewritten to avoid.
+
+        Reading first means the write has to re-ask what the read assumed.
+        Two predicates, two races: the epoch catches a handover, and the
+        expiry catches a renewal, which the epoch cannot see because
+        renewing writes locked_at and nothing else.
+        """
+        lost = 0
+        candidates = (
+            stuck.filter(attempts__gte=F("max_attempts"))
+            .only(
+                "id",
+                "task_path",
+                "queue_name",
+                "attempts",
+                "max_attempts",
+                "locked_by",
+                "errors",
+                "lease_epoch",
+            )
+            .order_by("id")[: self.reap_batch]
+        )
+        for db_task in candidates:
+            changed = (
+                OxTask.objects.using(self._db_alias)
+                .filter(
+                    pk=db_task.pk,
+                    status=OxTask.Status.RUNNING,
+                    lease_epoch=db_task.lease_epoch,
+                    locked_at__lt=cutoff,
+                )
+                .update(
                     status=OxTask.Status.LOST,
+                    locked_by=None,
+                    locked_at=None,
                     # Process time, not the lease clock; _lease_now says why.
                     finished_at=timezone.now(),
                     errors=[
@@ -1726,59 +1901,54 @@ class Worker:
                         },
                     ],
                 )
-            else:
-                updates.update(
-                    status=OxTask.Status.READY,
-                    lease_epoch=db_task.lease_epoch + 1,
-                )
-            # Two different races, so two predicates. The epoch catches a
-            # handover: a worker that finished, or another reaper that got
-            # here first, leaves a different epoch and this row is not
-            # overwritten. It cannot catch a renewal, because renewing does
-            # not change the epoch - `renew_leases` writes `locked_at` and
-            # nothing else. Without the expiry predicate here, a worker that
-            # was briefly late renewing and then renewed still loses its
-            # task: the row was selected while it looked expired, and by the
-            # time this UPDATE runs it is held and live. The reclaim would
-            # hand a running task to a second worker.
-            #
-            # Re-checking against the same cutoff the selection used asks the
-            # only question that matters: does this row STILL look abandoned.
-            # It compares an ordering, not a round-tripped timestamp for
-            # equality, which is what an earlier compare got wrong.
-            changed = (
-                OxTask.objects.using(self._db_alias)
-                .filter(
-                    pk=db_task.pk,
-                    status=OxTask.Status.RUNNING,
-                    lease_epoch=db_task.lease_epoch,
-                    locked_at__lt=cutoff,
-                )
-                .update(**updates)
             )
             if changed:
-                reclaimed += 1
+                lost += 1
                 logger.warning(
                     "Reclaimed stuck task id=%s path=%s (attempt %d/%d) -> %s",
                     db_task.id,
                     db_task.task_path,
                     db_task.attempts,
                     db_task.max_attempts,
-                    updates["status"],
+                    OxTask.Status.LOST,
                     extra=self._log_extra(
-                        "task_reclaimed", db_task, status=str(updates["status"])
+                        "task_reclaimed",
+                        db_task,
+                        status=str(OxTask.Status.LOST),
+                        held_by=db_task.locked_by,
                     ),
                 )
-        return reclaimed
+        return lost
 
     # -- scheduling --------------------------------------------------------
 
-    def _latest_ticks(self) -> dict[str, datetime]:
-        """Latest recorded tick per schedule name, for this worker's schedules."""
+    def _latest_ticks(self, since: datetime) -> dict[str, datetime]:
+        """
+        Latest recorded tick per schedule, counting only ticks at or after
+        `since`.
+
+        The bound is what keeps this cheap. Asked for the newest tick per
+        schedule over all of history, no database can seek to it: PostgreSQL
+        reads the whole tick table and hash-aggregates it, MySQL scans the
+        unique index end to end. That is a cost proportional to everything
+        ever dispatched, paid on every pass by every worker, and `ox_prune`
+        is the only thing holding it down.
+
+        `since` is the oldest tick any of this worker's schedules is
+        currently asking about, so the answer this method exists to give is
+        complete within it, and (schedule_name, scheduled_for) turns into a
+        range the index can seek. A schedule whose newest tick predates the
+        bound is absent from the result, which reads as "nothing recorded for
+        the tick in question" -- exactly what the caller does with it, and
+        the caller distinguishes that from a schedule with no ticks at all by
+        asking.
+        """
         return {
             row["schedule_name"]: row["latest"]
-            for row in OxScheduleTick.objects.filter(
-                schedule_name__in=[schedule.name for schedule in self.schedules]
+            for row in OxScheduleTick.objects.using(self._db_alias)
+            .filter(
+                schedule_name__in=[schedule.name for schedule in self.schedules],
+                scheduled_for__gte=since,
             )
             .values("schedule_name")
             .annotate(latest=Max("scheduled_for"))
@@ -1804,11 +1974,16 @@ class Worker:
         local_now = (
             timezone.localtime(now).replace(tzinfo=None) if settings.USE_TZ else now
         )
-        latest = self._latest_ticks()
-        dispatched = 0
+        # Every schedule's due tick first, so the tick log is read once and
+        # only as far back as the oldest of them.
+        due: dict[str, datetime] = {}
         for schedule in self.schedules:
             tick = schedule.cron.previous(local_now)
-            scheduled_for = timezone.make_aware(tick) if settings.USE_TZ else tick
+            due[schedule.name] = timezone.make_aware(tick) if settings.USE_TZ else tick
+        latest = self._latest_ticks(min(due.values()))
+        dispatched = 0
+        for schedule in self.schedules:
+            scheduled_for = due[schedule.name]
             last = latest.get(schedule.name)
             if last is not None and scheduled_for <= last:
                 if last <= now:
@@ -2112,7 +2287,23 @@ class Worker:
         Wait for the in-flight tasks, except the stuck ones while recycling:
         a thread the backstop gave up on may never finish, and the point of
         the recycle is to stop waiting for it.
+
+        While recycling, the wait is also bounded. Abandoning the stuck thread
+        is not enough on its own: the worker still waits for its healthy
+        siblings, and a sibling on a queue with no timeout has no obligation
+        to finish. One such task could hold a recycling worker open for as
+        long as it liked, which made the recycle a request rather than a
+        guarantee -- and the whole reason to recycle is that this process can
+        no longer be trusted to run work.
+
+        The budget is the lease itself. Past `lock_timeout` a reaper is
+        entitled to take these rows anyway, so waiting longer buys nothing
+        that the lease does not already cover. On expiry the remaining tasks
+        are left where a killed worker would leave them: renewal stops when
+        the process goes, the leases age out, and the reaper puts them back.
+        That is the recovery path this worker already relies on.
         """
+        give_up_at: float | None = None
         while True:
             pending = {future for future in in_flight if not future.done()}
             if not pending:
@@ -2122,8 +2313,28 @@ class Worker:
             # would never see it: the drain would wait unbounded on the thread
             # the recycle exists to abandon, and the supervisor would never
             # get its replacement.
-            if self._recycling and len(pending) <= self._stuck_alive():
-                return
+            if self._recycling:
+                healthy = len(pending) - self._stuck_alive()
+                if healthy <= 0:
+                    return
+                now = time.monotonic()
+                if give_up_at is None:
+                    give_up_at = now + self.recycle_drain_budget
+                elif now >= give_up_at:
+                    logger.warning(
+                        "Worker %s stopped waiting on %d in-flight task(s) "
+                        "after %gs of recycling; their leases will expire and "
+                        "the reaper will requeue them",
+                        self.worker_id,
+                        healthy,
+                        self.recycle_drain_budget,
+                        extra={
+                            "event": "worker_drain_abandoned",
+                            "worker_id": self.worker_id,
+                            "pending": healthy,
+                        },
+                    )
+                    return
             wait(pending, timeout=RECYCLE_DRAIN_POLL, return_when=FIRST_COMPLETED)
 
 

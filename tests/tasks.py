@@ -235,3 +235,9 @@ async def async_catch_timeout(seconds):
         STATE["cancelled"] = True
         raise
     return "done"
+
+
+@task()
+def failing_with_long_traceback():
+    """A failure whose traceback is far larger than the row it lands in."""
+    raise ValueError("x" * 200_000)

@@ -105,3 +105,43 @@ class TestStructuredLogging:
         assert record.dropped_status == "SUCCESSFUL"
         assert isinstance(record.duration_ms, int)
         assert "lost its lease" in record.getMessage()
+
+
+@pytest.mark.django_db
+class TestAReclaimNamesTheHolder:
+    """
+    `worker_id` on a reclaim record is the reaper: the worker that noticed.
+    The question an operator asks of this record is which worker stopped, and
+    only the row knows that.
+    """
+
+    def test_the_requeue_record_names_the_worker_that_went_quiet(
+        self, worker, caplog
+    ):
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        add.enqueue(1, 2)
+        db_task = worker.claim_one()
+        OxTask.objects.filter(pk=db_task.pk).update(
+            locked_by="worker-that-died",
+            locked_at=timezone.now() - timedelta(seconds=worker.lock_timeout + 10),
+        )
+        assert worker.reap() == 1
+
+        (record,) = events(caplog, "task_reclaimed")
+        assert record.held_by == "worker-that-died"
+        assert record.worker_id == worker.worker_id, "the reaper is still named"
+
+    def test_the_lost_record_names_it_too(self, worker, caplog):
+        caplog.set_level(logging.WARNING, logger="django_ox")
+        add.enqueue(1, 2)
+        db_task = worker.claim_one()
+        OxTask.objects.filter(pk=db_task.pk).update(
+            attempts=db_task.max_attempts,
+            locked_by="worker-that-died",
+            locked_at=timezone.now() - timedelta(seconds=worker.lock_timeout + 10),
+        )
+        assert worker.reap() == 1
+
+        (record,) = events(caplog, "task_reclaimed")
+        assert record.status == "LOST"
+        assert record.held_by == "worker-that-died"

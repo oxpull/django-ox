@@ -22,6 +22,7 @@ in the middle of a step.
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Collection, Mapping
 from contextvars import ContextVar
 from datetime import datetime, timedelta
@@ -59,6 +60,17 @@ RECYCLE_EXIT_CODE = 75
 # asgiref's choosing, with the caller's context copied across.
 _deadline: ContextVar[datetime | None] = ContextVar("django_ox_deadline", default=None)
 
+# The same deadline on the clock the watchdog actually enforces against.
+# `deadline()` answers "when", which is a wall-clock question and has to stay a
+# wall-clock answer. `remaining()` answers "how long have I got", which is the
+# question the enforcer settles, and it settles it on `time.monotonic()`. Read
+# off the wall clock, the two disagree for as long as an NTP step lasts: a
+# backwards correction leaves a task confident it has seconds in hand after the
+# watchdog has already fired, and a forwards one makes a task give up early.
+_deadline_monotonic: ContextVar[float | None] = ContextVar(
+    "django_ox_deadline_monotonic", default=None
+)
+
 
 def deadline() -> datetime | None:
     """
@@ -72,7 +84,14 @@ def remaining() -> float | None:
     """
     Seconds left before the running attempt times out, negative once the
     deadline has passed, or None when there is no limit.
+
+    Measured on the same monotonic clock the worker enforces the deadline
+    with, so a clock correction cannot put this answer and the timeout that
+    actually fires on different sides of the same instant.
     """
+    until = _deadline_monotonic.get()
+    if until is not None:
+        return until - time.monotonic()
     at = _deadline.get()
     if at is None:
         return None

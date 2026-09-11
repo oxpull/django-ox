@@ -934,7 +934,12 @@ class Worker:
         try:
             task = task_from_db(db_task)
             task_result = task_result_from_db(db_task, task=task)
-            task_started.send(sender=type(self.backend), task_result=task_result)
+            # send_robust: these are an observability surface, and a
+            # receiver's exception is not the task's fault. task_started fires
+            # before the function is reached and inside the attempt's own
+            # except clause, so a raising receiver spent an attempt and left
+            # the task retried without ever running it.
+            task_started.send_robust(sender=type(self.backend), task_result=task_result)
             logger.debug(
                 "Starting task id=%s path=%s (attempt %d/%d)",
                 db_task.id,
@@ -1011,7 +1016,7 @@ class Worker:
                     "task_succeeded", db_task, duration_ms=duration_ms
                 ),
             )
-            task_finished.send(
+            task_finished.send_robust(
                 sender=type(self.backend),
                 task_result=task_result_from_db(db_task, task=task),
             )
@@ -1570,7 +1575,9 @@ class Worker:
                 # the failure, but no result object can be built to signal.
                 task_result = None
             if task_result is not None:
-                task_finished.send(sender=type(self.backend), task_result=task_result)
+                task_finished.send_robust(
+                    sender=type(self.backend), task_result=task_result
+                )
             logger.error(
                 "Task id=%s path=%s failed after %d/%d attempts (%s)",
                 db_task.id,
@@ -1764,11 +1771,29 @@ class Worker:
             tick = schedule.cron.previous(local_now)
             scheduled_for = timezone.make_aware(tick) if settings.USE_TZ else tick
             last = latest.get(schedule.name)
-            # A tick recorded in the future (a clock-skewed worker's write)
-            # must not suppress ticks that are due now; the unique
-            # constraint still protects that future instant when it comes.
-            if last is not None and scheduled_for <= last and last <= now:
-                continue
+            if last is not None and scheduled_for <= last:
+                if last <= now:
+                    continue
+                # The newest tick in the log is in the future, which a
+                # clock-skewed worker's write can leave behind. That must not
+                # suppress ticks which are due now, so the comparison against
+                # the newest one cannot decide this. Ask about this instant
+                # instead: if it has already been recorded, it has run.
+                #
+                # Without that, every pass enqueued, the unique constraint
+                # refused the tick row, and the whole transaction rolled back
+                # - except that enqueue() saves and fires task_enqueued before
+                # the outer block unwinds, so receivers saw an enqueue per
+                # pass, about once a second, for a task that never existed.
+                #
+                # One extra query, and only while a future tick is the newest
+                # one. In ordinary operation the comparison above answers.
+                if (
+                    OxScheduleTick.objects.using(self._db_alias)
+                    .filter(schedule_name=schedule.name, scheduled_for=scheduled_for)
+                    .exists()
+                ):
+                    continue
             try:
                 with transaction.atomic(using=self._db_alias):
                     result = None

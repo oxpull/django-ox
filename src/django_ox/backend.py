@@ -93,7 +93,12 @@ class OxBackend(BaseTaskBackend):
         from .results import task_result_from_db
 
         task_result = cast("TaskResult[P, R]", task_result_from_db(db_task, task=task))
-        task_enqueued.send(type(self), task_result=task_result)
+        # send_robust, for the same reason as the worker's lifecycle signals
+        # and one of its own: this fires after the row is committed, so a
+        # raising receiver never prevented an enqueue. It only made enqueue()
+        # raise over a task that already exists, and a caller who reads that
+        # as a failure and retries ends up with two.
+        task_enqueued.send_robust(type(self), task_result=task_result)
         return task_result
 
     def enqueue_many[**P, R](
@@ -132,7 +137,7 @@ class OxBackend(BaseTaskBackend):
             for row in rows
         ]
         for task_result in results:
-            task_enqueued.send(type(self), task_result=task_result)
+            task_enqueued.send_robust(type(self), task_result=task_result)
         return results
 
     def get_result(self, result_id: str) -> TaskResult[..., Any]:

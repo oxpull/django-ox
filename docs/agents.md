@@ -70,8 +70,7 @@ OK: backlog=0 oldest_age=none last_claim_age=none
 ```
 
 `manage.py check` also runs the django-ox system checks, so a bad schedule
-or timeout option fails here, as `django_ox.E002` to `E005`, before anything
-deploys.
+or timeout option fails here, as `django_ox.E002` to `E005` and `E010`, before anything deploys.
 
 Start a worker in its own process, next to the web server, under the same
 supervisor:
@@ -178,7 +177,7 @@ TASKS = {
   `django.tasks.backends.dummy.DummyBackend` on Django 6.0+, and the same
   paths under `django_tasks.backends.` on Django 5.2 LTS.
 - Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a
-  paid add-on that is not on sale yet. `django_ox.stats` and `ox_health`
+  paid add-on. `django_ox.stats` and `ox_health`
   are in django-ox.
 
 ## How to verify it works

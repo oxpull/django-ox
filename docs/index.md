@@ -26,8 +26,7 @@ own.
 ## Transactional enqueue
 
 The queue lives in your database, so enqueueing a task is a single INSERT
-on your default connection. That gives you a guarantee no broker-based
-queue can offer: **the task and your data commit or roll back together.**
+on your default connection. That gives you a guarantee a broker cannot offer: **the task and your data commit or roll back together.**
 
 ```python
 from django.db import transaction
@@ -178,15 +177,15 @@ decisions worth knowing before you commit:
   one retried, from the admin or with `django_ox.actions`. `TASK_TIMEOUT`
   bounds how long any attempt may run; a particular running task cannot be
   interrupted on demand.
-- Tasks are stored on the default database for the model; multi-database
-  routing is not part of the current scope.
+- Every django-ox table lives on one database, the one your router sends
+`OxTask` to. A queue on a different database from the rows it refers to gives
+up the transactional enqueue.
 - Worker concurrency is a thread pool, which fits I/O-bound tasks. For
   CPU-bound work, run `--processes N --concurrency 1`, which is N worker
   processes under one supervisor. See
   [Production](production.md#threads-and-processes).
 
-Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a paid
-add-on that is not on sale yet; the waitlist is at <https://oxpull.com/>.
+Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a paid add-on. Pricing and how to get it are at <https://oxpull.com/>.
 Metrics stay in this package: `django_ox.stats` and `ox_health` are free and
 stay free.
 

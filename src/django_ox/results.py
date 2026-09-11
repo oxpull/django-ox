@@ -29,7 +29,7 @@ def task_from_db(db_task: OxTask) -> Task[..., Any]:
     @task). A row whose task_path points at any other importable callable is
     rejected here rather than executed: the worker never calls an arbitrary
     dotted path pulled from the table, only functions the application
-    registered as tasks. See SECURITY.md for the trust model.
+    registered as tasks. The trust model is at https://oxpull.com/django-ox/stability/.
 
     Raises ImportError if the path no longer resolves, or resolves to a
     non-Task object; callers decide whether that is a hard error (get_result)
@@ -69,14 +69,10 @@ def public_status(db_status: str) -> TaskResultStatus:
     over such a task spins forever, which is worse to hand somebody than a
     wrong answer.
 
-    The cost, stated rather than hidden: if the process holding the lost
-    lease does come back and records a success, a caller reading the row
-    twice sees FAILED and then SUCCESSFUL. It is confined to this path, and
-    it is what the same sequence produces today, where the reaper writes a
-    real FAILED and the returning worker overwrites it. The row keeps the
-    distinction the API cannot carry: its status is LOST, not FAILED, and
-    the recorded error says the outcome was never observed rather than
-    naming a cause.
+    A caller polling a LOST row sees FAILED; if the holder of the lease later
+    records a success, the next read sees SUCCESSFUL. The row keeps the
+    distinction the API cannot carry: its status is LOST, and the recorded
+    error says the outcome was not observed rather than naming a cause.
     """
     from .models import OxTask
 

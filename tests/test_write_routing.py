@@ -2,9 +2,9 @@
 Every statement in the claim protocol goes to the write database.
 
 A database router can send `OxTask` somewhere other than the default
-connection. The worker computes that alias once and used it only for its
-transaction blocks, leaving the statements themselves to route themselves.
-Reads route through `db_for_read`, so with a read replica configured the
+connection. The worker computes that alias once, and every statement in the
+protocol has to use it rather than routing itself. Reads route through
+`db_for_read`, so with a read replica configured the
 claim lands off primary or raises on a read-only standby, `_reload_claimed`
 can miss a claim that succeeded, and the reaper can read a stale `locked_at`
 while its update hits primary.

@@ -22,8 +22,7 @@ Comparing backends? See [Choosing a task backend](https://oxpull.com/django-ox/c
 
 Requires Python 3.12+ and Django 5.2+. Django 6.0 and later ship the Tasks
 framework in core. On Django 5.2 LTS it comes from the `django-tasks`
-backport, so install the `backport` extra there. **Your own imports differ
-with it**: on Django 6.0+ you write `from django.tasks import task`, and on
+backport, so install the `backport` extra there. **Your import path depends on the Django version**: on Django 6.0+ you write `from django.tasks import task`, and on
 Django 5.2 you write `from django_tasks import task`. django-ox itself
 handles both.
 
@@ -89,7 +88,7 @@ on PostgreSQL 16: 37,804 tasks, nine minutes of which SIGKILLed a random
 worker every 20 to 45 seconds. Eighteen kills, thirty interrupted
 executions. Every task reached a terminal state, every interrupted
 execution was re-executed inside the documented reclaim bound, and the
-median first-attempt latency under kills stayed within a millisecond of the
+median latency under kills stayed within a millisecond of the
 undisturbed baseline.
 
 Execution is at-least-once, so a worker killed between finishing a task and
@@ -97,9 +96,8 @@ recording the outcome leaves that task to run again. One task in that run
 executed twice for exactly that reason, and no task executed twice without
 a kill to account for it.
 
-The soak ran 0.3.1, and the outcome-write path changed after both it and the
-throughput run below. Neither measurement covers the shipped worker exactly;
-the benchmarks page says which way the difference runs.
+Both runs were on 0.3.1. The outcome write has changed since; the benchmarks
+page says what changed and what it does to the numbers.
 
 Thirty-seven assertions ran and all thirty-seven passed. The harness
 design, every assertion and the caveats are in
@@ -116,11 +114,9 @@ every one of the five control runs; the slowest was 112.6 and their fastest
 was 105.0. In-transaction enqueue latency was a tie at about six tenths of
 a millisecond at p50.
 
-At concurrency 4 the result reverses and django-tasks-db is ahead: 346.3
-against 328.5 on the mean, about 5 percent, and wider on the median.
-[The benchmarks page](https://oxpull.com/django-ox/benchmarks/) carries that
-result, the reason the two harnesses are not measuring the same shape at that
-width, and the raw data behind every figure.
+[The benchmarks page](https://oxpull.com/django-ox/benchmarks/) has the
+full matrix, the concurrency-4 row and why the two workers are not the same
+shape at that width, and the raw data behind every figure.
 
 ## Configuration
 
@@ -132,7 +128,7 @@ TASKS = {
         "BACKEND": "django_ox.backend.OxBackend",
         "QUEUES": ["default", "emails"],  # [] allows any queue name
         "OPTIONS": {
-            "MAX_ATTEMPTS": 3,  # executions per task before FAILED
+            "MAX_ATTEMPTS": 3,  # claims per task before FAILED
             "LOCK_TIMEOUT": 300,  # seconds before a dead worker's task is reclaimed
             "BACKOFF_INITIAL": 5,  # first retry delay, seconds; doubles per attempt
             "BACKOFF_MAX": 600,  # retry delay ceiling, seconds
@@ -305,7 +301,7 @@ firing for a time before it existed.
   retried both when it raises and when its worker dies mid-run. The lease
   number stops two workers writing the same row; it does not stop two threads
   running the same task body, which is a property of every at-least-once
-  queue. [What the lease guarantees, precisely](https://oxpull.github.io/django-ox/production/#what-the-lease-guarantees-precisely).
+  queue. [What the lease guarantees, precisely](https://oxpull.com/django-ox/production/#what-the-lease-guarantees-precisely).
 - Concurrency uses a thread pool. That fits I/O-bound tasks (email, HTTP,
   ORM); for CPU-bound work, run `--processes N --concurrency 1`, which is N
   worker processes under one supervisor.
@@ -319,8 +315,7 @@ bounded with `TASK_TIMEOUT`), and multi-database routing (tasks are stored on
 the default database for the model).
 
 Batches, unique tasks and rate limiting are in
-[Oxpull Pro](https://oxpull.com/django-ox/pro/), a paid add-on. See
-<https://oxpull.com/> for its status and pricing. Metrics stay in this
+[Oxpull Pro](https://oxpull.com/django-ox/pro/), a paid add-on. Pricing and how to get it are at <https://oxpull.com/>. Metrics stay in this
 package: `django_ox.stats` and `ox_health` are free and stay free.
 
 ## Stability

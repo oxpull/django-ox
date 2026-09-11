@@ -222,21 +222,6 @@ class _Watch:
 # or has already been answered.
 WRITABLE_STATUSES = (OxTask.Status.RUNNING, OxTask.Status.LOST)
 
-# Single-statement claim for PostgreSQL: the SKIP LOCKED subselect, the claim
-# UPDATE, and the per-attempt bookkeeping are one round trip, atomic in
-# autocommit. The equivalent multi-statement path costs 5 round trips.
-#
-# The claim's own timestamps come from {lease_clock}, which is
-# STATEMENT_TIMESTAMP() when USE_TZ is on and a parameter carrying the worker's
-# clock when it is off. That is not a style choice: _lease_now() makes the same
-# switch, and renew_leases and the reaper's cutoff both go through it. One
-# column, one clock. Stamping this from the server while the renewal stamps
-# from the worker would put two on it, and a worker whose clock ran behind the
-# server's would renew to a timestamp the reaper reads as already expired.
-# run_after is the exception and is still compared against the worker's clock,
-# because that is the clock the retry that wrote it used; see _ready_queryset.
-# lease_epoch advances here too: the increment and the claim are one statement,
-# so no execution can share an epoch with another.
 # Exhausted rows retired per reap pass. See Worker.reap.
 REAP_BATCH_DEFAULT = 100
 
@@ -293,6 +278,21 @@ def _stored_traceback(exc: BaseException) -> str:
     return _utf8_prefix(text, head) + marker + _utf8_suffix(text, budget - head)
 
 
+# Single-statement claim for PostgreSQL: the SKIP LOCKED subselect, the claim
+# UPDATE, and the per-attempt bookkeeping are one round trip, atomic in
+# autocommit. The equivalent multi-statement path costs 5 round trips.
+#
+# The claim's own timestamps come from {lease_clock}, which is
+# STATEMENT_TIMESTAMP() when USE_TZ is on and a parameter carrying the worker's
+# clock when it is off. That is not a style choice: _lease_now() makes the same
+# switch, and renew_leases and the reaper's cutoff both go through it. One
+# column, one clock. Stamping this from the server while the renewal stamps
+# from the worker would put two on it, and a worker whose clock ran behind the
+# server's would renew to a timestamp the reaper reads as already expired.
+# run_after is the exception and is still compared against the worker's clock,
+# because that is the clock the retry that wrote it used; see _ready_queryset.
+# lease_epoch advances here too: the increment and the claim are one statement,
+# so no execution can share an epoch with another.
 POSTGRES_CLAIM_SQL = """
 UPDATE "{table}" SET
     "status" = %(running)s,
@@ -347,9 +347,7 @@ def _lease_now() -> Combinable | datetime:
     TIME_ZONE.
 
     So: the database's clock where the two agree, the worker's clock where they
-    do not. The second case is what every timestamp here used before the lease
-    moved to database time, so it carries no behaviour that has not already
-    shipped.
+    do not.
 
     Only the lease is stamped this way: locked_at, the started_at and
     last_attempted_at written beside it in the claim, and the cutoff the reaper
@@ -357,12 +355,10 @@ def _lease_now() -> Combinable | datetime:
     is one, and _ready_queryset says why. finished_at is the other: nothing
     fences on it, the reaper never reads it, and it is written by the statement
     that gives the lease up rather than by one that holds it. Every comparison
-    against it here -- ox_prune's cutoff, the throughput window in stats -- is
+    against it here (ox_prune's cutoff, the throughput window in stats) is
     against timezone.now(), and django_ox.actions already stamps it from there,
-    so process time is the clock it is read on. Stamping it database-side also
-    cost a round trip per task, because a value the database computes has to be
-    read back before the in-memory row can be trusted, and _write_outcome is on
-    the path every task takes.
+    so process time is the clock it is read on. A database-computed value would
+    need a read-back, and _write_outcome is on the path every task takes.
     """
     return Now() if settings.USE_TZ else timezone.now()
 
@@ -456,7 +452,7 @@ class Worker:
         if not isinstance(backend, OxBackend):
             raise ImproperlyConfigured(
                 f"Backend {backend_alias!r} is {type(backend).__qualname__}, "
-                "not a OxBackend."
+                "not an OxBackend."
             )
         self.backend = backend
         options = backend.options
@@ -708,7 +704,7 @@ class Worker:
         # milliseconds and Now() + interval renders microseconds, and text
         # comparison then reads "12:00:00.604000" as later than
         # "12:00:00.604", so a retry written with no backoff is not eligible
-        # for up to a millisecond (measured: 86 of 200). Skew in run_after
+        # for up to a millisecond. Skew in run_after
         # only makes a retry early or late; mixing the two clocks across a
         # comparison would be worse than either clock consistently.
         queryset = (
@@ -855,7 +851,7 @@ class Worker:
         compare against an epoch this execution was never granted, which is
         what lets a straggler's outcome overwrite the real holder's.
 
-        Pinning the read to the granted epoch turns that into an honest miss.
+        Pinning the read to the granted epoch turns that into a miss.
         None means the lease was lost inside the gap, so there is nothing here
         to execute. The PostgreSQL path never has the gap, because RETURNING *
         is the same statement, and the SKIP LOCKED path holds a row lock
@@ -914,17 +910,15 @@ class Worker:
                     # next tick reconnects, and keep going, because giving
                     # up here would silently expire every live lease.
                     #
-                    # Every exception, not a chosen class. This caught
-                    # DatabaseError, and `django.db.InterfaceError` does not
-                    # inherit from it - it sits beside it under
-                    # `django.db.Error` - so the one failure most likely to
-                    # arrive here, a connection dropped underneath the
-                    # thread, escaped and killed it. Nothing restarts this
-                    # thread and nothing checks it is alive, so every
-                    # in-flight lease then aged out and the reaper handed
-                    # every running task to another worker. The consequence
-                    # of guessing wrong is severe and silent, which is
-                    # exactly when a guess should not be made.
+                    # Every exception, not a chosen class. Nothing restarts
+                    # this thread and nothing checks it is alive, and a
+                    # renewal loop that stops lets every in-flight lease
+                    # expire. `django.db.InterfaceError` sits beside
+                    # `DatabaseError` under `django.db.Error`, so a dropped
+                    # connection, the likeliest failure here, has to be
+                    # caught too. The consequence of guessing wrong is
+                    # severe and silent, which is exactly when a guess
+                    # should not be made.
                     logger.warning(
                         "Lease renewal failed for worker %s; retrying in %.1fs",
                         self.worker_id,
@@ -1058,9 +1052,8 @@ class Worker:
             task_result = task_result_from_db(db_task, task=task)
             # send_robust: these are an observability surface, and a
             # receiver's exception is not the task's fault. task_started fires
-            # before the function is reached and inside the attempt's own
-            # except clause, so a raising receiver spent an attempt and left
-            # the task retried without ever running it.
+            # before the function is reached, so a receiver that raises must
+            # not be charged to the task as an attempt.
             task_started.send_robust(sender=type(self.backend), task_result=task_result)
             logger.debug(
                 "Starting task id=%s path=%s (attempt %d/%d)",
@@ -1073,7 +1066,7 @@ class Worker:
             timeout = self.timeouts.for_queue(db_task.queue_name)
             if timeout is None:
                 # No timeout on this queue: the call is the one the worker
-                # made before timeouts existed, frame for frame, so the
+                # made directly, frame for frame, so the
                 # stored traceback of an ordinary failure is unchanged.
                 if task.takes_context:
                     raw_return_value = task.call(
@@ -1172,7 +1165,7 @@ class Worker:
         The attempt is registered with the watchdog for the duration of the
         call, and the attempt's deadline is published for deadline() and
         remaining(). A queue with no timeout never comes here: _run_attempt
-        calls the task directly, as it did before timeouts existed.
+        calls the task directly.
 
         A sync task is interrupted by TaskTimeout raised on this thread, at
         the next bytecode after the deadline. The exception can therefore
@@ -1473,13 +1466,11 @@ class Worker:
                         self._handle_stuck(watch)
                     except Exception:
                         # This thread is the whole of the timeout backstop and
-                        # nothing restarts it mid-attempt: an exception here
-                        # used to kill it, leaving every attempt already armed
-                        # with no deadline and no grace, and the worker with no
-                        # record of why. _fire_due has already taken this watch
-                        # out of the table, so the loop carries on with the
-                        # others rather than retrying a watch whose grace has
-                        # passed.
+                        # nothing restarts it mid-attempt, so a failure on one
+                        # watch must not end it for the others. _fire_due has
+                        # already taken this watch out of the table, so the
+                        # loop carries on rather than retrying a watch whose
+                        # grace has passed.
                         logger.exception(
                             "Worker %s could not record a stuck attempt; the "
                             "timeout backstop continues for the others",
@@ -1605,26 +1596,15 @@ class Worker:
                 extra=self._log_extra("task_stuck_unrecorded", db_task),
             )
         # Whether the write landed and whether the thread is stuck are
-        # different questions, and this used to answer the second with the
-        # first. A lost write can mean the thread's own outcome landed ahead
-        # of it, in which case the thread did come back; it can equally mean
-        # a reaper requeued the row underneath us, which sets READY and moves
-        # the epoch, so the write matches nothing while the thread runs on.
-        # Reading that as "not stuck" left the worker un-recycled, the pool
-        # slot gone for the life of the process, the thread absent from the
-        # stuck set so the drain waited on it without bound, and the row
-        # available for anyone to claim and run alongside it.
+        # different questions. A lost write can mean the thread's own
+        # outcome landed first, so it did come back; it can equally mean a
+        # reaper requeued the row underneath us while the thread runs on.
+        # Only the thread knows whether it is still inside this attempt, so
+        # ask it; the answer does not depend on any database write.
         #
-        # Ask the thread instead. It is still inside this attempt or it is
-        # not, and the answer does not depend on any database write.
-        #
-        # The write goes under the same lock as the read. `_stuck_alive`
-        # iterates this dict while holding `_in_flight_lock`, and a second
-        # attempt going stuck used to add to it without taking that lock, so
-        # the drain's iteration could see the dict change size underneath it
-        # and raise. The drain is what holds the process open while a stuck
-        # attempt is still running, so an exception there is not a cosmetic
-        # one.
+        # Written under the lock `_stuck_alive` iterates it under. The drain
+        # is what holds the process open while a stuck attempt is still
+        # running, so its iteration must never see this dict change size.
         with self._in_flight_lock:
             still_running = self._running_on.get(watch.ident) == watch.attempt
             if still_running:
@@ -1856,10 +1836,9 @@ class Worker:
 
         Two bounds, and both of them matter:
 
-        - The pass takes at most `reap_batch` rows. The statement count was
-          bounded before this and the row count was not, so a large enough
-          stuck set still meant the whole of it in memory and a WARNING per
-          row per worker per pass. The remainder goes on the next pass.
+        - The pass takes at most `reap_batch` rows, so memory and log volume
+          are bounded whatever the size of the stuck set. The remainder goes
+          on the next pass.
         - The UPDATE is restricted to the ids that were read. That is what
           makes the log honest. `cutoff` is a database expression evaluated
           per statement, so without the restriction the UPDATE's cutoff is
@@ -1937,9 +1916,8 @@ class Worker:
         went quiet appended to that row's own error list, so it cannot
         collapse into a single statement the way the requeue does. It is
         bounded instead: `reap_batch` rows per pass, the rest on the next
-        one. Exhausting every attempt is the exception, and a reaper that
-        walks an unbounded set of them is the same outage the requeue path
-        was rewritten to avoid.
+        one. Exhausting every attempt is the exception, and a bounded walk
+        keeps a reaper's cost independent of how many workers died at once.
 
         Reading first means the write has to re-ask what the read assumed.
         Two predicates, two races: the epoch catches a handover, and the
@@ -2090,12 +2068,6 @@ class Worker:
                 # the newest one cannot decide this. Ask about this instant
                 # instead: if it has already been recorded, it has run.
                 #
-                # Without that, every pass enqueued, the unique constraint
-                # refused the tick row, and the whole transaction rolled back
-                # - except that enqueue() saves and fires task_enqueued before
-                # the outer block unwinds, so receivers saw an enqueue per
-                # pass, about once a second, for a task that never existed.
-                #
                 # One extra query, and only while a future tick is the newest
                 # one. In ordinary operation the comparison above answers.
                 if (
@@ -2183,14 +2155,10 @@ class Worker:
         """
         Claim and execute a single task inline. Returns True if one ran.
 
-        Renewed for the duration, the same as a task on the pool. `execute()`
-        puts the attempt in the renewal set, but only `run()` starts the
-        thread that services it, so a task run this way used to hold a lease
-        nothing refreshed: anything outliving LOCK_TIMEOUT was reaped
-        mid-flight and handed to a real worker while this call was still
-        inside the function. There is no underscore on this method and its
-        callers read it as public, so refusing long work here would be
-        publishing the trap rather than closing it.
+        Renewed for the duration, the same as a task on the pool: a renewal
+        thread is started for this call and stopped before it returns, so a
+        task that outlives LOCK_TIMEOUT keeps its lease here as it would on
+        the pool.
         """
         db_task = self.claim_one()
         if db_task is None:
@@ -2320,14 +2288,11 @@ class Worker:
                     # underneath the worker is the likeliest failure here.
                     #
                     # The envelope this package publishes says the database may
-                    # go away and come back, and every other loop here already
-                    # honours that: the renewal thread survives it and so does
-                    # an attempt. This one did not, so one reconnect error
-                    # unwound out of run(). The supervisor then replaced the
-                    # child, the replacement failed on its own first reap, and
-                    # five deaths in a minute stop the supervisor for good - so
-                    # a blip the worker was built to ride out took the whole
-                    # fleet down and left it down.
+                    # go away and come back, and every loop here honours it:
+                    # the renewal thread rides it out, an attempt rides it
+                    # out, and so does this one. Letting the error out of
+                    # run() would hand the supervisor a death per blip, and
+                    # five in a minute stop it for good.
                     #
                     # Reap, dispatch and claim are all retried on the next pass
                     # by construction: nothing here holds state that a missed
@@ -2411,10 +2376,9 @@ class Worker:
         While recycling, the wait is also bounded. Abandoning the stuck thread
         is not enough on its own: the worker still waits for its healthy
         siblings, and a sibling on a queue with no timeout has no obligation
-        to finish. One such task could hold a recycling worker open for as
-        long as it liked, which made the recycle a request rather than a
-        guarantee, and the whole reason to recycle is that this process can
-        no longer be trusted to run work.
+        to finish. The bound is what makes the recycle a guarantee rather
+        than a request, on a process that has already decided it cannot be
+        trusted to run work.
 
         The budget defaults to `lock_timeout`, which is a generous allowance
         rather than a free one, and the arithmetic is worth stating because it
@@ -2441,11 +2405,8 @@ class Worker:
             pending = {future for future in in_flight if not future.done()}
             if not pending:
                 return
-            # Re-read the flag every pass. The backstop can fire part way
-            # through an ordinary drain, and a flag read once on the way in
-            # would never see it: the drain would wait unbounded on the thread
-            # the recycle exists to abandon, and the supervisor would never
-            # get its replacement.
+            # Re-read the flag every pass: the backstop can fire part way
+            # through an ordinary drain.
             if self._recycling:
                 healthy = len(pending) - self._stuck_alive()
                 if healthy <= 0:

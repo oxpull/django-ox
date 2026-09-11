@@ -2,10 +2,10 @@
 `ox_worker` has to import on a platform without every POSIX signal.
 
 The single-process worker needs no signal forwarding and is documented as
-the way to run on Windows. Naming SIGHUP at module scope made the import
-itself raise there, before argparse and before the command could explain
-anything, so the worker that does run could not start and the check meant
-to describe the limit was unreachable.
+the way to run on Windows. A signal named at module scope would make the
+import itself raise there, before argparse and before the command could
+explain anything, so the constants are built from the signals the platform
+has.
 """
 
 import importlib

@@ -164,10 +164,9 @@ class TestTheWatchdogThreadSurvivesAFailedRecord:
         self, worker, monkeypatch, caplog, failure
     ):
         """
-        The guard used to name `django.db.Error`, and the watchdog above it
-        catches `Exception`, so anything outside that taxonomy propagated
-        past the recycle. The pool slot was then gone for the life of the
-        process and the drain waited on a thread that will never finish.
+        The watchdog above catches `Exception`, so the guard here must be as
+        wide: anything that escapes it skips the recycle, and the pool slot is
+        then gone for the life of the process.
         """
         from django_ox.worker import _Watch
 

@@ -149,10 +149,6 @@ def _seconds(value: Any, where: str, *, unlimited: bool = True) -> float | None:
     return float(value)
 
 
-#: Options the worker reads as a number of seconds, with the floor each one
-#: has to clear. Every one of them was cast with a bare float() and used: a
-#: zero or a negative reached the poll loop and misbehaved there rather than
-#: at `manage.py check`, which is where a bad deploy is supposed to stop.
 #: Options the worker reads as a number of seconds. A deploy that gets one of
 #: them wrong stops at `manage.py check` rather than in the poll loop.
 LEASE_TIMINGS = ("LOCK_TIMEOUT", "BACKOFF_INITIAL", "BACKOFF_MAX")

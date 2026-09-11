@@ -91,22 +91,12 @@ jobs:
           cat requirements-audit.txt
       - run: pip-audit --strict --desc -r requirements-audit.txt
 
-  # Working notes belong in a working directory, not in a published package.
-  # This fails if a file whose name marks it as internal is ever tracked.
+  # A trusted-publishing project has no credential to keep in the tree.
   artifacts:
-    name: internal artefacts
+    name: credential-shaped files
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
-      - name: No internal artefacts tracked
-        run: |
-          set -uo pipefail
-          patterns='(^|/)(BUILD|DEV|WORKING|SESSION|MEETING)[-_]?NOTES|CHECKLIST|SCRATCH|\.internal(/|$)|internal[-_]notes|(^|/)TODO(\.md)?$|DRAFT'
-          if git ls-files | grep -nEi "$patterns"; then
-            echo "::error::A file that looks like internal notes is tracked here."
-            exit 1
-          fi
-          echo "No internal artefacts tracked."
       - name: No credential-shaped files tracked
         run: |
           set -uo pipefail

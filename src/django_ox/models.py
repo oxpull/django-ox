@@ -66,13 +66,10 @@ class OxTask(models.Model):
 
     # When this lease stops being valid, written by the worker that took it.
     #
-    # Without it every reaper derives an expiry from its own LOCK_TIMEOUT, so
-    # during a rolling deploy that changes the setting the fleet disagrees
-    # about which rows are abandoned: a worker renewing correctly on the old
-    # cadence is reclaimed mid-execution by one running the new one. The lease
-    # epoch protects that worker's finish write, not the work it is doing.
-    #
-    # Stored so every observer asks the same question. NULL means a lease
+    # Stored on the row so every reaper in a fleet judges a lease by the
+    # same deadline, whatever LOCK_TIMEOUT each one was started with; the
+    # setting can change in a rolling deploy without two workers disagreeing
+    # about which rows are abandoned. NULL means a lease
     # taken before this column existed, and the reaper falls back to comparing
     # locked_at against its own timeout for those; the first renewal after an
     # upgrade fills it in, so a fleet converges lease by lease with no step an
@@ -106,12 +103,11 @@ class OxTask(models.Model):
             # tighter for a worker pinned to exactly one queue, the shape the
             # production page recommends: it walks only that queue's rows
             # instead of filtering the others out. PostgreSQL picks between
-            # them per query, measured on all three configurations.
+            # them per query.
             #
-            # `run_after` is in neither. It is a range behind the sort columns,
-            # where no database can use it, and putting it there cost the
-            # planner the ordering: the index stops being chosen at all and
-            # sorted the whole candidate set on every claim.
+            # `run_after` is in neither: a range condition behind the sort
+            # columns is unusable by a btree, and an index that ends there
+            # loses the ordering.
             models.Index(
                 fields=["status", "-priority", "enqueued_at"],
                 name="ox_dequeue_idx",

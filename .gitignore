@@ -11,10 +11,6 @@ dist/
 site/
 benchmarks/logs/
 
-# Working notes and local scratch. Not part of the package. Published
 # benchmark data is committed under benchmarks/ by its dated filename; anything
 # matching these patterns is a local run that has not been reviewed.
-*-NOTES.md
-*CHECKLIST*
-.scratch/
 results-raw-*-[a-z]*[0-9].json

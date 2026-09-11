@@ -30,8 +30,7 @@ directory, against the standing ox-pg container:
 
 Raw results (exact invocation, per-scenario config, every sample, every
 kill event, every assertion) checkpoint to soak-results-raw-<date>.json
-after each scenario; per-process logs land in logs/. The published
-SOAK-<date>.md is written by a person from the raw JSON.
+after each scenario; per-process logs land in logs/. The published SOAK-<date>.md is written from the raw JSON.
 """
 
 import argparse

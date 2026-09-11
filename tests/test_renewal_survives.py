@@ -24,7 +24,7 @@ from django_ox.worker import Worker
 pytestmark = pytest.mark.django_db
 
 
-def test_the_exception_that_prompted_this_is_not_a_database_error():
+def test_interface_error_is_not_a_database_error():
     # If this ever becomes false upstream, the reasoning below changes.
     assert not issubclass(InterfaceError, DatabaseError)
     assert issubclass(InterfaceError, Error)

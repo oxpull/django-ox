@@ -10,12 +10,6 @@
   "excludeFolders": [
     "tests",
     ".github",
-    "archive",
-    "archived",
-    "old",
-    "deprecated",
-    "legacy",
-    "superseded",
     "benchmarks",
     "overrides",
     "site",

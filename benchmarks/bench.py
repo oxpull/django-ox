@@ -9,10 +9,9 @@ Run with the project venv python (psycopg and both backends installed):
 
 See README.md in this directory for methodology and limitations.
 
-The orchestrator (no --role flag) never imports Django. Every measurement
+The orchestrator (no --role flag) imports Django only to record the environment. Every measurement
 runs in a fresh subprocess (a "role") so no backend benefits from a warm
-process. Raw results are written to results-raw-<date>.json; the published
-results file is authored from that JSON by a human.
+process. Raw results are written to results-raw-<date>.json; the published results file is written from that JSON.
 """
 
 import argparse

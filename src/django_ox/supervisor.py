@@ -214,8 +214,8 @@ class Supervisor:
         connection or claimed a task. Nothing was lost and nothing failed.
 
         Reporting it upwards would say otherwise. A stop that lands during
-        startup is ordinary -- a restart, a deploy that rolls twice, a
-        health check that never went green -- and a unit on
+        startup is ordinary (a restart, a deploy that rolls twice, a
+        health check that never went green), and a unit on
         ``Restart=on-failure`` would read the 143 as a fault and start the
         service again.
         """

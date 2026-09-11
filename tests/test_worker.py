@@ -249,7 +249,7 @@ class TestReaper:
     def test_reaper_records_a_lost_lease_and_not_a_failure(self, worker):
         """
         Attempts exhausted is the one case the reaper cannot requeue out of,
-        and it is the case it used to invent a verdict for. It has watched a
+        and it is the case it must not invent a verdict for. It has watched a
         lock go quiet and nothing else, so LOST is the whole of what it may
         write, and it announces nothing.
         """
@@ -350,7 +350,7 @@ class TestLeaseFencesTerminalWrites:
 
     def test_stale_retry_does_not_unterminal_a_finished_task(self, worker):
         """
-        The reported race: worker A is reaped, worker B runs the task to
+        The race: worker A is reaped, worker B runs the task to
         SUCCESSFUL, and A then fails with retries left and writes READY over
         the top. A completed task went back on the queue.
         """
@@ -709,10 +709,8 @@ class TestLostState:
 
     def test_lost_is_not_pending_for_completion_counting(self, worker):
         """
-        The paid batches feature counts unfinished members as
-        (READY, RUNNING) against this column. A fifth value is therefore
-        settled by construction, which is the property that stops a batch
-        with a lost member hanging.
+        Anything counting unfinished work treats (READY, RUNNING) as pending
+        against this column, so a fifth value is settled by construction.
         """
         self._lose_the_lease(worker)
 

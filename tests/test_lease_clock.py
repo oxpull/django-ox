@@ -116,10 +116,9 @@ class TestWhoseClockTheLeaseIsOn:
 
 class TestTheTimingOptionsAreChecked:
     """
-    `LOCK_TIMEOUT`, `BACKOFF_INITIAL` and `BACKOFF_MAX` were each cast with a
-    bare `float()` and used. A zero or a negative reached the poll loop and
-    misbehaved there, rather than stopping the deploy at `manage.py check`
-    where every other bad option does.
+    `LOCK_TIMEOUT`, `BACKOFF_INITIAL` and `BACKOFF_MAX` are each a positive,
+    finite number of seconds. A value that is not stops the deploy at
+    `manage.py check`, where every other bad option does.
     """
 
     def _check(self, settings, options):
@@ -173,9 +172,9 @@ class TestTheTimingOptionsAreChecked:
 
 class TestTheLeaseTimingsRefuseWhatTheTimeoutOptionsRefuse:
     """
-    One validator for both, because a second one written by hand drifted:
-    it accepted `True` as a one-second lock timeout and 1e300 as a finite
-    duration, which is the class of value the check exists to refuse.
+    One validator for both, so the lease timings refuse exactly what the
+    timeout options refuse: `True` is not one second and 1e300 is not a
+    duration.
     """
 
     @pytest.mark.parametrize("name", ["LOCK_TIMEOUT", "BACKOFF_INITIAL", "BACKOFF_MAX"])

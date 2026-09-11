@@ -42,8 +42,7 @@ class OxBackend(BaseTaskBackend):
     which is the case the guarantee is usually described in. Under a router
     that sends OxTask elsewhere it is that database, and a caller whose own
     rows are written on a different connection gets two transactions rather
-    than one. django_ox.E008 refuses the django-ox models being split across
-    databases; it cannot speak for the application's own models.
+    than one.
     """
 
     supports_defer = True
@@ -184,9 +183,7 @@ class OxBackend(BaseTaskBackend):
                     problem,
                     hint=(
                         "LOCK_TIMEOUT, BACKOFF_INITIAL and BACKOFF_MAX are each "
-                        "a positive, finite number of seconds. They were cast "
-                        "and used unchecked, so a bad value reached the poll "
-                        "loop instead of stopping the deploy."
+                        "a positive, finite number of seconds."
                     ),
                     id="django_ox.E010",
                 )

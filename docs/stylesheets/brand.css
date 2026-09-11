@@ -1,7 +1,4 @@
-/* Brand palette. Same tokens as the Oxpull site, so the docs, the waitlist
-   page and the wordmarks are one system rather than three. Material's named
-   palettes have no spruce, hence `primary: custom` in mkdocs.yml plus these
-   overrides. */
+/* Brand palette, shared with oxpull.com. Material has no spruce, hence `primary: custom`. */
 
 [data-md-color-scheme="default"] {
   --md-primary-fg-color: #1f6b4b;
@@ -13,17 +10,14 @@
 }
 
 [data-md-color-scheme="slate"] {
-  /* Dark header keeps the code-panel colour rather than a tinted green bar:
-     the panel is the motif the ad and the site hero already use. */
+  /* Brand palette, shared with oxpull.com. Material has no spruce, hence `primary: custom`. */
   --md-primary-fg-color: #16201b;
   --md-primary-fg-color--light: #2b3a32;
   --md-primary-fg-color--dark: #0b100d;
   --md-accent-fg-color: #7fd3a6;
   --md-accent-fg-color--transparent: rgba(127, 211, 166, 0.12);
   --md-typeset-a-color: #7fd3a6;
-  /* Material's slate is a blue-grey, which leaves the green-black header
-     looking like it came from a different site. Match the body to the dark
-     paper the waitlist page uses. */
+  /* Brand palette, shared with oxpull.com. Material has no spruce, hence `primary: custom`. */
   --md-default-bg-color: #111713;
   --md-code-bg-color: #0b100d;
   --md-default-fg-color--lightest: #27312a;

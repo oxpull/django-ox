@@ -1,9 +1,10 @@
 # Production
 
 The worker is a plain foreground process: `manage.py ox_worker`, run
-under whatever supervises your other processes. It treats a lost database
-connection as fatal rather than retrying blind, and relies on the
-supervisor to restart it. Run it under `Restart=always` (as in the unit
+under whatever supervises your other processes. It rides out a database that goes away and comes back: a failed pass is
+logged as `worker_poll_failed`, the connection is reopened, and the loop
+carries on. A process manager is still what brings it back from a crash or a
+recycle. Run it under `Restart=always` (as in the unit
 below). This page covers systemd,
 scaling, shutdown, the reaper, and monitoring.
 
@@ -103,13 +104,7 @@ Run migrations before rolling workers, as an init container or a job, not from
 the worker itself. Several workers starting at once would race the same
 migration.
 
-Roll every process before using a status the old version cannot read. 0.3.0
-adds DISCARDED: a 0.2.1 process that reads a discarded row raises
-`ValueError` from `get_result()` and `refresh()`, and its `ox_prune` cannot
-delete the row. Migrate, finish the rollout, then discard. A rollback to
-0.2.1 with discarded rows present keeps the crash until those rows are
-deleted by hand (`DELETE FROM django_ox_oxtask WHERE status = 'DISCARDED'`);
-reversing the migration does not remove them.
+Roll every process before using a status the old version cannot read: migrate, finish the rollout, then use the new status.
 
 ## Graceful shutdown
 
@@ -234,8 +229,8 @@ is per slot:
   not a trip. Six workers that all die in the same second all come back a
   second later.
 
-Two things `--processes` does not do. It does not run on Windows, where
-there are no POSIX signals to forward; run one `ox_worker` per process there.
+`--processes` is POSIX-only; on Windows run one `ox_worker` per process. It
+expects a process manager above it, like the single worker does; run one `ox_worker` per process there.
 And it does not replace a process manager: the supervisor is a foreground
 process that expects to be restarted itself, like the single worker.
 
@@ -459,7 +454,7 @@ happens next depends on whether the task has attempts left:
 
 - **Attempts remaining.** The task goes back to READY and the lease number
   goes up, so the old worker cannot write to it again. This is the ordinary
-  case, and it is a guess the system already absorbs: at-least-once execution
+  case, and at-least-once execution already covers it: at-least-once execution
   means the task may run twice, which is why task bodies must be idempotent.
 - **No attempts remaining.** The row is marked LOST. LOST means what it says:
   the worker holding this task stopped reporting and nobody observed how the
@@ -493,7 +488,7 @@ One case is worth knowing about before it surprises you. If the worker
 holding a LOST task was starved rather than dead, and it comes back and
 records a success, the row becomes SUCCESSFUL and a caller reading it twice
 sees `FAILED` and then `SUCCESSFUL`. Only that one execution can do this, and
-only while the row is still LOST. It is the honest cost of giving a
+only while the row is still LOST. It is the cost of giving a
 four-valued API an answer for a task whose outcome nobody saw, and the
 alternative, reporting it as still running forever, hangs every caller that
 waits on it.
@@ -566,10 +561,6 @@ still refuses that task's finish write once somebody else holds the row, so it
 is the ordinary reclaim brought forward rather than a cancellation. Use
 `discard()` to close a task.
 
-A row claimed by a version before this column existed has it empty, and the
-reaper falls back to comparing `locked_at` against its own timeout for those.
-The first renewal after the upgrade fills it in, so a fleet converges lease by
-lease with no step to run.
 
 **Tasks must be idempotent.** Execution is at-least-once by design: a task
 is retried both when it raises and when its worker dies mid-run. Write
@@ -602,11 +593,14 @@ the row, not the function. There are two ways to get there:
 
 So the rule is the same one every at-least-once queue asks for, and it is worth
 saying that it *is* every at-least-once queue rather than a property of this
-one. Sidekiq loses in-flight work outright when a process is killed under its
-default fetch. Oban's own rescue documentation says it "may transition jobs that
-are genuinely executing and cause duplicate execution". Que re-runs a job whose
-worker died with its error count untouched, immediately and without limit.
-Celery with `acks_late` leaves redelivery to the broker and counts nothing.
+one. Sidekiq's [reliability notes](https://github.com/sidekiq/sidekiq/wiki/Reliability)
+say a job in flight is lost when a process is killed under the default fetch.
+Oban's [rescue plugin](https://github.com/oban-bg/oban/blob/main/lib/oban/lifeline.ex)
+documents that it "may transition jobs that are genuinely executing and cause
+duplicate execution". Que's [README](https://github.com/que-rb/que/blob/master/docs/README.md)
+describes a killed worker's job as unlocked and retried with its error count
+untouched. Celery with [`acks_late`](https://docs.celeryq.dev/en/stable/userguide/configuration.html#task-acks-late)
+leaves redelivery to the broker and counts nothing. All read 2026-09-11.
 
 Where a task must not overlap with itself at any cost, the options are the same
 as anywhere else: make the body idempotent, take an application-level lock the

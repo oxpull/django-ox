@@ -55,8 +55,7 @@ backup, or those log records can read them.
 - Tracebacks are standard `traceback.format_exception()` output: stack
   frames and the exception message, without local-variable values.
 
-Encrypting arguments at rest is not offered in either tier today; the plaintext
-posture above is what both packages do.
+Encrypting arguments at rest is not offered.
 
 ## The admin page
 
@@ -87,7 +86,7 @@ or user input by string formatting.
 
 | Version | Supported |
 | ------- | --------- |
-| 1.0.x   | yes       |
+| 1.1.x   | yes       |
 | older   | no        |
 
 ## Reporting a vulnerability

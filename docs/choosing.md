@@ -24,7 +24,7 @@ fewer service. The last section says where django-ox is not the right fit.
 | Time limit on a running task | `TASK_TIMEOUT`, per queue in `TASK_TIMEOUTS`: `TaskTimeout` raised inside the task at the deadline, and a worker recycle when the thread does not stop. Two caveats leave the grace backstop as the whole enforcement: an interpreter with no facility for raising an exception in another thread, and a thread a coverage tool or debugger is watching. See [Production](production.md#task-timeouts) | Not documented in the README or the worker flags [^tdb-readme] [^tdb-worker] | `timeout` per task or per call; "a `TaskTimeout` is raised and returned to the caller via the result handle" [^huey-guide] | `soft_time_limit` raises `SoftTimeLimitExceeded` inside the task; `time_limit` terminates the process running it, which is replaced. "Time limits don't currently work on platforms that don't support the `SIGUSR1` signal" [^celery-workers] | `timeout`, default `None`: "the number of seconds a worker is allowed to spend on a task before it's terminated" [^q2-configure] | `time_limit` per actor, default 10 minutes, raises `TimeLimitExceeded`. "Time limits are best-effort. They cannot cancel system calls or any function that doesn't currently hold the GIL under CPython" [^dq-guide] | Not documented on the page checked [^proc-index] |
 | Worker dies mid-task | Lease renewed every `LOCK_TIMEOUT / 3`; a task whose lease goes stale for `LOCK_TIMEOUT` is put back to READY, or marked LOST when attempts are spent. See [Production](production.md#the-reaper) | Issue #5, open since 2024-06-11: the task 'remains marked as "PROCESSING", and thus is never picked up for re-processing nor marked as completed / failed' [^tdb-5] | "tasks that are mid-execution are lost and will not be retried automatically" [^huey-guide] | `acks_late` re-delivers; the worker still acknowledges "if the child process executing the task is terminated" [^celery-tasks] | Issue #327, open since 2026-05-05: worker death not reported to the monitor, `MAX_ATTEMPTS` ignored [^q2-327] | Not stated on the pages checked [^dq-guide] [^dq-cookbook] | Heartbeat every 10 s; jobs stay in `doing` until a `retry_stalled_jobs` periodic task you define picks them up [^proc-stalled] |
 | Health and metrics | `ox_health` command, `django_ox.stats`, a Prometheus endpoint (`/ox/metrics`), structured log events, admin retry and discard | Issue #44, container healthchecks, open since 2026-06-08 [^tdb-44] | Signals [^huey-guide] | Flower, a separate process, with Prometheus integration [^flower] | `qmonitor`, `qinfo`, `Stat` [^q2-monitor] | Prometheus middleware; not in the default middleware list [^dq-prom] | Statistics via events [^proc-index] |
-| Databases | PostgreSQL, SQLite and MySQL 8 tested in CI; MariaDB 10.6+ untested | Any Django database [^tdb-readme] | Redis, SQLite, PostgreSQL, file, memory [^huey-guide] | Broker, not a database [^celery-brokers] | Any Django database through the ORM broker [^q2-brokers] | Broker, not a database [^dq-guide] | PostgreSQL 13+ [^proc-index] |
+| Databases | PostgreSQL, SQLite and MySQL 8 tested in CI; MariaDB 10.6+ outside the CI matrix | Any Django database [^tdb-readme] | Redis, SQLite, PostgreSQL, file, memory [^huey-guide] | Broker, not a database [^celery-brokers] | Any Django database through the ORM broker [^q2-brokers] | Broker, not a database [^dq-guide] | PostgreSQL 13+ [^proc-index] |
 | Licence | BSD 3-Clause | BSD 3-Clause [^tdb-repo] | MIT [^huey-repo] | BSD 3-Clause [^celery-license] | MIT [^q2-pyproject] | LGPL 3.0 [^dq-repo] | MIT [^proc-repo] |
 
 Async tasks: django-ox sets `supports_async_task`, so `async def` tasks
@@ -39,15 +39,14 @@ function", open since 2020-12-19 with 98 upvotes [^celery-6552].
   Celery can revoke and terminate a running task, from Flower or the control
   API [^flower].
 - **The queue must live on a different database from your models.** Tasks are
-  stored on the default database. Multi-database routing is outside the
-  current scope, and a separate queue database would also give up the
+  stored on the default database. Every django-ox table lives on the database `OxTask` routes to, and a separate queue database would also give up the
   transactional enqueue.
 - **Throughput beyond what one database comfortably serves.** The
   [benchmarks](benchmarks.md) page gives measured numbers with the method.
   If your workload is above them, a broker-based queue is the right tool, and
   the cost is the second datastore.
 - **Chains, groups and chords.** Not in django-ox. Batches are in
-  [Oxpull Pro](pro.md), a paid add-on that is not on sale yet; chains and
+  [Oxpull Pro](pro.md), a paid add-on; chains and
   workflows are on the Pro roadmap, undated.
 - **CPU-bound tasks in one process.** Worker concurrency is a thread pool.
   Run `ox_worker --processes N --concurrency 1` for N interpreters, or pick
@@ -55,8 +54,8 @@ function", open since 2020-12-19 with 98 upvotes [^celery-6552].
 
 ## Maintenance
 
-Rows are re-checked each release. If a cell is out of date, open an issue with
-the link that shows it, and it will be corrected in the next release.
+Each footnote carries the date its row was last checked. If a cell is out
+of date, open an issue with the link that shows it.
 
 [^tdb-readme]: https://github.com/RealOrangeOne/django-tasks-db README, checked 2026-08-23.
 [^tdb-worker]: https://github.com/RealOrangeOne/django-tasks-db/blob/master/django_tasks_db/management/commands/db_worker.py, `add_arguments`, checked 2026-08-23.

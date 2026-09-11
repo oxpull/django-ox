@@ -6,8 +6,8 @@ priorities, deferred tasks, recurring tasks and pruning are the free tier,
 permanently. Nothing that works today moves behind the paid tier.
 
 **Oxpull Pro** is a paid add-on for three problems that show up once a queue
-is carrying real volume. All three are built and tested. It is not on sale
-yet. The waitlist below is how to hear when it opens.
+is carrying real volume. All three are built and tested. Pricing and how to
+get it are at <https://oxpull.com/>.
 
 Pro requires Django 6.0 or later. It builds on `django.tasks`, which is part
 of Django core from 6.0. django-ox itself also runs on Django 5.2 LTS through
@@ -67,8 +67,7 @@ Docker on localhost, each width against an empty database.
 
 ## What Pro is not
 
-Workflows and chains are on the roadmap, undated. A web dashboard and
-encrypted payloads are not in Pro and are not dated. Rate limiting caps how
+Workflows and chains are on the roadmap, undated.  Rate limiting caps how
 often a task starts, not how many run at once; concurrency limiting is a
 different mechanism and is not in Pro. Metrics stay free: the stats API and
 the health command are in the open source package and remain there.
@@ -79,7 +78,7 @@ Pro installs from a private package index using credentials issued per
 company. There is no licence key and no runtime check. A licence check would
 put a validation step in the path of code that has to keep running, and it
 does nothing for a company that has already paid. Nothing in the package
-phones home: no network call to us, and no telemetry. The credential controls
+phones home: no network call to Oxpull, and no telemetry. The credential controls
 access to the index rather than to code you have already installed, so if it
 lapses, what is deployed keeps running.
 
@@ -93,8 +92,7 @@ of the period you have paid for.
 
 ## Waitlist
 
-If Pro would earn its keep in your deployment, join the waitlist and say which
-of the three features matters to you. That ordering decides what gets built
-after these.
+If Pro would earn its keep in your deployment, say which of the three
+features matters to you. That ordering decides what gets built after these.
 
 [Join the Pro waitlist](https://oxpull.com/#waitlist){ .md-button }

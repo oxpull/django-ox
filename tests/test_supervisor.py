@@ -371,8 +371,8 @@ class TestStopDuringStartup:
 
     That window is not a test artefact. Anything that stops a service
     shortly after starting it -- a restart, a deploy that rolls twice, a
-    health check that never goes green -- lands in it. The supervisor used
-    to report the child's 143 as its own exit code, which a unit on
+    health check that never goes green -- lands in it. The supervisor must
+    not report the child's 143 as its own exit code, which a unit on
     ``Restart=on-failure`` reads as a fault and starts again.
     """
 

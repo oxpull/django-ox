@@ -85,8 +85,8 @@ class TestTheRequeueBranchCostsOneStatement:
         assert len(many.captured_queries) == len(few.captured_queries)
 
     def test_a_pass_reads_at_most_reap_batch_rows(self, settings):
-        # The statement count was bounded before the row count was, so a large
-        # enough stuck set still meant the whole of it in memory and a WARNING
+        # Bounding the statement count alone leaves the row count unbounded: a
+        # large enough stuck set is the whole of it in memory and a WARNING
         # per row, per worker, per pass.
         settings.TASKS = {
             "default": {

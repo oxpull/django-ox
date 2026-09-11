@@ -1,11 +1,11 @@
 """
 `remaining()` and the watchdog must not disagree about the same instant.
 
-The watchdog fires on `time.monotonic()`. `remaining()` used to answer from the
-wall clock, so for as long as an NTP correction lasts the two sat on different
-sides of the deadline: a backwards step left a task confident it had seconds in
-hand after the timeout had already fired, and a forwards step made a
-well-behaved cooperative task give up early.
+The watchdog fires on `time.monotonic()`. Read from the wall clock instead,
+the two sit on different sides of the deadline for as long as an NTP
+correction lasts: a backwards step tells a task it has seconds in hand after
+the timeout has already fired, and a forwards step makes a well-behaved
+cooperative task give up early.
 """
 
 import time

@@ -61,8 +61,8 @@ class TestATracebackIsBounded:
         assert "bytes of this traceback were not stored" in stored
 
     def test_the_cap_is_bytes_and_not_characters(self):
-        # One emoji is four bytes. Counting characters stored four times the
-        # published limit for a traceback that happened to carry them.
+        # One emoji is four bytes. Counted in characters, a traceback carrying
+        # them stores four times the published limit.
         exc = an_oversized_exception_of("\U0001f600" * MAX_STORED_TRACEBACK)
         stored = _stored_traceback(exc)
         assert len(stored.encode()) <= MAX_STORED_TRACEBACK, (

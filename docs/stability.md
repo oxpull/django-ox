@@ -26,7 +26,7 @@ export names this page does not list; those names are not public.
   first other non-zero worker code. A worker killed by a signal reports
   `128 + the signal number`, following the shell convention.
 - **The system check IDs**, the `django_ox.E0xx` identifiers, which
-  the configuration guide tells you to list in `SILENCED_SYSTEM_CHECKS`. The
+  you may list in `SILENCED_SYSTEM_CHECKS`. The
   IDs are stable; the messages are not.
 - **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy or when an
   argument value is rejected. Argparse errors, such as an unknown flag, exit 2.
@@ -52,7 +52,8 @@ export names this page does not list; those names are not public.
   `CONTENT_TYPE_OPENMETRICS` are the content types the view serves. A
   scraped name is a contract with every dashboard that reads it, so a
   rename is a breaking change. Help text is not part of the contract.
-- **The actions module** `django_ox.actions`: `retry` and `discard`, their
+- **The actions module** `django_ox.actions`: `retry`, `discard` and
+  `expire_lease`, their
   accepted states, and their return values; `retry_many` and
   `discard_many`, the selections they accept and their `(changed, skipped)`
   return. `RETRYABLE_STATUSES` and `DISCARDABLE_STATUSES` are those

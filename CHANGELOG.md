@@ -11,9 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 index the claim reads and adds a second one; `0006_lease_expiry` adds a
 nullable column and its index. On PostgreSQL and MySQL, building an index
 takes a lock that blocks enqueues and claims for the duration. On a large task
-table, create the three indexes by hand with `CREATE INDEX CONCURRENTLY` and
-then run `migrate --fake django_ox 0006`; `sqlmigrate` prints the exact
-statements for each migration.
+table, do it by hand and fake the migrations: `DROP INDEX CONCURRENTLY
+ox_dequeue_idx`, then `CREATE INDEX CONCURRENTLY` for the three indexes, then
+`migrate --fake django_ox 0006`. `sqlmigrate` prints the exact statements for
+each migration.
 
 ### Added
 
@@ -38,119 +39,82 @@ statements for each migration.
 
 ### Fixed
 
-- The drain can no longer raise while a stuck attempt is still running. A
-  second attempt going stuck wrote to the set the drain iterates over without
-  taking the lock the drain holds, so the iteration could see the set change
-  size. The drain is what keeps the process alive until abandoned work has
-  stopped, so an exception there is not cosmetic.
-- `django_ox.remaining()` is measured on the clock the timeout is enforced
-  with. It read the wall clock while the watchdog fires on a monotonic one, so
-  for the length of an NTP correction the two disagreed about the same
-  instant: a backwards step told a cooperative task it had an hour in hand
-  with the timeout about to fire, and a forwards step made it give up early.
-  `django_ox.deadline()` still answers with a wall-clock time, which is the
-  right answer to "when".
-- One failure can no longer write an unbounded string onto its own row. The
-  traceback stored per attempt is capped at 16 KB, with a marker naming what
-  was dropped; both ends are kept, so where the call came from and what
-  actually raised both survive. The Monitoring page now says what `errors`
-  holds, who can read it in the admin, and which flag retires it.
-- The reaper no longer costs a statement per abandoned row. It read the whole
-  stuck set with no limit and wrote each row back one at a time, so a fleet
-  that lost half its members had every survivor issue that same unbounded
-  walk at once, against a database still recovering from the event that
-  caused it. Rows with attempts left now come back in a single UPDATE whose
-  predicate is the one that selected them, and rows whose attempts are spent
-  are retired in bounded batches.
-- The claim reads its candidate out of an index, in order. The index
-  ended on `run_after`, a range condition sitting behind the two columns that
-  carry the ordering, where no database could use it: PostgreSQL stopped
-  choosing the index at all and sorted a bitmap scan on every claim, and
-  SQLite built a temporary B-tree. It now ends on `enqueued_at`, so the scan
-  stops at the first runnable row. Migration `0005_dequeue_index` rebuilds it.
-- Dispatching schedules no longer reads the whole tick log. Finding each
-  schedule's newest tick meant a grouped aggregate over every tick ever
-  recorded, on every pass, by every worker; it is now bounded to the oldest
-  tick any configured schedule is asking about, which the unique index can
-  seek to. The read is also pinned to the database the worker writes to, so a
-  configured read replica cannot answer the question that decides an enqueue.
-- A worker that was briefly late renewing its lease, then renewed, could still
-  lose the task. The reaper selected rows whose lease looked expired and then
-  reclaimed each one on a compare-and-set that checked the lease epoch but not
-  the expiry, and renewing a lease writes `locked_at` without touching the
-  epoch. The row went back to READY and a second worker could claim and run a
-  task the first was still running. The reclaim now re-checks the expiry
-  against the same cutoff the selection used.
-- The lease renewal thread survives a dropped connection: it discards the
+- A worker that renews its lease late, but renews, keeps its task. The reaper
+  checks the expiry in the reclaim itself, against the same cutoff it selected
+  with, so only a lease still stale at the moment of the write is taken back.
+- The lease renewal thread survives a dropped connection. It discards the
   connection, reconnects on the next interval, and keeps `locked_at` moving on
-  every row the worker holds. A renewal that stops is what lets the reaper give
-  a running task to a second worker, and it has no symptom of its own beyond a
-  burst of reclaims from workers that look healthy.
-- A database error in the poll loop ended the worker. The supervisor replaced
-  the child, the replacement failed on its own first reap, and five deaths in
-  a minute stop the supervisor, so a brief outage took the fleet down and left
-  it down. One pass is now abandoned and retried on the next.
-- An exception while recording a stuck attempt ended the watchdog thread,
-  which is the whole timeout backstop for every attempt already armed. Each
-  stuck attempt is handled on its own now, and recording one is no longer
-  allowed to skip the recycle that frees the worker.
-- A worker whose timeout backstop gave up on a thread declined to recycle when
-  its own write had lost a race to the reaper, so the pool slot stayed
-  occupied for the life of the process and the drain waited on that thread
-  without bound. Whether the thread is still running is now asked of the
-  thread.
-- The drain could stop waiting while a healthy task was still running and let
-  the process exit from under it. It counted pool threads that were still
-  alive, and a pool thread stays alive and idle after an abandoned task
-  returns. It now counts only threads still inside the attempt that was
-  abandoned. A backstop that fires part way through an ordinary drain is also
-  observed, where before the drain read that flag once and waited forever.
-- Every statement in the claim protocol now runs on the database the worker
-  writes to. They routed themselves, and a read routes through `db_for_read`,
-  so with a read replica configured a claim could land off primary and a
-  re-read could miss a claim that had just succeeded. The PostgreSQL claim is
-  raw SQL, which Django cannot recognise as a write at all.
+  every row the worker holds.
+- The poll loop survives a database error. The pass is abandoned, logged as
+  `worker_poll_failed`, and retried on the next one with a fresh connection,
+  so one blip is not a worker death and cannot reach the supervisor's restart
+  cap.
+- The timeout watchdog handles each stuck attempt on its own. A failure
+  recording one is logged as `watchdog_error` and every other armed attempt
+  keeps its deadline; recording one can no longer skip the recycle that frees
+  the worker.
+- A worker whose timeout backstop gives up on a thread recycles on whether
+  that thread is still running, not on whether its own outcome write landed.
+  The pool slot is freed and the drain does not wait on the thread.
+- The drain waits for healthy work and stops waiting for abandoned work. It
+  counts threads still inside the attempt that was abandoned, rather than
+  pool threads that happen to be alive, and it observes a backstop that fires
+  part way through an ordinary drain.
+- The drain is safe to run while a second attempt goes stuck: the stuck set
+  is written under the same lock the drain reads it under.
+- A recycling worker's wait is bounded, at `LOCK_TIMEOUT`. Past that it stops
+  renewing the leases it holds and exits, and the reaper requeues them.
+- Every statement in the claim protocol runs on the database the worker
+  writes to, including the raw PostgreSQL claim, so a read replica cannot
+  answer a question that decides who holds a task.
 - `enqueue_many` opens its transaction on the connection `OxTask` routes to,
-  so its all-or-nothing guarantee holds under a database router. An unpinned
-  block guards the default connection while the rows are written through
-  another.
-- A worker subclass that narrows what it may claim by overriding
-  `claim_filter_q()` alone now takes the claim path that applies it. The
-  single-statement PostgreSQL claim reads `claim_filter_sql()` and could not
-  see the other hook, so such a subclass excluded rows on SQLite and MySQL and
-  claimed them on PostgreSQL. It says once per worker why it gave up the
-  faster path.
-- The PostgreSQL claim stamped the lease from the database server even when
-  `USE_TZ` is off, while the renewal and the reaper use the worker's clock
-  under that setting. Both now use the same clock as each other.
-- `LOCK_TIMEOUT`, `BACKOFF_INITIAL` and `BACKOFF_MAX` are checked at
-  `manage.py check` as `django_ox.E010`. Each was read and used unchecked, so
-  a zero or a negative reached the poll loop instead of stopping the deploy.
-- A schedule tick recorded in the future, which a worker with a fast clock can
-  leave behind, made every later pass enqueue a task and roll it back. The
-  task row never survived, but `task_enqueued` fires before the rollback, so
-  receivers saw an enqueue about once a second for a task that did not exist.
-- A signal receiver that raises is no longer charged to the task. A raising
-  `task_started` receiver spent an attempt and left the task retried without
-  its function ever running, and a raising `task_enqueued` receiver made
-  `enqueue()` raise over a row that was already committed, so a caller that
-  retried created a second task.
-- A task run through `run_once()` keeps its lease renewed. Only `run()` started
-  the renewal thread, so anything on that path outliving `LOCK_TIMEOUT` was
-  reclaimed while it was still running.
+  so its all-or-nothing guarantee holds under a database router.
+- A worker subclass that overrides `claim_filter_q()` alone takes the claim
+  path that applies it, on every database. It logs
+  `claim_filter_sql_missing` once to say it gave up the single-statement
+  PostgreSQL claim to do so.
+- The PostgreSQL claim, the renewal and the reaper stamp and judge the lease
+  on one clock: the database's with `USE_TZ` on, the worker's with it off.
+- The reaper requeues abandoned rows in one UPDATE per pass, whatever their
+  number, and retires rows whose attempts are spent in bounded batches. Its
+  cost no longer grows with how many workers died at once.
+- The reclaim record names only tasks the pass actually reclaimed. A pass
+  whose stuck set changed while it ran reports a `count` and names nobody.
+- The claim reads its candidate out of an index, in order, for a worker that
+  names one queue, several, or none. Two index shapes ship and the planner
+  picks per query. Migration `0005_dequeue_index` builds them.
+- Dispatching schedules reads only the ticks it is asking about: the tick log
+  is bounded to the oldest due tick across the configured schedules, which the
+  unique index can seek to, and the read is pinned to the database the worker
+  writes to.
+- The tick row is written before its task is enqueued, so on every tick
+  exactly one worker enqueues and the others announce nothing. A tick already
+  in the log is not dispatched again whatever a fast-clocked worker recorded
+  after it, and `task_enqueued` fires only for a task that exists.
+- A signal receiver that raises is not charged to the task. A `task_started`
+  receiver's exception does not spend an attempt, and a `task_enqueued`
+  receiver's exception does not surface from `enqueue()` over a task that is
+  already committed.
+- A task run through `run_once()` keeps its lease renewed for the duration,
+  the same as a task on the pool.
 - `KeyboardInterrupt` and `SystemExit` reach the caller when a task runs
-  through `run_once()`, instead of being recorded as a failed attempt. On the
-  worker pool they are still recorded, so one task calling `sys.exit()` cannot
-  stop a fleet.
-- The retry delay no longer raises on a deployment with a very large
-  `MAX_ATTEMPTS`. It doubled the initial backoff by the attempt count before
-  applying the cap, and the arithmetic overflowed on the failure path, leaving
-  the row RUNNING for the reaper to find.
-- `manage.py ox_worker` starts on platforms without every POSIX signal. The
-  supervisor named `SIGHUP` in a module-level constant and the command imports
-  it unconditionally, so on Windows the command failed at import, before it
-  could report anything, and the single-process worker the documentation
-  points Windows users at did not start at all.
+  through `run_once()`. On the worker pool they are recorded as a failed
+  attempt, so one task calling `sys.exit()` cannot stop a fleet.
+- The retry delay stays in range for any `MAX_ATTEMPTS`. The doubling is
+  capped before the multiplication, so the failure path never raises on the
+  arithmetic.
+- `LOCK_TIMEOUT`, `BACKOFF_INITIAL` and `BACKOFF_MAX` are validated at
+  `manage.py check` as `django_ox.E010`, by the same rule as the timeout
+  options: a positive, finite number of seconds.
+- Each stored traceback is capped at 16,384 bytes, marker included, with both
+  ends kept. One failure cannot write an unbounded string onto its own row.
+- `django_ox.remaining()` is measured on the monotonic clock the timeout is
+  enforced with, so a clock correction cannot put the two on different sides
+  of the same instant. `django_ox.deadline()` still answers with a wall-clock
+  time.
+- `manage.py ox_worker` starts on Windows. Stop signals are built from the
+  ones the platform has; `--processes` above 1 still refuses off POSIX with
+  its usual message.
 
 ### Changed
 
@@ -160,15 +124,13 @@ statements for each migration.
   it is recorded as a lost lease and retried, and one on its last attempt
   reaches LOST. A worker recycles because a thread stopped responding to its
   deadline, so the alternative is a process that never leaves.
-- `MAX_ATTEMPTS` and the `attempt` log key are documented as counting claims
-  rather than invocations. The behaviour is unchanged; the reference table said
-  "executions", which reads as the number of times a task body ran.
+- `MAX_ATTEMPTS` and the `attempt` log key count claims, not invocations. The
+  behaviour is unchanged; the reference table now says so.
 - Five log events that only fire while something is wrong are documented:
   `worker_poll_failed`, `watchdog_error`, `task_stuck_unrecorded`,
   `worker_drain_abandoned` and `claim_filter_sql_missing`.
-- `task_reclaimed` carries `held_by`: the worker that stopped refreshing the
-  lock. `worker_id` on that record is the reaper that noticed, which is not
-  the question anyone reads a reclaim record to answer.
+- `task_reclaimed` carries `held_by`, the worker that stopped refreshing the
+  lock. `worker_id` on the same record is the reaper that noticed.
 - SQLite guidance: run one worker and give it threads with `--concurrency`,
   rather than several worker processes. `SKIP LOCKED` is what lets workers step
   past each other's rows, and a database without it hands out the head of the
@@ -177,9 +139,10 @@ statements for each migration.
   stuck set changes underneath a reap pass (a lease renewed, or one more
   expired), that pass emits a single record carrying `count` and no `task_id`,
   rather than naming tasks it cannot vouch for.
-- The production page says which databases give the lease one shared clock. SQLite computes `Now()` inside the process that runs
-  the statement, so every worker uses its own clock there whatever `USE_TZ`
-  says; run SQLite on one host. With `USE_TZ` off, no database gives a shared
+- The production page says which databases give the lease one shared clock.
+  SQLite computes `Now()` inside the process that runs the statement, so every
+  worker uses its own clock there whatever `USE_TZ` says; run SQLite on one
+  host. With `USE_TZ` off, no database gives a shared
   clock, and two workers whose clocks differ by more than `LOCK_TIMEOUT`
   reclaim each other's live leases.
 
@@ -198,7 +161,7 @@ PostgreSQL and MySQL, and the suite covers all of them.
   import of the framework now goes through `django_ox.compat`, which picks
   core or the backport at runtime, so nothing else in the package changed.
   CI runs the whole suite on 5.2 against the backport, on SQLite, PostgreSQL
-  and MySQL, because the two being the same API is a claim rather than a fact.
+  and MySQL, so the backport is tested rather than assumed.
   Python 3.14 is not in the 5.2 legs, since Django 5.2 does not support it.
 - `Django>=5.2` replaces `Django>=6.0` as the declared dependency, and
   `Framework :: Django :: 5.2` joins the classifiers.
@@ -219,7 +182,7 @@ PostgreSQL and MySQL, and the suite covers all of them.
   `enqueue_on_commit` on `Task`, 0.10.0 rejects the result statuses django-ox
   stores, and 0.11.0 adds an abstract `save_metadata` that the backend does not
   implement. CI now installs the floor with `==` and asserts the resolved
-  version, so the floor is a version under test rather than a number in a file.
+  version, so the floor is tested.
 - `Development Status :: 5 - Production/Stable` replaces the beta classifier.
 
 ## [0.4.0] - 2026-09-01
@@ -395,12 +358,7 @@ PostgreSQL and MySQL, and the suite covers all of them.
 
 ### Added
 
-- `tools/check_release.py --dist` opens the built wheel and sdist and checks
-  that each one carries every migration in the source tree, along with the
-  licence and the package modules. A packaging rule that stops shipping a
-  migration leaves a distribution that imports and passes its tests, and fails
-  on somebody's upgrade against a column that is not there. The release
-  workflow runs it after the build.
+- Built distributions are checked for every migration before release.
 
 ## [0.2.0] - 2026-08-20
 
@@ -569,7 +527,6 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
-[Unreleased]: https://github.com/oxpull/django-ox/compare/v1.0.0...HEAD
 [1.1.0]: https://github.com/oxpull/django-ox/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/oxpull/django-ox/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/oxpull/django-ox/compare/v0.3.1...v0.4.0

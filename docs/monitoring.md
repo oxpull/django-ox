@@ -244,15 +244,20 @@ The message text is not part of the contract. The keys are.
 | `task_succeeded` | INFO | The task reached SUCCESSFUL. |
 | `task_timed_out` | WARNING | An attempt ran past its `TASK_TIMEOUT` and is recorded as failed; a `task_retrying` or `task_failed` record follows. It counts timeouts recorded as failures, not deadlines that passed: a task that catches `TaskTimeout` and returns produces no event, and neither does a timeout on a worker logging `timeouts_backstop_only`, where the attempt ends in `task_stuck` or in whatever the task went on to do. |
 | `task_stuck` | ERROR | A timed-out attempt's thread did not stop within `TASK_TIMEOUT_GRACE`. The attempt is recorded as failed and the worker is recycling. On a worker logging `timeouts_backstop_only` nothing is raised inside the task, so this is the ordinary end of a timeout there rather than a pathological one. |
-| `worker_recycling` | WARNING | The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75. One follows every `task_stuck`, so on a worker logging `timeouts_backstop_only` every timeout that reaches the backstop costs a worker restart. |
+| `worker_recycling` | WARNING | The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75. It follows a `task_stuck` whose thread is still inside the attempt, which is the usual case, so on a worker logging `timeouts_backstop_only` every timeout that reaches the backstop costs a worker restart. |
 | `timeouts_backstop_only` | WARNING | Once per worker: `TaskTimeout` is not raised inside a running sync task, because the interpreter cannot raise an exception inside another thread (`reason=interpreter`, logged at startup) or a coverage tool or debugger is watching the worker's threads (`reason=tracing_tool`, logged on the first attempt registered under it). `TASK_TIMEOUT_GRACE` is the whole enforcement while it stands. See [Task timeouts](production.md#task-timeouts). |
 | `task_retrying` | WARNING | An attempt failed with retries remaining. |
 | `task_failed` | ERROR | The task reached FAILED, out of attempts. |
-| `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. One record per task. A pass whose stuck set changed while it ran -- a lease renewed, or one more lease expired -- instead emits a single record carrying `count` and no `task_id`, because it cannot say which tasks the reclaim covered. |
+| `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. One record per task. A pass whose stuck set changed while it ran (a lease renewed, or one more lease expired) instead emits a single record carrying `count` and no `task_id`, because it cannot say which tasks the reclaim covered. |
 | `task_lease_lost` | WARNING | A worker finished an attempt whose lease had already been reclaimed, so its write was dropped and no result was signalled. |
 | `lease_renew_failed` | WARNING | A lease renewal statement failed. The worker keeps going and tries again on the next interval. |
 | `schedule_dispatched` | INFO | A recurring tick enqueued its task. |
 | `worker_error` | ERROR | The execution wrapper itself raised (an internal worker error, not a task failure). |
+| `worker_poll_failed` | WARNING | A database error ended one pass of the poll loop. The pass is abandoned and retried on the next one; the worker keeps running. A steady stream of it means the database is unreachable rather than slow. |
+| `watchdog_error` | ERROR | The timeout watchdog failed to handle one armed attempt. Every other attempt is unaffected and the thread keeps running. |
+| `task_stuck_unrecorded` | WARNING | A timed-out attempt could not be recorded as failed. The worker recycles regardless, so the row is recovered by the reaper rather than by this write. |
+| `worker_drain_abandoned` | WARNING | A recycling worker stopped waiting on tasks that had not finished. Their leases expire and the reaper requeues them. Carries `pending`. |
+| `claim_filter_sql_missing` | WARNING | Once per worker: a subclass overrides `claim_filter_q()` without `claim_filter_sql()`, so the single-statement PostgreSQL claim is given up for the path that applies the hook. |
 | `worker_draining` | INFO | Shutdown began with tasks still in flight. |
 | `worker_stopped` | INFO | The run loop exited. |
 | `supervisor_started` | INFO | `ox_worker --processes N` started its worker processes. |
@@ -280,7 +285,7 @@ The message text is not part of the contract. The keys are.
 | `exception` | `task_retrying`, `task_failed` | Exception class name of the failure. |
 | `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `LOST` (out of attempts). |
 | `count` | `task_reclaimed` without `task_id` | How many tasks that pass reclaimed. Present only on the batch record described above. |
-| `held_by` | `task_reclaimed` | The worker that stopped refreshing the lock, from the row. `worker_id` on the same record is the reaper that noticed. |
+| `held_by` | `task_reclaimed` | The worker that stopped refreshing the lock, from the row. `worker_id` on the same record is the reaper that noticed. Absent on the batch record, along with `task_id`, `task_path`, `queue` and `attempt`. |
 | `dropped_status` | `task_lease_lost` | Status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |
 | `schedule` | `schedule_dispatched` | Schedule name from `SCHEDULES`. |
 | `queues`, `concurrency` | `worker_started` | The worker's configuration. |
@@ -331,16 +336,19 @@ column from `queue_stats()` for it.
 
 ### What `errors` holds
 
-One entry per attempt, each with the exception's dotted class path and its
-formatted traceback. A traceback is whatever Python produced for that failure,
+One entry per failed attempt, each with the exception's dotted class path and
+its formatted traceback, plus one the reaper writes when it gives a lease up
+with no attempts left. A successful attempt adds nothing, so the entries count
+failures rather than runs. A traceback is whatever Python produced for that failure,
 so if an exception message or a chained cause carried a connection string, a
-token or a customer's data, that is what lands in the column -- the same
+token or a customer's data, that is what lands in the column: the same
 material your application's own error reporting already receives. Treat the
 column as you treat those reports.
 
-Two things bound it. Each traceback is stored up to 16 KB, with a marker in
-place of anything past that, so one pathological failure cannot write an
-unbounded string onto the row. And `ox_prune --include-failed` is the retention
+Two things bound it. Each traceback is stored up to 16,384 bytes of UTF-8,
+marker included, so one pathological failure cannot write an unbounded string
+onto the row. Bytes rather than characters, because that is the unit the column
+is sized in. And `ox_prune --include-failed` is the retention
 control: FAILED and LOST rows are kept by default so tracebacks survive until
 somebody has looked at them, and that flag is what eventually removes them.
 

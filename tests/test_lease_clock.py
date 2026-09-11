@@ -152,10 +152,10 @@ class TestTheTimingOptionsAreChecked:
     def test_leaving_them_out_is_accepted(self, settings):
         assert "django_ox.E010" not in self._check(settings, {})
 
-    def test_the_relationship_the_digest_named_is_not_reachable(self):
-        # `renew_interval > lock_timeout` was reported as the headline case.
-        # It cannot be configured: the renewal interval is derived from the
-        # lock timeout, not read from OPTIONS. Asserted rather than "fixed".
+    def test_renew_interval_cannot_be_configured_above_lock_timeout(self):
+        # A renewal slower than the lease it renews would lose every task.
+        # It cannot be configured: the interval is derived from the lock
+        # timeout rather than read from OPTIONS. Asserted, not guarded.
         w = Worker(backoff_initial=0, lock_timeout=30)
         assert w.renew_interval < w.lock_timeout, (
             "the renewal would be slower than the lease it renews"
@@ -166,8 +166,8 @@ class TestTheTimingOptionsAreChecked:
 
         source = inspect.getsource(worker_module.Worker.__init__)
         assert 'options.get("RENEW_INTERVAL"' not in source, (
-            "RENEW_INTERVAL became configurable, so the pair the digest named "
-            "is now reachable and does need a check"
+            "RENEW_INTERVAL became configurable, so this pair is now "
+            "reachable and needs a check of its own"
         )
 
 

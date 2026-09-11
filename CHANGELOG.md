@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**A migration ships with this release.** `0005_dequeue_index` rebuilds the
+index the claim reads and adds a second one. On PostgreSQL and MySQL, building
+an index takes a lock that blocks enqueues and claims for the duration. On a
+large task table, create the two indexes by hand with `CREATE INDEX
+CONCURRENTLY` and then run `migrate --fake django_ox 0005`; `sqlmigrate` prints
+the exact statements.
+
 ### Fixed
 
 - The drain can no longer raise while a stuck attempt is still running. A
@@ -33,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caused it. Rows with attempts left now come back in a single UPDATE whose
   predicate is the one that selected them, and rows whose attempts are spent
   are retired in bounded batches.
-- The claim reads its candidate out of `ox_dequeue_idx` again. The index
+- The claim reads its candidate out of an index, in order. The index
   ended on `run_after`, a range condition sitting behind the two columns that
   carry the ordering, where no database could use it: PostgreSQL stopped
   choosing the index at all and sorted a bitmap scan on every claim, and
@@ -52,11 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   epoch. The row went back to READY and a second worker could claim and run a
   task the first was still running. The reclaim now re-checks the expiry
   against the same cutoff the selection used.
-- The lease renewal thread stopped on a dropped connection and nothing
-  restarted it or noticed. `locked_at` then froze on every in-flight row, and
-  after the lock timeout the reaper handed each of those tasks to another
-  worker while they were still running. The only symptom was a burst of
-  reclaims from workers that were visibly healthy.
+- The lease renewal thread survives a dropped connection: it discards the
+  connection, reconnects on the next interval, and keeps `locked_at` moving on
+  every row the worker holds. A renewal that stops is what lets the reaper give
+  a running task to a second worker, and it has no symptom of its own beyond a
+  burst of reclaims from workers that look healthy.
 - A database error in the poll loop ended the worker. The supervisor replaced
   the child, the replacement failed on its own first reap, and five deaths in
   a minute stop the supervisor, so a brief outage took the fleet down and left
@@ -81,9 +88,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so with a read replica configured a claim could land off primary and a
   re-read could miss a claim that had just succeeded. The PostgreSQL claim is
   raw SQL, which Django cannot recognise as a write at all.
-- `enqueue_many` opened its transaction on the default connection while the
-  rows were written through the routed one, so under a database router its
-  all-or-nothing promise did not hold.
+- `enqueue_many` opens its transaction on the connection `OxTask` routes to,
+  so its all-or-nothing guarantee holds under a database router. An unpinned
+  block guards the default connection while the rows are written through
+  another.
 - A worker subclass that narrows what it may claim by overriding
   `claim_filter_q()` alone now takes the claim path that applies it. The
   single-statement PostgreSQL claim reads `claim_filter_sql()` and could not
@@ -124,19 +132,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A recycling worker now bounds how long it waits for its other in-flight
+  tasks, at `LOCK_TIMEOUT`. Past that it stops renewing their leases and exits,
+  and the reaper requeues them. This can end a task that was going to finish:
+  it is recorded as a lost lease and retried, and one on its last attempt
+  reaches LOST. A worker recycles because a thread stopped responding to its
+  deadline, so the alternative is a process that never leaves.
+- `MAX_ATTEMPTS` and the `attempt` log key are documented as counting claims
+  rather than invocations. The behaviour is unchanged; the reference table said
+  "executions", which reads as the number of times a task body ran.
+- Five log events that only fire while something is wrong are documented:
+  `worker_poll_failed`, `watchdog_error`, `task_stuck_unrecorded`,
+  `worker_drain_abandoned` and `claim_filter_sql_missing`.
 - `task_reclaimed` carries `held_by`: the worker that stopped refreshing the
   lock. `worker_id` on that record is the reaper that noticed, which is not
   the question anyone reads a reclaim record to answer.
-- Running several worker processes against SQLite is documented as spending
-  concurrency in the wrong place. `SKIP LOCKED` is what lets workers step past
-  each other, and without it they take the head of the queue one at a time; on
-  SQLite, one worker with `--concurrency` is the shape that works.
+- SQLite guidance: run one worker and give it threads with `--concurrency`,
+  rather than several worker processes. `SKIP LOCKED` is what lets workers step
+  past each other's rows, and a database without it hands out the head of the
+  queue one worker at a time.
 - `task_reclaimed` is still one record per task on the ordinary path. When the
-  stuck set changes underneath a reap pass -- a lease renewed, or one more
-  expired -- that pass emits a single record carrying `count` and no
-  `task_id`, rather than naming tasks it cannot vouch for.
-- The recurring-schedule and production pages say which databases give the
-  lease one shared clock. SQLite computes `Now()` inside the process that runs
+  stuck set changes underneath a reap pass (a lease renewed, or one more
+  expired), that pass emits a single record carrying `count` and no `task_id`,
+  rather than naming tasks it cannot vouch for.
+- The production page says which databases give the lease one shared clock. SQLite computes `Now()` inside the process that runs
   the statement, so every worker uses its own clock there whatever `USE_TZ`
   says; run SQLite on one host. With `USE_TZ` off, no database gives a shared
   clock, and two workers whose clocks differ by more than `LOCK_TIMEOUT`

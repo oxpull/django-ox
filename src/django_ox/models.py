@@ -75,18 +75,31 @@ class OxTask(models.Model):
 
     class Meta:
         indexes = [
-            # The dequeue query's ORDER BY, not its WHERE. `run_after` sat in
-            # the fourth position and was never usable there: it is a range,
-            # the two columns before it are the sort, and PostgreSQL responded
-            # by ignoring this index entirely -- bitmap-scanning the reaper's
-            # index instead and sorting the result on every claim. Ending on
-            # `enqueued_at` makes the index deliver rows in exactly the order
-            # the claim wants them, so the scan stops at the first runnable
-            # row and there is no sort at all. `run_after` stays a filter,
-            # which is what it was in practice before.
+            # Two shapes because the claim has two shapes, and one btree
+            # cannot serve both. The query is an equality on status, an
+            # optional restriction on queue_name, a range on run_after, and
+            # `ORDER BY priority DESC, enqueued_at`.
+            #
+            # `ox_dequeue_idx` ends on the sort columns with nothing variable
+            # in front of them, so it delivers rows in claim order for a
+            # worker that names several queues or names none at all, which is
+            # the default. `ox_dequeue_queue_idx` puts queue_name first and is
+            # tighter for a worker pinned to exactly one queue, the shape the
+            # production page recommends: it walks only that queue's rows
+            # instead of filtering the others out. PostgreSQL picks between
+            # them per query, measured on all three configurations.
+            #
+            # `run_after` is in neither. It is a range behind the sort columns,
+            # where no database can use it, and putting it there cost the
+            # planner the ordering: the index stops being chosen at all and
+            # sorted the whole candidate set on every claim.
+            models.Index(
+                fields=["status", "-priority", "enqueued_at"],
+                name="ox_dequeue_idx",
+            ),
             models.Index(
                 fields=["status", "queue_name", "-priority", "enqueued_at"],
-                name="ox_dequeue_idx",
+                name="ox_dequeue_queue_idx",
             ),
             models.Index(fields=["status", "locked_at"], name="ox_reaper_idx"),
         ]

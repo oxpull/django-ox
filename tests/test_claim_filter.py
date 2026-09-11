@@ -162,9 +162,8 @@ class TestAFilterThatReachesOnlyOneClaimPath:
     """
     The single-statement PostgreSQL claim builds its own SQL, so it reads
     `claim_filter_sql()` and cannot see `claim_filter_q()`. A subclass that
-    overrides the queryset hook alone therefore narrowed SQLite and MySQL and
-    claimed the excluded rows on PostgreSQL, silently. That is the shape this
-    project treats as the most serious kind of defect.
+    overrides the queryset hook alone would narrow SQLite and MySQL and claim
+    the excluded rows on PostgreSQL, with nothing raised and nothing logged.
     """
 
     def _settings(self, settings, worker_class_path):

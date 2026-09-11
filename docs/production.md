@@ -169,9 +169,9 @@ concurrent workers safe:
 
 - **Claiming is atomic.** On PostgreSQL a claim is one
   `UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING`
-  statement; on MySQL 8 it is `SELECT ... FOR UPDATE SKIP LOCKED` inside a
+  statement; on MySQL 8+ it is `SELECT ... FOR UPDATE SKIP LOCKED` inside a
   short transaction. Either way workers step past each other's rows rather
-  than queueing behind them, so a worker you add is a worker that works.
+  than queueing behind them, so throughput scales with the workers you add.
   Databases without `SKIP LOCKED` claim through an optimistic
   compare-and-set, which is atomic everywhere and gives one worker at a time
   the head of the queue; [PostgreSQL, MySQL or SQLite](#postgresql-mysql-or-sqlite)
@@ -268,7 +268,7 @@ database server's clock, so two hosts with drifting clocks do not produce false
 reclaims. If you run workers on more than one host, that is the setting which
 gives them one clock, and it is Django's default.
 
-SQLite is the exception, and it is a scope statement rather than a caveat:
+SQLite is the exception.
 Django's `Now()` compiles there to `STRFTIME(..., 'NOW')`, which SQLite
 evaluates inside the process that ran the statement. There is no server to
 stamp it, so every worker uses its own clock whatever `USE_TZ` says. Run SQLite
@@ -525,9 +525,10 @@ has a free thread and hands the task straight to it. It is not zero.
 
 Two consequences worth knowing:
 
-- **Read `attempts` as "times this was handed out".** If you need "times this
-  actually ran", the per-attempt entries in `errors` are the record of
-  executions that reported something.
+- **Read `attempts` as "times this was handed out".** There is no column that
+  counts successful runs: `errors` holds one entry per *failed* attempt, so a
+  task that failed twice and then succeeded has three attempts and two
+  entries.
 - **A task that must not be retried on infrastructure loss** should be
   idempotent, the same as it must be under any at-least-once queue. The lease
   number stops a reaped worker writing its outcome over a later holder's; it
@@ -553,6 +554,44 @@ is retried both when it raises and when its worker dies mid-run. Write
 task bodies so that running twice is harmless (upserts, idempotency keys,
 "already sent?" checks).
 
+### What the lease guarantees, precisely
+
+One worker holds the lease on a task at a time, and a task runs at least once.
+It is worth being exact about which of those the lease number enforces, because
+the two are not the same guarantee.
+
+**Two workers cannot write the same row.** Every claim increments
+`lease_epoch`, and every write that ends an attempt carries the value the
+worker was given in its `WHERE` clause. A worker whose lease was reclaimed
+matches zero rows instead of overwriting whoever holds it now. That is
+arithmetic, not timing: no pause is long enough to defeat it, which is why a
+reclaimed worker cannot corrupt the record of a task it no longer owns.
+
+**Two threads can run the same task body at the same time.** The lease fences
+the row, not the function. There are two ways to get there:
+
+- A task outlives `TASK_TIMEOUT`. The worker asks the thread to stop, and after
+  `TASK_TIMEOUT_GRACE` it publishes the retry and recycles. The old thread is
+  still running while the retry is claimed elsewhere, because nothing in
+  CPython can stop a thread that is inside a call which never returns.
+- A worker is partitioned from the database for longer than `LOCK_TIMEOUT`. It
+  is still executing; the reaper cannot tell it apart from a dead one and gives
+  the task to somebody else.
+
+So the rule is the same one every at-least-once queue asks for, and it is worth
+saying that it *is* every at-least-once queue rather than a property of this
+one. Sidekiq loses in-flight work outright when a process is killed under its
+default fetch. Oban's own rescue documentation says it "may transition jobs that
+are genuinely executing and cause duplicate execution". Que re-runs a job whose
+worker died with its error count untouched, immediately and without limit.
+Celery with `acks_late` leaves redelivery to the broker and counts nothing.
+
+Where a task must not overlap with itself at any cost, the options are the same
+as anywhere else: make the body idempotent, take an application-level lock the
+task checks on entry, or give the queue a timeout long enough that the backstop
+is not reached in normal operation. What this package adds is that the *record*
+of the task cannot be corrupted while you do it.
+
 ## PostgreSQL, MySQL or SQLite
 
 All three run the full worker suite in CI. Guidance:
@@ -565,13 +604,14 @@ All three run the full worker suite in CI. Guidance:
   and Django corners.
 - **SQLite** is the right choice wherever SQLite is already the right choice
   for your Django database: development, tests, and small single-host
-  deployments. Run one worker and give it threads -- `ox_worker
-  --concurrency 8` -- rather than several worker processes. A thread pool in
-  one process is how a single-writer database wants to be driven, and it
-  covers the email-and-webhook workload most single-host deployments
-  actually run. Claiming stays correct with more processes than that; they
-  just spend their turns reaching for the same row instead of dividing the
-  queue between them.
+  deployments. Run one worker and give it threads (`ox_worker
+  --concurrency 8`) rather than several worker processes. A thread pool in one
+  process is how a single-writer database wants to be driven, and it
+  is enough for the IO-bound work a single-host deployment usually queues.
+  Claiming stays correct with more processes than that: a worker that loses
+  the head of the queue retries against the next few candidates rather than
+  stepping past locked rows, so throughput stops scaling with processes well
+  before it would on PostgreSQL.
 
 The queue lives in your default database, inside your existing backup and
 migration story. That is the point: one system of record, one thing to

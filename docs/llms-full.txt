@@ -1405,9 +1405,9 @@ concurrent workers safe:
 
 - **Claiming is atomic.** On PostgreSQL a claim is one
   `UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING`
-  statement; on MySQL 8 it is `SELECT ... FOR UPDATE SKIP LOCKED` inside a
+  statement; on MySQL 8+ it is `SELECT ... FOR UPDATE SKIP LOCKED` inside a
   short transaction. Either way workers step past each other's rows rather
-  than queueing behind them, so a worker you add is a worker that works.
+  than queueing behind them, so throughput scales with the workers you add.
   Databases without `SKIP LOCKED` claim through an optimistic
   compare-and-set, which is atomic everywhere and gives one worker at a time
   the head of the queue; [PostgreSQL, MySQL or SQLite](#postgresql-mysql-or-sqlite)
@@ -1504,7 +1504,7 @@ database server's clock, so two hosts with drifting clocks do not produce false
 reclaims. If you run workers on more than one host, that is the setting which
 gives them one clock, and it is Django's default.
 
-SQLite is the exception, and it is a scope statement rather than a caveat:
+SQLite is the exception.
 Django's `Now()` compiles there to `STRFTIME(..., 'NOW')`, which SQLite
 evaluates inside the process that ran the statement. There is no server to
 stamp it, so every worker uses its own clock whatever `USE_TZ` says. Run SQLite
@@ -1761,9 +1761,10 @@ has a free thread and hands the task straight to it. It is not zero.
 
 Two consequences worth knowing:
 
-- **Read `attempts` as "times this was handed out".** If you need "times this
-  actually ran", the per-attempt entries in `errors` are the record of
-  executions that reported something.
+- **Read `attempts` as "times this was handed out".** There is no column that
+  counts successful runs: `errors` holds one entry per *failed* attempt, so a
+  task that failed twice and then succeeded has three attempts and two
+  entries.
 - **A task that must not be retried on infrastructure loss** should be
   idempotent, the same as it must be under any at-least-once queue. The lease
   number stops a reaped worker writing its outcome over a later holder's; it
@@ -1789,6 +1790,44 @@ is retried both when it raises and when its worker dies mid-run. Write
 task bodies so that running twice is harmless (upserts, idempotency keys,
 "already sent?" checks).
 
+### What the lease guarantees, precisely
+
+One worker holds the lease on a task at a time, and a task runs at least once.
+It is worth being exact about which of those the lease number enforces, because
+the two are not the same guarantee.
+
+**Two workers cannot write the same row.** Every claim increments
+`lease_epoch`, and every write that ends an attempt carries the value the
+worker was given in its `WHERE` clause. A worker whose lease was reclaimed
+matches zero rows instead of overwriting whoever holds it now. That is
+arithmetic, not timing: no pause is long enough to defeat it, which is why a
+reclaimed worker cannot corrupt the record of a task it no longer owns.
+
+**Two threads can run the same task body at the same time.** The lease fences
+the row, not the function. There are two ways to get there:
+
+- A task outlives `TASK_TIMEOUT`. The worker asks the thread to stop, and after
+  `TASK_TIMEOUT_GRACE` it publishes the retry and recycles. The old thread is
+  still running while the retry is claimed elsewhere, because nothing in
+  CPython can stop a thread that is inside a call which never returns.
+- A worker is partitioned from the database for longer than `LOCK_TIMEOUT`. It
+  is still executing; the reaper cannot tell it apart from a dead one and gives
+  the task to somebody else.
+
+So the rule is the same one every at-least-once queue asks for, and it is worth
+saying that it *is* every at-least-once queue rather than a property of this
+one. Sidekiq loses in-flight work outright when a process is killed under its
+default fetch. Oban's own rescue documentation says it "may transition jobs that
+are genuinely executing and cause duplicate execution". Que re-runs a job whose
+worker died with its error count untouched, immediately and without limit.
+Celery with `acks_late` leaves redelivery to the broker and counts nothing.
+
+Where a task must not overlap with itself at any cost, the options are the same
+as anywhere else: make the body idempotent, take an application-level lock the
+task checks on entry, or give the queue a timeout long enough that the backstop
+is not reached in normal operation. What this package adds is that the *record*
+of the task cannot be corrupted while you do it.
+
 ## PostgreSQL, MySQL or SQLite
 
 All three run the full worker suite in CI. Guidance:
@@ -1801,13 +1840,14 @@ All three run the full worker suite in CI. Guidance:
   and Django corners.
 - **SQLite** is the right choice wherever SQLite is already the right choice
   for your Django database: development, tests, and small single-host
-  deployments. Run one worker and give it threads -- `ox_worker
-  --concurrency 8` -- rather than several worker processes. A thread pool in
-  one process is how a single-writer database wants to be driven, and it
-  covers the email-and-webhook workload most single-host deployments
-  actually run. Claiming stays correct with more processes than that; they
-  just spend their turns reaching for the same row instead of dividing the
-  queue between them.
+  deployments. Run one worker and give it threads (`ox_worker
+  --concurrency 8`) rather than several worker processes. A thread pool in one
+  process is how a single-writer database wants to be driven, and it
+  is enough for the IO-bound work a single-host deployment usually queues.
+  Claiming stays correct with more processes than that: a worker that loses
+  the head of the queue retries against the next few candidates rather than
+  stepping past locked rows, so throughput stops scaling with processes well
+  before it would on PostgreSQL.
 
 The queue lives in your default database, inside your existing backup and
 migration story. That is the point: one system of record, one thing to
@@ -2120,15 +2160,20 @@ The message text is not part of the contract. The keys are.
 | `task_succeeded` | INFO | The task reached SUCCESSFUL. |
 | `task_timed_out` | WARNING | An attempt ran past its `TASK_TIMEOUT` and is recorded as failed; a `task_retrying` or `task_failed` record follows. It counts timeouts recorded as failures, not deadlines that passed: a task that catches `TaskTimeout` and returns produces no event, and neither does a timeout on a worker logging `timeouts_backstop_only`, where the attempt ends in `task_stuck` or in whatever the task went on to do. |
 | `task_stuck` | ERROR | A timed-out attempt's thread did not stop within `TASK_TIMEOUT_GRACE`. The attempt is recorded as failed and the worker is recycling. On a worker logging `timeouts_backstop_only` nothing is raised inside the task, so this is the ordinary end of a timeout there rather than a pathological one. |
-| `worker_recycling` | WARNING | The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75. One follows every `task_stuck`, so on a worker logging `timeouts_backstop_only` every timeout that reaches the backstop costs a worker restart. |
+| `worker_recycling` | WARNING | The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75. It follows a `task_stuck` whose thread is still inside the attempt, which is the usual case, so on a worker logging `timeouts_backstop_only` every timeout that reaches the backstop costs a worker restart. |
 | `timeouts_backstop_only` | WARNING | Once per worker: `TaskTimeout` is not raised inside a running sync task, because the interpreter cannot raise an exception inside another thread (`reason=interpreter`, logged at startup) or a coverage tool or debugger is watching the worker's threads (`reason=tracing_tool`, logged on the first attempt registered under it). `TASK_TIMEOUT_GRACE` is the whole enforcement while it stands. See [Task timeouts](production.md#task-timeouts). |
 | `task_retrying` | WARNING | An attempt failed with retries remaining. |
 | `task_failed` | ERROR | The task reached FAILED, out of attempts. |
-| `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. One record per task. A pass whose stuck set changed while it ran -- a lease renewed, or one more lease expired -- instead emits a single record carrying `count` and no `task_id`, because it cannot say which tasks the reclaim covered. |
+| `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. One record per task. A pass whose stuck set changed while it ran (a lease renewed, or one more lease expired) instead emits a single record carrying `count` and no `task_id`, because it cannot say which tasks the reclaim covered. |
 | `task_lease_lost` | WARNING | A worker finished an attempt whose lease had already been reclaimed, so its write was dropped and no result was signalled. |
 | `lease_renew_failed` | WARNING | A lease renewal statement failed. The worker keeps going and tries again on the next interval. |
 | `schedule_dispatched` | INFO | A recurring tick enqueued its task. |
 | `worker_error` | ERROR | The execution wrapper itself raised (an internal worker error, not a task failure). |
+| `worker_poll_failed` | WARNING | A database error ended one pass of the poll loop. The pass is abandoned and retried on the next one; the worker keeps running. A steady stream of it means the database is unreachable rather than slow. |
+| `watchdog_error` | ERROR | The timeout watchdog failed to handle one armed attempt. Every other attempt is unaffected and the thread keeps running. |
+| `task_stuck_unrecorded` | WARNING | A timed-out attempt could not be recorded as failed. The worker recycles regardless, so the row is recovered by the reaper rather than by this write. |
+| `worker_drain_abandoned` | WARNING | A recycling worker stopped waiting on tasks that had not finished. Their leases expire and the reaper requeues them. Carries `pending`. |
+| `claim_filter_sql_missing` | WARNING | Once per worker: a subclass overrides `claim_filter_q()` without `claim_filter_sql()`, so the single-statement PostgreSQL claim is given up for the path that applies the hook. |
 | `worker_draining` | INFO | Shutdown began with tasks still in flight. |
 | `worker_stopped` | INFO | The run loop exited. |
 | `supervisor_started` | INFO | `ox_worker --processes N` started its worker processes. |
@@ -2156,7 +2201,7 @@ The message text is not part of the contract. The keys are.
 | `exception` | `task_retrying`, `task_failed` | Exception class name of the failure. |
 | `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `LOST` (out of attempts). |
 | `count` | `task_reclaimed` without `task_id` | How many tasks that pass reclaimed. Present only on the batch record described above. |
-| `held_by` | `task_reclaimed` | The worker that stopped refreshing the lock, from the row. `worker_id` on the same record is the reaper that noticed. |
+| `held_by` | `task_reclaimed` | The worker that stopped refreshing the lock, from the row. `worker_id` on the same record is the reaper that noticed. Absent on the batch record, along with `task_id`, `task_path`, `queue` and `attempt`. |
 | `dropped_status` | `task_lease_lost` | Status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |
 | `schedule` | `schedule_dispatched` | Schedule name from `SCHEDULES`. |
 | `queues`, `concurrency` | `worker_started` | The worker's configuration. |
@@ -2207,16 +2252,19 @@ column from `queue_stats()` for it.
 
 ### What `errors` holds
 
-One entry per attempt, each with the exception's dotted class path and its
-formatted traceback. A traceback is whatever Python produced for that failure,
+One entry per failed attempt, each with the exception's dotted class path and
+its formatted traceback, plus one the reaper writes when it gives a lease up
+with no attempts left. A successful attempt adds nothing, so the entries count
+failures rather than runs. A traceback is whatever Python produced for that failure,
 so if an exception message or a chained cause carried a connection string, a
-token or a customer's data, that is what lands in the column -- the same
+token or a customer's data, that is what lands in the column: the same
 material your application's own error reporting already receives. Treat the
 column as you treat those reports.
 
-Two things bound it. Each traceback is stored up to 16 KB, with a marker in
-place of anything past that, so one pathological failure cannot write an
-unbounded string onto the row. And `ox_prune --include-failed` is the retention
+Two things bound it. Each traceback is stored up to 16,384 bytes of UTF-8,
+marker included, so one pathological failure cannot write an unbounded string
+onto the row. Bytes rather than characters, because that is the unit the column
+is sized in. And `ox_prune --include-failed` is the retention
 control: FAILED and LOST rows are kept by default so tracebacks survive until
 somebody has looked at them, and that flag is what eventually removes them.
 
@@ -2500,7 +2548,7 @@ export names this page does not list; those names are not public.
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   `128 + the signal number`, following the shell convention.
-- **The system check IDs** `django_ox.E001` through `django_ox.E005`, which
+- **The system check IDs** the `django_ox.E0xx` system check identifiers, which
   the configuration guide tells you to list in `SILENCED_SYSTEM_CHECKS`. The
   IDs are stable; the messages are not.
 - **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy or when an
@@ -2970,6 +3018,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**A migration ships with this release.** `0005_dequeue_index` rebuilds the
+index the claim reads and adds a second one. On PostgreSQL and MySQL, building
+an index takes a lock that blocks enqueues and claims for the duration. On a
+large task table, create the two indexes by hand with `CREATE INDEX
+CONCURRENTLY` and then run `migrate --fake django_ox 0005`; `sqlmigrate` prints
+the exact statements.
+
 ### Fixed
 
 - The drain can no longer raise while a stuck attempt is still running. A
@@ -2996,7 +3051,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caused it. Rows with attempts left now come back in a single UPDATE whose
   predicate is the one that selected them, and rows whose attempts are spent
   are retired in bounded batches.
-- The claim reads its candidate out of `ox_dequeue_idx` again. The index
+- The claim reads its candidate out of an index, in order. The index
   ended on `run_after`, a range condition sitting behind the two columns that
   carry the ordering, where no database could use it: PostgreSQL stopped
   choosing the index at all and sorted a bitmap scan on every claim, and
@@ -3015,11 +3070,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   epoch. The row went back to READY and a second worker could claim and run a
   task the first was still running. The reclaim now re-checks the expiry
   against the same cutoff the selection used.
-- The lease renewal thread stopped on a dropped connection and nothing
-  restarted it or noticed. `locked_at` then froze on every in-flight row, and
-  after the lock timeout the reaper handed each of those tasks to another
-  worker while they were still running. The only symptom was a burst of
-  reclaims from workers that were visibly healthy.
+- The lease renewal thread survives a dropped connection: it discards the
+  connection, reconnects on the next interval, and keeps `locked_at` moving on
+  every row the worker holds. A renewal that stops is what lets the reaper give
+  a running task to a second worker, and it has no symptom of its own beyond a
+  burst of reclaims from workers that look healthy.
 - A database error in the poll loop ended the worker. The supervisor replaced
   the child, the replacement failed on its own first reap, and five deaths in
   a minute stop the supervisor, so a brief outage took the fleet down and left
@@ -3044,9 +3099,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so with a read replica configured a claim could land off primary and a
   re-read could miss a claim that had just succeeded. The PostgreSQL claim is
   raw SQL, which Django cannot recognise as a write at all.
-- `enqueue_many` opened its transaction on the default connection while the
-  rows were written through the routed one, so under a database router its
-  all-or-nothing promise did not hold.
+- `enqueue_many` opens its transaction on the connection `OxTask` routes to,
+  so its all-or-nothing guarantee holds under a database router. An unpinned
+  block guards the default connection while the rows are written through
+  another.
 - A worker subclass that narrows what it may claim by overriding
   `claim_filter_q()` alone now takes the claim path that applies it. The
   single-statement PostgreSQL claim reads `claim_filter_sql()` and could not
@@ -3087,19 +3143,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A recycling worker now bounds how long it waits for its other in-flight
+  tasks, at `LOCK_TIMEOUT`. Past that it stops renewing their leases and exits,
+  and the reaper requeues them. This can end a task that was going to finish:
+  it is recorded as a lost lease and retried, and one on its last attempt
+  reaches LOST. A worker recycles because a thread stopped responding to its
+  deadline, so the alternative is a process that never leaves.
+- `MAX_ATTEMPTS` and the `attempt` log key are documented as counting claims
+  rather than invocations. The behaviour is unchanged; the reference table said
+  "executions", which reads as the number of times a task body ran.
+- Five log events that only fire while something is wrong are documented:
+  `worker_poll_failed`, `watchdog_error`, `task_stuck_unrecorded`,
+  `worker_drain_abandoned` and `claim_filter_sql_missing`.
 - `task_reclaimed` carries `held_by`: the worker that stopped refreshing the
   lock. `worker_id` on that record is the reaper that noticed, which is not
   the question anyone reads a reclaim record to answer.
-- Running several worker processes against SQLite is documented as spending
-  concurrency in the wrong place. `SKIP LOCKED` is what lets workers step past
-  each other, and without it they take the head of the queue one at a time; on
-  SQLite, one worker with `--concurrency` is the shape that works.
+- SQLite guidance: run one worker and give it threads with `--concurrency`,
+  rather than several worker processes. `SKIP LOCKED` is what lets workers step
+  past each other's rows, and a database without it hands out the head of the
+  queue one worker at a time.
 - `task_reclaimed` is still one record per task on the ordinary path. When the
-  stuck set changes underneath a reap pass -- a lease renewed, or one more
-  expired -- that pass emits a single record carrying `count` and no
-  `task_id`, rather than naming tasks it cannot vouch for.
-- The recurring-schedule and production pages say which databases give the
-  lease one shared clock. SQLite computes `Now()` inside the process that runs
+  stuck set changes underneath a reap pass (a lease renewed, or one more
+  expired), that pass emits a single record carrying `count` and no `task_id`,
+  rather than naming tasks it cannot vouch for.
+- The production page says which databases give the lease one shared clock. SQLite computes `Now()` inside the process that runs
   the statement, so every worker uses its own clock there whatever `USE_TZ`
   says; run SQLite on one host. With `USE_TZ` off, no database gives a shared
   clock, and two workers whose clocks differ by more than `LOCK_TIMEOUT`

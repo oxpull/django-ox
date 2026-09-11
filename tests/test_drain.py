@@ -292,3 +292,66 @@ class TestARecycleFinishesEvenWithHealthyWorkOutstanding:
             healthy.set_result(None)
             drain.join(timeout=2)
         assert returned
+
+
+class TestGivingUpStopsRenewingTheLeases:
+    """
+    The budget only bounds recovery if the leases start ageing out when it
+    expires. Left to the process exit, the wait and the lease add instead of
+    overlapping, and an embedded caller that returns from `run()` rather than
+    exiting would keep renewing rows it has already abandoned.
+    """
+
+    def test_the_renewal_thread_is_stopped_when_the_budget_expires(self, settings):
+        settings.TASKS = {
+            "default": {
+                "BACKEND": "django_ox.backend.OxBackend",
+                "QUEUES": ["default"],
+                "OPTIONS": {},
+            }
+        }
+        worker = Worker(backoff_initial=0, recycle_drain_budget=0.3)
+        ident = threading.get_ident()
+        worker._stuck[ident] = ("task-a", 3)
+        worker._running_on = {ident: ("task-a", 3)}
+        worker._recycling = True
+
+        renew_stop = threading.Event()
+        # The stuck attempt plus a healthy sibling, which is what makes the
+        # budget arm at all: with nothing but the stuck one the drain returns
+        # immediately and there is nothing to give up on.
+        abandoned, never_finishes = _pending(), _pending()
+        drain = threading.Thread(
+            target=lambda: worker._drain({abandoned, never_finishes}, renew_stop),
+            daemon=True,
+        )
+        drain.start()
+        drain.join(timeout=5)
+        assert renew_stop.is_set(), (
+            "the drain abandoned the rows but left their leases being "
+            "refreshed, so no reaper may take them"
+        )
+        abandoned.set_result(None)
+        never_finishes.set_result(None)
+
+    def test_an_ordinary_drain_leaves_renewal_alone(self, settings):
+        settings.TASKS = {
+            "default": {
+                "BACKEND": "django_ox.backend.OxBackend",
+                "QUEUES": ["default"],
+                "OPTIONS": {},
+            }
+        }
+        worker = Worker(backoff_initial=0, recycle_drain_budget=0.3)
+        renew_stop = threading.Event()
+        finishes = _pending()
+        drain = threading.Thread(
+            target=lambda: worker._drain({finishes}, renew_stop), daemon=True
+        )
+        drain.start()
+        time.sleep(0.6)
+        finishes.set_result(None)
+        drain.join(timeout=2)
+        assert not renew_stop.is_set(), (
+            "a healthy shutdown stopped renewing leases it was still holding"
+        )

@@ -302,7 +302,10 @@ firing for a time before it existed.
 - Retry state is visible in the database: attempts, per-attempt tracebacks,
   and the next scheduled run (`run_after`).
 - Because execution is at-least-once, tasks should be idempotent. A task is
-  retried both when it raises and when its worker dies mid-run.
+  retried both when it raises and when its worker dies mid-run. The lease
+  number stops two workers writing the same row; it does not stop two threads
+  running the same task body, which is a property of every at-least-once
+  queue. [What the lease guarantees, precisely](https://oxpull.github.io/django-ox/production/#what-the-lease-guarantees-precisely).
 - Concurrency uses a thread pool. That fits I/O-bound tasks (email, HTTP,
   ORM); for CPU-bound work, run `--processes N --concurrency 1`, which is N
   worker processes under one supervisor.

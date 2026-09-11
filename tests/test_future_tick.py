@@ -15,6 +15,7 @@ from datetime import timedelta
 import pytest
 from django.utils import timezone
 
+from django_ox.compat import task_enqueued
 from django_ox.models import OxScheduleTick, OxTask
 from django_ox.worker import Worker
 
@@ -35,6 +36,20 @@ def worker(settings):
         }
     }
     return Worker(backoff_initial=0)
+
+
+@pytest.fixture
+def two_scheduled_workers(settings):
+    settings.TASKS = {
+        "default": {
+            "BACKEND": "django_ox.backend.OxBackend",
+            "QUEUES": ["default"],
+            "OPTIONS": {"SCHEDULES": MINUTELY},
+        }
+    }
+    # Two workers on the same schedule, which is the ordinary state of a
+    # fleet on every tick rather than an edge case.
+    return Worker(backoff_initial=0), Worker(backoff_initial=0)
 
 
 def _tick(at, task_id=None):
@@ -88,3 +103,51 @@ class TestATickRecordedInTheFuture:
         _tick(now - timedelta(minutes=1))
         assert worker.dispatch_schedules() == 1
         assert OxTask.objects.count() == 1
+
+
+class TestALosingWorkerAnnouncesNothing:
+    """
+    Every worker derives the same tick times, so on every tick all of them
+    reach the dispatch and exactly one INSERT survives the unique constraint.
+    The losers must do no work: `enqueue()` saves and fires `task_enqueued`
+    before an outer rollback unwinds, so a loser that enqueued first announced
+    a task that never existed, once per tick, for as long as the fleet ran.
+    """
+
+    def test_the_loser_fires_no_enqueue_signal(
+        self, two_scheduled_workers, monkeypatch
+    ):
+        first, second = two_scheduled_workers
+        # The schedule already has history, so this tick fires rather than
+        # anchoring.
+        now = timezone.now().replace(second=0, microsecond=0)
+        _tick(now - timedelta(minutes=1), task_id=None)
+
+        # Both read the tick log before either commits, which is the whole of
+        # the race: without a stale snapshot the second worker simply sees the
+        # first one's committed tick and never reaches the dispatch at all.
+        stale = second._latest_ticks(now - timedelta(days=1))
+        monkeypatch.setattr(second, "_latest_ticks", lambda since: stale)
+
+        announced: list[str] = []
+
+        def record(sender, task_result, **kwargs):
+            announced.append(str(task_result.id))
+
+        task_enqueued.connect(record)
+        try:
+            assert first.dispatch_schedules() == 1
+            announced_by_winner = list(announced)
+            assert second.dispatch_schedules() == 0, "both workers dispatched"
+        finally:
+            task_enqueued.disconnect(record)
+
+        assert announced == announced_by_winner, (
+            "the losing worker announced an enqueue; its task row was rolled "
+            "back, so receivers saw a task that never existed"
+        )
+        surviving = {str(pk) for pk in OxTask.objects.values_list("id", flat=True)}
+        for task_id in announced:
+            assert task_id in surviving, (
+                f"announced {task_id}, which is not in the database"
+            )

@@ -63,21 +63,19 @@ KILL_GRACE = 5.0
 # the restart delay and of the response to a stop request.
 POLL_INTERVAL = 0.1
 
-# Built from what this platform has, rather than named outright. SIGHUP does
-# not exist on Windows, and naming it here raised AttributeError at import:
-# `ox_worker` imports this module unconditionally, so the failure landed
-# before argparse and before the command could tell anyone why. The single
-# worker that runs fine without any of this could not start at all, and the
-# check that is supposed to explain the limit sits inside handle(), which the
-# failed import never reached.
+# Built from the signals this platform has, rather than named outright. SIGHUP
+# does not exist on Windows and `ox_worker` imports this module
+# unconditionally, so a named constant would fail at import, before argparse
+# and before the command could explain anything. The limit belongs to
+# --processes, and the check that reports it lives in handle().
 STOP_SIGNALS = tuple(
     getattr(signal, name)
     for name in ("SIGTERM", "SIGINT", "SIGHUP")
     if hasattr(signal, name)
 )
 
-# Same reason. Where there is no SIGKILL there is nothing stronger than
-# SIGTERM to escalate to, and sending it twice is the honest approximation.
+# Same reason. Where there is no SIGKILL, SIGTERM is the strongest signal
+# available, so escalation repeats it.
 FORCE_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 

@@ -94,10 +94,15 @@ class OxBackend(BaseTaskBackend):
 
         task_result = cast("TaskResult[P, R]", task_result_from_db(db_task, task=task))
         # send_robust, for the same reason as the worker's lifecycle signals
-        # and one of its own: this fires after the row is committed, so a
-        # raising receiver never prevented an enqueue. It only made enqueue()
-        # raise over a task that already exists, and a caller who reads that
-        # as a failure and retries ends up with two.
+        # and one of its own: the row is already saved when this fires, so a
+        # receiver has no enqueue left to veto. Letting its exception out of
+        # enqueue() would report a failure over a task that exists, and a
+        # caller who retries on that creates a second one. Receiver exceptions
+        # are logged on the django.dispatch logger, not this package's.
+        #
+        # Inside an outer transaction.atomic() the row is committed with that
+        # block rather than before this line; the reasoning holds either way,
+        # because the caller's own rollback is what undoes the task.
         task_enqueued.send_robust(type(self), task_result=task_result)
         return task_result
 
@@ -123,11 +128,10 @@ class OxBackend(BaseTaskBackend):
         enqueued_at = timezone.now()
         rows = [self._row(task, args, kwargs, enqueued_at) for args, kwargs in calls]
 
-        # Pinned to the alias the rows are written through. An unpinned
-        # atomic() wraps the default connection while bulk_create routes
-        # itself, so with a router in play the block guarded a connection the
-        # INSERTs never touched and the all-or-nothing promise was void: a
-        # partial batch could survive an error.
+        # Pinned to the alias the rows are written through, so the block and
+        # the INSERTs share one connection. An unpinned atomic() opens on the
+        # default connection while bulk_create routes itself, which under a
+        # router guards a connection the INSERTs never touch.
         alias = router.db_for_write(OxTask)
         with transaction.atomic(using=alias):
             OxTask.objects.using(alias).bulk_create(rows, batch_size=INSERT_CHUNK_SIZE)

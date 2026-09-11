@@ -229,12 +229,10 @@ WRITABLE_STATUSES = (OxTask.Status.RUNNING, OxTask.Status.LOST)
 # The claim's own timestamps come from {lease_clock}, which is
 # STATEMENT_TIMESTAMP() when USE_TZ is on and a parameter carrying the worker's
 # clock when it is off. That is not a style choice: _lease_now() makes the same
-# switch, and renew_leases and the reaper's cutoff both go through it. Hard
-# coding the server's clock here while the renewal used the worker's put two
-# clocks on one column, so on a deployment where the database and the worker
-# are different hosts, a worker whose clock ran behind the server renewed to a
-# timestamp the reaper already read as expired and lost its task on the first
-# renewal.
+# switch, and renew_leases and the reaper's cutoff both go through it. One
+# column, one clock. Stamping this from the server while the renewal stamps
+# from the worker would put two on it, and a worker whose clock ran behind the
+# server's would renew to a timestamp the reaper reads as already expired.
 # run_after is the exception and is still compared against the worker's clock,
 # because that is the clock the retry that wrote it used; see _ready_queryset.
 # lease_epoch advances here too: the increment and the claim are one statement,
@@ -372,6 +370,12 @@ class Worker:
     """
     Claims READY tasks and executes them, at least once.
 
+    One worker holds the lease on a task at a time, and the lease number
+    fences the row rather than the execution: two workers cannot write the
+    same row, and two threads can still be inside the same task body, which
+    the production page sets out in full. Task bodies are idempotent, the same
+    as under any at-least-once queue.
+
     Claiming uses a single UPDATE ... SKIP LOCKED ... RETURNING statement on
     PostgreSQL, SELECT ... FOR UPDATE SKIP LOCKED where another database
     supports it, and otherwise an optimistic compare-and-set UPDATE keyed on
@@ -460,6 +464,12 @@ class Worker:
         self.reap_batch: int = (
             reap_batch if reap_batch is not None else REAP_BATCH_DEFAULT
         )
+        if self.reap_batch < 1:
+            # A zero slices to nothing, so the reaper would retire no
+            # exhausted row ever and leave them RUNNING for good, silently.
+            raise ImproperlyConfigured(
+                f"reap_batch must be at least 1, got {self.reap_batch!r}."
+            )
         # How long a recycling worker waits on its healthy in-flight tasks
         # before leaving them to the reaper. See _drain for why this is the
         # lease and not a number of its own.
@@ -636,11 +646,9 @@ class Worker:
         Only when this worker's claim filter reaches it. The fast path builds
         its own SQL, so it reads `claim_filter_sql()` and knows nothing about
         `claim_filter_q()`. A subclass that overrides the queryset hook alone
-        therefore narrowed SQLite and MySQL and claimed the very rows it meant
-        to exclude on PostgreSQL, with nothing raised and nothing logged: the
-        one shape this project treats as the most serious kind of defect, a
-        mechanism that holds on two databases and silently does nothing on the
-        third.
+        would narrow SQLite and MySQL and claim the very rows it meant to
+        exclude on PostgreSQL, with nothing raised and nothing logged: a
+        condition that holds on two databases and does nothing on the third.
 
         Falling back to the `SELECT ... FOR UPDATE SKIP LOCKED` path rather
         than refusing to start. Both hooks are a published stability surface,
@@ -1718,12 +1726,10 @@ class Worker:
             )
         else:
             # The exponent is capped before the multiplication, not after.
-            # `attempts` is a PositiveSmallIntegerField, so it can reach
-            # 32767, and 2 ** 32766 raised OverflowError converting to float
-            # while computing a value the min() was about to throw away. It
-            # raised inside _handle_failure, on the failure path, so the row
-            # stayed RUNNING until the reaper took it: a deployment with a
-            # large MAX_ATTEMPTS turned every failure into a lost lease.
+            # `attempts` is a PositiveSmallIntegerField and can reach 32767,
+            # and 2 ** 32766 overflows on the way to a float the min() would
+            # have discarded. This runs on the failure path, where raising
+            # would leave the row RUNNING for the reaper.
             #
             # Capping at 64 doublings is far past any backoff_max anyone
             # configures and keeps the arithmetic in range.
@@ -1882,8 +1888,8 @@ class Worker:
         """
         Mark abandoned rows whose attempts are spent LOST.
 
-        This branch writes something specific to each row -- the holder that
-        went quiet, appended to that row's own error list -- so it cannot
+        This branch writes something specific to each row, the holder that
+        went quiet appended to that row's own error list, so it cannot
         collapse into a single statement the way the requeue does. It is
         bounded instead: `reap_batch` rows per pass, the rest on the next
         one. Exhausting every attempt is the exception, and a reaper that
@@ -1982,7 +1988,7 @@ class Worker:
         complete within it, and (schedule_name, scheduled_for) turns into a
         range the index can seek. A schedule whose newest tick predates the
         bound is absent from the result, which reads as "nothing recorded for
-        the tick in question" -- exactly what the caller does with it, and
+        the tick in question", which is exactly what the caller does with it, and
         the caller distinguishes that from a schedule with no ticks at all by
         asking.
         """
@@ -2054,6 +2060,26 @@ class Worker:
             try:
                 with transaction.atomic(using=self._db_alias):
                     result = None
+                    # The tick row goes in first, before anything is
+                    # enqueued. Every worker derives the same tick times, so
+                    # on every tick all of them reach this line and exactly
+                    # one INSERT survives the unique constraint. Claiming the
+                    # instant before doing the work means the losers do no
+                    # work: they raise here and enqueue nothing.
+                    #
+                    # Enqueueing first and letting the constraint refuse the
+                    # tick afterwards rolls the task row back, but enqueue()
+                    # saves and fires task_enqueued before the outer block
+                    # unwinds, so every loser announced a task that never
+                    # existed. With N workers on a per-minute schedule that
+                    # is N-1 phantom signals a minute, for as long as the
+                    # fleet runs.
+                    tick_row = OxScheduleTick.objects.using(self._db_alias).create(
+                        schedule_name=schedule.name,
+                        scheduled_for=scheduled_for,
+                        task_id=None,
+                        created_at=now,
+                    )
                     # Whether this is the first sighting is decided here,
                     # from the log, rather than from the snapshot taken
                     # before the loop. Another worker can commit this
@@ -2061,8 +2087,13 @@ class Worker:
                     # not the first sighting at all: anchoring again writes
                     # a second no-task row, this time over a tick that had a
                     # boundary and should have fired. The constraint then
-                    # suppresses that instant for good, so the schedule
-                    # silently skips a run.
+                    # holds that instant for good, and the run it was for
+                    # never happens.
+                    #
+                    # The row inserted above is excluded: it is this pass's
+                    # own tick, visible inside this transaction, and counting
+                    # it would make every schedule look like it already had
+                    # history.
                     #
                     # One extra query, and only while a schedule has no
                     # ticks at all. Once it has one, `last` is set and this
@@ -2070,21 +2101,18 @@ class Worker:
                     first_sighting = last is None and not (
                         OxScheduleTick.objects.using(self._db_alias)
                         .filter(schedule_name=schedule.name)
+                        .exclude(pk=tick_row.pk)
                         .exists()
                     )
                     if not first_sighting:
                         result = schedule.task.enqueue(
                             *schedule.args, **schedule.kwargs
                         )
-                    OxScheduleTick.objects.create(
-                        schedule_name=schedule.name,
-                        scheduled_for=scheduled_for,
-                        task_id=result.id if result is not None else None,
-                        created_at=now,
-                    )
+                        tick_row.task_id = result.id
+                        tick_row.save(using=self._db_alias, update_fields=["task"])
             except IntegrityError:
-                # Another worker inserted this tick between our read and
-                # INSERT; its transaction won and ours rolled back whole.
+                # Another worker claimed this tick first; its INSERT won and
+                # ours rolled back before it enqueued anything.
                 continue
             if result is not None:
                 dispatched += 1
@@ -2302,7 +2330,7 @@ class Worker:
                         "pending": pending,
                     },
                 )
-            self._drain(in_flight)
+            self._drain(in_flight, renew_stop)
             renew_stop.set()
             renewer.join(timeout=self.renew_interval + 5)
             if self._recycling:
@@ -2325,7 +2353,9 @@ class Worker:
                 extra={"event": "worker_stopped", "worker_id": self.worker_id},
             )
 
-    def _drain(self, in_flight: set[Future[None]]) -> None:
+    def _drain(
+        self, in_flight: set[Future[None]], renew_stop: Event | None = None
+    ) -> None:
         """
         Wait for the in-flight tasks, except the stuck ones while recycling:
         a thread the backstop gave up on may never finish, and the point of
@@ -2336,15 +2366,28 @@ class Worker:
         siblings, and a sibling on a queue with no timeout has no obligation
         to finish. One such task could hold a recycling worker open for as
         long as it liked, which made the recycle a request rather than a
-        guarantee -- and the whole reason to recycle is that this process can
+        guarantee, and the whole reason to recycle is that this process can
         no longer be trusted to run work.
 
-        The budget is the lease itself. Past `lock_timeout` a reaper is
-        entitled to take these rows anyway, so waiting longer buys nothing
-        that the lease does not already cover. On expiry the remaining tasks
-        are left where a killed worker would leave them: renewal stops when
-        the process goes, the leases age out, and the reaper puts them back.
-        That is the recovery path this worker already relies on.
+        The budget defaults to `lock_timeout`, which is a generous allowance
+        rather than a free one, and the arithmetic is worth stating because it
+        is not what it first looks like. These leases are still being renewed
+        while the drain waits, so no reaper is entitled to the rows during the
+        budget: the wait and the lease do not overlap, they add. Worst case
+        from the backstop firing to another worker picking the row up is
+        `recycle_drain_budget + lock_timeout`, which is ten minutes at the
+        defaults.
+
+        Renewal is stopped here, at the moment the budget expires, rather than
+        left to the process exit, so the lease clock starts from a point this
+        method controls and an embedded caller behaves like the management
+        command.
+
+        The cost is real and deliberate: a task cut short this way is recorded
+        as a lost lease and retried, and one on its last attempt becomes LOST
+        instead of the success it was heading for. That is the price of making
+        the recycle a guarantee rather than a request, on a process that has
+        already decided it cannot be trusted with work.
         """
         give_up_at: float | None = None
         while True:
@@ -2364,6 +2407,11 @@ class Worker:
                 if give_up_at is None:
                     give_up_at = now + self.recycle_drain_budget
                 elif now >= give_up_at:
+                    # Stop refreshing the leases before abandoning the rows,
+                    # so they begin ageing out now rather than whenever this
+                    # process happens to exit.
+                    if renew_stop is not None:
+                        renew_stop.set()
                     logger.warning(
                         "Worker %s stopped waiting on %d in-flight task(s) "
                         "after %gs of recycling; their leases will expire and "

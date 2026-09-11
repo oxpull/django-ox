@@ -20,11 +20,10 @@ def _assert_testing_this_checkout() -> None:
     """
     Fail loudly if the suite imported django_ox from somewhere else.
 
-    The shared venv installs django-ox as an editable pointing at one
-    checkout, so running pytest from a second one - a git worktree, a
-    clone - silently tests the first one's source instead of the code in
-    front of you. A passing suite then says nothing about the tree you are
-    editing, which has already happened here.
+    An editable install elsewhere on the path can win over this checkout,
+    in which case the suite exercises another source tree: a git worktree or
+    a second clone silently tests the first one's code. A passing suite then
+    says nothing about the tree in front of you, and nothing announces it.
     """
     here = pathlib.Path(__file__).resolve().parent.parent
     imported = pathlib.Path(django_ox.__file__).resolve()

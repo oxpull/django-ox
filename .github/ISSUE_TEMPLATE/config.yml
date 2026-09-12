@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://oxpull.com/django-ox/
+    about: Configuration, production notes and the full option reference.
+  - name: Choosing a task backend
+    url: https://oxpull.com/django-ox/choosing/
+    about: How django-ox compares to Celery, huey and django-tasks-db.
+  - name: Questions and ideas
+    url: https://github.com/oxpull/django-ox/discussions
+    about: Ask how to do something, or float a change before opening an issue.
+  - name: Report a vulnerability
+    url: https://github.com/oxpull/django-ox/security/advisories/new
+    about: Security reports go here privately, not in a public issue.

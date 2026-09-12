@@ -114,6 +114,25 @@ tenths of a millisecond at p50 and the same story at p95.
 [The benchmarks page](https://oxpull.com/django-ox/benchmarks/) has the
 full matrix and the raw data behind every figure.
 
+## How it compares
+
+The four backends a Django team is most likely to shortlist. Every cell about
+another project comes from that project's own documentation or issue tracker,
+each carrying a link and the date it was read on the
+[Choosing a task backend](https://oxpull.com/django-ox/choosing/) page.
+
+| | django-ox | django-tasks-db | Celery | huey |
+| --- | --- | --- | --- | --- |
+| `django.tasks` backend | **Yes**, native | **Yes**, native | **No** | **No** |
+| Broker to run | **None.** The queue is a table in the database you already run | **None.** Django ORM | RabbitMQ, Redis or SQS | Redis, SQLite, PostgreSQL, file or memory |
+| Transactional enqueue | **Yes.** A task enqueued in `atomic()` commits or rolls back with your data | Not claimed | **No.** Django's own docs name this as the case for `on_commit()` | Not claimed |
+| Worker killed mid-task | **Retried.** The lease expires and the task goes back on the queue | **Stuck.** The task stays `PROCESSING`, never retried and never failed. Open since 2024-06-11 | **Lost** when the child process is killed, even with `acks_late` | **Lost.** "will not be retried automatically" |
+| Retries and backoff | **Exponential**, keeping every attempt's traceback | **None** | Yes | Yes |
+| Recurring schedules | **Cron or a fixed interval, and no scheduler process.** Editable in the Django admin, limited to the tasks your code exposes | **None** | `celery beat`, a separate process you must run exactly one of | Yes |
+
+The full version has three more backends, a footnote and a date on every cell,
+and a [section on when django-ox is the wrong choice](https://oxpull.com/django-ox/choosing/#when-not-to-use-django-ox).
+
 ## Configuration
 
 Every option has a default; add one when you have a reason to.

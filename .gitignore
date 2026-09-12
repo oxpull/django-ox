@@ -4,6 +4,7 @@ __pycache__/
 dist/
 .venv/
 *.sqlite3
+*.sqlite3-journal
 .pytest_cache/
 .coverage*
 .mypy_cache/

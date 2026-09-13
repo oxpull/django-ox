@@ -138,16 +138,11 @@ class TestRenderPrometheus:
 
         assert len(set(metrics.STATUSES)) == len(metrics.STATUSES)
         assert set(metrics.STATUSES) == {value.lower() for value in OxTask.Status}
-        assert set(metrics.STATUSES) <= {field.name for field in fields(QueueStats)}
-        # Appended, so the samples a dashboard already reads keep their order.
-        assert metrics.STATUSES[:6] == (
-            "ready",
-            "running",
-            "failed",
-            "successful",
-            "lost",
-            "discarded",
-        )
+        # The QueueStats columns first, in their order, so the samples a
+        # dashboard already reads keep theirs. waiting is appended, and its
+        # count comes from waiting_counts(), not from a QueueStats field.
+        columns = tuple(field.name for field in fields(QueueStats))[1:]
+        assert (*columns, "waiting") == metrics.STATUSES
 
     def test_metric_names_are_pinned(self):
         assert metrics.METRIC_NAMES == (

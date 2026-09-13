@@ -90,7 +90,9 @@ def collect(window: timedelta = stats.DEFAULT_WINDOW) -> list[MetricFamily]:
     give (eligible backlog, oldest wait, last claim, the finished window).
     """
     now = timezone.now()
-    rows = stats.queue_stats()
+    # Every status per queue in one query: queue_stats() and waiting_counts()
+    # would be two.
+    rows = stats._status_counts()
     ready_by_queue = stats._ready_counts(now)
     oldest_by_queue = stats._oldest_ready(now)
     claims_by_queue = stats._last_claims()
@@ -103,19 +105,20 @@ def collect(window: timedelta = stats.DEFAULT_WINDOW) -> list[MetricFamily]:
     throughput: list[tuple[dict[str, str], float]] = []
     failure: list[tuple[dict[str, str], float]] = []
     for row in rows:
-        queue = {"queue": row.queue_name}
+        queue_name = row["queue_name"]
+        queue = {"queue": queue_name}
         tasks.extend(
-            ({"queue": row.queue_name, "status": status}, float(getattr(row, status)))
+            ({"queue": queue_name, "status": status}, float(row[status]))
             for status in STATUSES
         )
-        ready.append((queue, float(ready_by_queue.get(row.queue_name, 0))))
-        eligible_since = oldest_by_queue.get(row.queue_name)
+        ready.append((queue, float(ready_by_queue.get(queue_name, 0))))
+        eligible_since = oldest_by_queue.get(queue_name)
         if eligible_since is not None:
             oldest.append((queue, (now - eligible_since).total_seconds()))
-        last_claim = claims_by_queue.get(row.queue_name)
+        last_claim = claims_by_queue.get(queue_name)
         if last_claim is not None:
             claim.append((queue, (now - last_claim).total_seconds()))
-        finished, failed = finished_by_queue.get(row.queue_name, (0, 0))
+        finished, failed = finished_by_queue.get(queue_name, (0, 0))
         throughput.append((queue, finished / minutes))
         if finished:
             failure.append((queue, failed / finished))

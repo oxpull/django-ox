@@ -23,26 +23,28 @@ from datetime import timedelta
 from django_ox import stats
 
 stats.queue_stats()
-# [QueueStats(queue_name="default", ready=3, running=1, failed=0, successful=214, lost=0, discarded=0, waiting=0),
-#  QueueStats(queue_name="emails", ready=0, running=0, failed=2, successful=560, lost=0, discarded=0, waiting=0)]
+# [QueueStats(queue_name="default", ready=3, running=1, failed=0, successful=214, lost=0, discarded=0),
+#  QueueStats(queue_name="emails", ready=0, running=0, failed=2, successful=560, lost=0, discarded=0)]
 
 stats.ready_count()  # tasks eligible to run right now
 stats.oldest_ready_age()  # timedelta, or None when no READY task is eligible
 stats.throughput(timedelta(minutes=5))  # terminal outcomes per minute
 stats.failure_rate(timedelta(minutes=5))  # 0.0 to 1.0, or None
 stats.last_claim_age()  # time since a worker last claimed
+stats.waiting_counts()  # WAITING tasks per queue, such as {"default": 4}
 ```
 
 | Function | Returns | Semantics |
 | --- | --- | --- |
-| `queue_stats()` | `list[QueueStats]` | Raw row counts per queue and status (`ready`, `running`, `failed`, `successful`, `lost`, `discarded`, `waiting`), one entry per queue with any rows. The `ready` column counts every READY row, including tasks deferred to a future `run_after`. `lost` counts tasks whose worker stopped reporting with no attempts left; see [the reaper](production.md#the-reaper). `discarded` counts tasks closed without running; see [Retrying and discarding](#retrying-and-discarding). `waiting` counts tasks held back from every worker until something releases them. django-ox never puts a task there by itself, and it is not backlog. |
+| `queue_stats()` | `list[QueueStats]` | Raw row counts per queue and status (`ready`, `running`, `failed`, `successful`, `lost`, `discarded`), one entry per queue with any rows. The `ready` column counts every READY row, including tasks deferred to a future `run_after`. `lost` counts tasks whose worker stopped reporting with no attempts left; see [the reaper](production.md#the-reaper). `discarded` counts tasks closed without running; see [Retrying and discarding](#retrying-and-discarding). A WAITING task is in no column. `waiting_counts()` counts those. |
 | `ready_count()` | `int` | READY tasks eligible to run now, mirroring the worker's dequeue predicate: deferred tasks do not count until `run_after` passes. This is the backlog number. |
 | `oldest_ready_age()` | `timedelta \| None` | Age of the oldest eligible READY task, measured from when it became eligible (`run_after` when set, `enqueued_at` otherwise), so a task deferred by a week does not read as a week of backlog. |
 | `throughput(window)` | `float` | Tasks reaching a terminal state (SUCCESSFUL or FAILED) per minute over the trailing window (default 5 minutes). |
 | `failure_rate(window)` | `float \| None` | Fraction of terminal outcomes in the window that FAILED, or `None` when nothing finished. Retries still pending are not outcomes and do not count. |
 | `last_claim_age()` | `timedelta \| None` | Time since any worker last claimed a task, or `None` if none ever was. This is claim activity, not a heartbeat: idle workers over an empty queue record nothing. |
+| `waiting_counts()` | `dict[str, int]` | WAITING tasks per queue, for each queue that has any. A waiting task is held back from every worker until something releases it. django-ox never puts a task there by itself, and it isn't backlog. |
 
-Every function except `queue_stats()` accepts a `queue_name` keyword to
+Every function except `queue_stats()` and `waiting_counts()` accepts a `queue_name` keyword to
 scope the metric to one queue.
 
 **Alert on two numbers: backlog depth (`ready_count`) and backlog age
@@ -170,7 +172,7 @@ Every metric is a gauge, with one sample per queue that has any row:
 
 | Metric | Labels | Value |
 | --- | --- | --- |
-| `django_ox_tasks` | `queue`, `status` | Rows by status, one of `ready`, `running`, `failed`, `successful`, `lost`, `discarded`, `waiting`. The same numbers as `queue_stats()`, so `ready` includes deferred tasks. |
+| `django_ox_tasks` | `queue`, `status` | Rows by status, one of `ready`, `running`, `failed`, `successful`, `lost`, `discarded`, `waiting`. The same numbers as `queue_stats()` and `waiting_counts()`, so `ready` includes deferred tasks. A sum over `status` includes waiting tasks, which aren't backlog. |
 | `django_ox_ready_tasks` | `queue` | `ready_count()`: READY tasks eligible to run now. The backlog number. |
 | `django_ox_oldest_ready_age_seconds` | `queue` | `oldest_ready_age()` in seconds. Absent when no READY task is eligible. |
 | `django_ox_last_claim_age_seconds` | `queue` | `last_claim_age()` in seconds. Absent until a worker has claimed on that queue. |
@@ -418,8 +420,10 @@ it in its own `discarded` column, and `ox_prune` deletes discarded rows
 with successful ones.
 
 WAITING is the seventh value. It reads as `READY` through `django.tasks`, so
-`is_finished` is false. Workers never claim it, `ox_prune` never deletes it,
-and retry skips it.
+`is_finished` is false. There, `READY` only means the task hasn't finished.
+It doesn't mean a worker can take it now. `OxTask.status` still says WAITING,
+and `waiting_counts()` counts it. Workers never claim a waiting task,
+`ox_prune` never deletes it, and retry skips it.
 
 ### The admin page
 

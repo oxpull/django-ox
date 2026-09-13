@@ -195,7 +195,7 @@ class TestWaitingRows:
     def test_waiting_is_filtered_displayed_skipped_by_retry_and_discarded(
         self, admin_client
     ):
-        held = _waiting.enqueue(add, [1, 2], {})
+        held = _waiting.enqueue(add, [1, 2], {}, using="default")
         echo.enqueue("ready")
 
         body = admin_client.get(reverse(CHANGELIST)).content.decode()

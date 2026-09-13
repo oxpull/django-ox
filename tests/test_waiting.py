@@ -8,6 +8,7 @@ depends on it.
 """
 
 import ast
+import inspect
 import logging
 import re
 import uuid
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from django.core.management import call_command
-from django.db import DatabaseError, connection, connections
+from django.db import DatabaseError, connection, connections, transaction
 from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.recorder import MigrationRecorder
 from django.db.models import QuerySet
@@ -41,21 +42,27 @@ from django_ox.worker import WRITABLE_STATUSES
 
 from .tasks import add
 from .test_worker import reap_away
-from .test_write_routing import ALT, _PrimaryAndReplica
+from .test_write_routing import ALT
 
 SRC = Path(django_ox.__file__).resolve().parent
 REPO = SRC.parent.parent
 
+# Every helper names its database. The suite's default alias is the one the
+# worker fixture claims from.
+DB = "default"
+
 WAITING = OxTask.Status.WAITING
+READY = OxTask.Status.READY
+DISCARDED = OxTask.Status.DISCARDED
 
 
-def held(task=add, args=(1, 2), kwargs=None):
+def held(task=add, args=(1, 2), kwargs=None, *, using=DB):
     """A row inserted WAITING, the way the helpers insert one."""
-    result = _waiting.enqueue(task, list(args), kwargs or {})
-    return OxTask.objects.get(pk=result.id)
+    result = _waiting.enqueue(task, list(args), kwargs or {}, using=using)
+    return OxTask.objects.using(using).get(pk=result.id)
 
 
-def a_row(status, *, using="default", **fields):
+def a_row(status, *, using=DB, **fields):
     """A row in any status, written directly, for the guard tests."""
     return OxTask.objects.using(using).create(
         task_path="tests.tasks.add",
@@ -72,12 +79,12 @@ def current(row):
 
 # -- the status set -----------------------------------------------------------
 
-PENDING = {OxTask.Status.READY, OxTask.Status.RUNNING, WAITING}
+PENDING = {READY, OxTask.Status.RUNNING, WAITING}
 SETTLED = {
     OxTask.Status.SUCCESSFUL,
     OxTask.Status.FAILED,
     OxTask.Status.LOST,
-    OxTask.Status.DISCARDED,
+    DISCARDED,
 }
 
 
@@ -107,7 +114,7 @@ def test_waiting_is_a_choice_with_its_label():
 
 ENQUEUE_PATHS = {
     "OxBackend.enqueue": lambda task: task.enqueue(1, 2),
-    "_waiting.enqueue": lambda task: _waiting.enqueue(task, [1, 2], {}),
+    "_waiting.enqueue": lambda task: _waiting.enqueue(task, [1, 2], {}, using=DB),
 }
 
 
@@ -115,7 +122,7 @@ ENQUEUE_PATHS = {
 class TestEnqueue:
     def test_enqueue_inserts_waiting_and_never_ready(self):
         with CaptureQueriesContext(connection) as ctx:
-            result = _waiting.enqueue(add, [1, 2], {})
+            result = _waiting.enqueue(add, [1, 2], {}, using=DB)
         statements = [query["sql"] for query in ctx.captured_queries]
         assert len(statements) == 1, statements
         assert statements[0].lstrip().upper().startswith("INSERT"), statements
@@ -132,7 +139,7 @@ class TestEnqueue:
             run_after=timezone.now() + timedelta(hours=1),
         )
         ready = task.enqueue(3, b=4)
-        waiting = _waiting.enqueue(task, [3], {"b": 4})
+        waiting = _waiting.enqueue(task, [3], {"b": 4}, using=DB)
 
         generated = {"id", "status", "enqueued_at"}
         columns = [
@@ -144,7 +151,7 @@ class TestEnqueue:
             OxTask.objects.filter(pk=waiting.id).values(*columns).get()
             == OxTask.objects.filter(pk=ready.id).values(*columns).get()
         )
-        assert OxTask.objects.get(pk=ready.id).status == OxTask.Status.READY
+        assert OxTask.objects.get(pk=ready.id).status == READY
         assert OxTask.objects.get(pk=waiting.id).status == WAITING
         assert (waiting.task, waiting.args, waiting.kwargs, waiting.backend) == (
             ready.task,
@@ -175,7 +182,7 @@ class TestEnqueue:
             "immediate": {"BACKEND": IMMEDIATE_BACKEND_PATH},
         }
         with pytest.raises(TypeError, match="not an OxBackend"):
-            _waiting.enqueue(add.using(backend="immediate"), [1, 2], {})
+            _waiting.enqueue(add.using(backend="immediate"), [1, 2], {}, using=DB)
         assert not OxTask.objects.exists()
 
 
@@ -186,50 +193,100 @@ class TestEnqueue:
 class TestRelease:
     def test_release_moves_a_waiting_row_to_ready_and_keeps_its_epoch(self):
         row = held()
-        assert _waiting.release(row.pk) is True
+        assert _waiting.release(row.pk, lease_epoch=0, using=DB) is True
         after = current(row)
-        assert after.status == OxTask.Status.READY
+        assert after.status == READY
         assert after.lease_epoch == row.lease_epoch
         assert after.run_after is not None
-        assert _waiting.release(row.pk) is False
+        assert _waiting.release(row.pk, lease_epoch=0, using=DB) is False
 
     @pytest.mark.parametrize(
         "status", [status for status in OxTask.Status if status != WAITING]
     )
     def test_release_moves_only_waiting_rows(self, status):
         row = a_row(status, lease_epoch=3)
-        assert _waiting.release(row.pk) is False
-        assert _waiting.release(row.pk, lease_epoch=3) is False
-        assert _waiting.release_many([row.pk]) == (0, 1)
+        assert _waiting.release(row.pk, lease_epoch=3, using=DB) is False
+        assert _waiting.release_many([(row.pk, 3)], using=DB) == (0, 1)
         after = current(row)
         assert (after.status, after.run_after, after.lease_epoch) == (status, None, 3)
 
     def test_a_missing_or_malformed_id_moves_nothing(self):
         row = held()
-        assert _waiting.release(uuid.uuid4()) is False
-        assert _waiting.release("not-a-uuid") is False
+        assert _waiting.release(uuid.uuid4(), lease_epoch=0, using=DB) is False
+        assert _waiting.release("not-a-uuid", lease_epoch=0, using=DB) is False
         # Counted as django_ox.actions counts: duplicates once, malformed skipped.
         assert _waiting.release_many(
-            [row.pk, str(row.pk), "not-a-uuid", uuid.uuid4()]
+            [(row.pk, 0), (str(row.pk), 0), ("not-a-uuid", 0), (uuid.uuid4(), 0)],
+            using=DB,
         ) == (1, 2)
-        assert _waiting.release_many([]) == (0, 0)
+        assert _waiting.release_many([], using=DB) == (0, 0)
+
+    def test_there_is_no_unpinned_release(self):
+        """
+        A release that matched on status alone could move a row that was
+        cancelled and revived after its caller read it. Every release names
+        the epoch its caller read.
+        """
+        row = held()
+        with pytest.raises(TypeError, match="lease_epoch"):
+            _waiting.release(row.pk, using=DB)
+        with pytest.raises(TypeError):
+            _waiting.release_many([row.pk], using=DB)
+        assert (current(row).status, current(row).run_after) == (WAITING, None)
+
+    @pytest.mark.parametrize("bulk", [False, True], ids=["release", "release_many"])
+    def test_a_release_decided_before_a_cancel_and_revive_changes_nothing(self, bulk):
+        """
+        The caller reads the row at epoch 7 and decides to release it. Before
+        that release lands, the row is cancelled at 7 and revived, which puts
+        it back to WAITING at 8 for a decision nobody has made yet. The release
+        decided at 7 matches nothing.
+        """
+        row = held()
+        OxTask.objects.filter(pk=row.pk).update(lease_epoch=7)
+        decided_at = current(row).lease_epoch
+        assert decided_at == 7
+
+        assert _waiting.cancel_many([(row.pk, 7)], using=DB) == 1
+        assert _waiting.revive_many([(row.pk, 7)], using=DB) == {
+            row.pk: _waiting.Revival.REVIVED
+        }
+        assert (current(row).status, current(row).lease_epoch) == (WAITING, 8)
+
+        if bulk:
+            assert _waiting.release_many([(row.pk, decided_at)], using=DB) == (0, 1)
+        else:
+            assert _waiting.release(row.pk, lease_epoch=decided_at, using=DB) is False
+        after = current(row)
+        assert (after.status, after.lease_epoch, after.run_after) == (WAITING, 8, None)
+
+        # A release decided from the revived row still moves it.
+        if bulk:
+            assert _waiting.release_many([(row.pk, 8)], using=DB) == (1, 0)
+        else:
+            assert _waiting.release(row.pk, lease_epoch=8, using=DB) is True
+        assert current(row).status == READY
 
     def test_the_epoch_pin_refuses_a_moved_row(self):
         row = held()
         OxTask.objects.filter(pk=row.pk).update(lease_epoch=5)
-        assert _waiting.release(row.pk, lease_epoch=4) is False
+        assert _waiting.release(row.pk, lease_epoch=4, using=DB) is False
         assert current(row).status == WAITING
-        assert _waiting.release(row.pk, lease_epoch=5) is True
-        assert current(row).status == OxTask.Status.READY
+        assert _waiting.release(row.pk, lease_epoch=5, using=DB) is True
+        assert current(row).status == READY
 
         other = held()
         OxTask.objects.filter(pk=other.pk).update(lease_epoch=5)
-        assert _waiting.cancel_many([(other.pk, 4)]) == 0
+        assert _waiting.cancel_many([(other.pk, 4)], using=DB) == 0
         assert current(other).status == WAITING
-        assert _waiting.cancel_many([(other.pk, 5)]) == 1
-        assert _waiting.revive_many([(other.pk, 4)]) == 0
-        assert current(other).status == OxTask.Status.DISCARDED
-        assert _waiting.revive_many([(other.pk, 5)]) == 1
+        assert _waiting.cancel_many([(other.pk, 5)], using=DB) == 1
+        assert _waiting.revive_many([(other.pk, 4)], using=DB) == {
+            other.pk: _waiting.Revival.WRONG_STATUS_OR_EPOCH
+        }
+        assert current(other).status == DISCARDED
+        assert _waiting.revive_many([(other.pk, 5)], using=DB) == {
+            other.pk: _waiting.Revival.REVIVED
+        }
         assert (current(other).status, current(other).lease_epoch) == (WAITING, 6)
 
     @pytest.mark.parametrize("bulk", [False, True], ids=["release", "release_many"])
@@ -242,10 +299,14 @@ class TestRelease:
         assert current(past).run_after == earlier
 
         before = timezone.now()
+        rows = (unset, future, past)
         if bulk:
-            assert _waiting.release_many([unset.pk, future.pk, past.pk]) == (3, 0)
+            pinned = [(row.pk, 0) for row in rows]
+            assert _waiting.release_many(pinned, using=DB) == (3, 0)
         else:
-            assert all(_waiting.release(row.pk) for row in (unset, future, past))
+            assert all(
+                _waiting.release(row.pk, lease_epoch=0, using=DB) for row in rows
+            )
         after = timezone.now()
 
         assert current(future).run_after == later
@@ -261,11 +322,11 @@ class TestCancelAndRevive:
     @pytest.mark.parametrize("status", list(OxTask.Status))
     def test_cancel_closes_only_ready_and_waiting_rows(self, status):
         row = a_row(status, lease_epoch=3, attempts=1, worker_ids=["w"])
-        moved = _waiting.cancel_many([(row.pk, 3)])
+        moved = _waiting.cancel_many([(row.pk, 3)], using=DB)
         after = current(row)
-        if status in (OxTask.Status.READY, WAITING):
+        if status in (READY, WAITING):
             assert moved == 1
-            assert after.status == OxTask.Status.DISCARDED
+            assert after.status == DISCARDED
             assert after.finished_at is not None
             assert (after.lease_epoch, after.attempts, after.worker_ids) == (
                 3,
@@ -293,17 +354,44 @@ class TestCancelAndRevive:
             run_after=later,
             finished_at=timezone.now(),
         )
-        moved = _waiting.revive_many([(row.pk, 3)])
+        results = _waiting.revive_many([(row.pk, 3)], using=DB)
         after = current(row)
-        if status == OxTask.Status.DISCARDED:
-            assert moved == 1
+        if status == DISCARDED:
+            assert results == {row.pk: _waiting.Revival.REVIVED}
             assert after.status == WAITING
             assert after.lease_epoch == 4
             assert after.finished_at is None
             assert (after.attempts, after.errors, after.run_after) == (2, errors, later)
         else:
-            assert moved == 0
+            assert results == {row.pk: _waiting.Revival.WRONG_STATUS_OR_EPOCH}
             assert (after.status, after.lease_epoch) == (status, 3)
+
+    def test_revive_reports_a_row_pruned_after_its_cancel_as_not_found(self):
+        """
+        ox_prune deletes DISCARDED rows, so a cancelled task can be gone before
+        anything revives it. Reviving it has nothing to move, and the result
+        says the row is not there instead of leaving it out.
+        """
+        pruned, kept, never_cancelled = held(), held(), held()
+        assert _waiting.cancel_many([(pruned.pk, 0)], using=DB) == 1
+        out = StringIO()
+        call_command("ox_prune", "--older-than=0s", stdout=out)
+        assert "Deleted 1 SUCCESSFUL/DISCARDED task row(s)" in out.getvalue()
+        assert not OxTask.objects.filter(pk=pruned.pk).exists()
+
+        assert _waiting.cancel_many([(kept.pk, 0)], using=DB) == 1
+        results = _waiting.revive_many(
+            [(pruned.pk, 0), (kept.pk, 0), (never_cancelled.pk, 0)], using=DB
+        )
+        assert results == {
+            pruned.pk: _waiting.Revival.NOT_FOUND,
+            kept.pk: _waiting.Revival.REVIVED,
+            never_cancelled.pk: _waiting.Revival.WRONG_STATUS_OR_EPOCH,
+        }
+        assert list(results) == sorted(results)
+        assert (current(kept).status, current(kept).lease_epoch) == (WAITING, 1)
+        untouched = current(never_cancelled)
+        assert (untouched.status, untouched.lease_epoch) == (WAITING, 0)
 
     def test_each_row_is_pinned_to_its_own_epoch(self):
         rows = [held() for _ in range(4)]
@@ -311,22 +399,34 @@ class TestCancelAndRevive:
             OxTask.objects.filter(pk=row.pk).update(lease_epoch=epoch)
         # The second row is named with an epoch it no longer has.
         claimed = [(rows[0].pk, 0), (rows[1].pk, 1), (rows[2].pk, 1), (rows[3].pk, 2)]
-        assert _waiting.cancel_many(claimed) == 3
+        assert _waiting.cancel_many(claimed, using=DB) == 3
         assert [current(row).status for row in rows] == [
-            OxTask.Status.DISCARDED,
+            DISCARDED,
             WAITING,
-            OxTask.Status.DISCARDED,
-            OxTask.Status.DISCARDED,
+            DISCARDED,
+            DISCARDED,
         ]
-        assert _waiting.revive_many([(rows[0].pk, 0), (rows[2].pk, 1)]) == 2
+        results = _waiting.revive_many([(rows[0].pk, 0), (rows[2].pk, 1)], using=DB)
+        assert results == {
+            rows[0].pk: _waiting.Revival.REVIVED,
+            rows[2].pk: _waiting.Revival.REVIVED,
+        }
         assert [current(row).lease_epoch for row in rows] == [1, 2, 2, 2]
 
     def test_a_malformed_id_in_a_pinned_form_moves_nothing(self):
         row = held()
-        assert _waiting.cancel_many([("not-a-uuid", 0), (uuid.uuid4(), 0)]) == 0
-        assert _waiting.revive_many([("not-a-uuid", 0)]) == 0
-        assert _waiting.cancel_many([]) == 0
+        malformed = [("not-a-uuid", 0), (uuid.uuid4(), 0)]
+        assert _waiting.cancel_many(malformed, using=DB) == 0
+        assert _waiting.cancel_many([], using=DB) == 0
+        assert _waiting.revive_many([], using=DB) == {}
         assert current(row).status == WAITING
+
+        # revive_many reports on every row it is given, and a malformed id
+        # names no row to report on, so it refuses the call before moving any.
+        assert _waiting.cancel_many([(row.pk, 0)], using=DB) == 1
+        with pytest.raises(ValueError, match="not-a-uuid"):
+            _waiting.revive_many([(row.pk, 0), ("not-a-uuid", 0)], using=DB)
+        assert current(row).status == DISCARDED
 
     def test_revive_bumps_the_epoch_and_fences_a_straggler(self, worker):
         add.enqueue(1, 2)
@@ -336,7 +436,8 @@ class TestCancelAndRevive:
         assert current(stale).status == OxTask.Status.LOST
         assert actions.discard(stale.pk) is True
 
-        assert _waiting.revive_many([(stale.pk, stale.lease_epoch)]) == 1
+        results = _waiting.revive_many([(stale.pk, stale.lease_epoch)], using=DB)
+        assert results == {stale.pk: _waiting.Revival.REVIVED}
         revived = current(stale)
         assert (revived.status, revived.lease_epoch) == (
             WAITING,
@@ -347,10 +448,15 @@ class TestCancelAndRevive:
         status = OxTask.Status.SUCCESSFUL
         assert worker._write_outcome(stale, status=status, **finish) is False
         # A decision made from a read taken before the revival misses too.
-        assert _waiting.cancel_many([(stale.pk, stale.lease_epoch)]) == 0
-        assert _waiting.release(stale.pk, lease_epoch=stale.lease_epoch) is False
+        assert _waiting.cancel_many([(stale.pk, stale.lease_epoch)], using=DB) == 0
+        assert (
+            _waiting.release(stale.pk, lease_epoch=stale.lease_epoch, using=DB) is False
+        )
 
-        assert _waiting.release(stale.pk, lease_epoch=revived.lease_epoch) is True
+        assert (
+            _waiting.release(stale.pk, lease_epoch=revived.lease_epoch, using=DB)
+            is True
+        )
         claimed = worker.claim_one()
         assert claimed.pk == stale.pk
         assert claimed.lease_epoch == revived.lease_epoch + 1
@@ -364,17 +470,39 @@ BULK = ["release_many", "cancel_many", "revive_many"]
 
 
 def run_bulk(helper, rows):
-    if helper == "release_many":
-        return _waiting.release_many([row.pk for row in rows])
     pinned = [(row.pk, current(row).lease_epoch) for row in rows]
-    return getattr(_waiting, helper)(pinned)
+    return getattr(_waiting, helper)(pinned, using=DB)
 
 
 def rows_for(helper, count):
     rows = [held() for _ in range(count)]
     if helper == "revive_many":
-        _waiting.cancel_many([(row.pk, row.lease_epoch) for row in rows])
+        _waiting.cancel_many([(row.pk, row.lease_epoch) for row in rows], using=DB)
     return rows
+
+
+def all_moved(helper, rows):
+    """What a bulk helper returns when every row it was given moved."""
+    if helper == "release_many":
+        return (len(rows), 0)
+    if helper == "revive_many":
+        return {row.pk: _waiting.Revival.REVIVED for row in rows}
+    return len(rows)
+
+
+def update_that_fails_second(monkeypatch):
+    """Patch QuerySet.update so its second call raises. Returns the calls."""
+    real_update = QuerySet.update
+    calls = []
+
+    def update(self, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 2:
+            raise DatabaseError("the second chunk fails")
+        return real_update(self, **kwargs)
+
+    monkeypatch.setattr(QuerySet, "update", update)
+    return calls
 
 
 UUID_TEXT = re.compile(
@@ -384,25 +512,18 @@ UUID_TEXT = re.compile(
 
 @pytest.mark.django_db
 class TestBulk:
-    @pytest.mark.parametrize("helper", BULK)
-    def test_a_bulk_move_that_fails_part_way_moves_nothing(self, helper, monkeypatch):
+    @pytest.mark.parametrize("helper", ["cancel_many", "revive_many"])
+    def test_a_cancel_or_revive_that_fails_part_way_moves_nothing(
+        self, helper, monkeypatch
+    ):
         monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
         rows = rows_for(helper, 5)
         before = [current(row).status for row in rows]
 
-        real_update = QuerySet.update
-        calls = []
-
-        def update_that_fails_second(self, **kwargs):
-            calls.append(kwargs)
-            if len(calls) == 2:
-                raise DatabaseError("the second chunk fails")
-            return real_update(self, **kwargs)
-
-        monkeypatch.setattr(QuerySet, "update", update_that_fails_second)
+        calls = update_that_fails_second(monkeypatch)
         with pytest.raises(DatabaseError, match="second chunk"):
             run_bulk(helper, rows)
-        monkeypatch.setattr(QuerySet, "update", real_update)
+        monkeypatch.undo()
 
         assert len(calls) == 2
         assert [current(row).status for row in rows] == before
@@ -411,17 +532,15 @@ class TestBulk:
     def test_bulk_moves_lock_in_primary_key_order(self, helper, monkeypatch):
         monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
         rows = rows_for(helper, 5)
-        if helper != "release_many":
-            # Interleaved epochs, so ordering by epoch would break key order.
-            for index, row in enumerate(sorted(rows, key=lambda r: r.pk)):
-                OxTask.objects.filter(pk=row.pk).update(lease_epoch=index % 2)
+        # Interleaved epochs, so ordering by epoch would break key order.
+        for index, row in enumerate(sorted(rows, key=lambda r: r.pk)):
+            OxTask.objects.filter(pk=row.pk).update(lease_epoch=index % 2)
         given = sorted(rows, key=lambda r: r.pk, reverse=True)
         given = given[1::2] + given[::2]
 
         with CaptureQueriesContext(connection) as ctx:
             moved = run_bulk(helper, given)
-        expected_moved = (5, 0) if helper == "release_many" else 5
-        assert moved == expected_moved
+        assert moved == all_moved(helper, rows)
 
         statements = []
         for query in ctx.captured_queries:
@@ -438,32 +557,74 @@ class TestBulk:
         assert issued == sorted(row.pk for row in rows)
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "ambient", [False, True], ids=["autocommit", "in-the-callers-transaction"]
+)
+def test_release_many_commits_each_chunk_on_its_own(ambient, monkeypatch):
+    """
+    A large release is not one long transaction. Outside a transaction each
+    chunk commits by itself, so a failure in the second leaves the first
+    released and the rest WAITING, for a later release to finish. Inside the
+    caller's transaction the chunks commit or roll back with it.
+    """
+    monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
+    rows = sorted((held() for _ in range(5)), key=lambda row: row.pk)
+    pinned = [(row.pk, 0) for row in reversed(rows)]
+
+    calls = update_that_fails_second(monkeypatch)
+    with pytest.raises(DatabaseError, match="second chunk"):
+        if ambient:
+            with transaction.atomic(using=DB):
+                _waiting.release_many(pinned, using=DB)
+        else:
+            _waiting.release_many(pinned, using=DB)
+    monkeypatch.undo()
+
+    assert len(calls) == 2
+    statuses = [current(row).status for row in rows]
+    if ambient:
+        assert statuses == [WAITING] * 5
+    else:
+        assert statuses == [READY, READY, WAITING, WAITING, WAITING]
+
+
 # -- the database a move is written to ----------------------------------------
 
-READY = OxTask.Status.READY
-DISCARDED = OxTask.Status.DISCARDED
-
 MOVES = {
-    # helper: (status before, the call, what it returns when it moved, status after)
-    "release": (WAITING, lambda pk, kw: _waiting.release(pk, **kw), True, READY),
+    # helper: (status before, the call, what it returns when it moved, after)
+    "release": (
+        WAITING,
+        lambda pk, alias: _waiting.release(pk, lease_epoch=0, using=alias),
+        lambda pk: True,
+        READY,
+    ),
     "release_many": (
         WAITING,
-        lambda pk, kw: _waiting.release_many([pk], **kw),
-        (1, 0),
+        lambda pk, alias: _waiting.release_many([(pk, 0)], using=alias),
+        lambda pk: (1, 0),
         READY,
     ),
     "cancel_many": (
         WAITING,
-        lambda pk, kw: _waiting.cancel_many([(pk, 0)], **kw),
-        1,
+        lambda pk, alias: _waiting.cancel_many([(pk, 0)], using=alias),
+        lambda pk: 1,
         DISCARDED,
     ),
     "revive_many": (
         DISCARDED,
-        lambda pk, kw: _waiting.revive_many([(pk, 0)], **kw),
-        1,
+        lambda pk, alias: _waiting.revive_many([(pk, 0)], using=alias),
+        lambda pk: {pk: _waiting.Revival.REVIVED},
         WAITING,
     ),
+}
+
+WITHOUT_USING = {
+    "enqueue": lambda pk: _waiting.enqueue(add, [1, 2], {}),
+    "release": lambda pk: _waiting.release(pk, lease_epoch=0),
+    "release_many": lambda pk: _waiting.release_many([(pk, 0)]),
+    "cancel_many": lambda pk: _waiting.cancel_many([(pk, 0)]),
+    "revive_many": lambda pk: _waiting.revive_many([(pk, 0)]),
 }
 
 
@@ -475,29 +636,57 @@ class TestTheDatabaseAMoveIsWrittenTo:
     failing to find one.
     """
 
-    @pytest.fixture(params=["using", "router"])
-    def to_alt(self, request, settings):
-        """The keyword arguments that send a helper's write to ALT."""
-        if request.param == "router":
-            settings.DATABASE_ROUTERS = [_PrimaryAndReplica()]
-            return {}
-        return {"using": ALT}
-
     @pytest.mark.parametrize("helper", list(MOVES))
-    def test_a_move_is_written_to_the_database_it_names(self, helper, to_alt):
+    def test_a_move_is_written_to_the_database_it_names(self, helper):
         before, move, moved, after = MOVES[helper]
         pk = uuid.uuid4()
         a_row(before, pk=pk)
         a_row(before, pk=pk, using=ALT)
 
-        assert move(pk, to_alt) == moved
+        assert move(pk, ALT) == moved(pk)
         assert OxTask.objects.using(ALT).get(pk=pk).status == after
-        assert OxTask.objects.using("default").get(pk=pk).status == before
+        assert OxTask.objects.using(DB).get(pk=pk).status == before
 
-    def test_enqueue_inserts_into_the_database_it_names(self, to_alt):
-        result = _waiting.enqueue(add, [1, 2], {}, **to_alt)
+    def test_enqueue_inserts_into_the_database_it_names(self):
+        result = _waiting.enqueue(add, [1, 2], {}, using=ALT)
         assert OxTask.objects.using(ALT).get(pk=result.id).status == WAITING
-        assert not OxTask.objects.using("default").exists()
+        assert not OxTask.objects.using(DB).exists()
+
+    def test_a_move_through_another_database_changes_nothing_and_says_so(self):
+        """
+        A task enqueued on one database is not there to move through another.
+        Each helper says so in what it returns, and the row stays WAITING on
+        the database it was enqueued on.
+        """
+        pk = uuid.UUID(_waiting.enqueue(add, [1, 2], {}, using=ALT).id)
+
+        assert _waiting.release(pk, lease_epoch=0, using=DB) is False
+        assert _waiting.release_many([(pk, 0)], using=DB) == (0, 1)
+        assert _waiting.cancel_many([(pk, 0)], using=DB) == 0
+        assert _waiting.revive_many([(pk, 0)], using=DB) == {
+            pk: _waiting.Revival.NOT_FOUND
+        }
+        row = OxTask.objects.using(ALT).get(pk=pk)
+        assert (row.status, row.lease_epoch, row.run_after) == (WAITING, 0, None)
+        assert not OxTask.objects.using(DB).exists()
+
+        assert _waiting.release(pk, lease_epoch=0, using=ALT) is True
+        assert OxTask.objects.using(ALT).get(pk=pk).status == READY
+
+    @pytest.mark.parametrize("helper", list(WITHOUT_USING))
+    def test_every_helper_needs_its_database_named(self, helper):
+        """
+        No helper falls back to a router, which could send a release to
+        another database than the one its task was enqueued on.
+        """
+        pk = uuid.uuid4()
+        a_row(WAITING, pk=pk)
+        with pytest.raises(TypeError, match="using"):
+            WITHOUT_USING[helper](pk)
+        assert list(OxTask.objects.using(DB).values_list("pk", "status")) == [
+            (pk, WAITING)
+        ]
+        assert not OxTask.objects.using(ALT).exists()
 
 
 def test_the_helpers_send_no_signal(caplog, db):
@@ -512,10 +701,12 @@ def test_the_helpers_send_no_signal(caplog, db):
     try:
         with caplog.at_level(logging.DEBUG, logger="django_ox"):
             first, second, third = (held() for _ in range(3))
-            assert _waiting.release(first.pk)
-            assert _waiting.release_many([second.pk]) == (1, 0)
-            assert _waiting.cancel_many([(third.pk, 0)]) == 1
-            assert _waiting.revive_many([(third.pk, 0)]) == 1
+            assert _waiting.release(first.pk, lease_epoch=0, using=DB)
+            assert _waiting.release_many([(second.pk, 0)], using=DB) == (1, 0)
+            assert _waiting.cancel_many([(third.pk, 0)], using=DB) == 1
+            assert _waiting.revive_many([(third.pk, 0)], using=DB) == {
+                third.pk: _waiting.Revival.REVIVED
+            }
     finally:
         for signal in signals:
             signal.disconnect(receiver)
@@ -664,34 +855,32 @@ def test_only_the_private_helpers_write_waiting():
 EXPECTED_SIGNATURES = {
     "enqueue": (
         "(task: 'Task[P, R]', args: 'Sequence[Any]', kwargs: 'Mapping[str, Any]', "
-        "*, using: 'str | None' = None) -> 'TaskResult[P, R]'"
+        "*, using: 'str') -> 'TaskResult[P, R]'"
     ),
-    "release": (
-        "(task_id: 'TaskId', *, using: 'str | None' = None, "
-        "lease_epoch: 'int | None' = None) -> 'bool'"
-    ),
+    "release": "(task_id: 'TaskId', *, lease_epoch: 'int', using: 'str') -> 'bool'",
     "release_many": (
-        "(task_ids: 'Iterable[TaskId]', *, using: 'str | None' = None) "
-        "-> 'tuple[int, int]'"
+        "(rows: 'Iterable[tuple[TaskId, int]]', *, using: 'str') -> 'tuple[int, int]'"
     ),
-    "cancel_many": (
-        "(rows: 'Iterable[tuple[TaskId, int]]', *, using: 'str | None' = None) -> 'int'"
-    ),
+    "cancel_many": "(rows: 'Iterable[tuple[TaskId, int]]', *, using: 'str') -> 'int'",
     "revive_many": (
-        "(rows: 'Iterable[tuple[TaskId, int]]', *, using: 'str | None' = None) -> 'int'"
+        "(rows: 'Iterable[tuple[TaskId, int]]', *, using: 'str') "
+        "-> 'dict[uuid.UUID, Revival]'"
     ),
 }
 
 
 def test_the_waiting_helpers_keep_their_signatures():
-    import inspect
-
     actual = {
         name: str(inspect.signature(getattr(_waiting, name)))
         for name in EXPECTED_SIGNATURES
     }
     assert actual == EXPECTED_SIGNATURES
     assert _waiting.TaskId == str | uuid.UUID
+    assert {member.name: member.value for member in _waiting.Revival} == {
+        "REVIVED": "revived",
+        "NOT_FOUND": "not found",
+        "WRONG_STATUS_OR_EPOCH": "wrong status or epoch",
+    }
 
 
 def test_the_waiting_helpers_stay_private():
@@ -743,7 +932,7 @@ def test_migration_0008_runs_no_sql():
         assert "(no-op)" in text, text
 
 
-def applied_migrations(alias="default"):
+def applied_migrations(alias=DB):
     recorder = MigrationRecorder(connections[alias])
     return {name for app, name in recorder.applied_migrations() if app == "django_ox"}
 

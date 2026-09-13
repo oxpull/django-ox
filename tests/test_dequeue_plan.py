@@ -141,6 +141,12 @@ def analyze():
             cursor.execute("ANALYZE django_ox_oxtask")
 
 
+def release_one_at_insert():
+    """A task inserted WAITING and released at once, at the epoch it was born with."""
+    result = _waiting.enqueue(add, [1, 2], {}, using=DEFAULT_DB_ALIAS)
+    _waiting.release(result.id, lease_epoch=0, using=DEFAULT_DB_ALIAS)
+
+
 def rows_ahead_of_the_claim(arm, ahead=400, released=50, behind=100):
     """
     `ahead` rows in front of everything runnable in claim order, then
@@ -155,12 +161,12 @@ def rows_ahead_of_the_claim(arm, ahead=400, released=50, behind=100):
     with transaction.atomic():
         for _ in range(ahead):
             if arm == "born-waiting":
-                _waiting.enqueue(urgent, [1, 2], {})
+                _waiting.enqueue(urgent, [1, 2], {}, using=DEFAULT_DB_ALIAS)
             else:
                 later = timezone.now() + timedelta(days=365)
                 urgent.using(run_after=later).enqueue(1, 2)
         for _ in range(released):
-            _waiting.release(_waiting.enqueue(add, [1, 2], {}).id)
+            release_one_at_insert()
     now = timezone.now()
     OxTask.objects.bulk_create(
         [
@@ -321,9 +327,9 @@ def test_a_born_waiting_row_leaves_no_dead_ready_entry(arm, worker):
         with transaction.atomic():
             if arm == "born-waiting":
                 for _ in range(400):
-                    _waiting.enqueue(urgent, [1, 2], {})
+                    _waiting.enqueue(urgent, [1, 2], {}, using=DEFAULT_DB_ALIAS)
                 for _ in range(50):
-                    _waiting.release(_waiting.enqueue(add, [1, 2], {}).id)
+                    release_one_at_insert()
             else:
                 for _ in range(400):
                     urgent.enqueue(1, 2)

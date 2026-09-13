@@ -41,9 +41,9 @@ export names this page does not list; those names are not public.
   enforces the deadline with, so the two can differ by the size of a clock
   correction. `remaining()` is the one the watchdog agrees with.
 - **The metrics module** `django_ox.stats`: `queue_stats`, `ready_count`,
-  `oldest_ready_age`, `throughput`, `failure_rate`, `last_claim_age`, the
-  `QueueStats` dataclass, and `DEFAULT_WINDOW`, the trailing window the
-  rate functions default to.
+  `oldest_ready_age`, `throughput`, `failure_rate`, `last_claim_age`,
+  `waiting_counts`, the `QueueStats` dataclass, and `DEFAULT_WINDOW`, the
+  trailing window the rate functions default to.
 - **The Prometheus surface**: `django_ox.metrics.render_prometheus`,
   `render_openmetrics` and `collector`, the view `django_ox.views.metrics`,
   the `django_ox.urls` module with its `metrics` route name, and the metric
@@ -101,10 +101,8 @@ django-ox follows [Semantic Versioning](https://semver.org/):
 - **Minor releases add, they do not break.** Patch releases are bug fixes
   only.
 
-A minor release may add a status value. Code that reads `OxTask.status`
-should treat a value it does not know as unfinished. The changelog names each
-new value and says how claims, retries, discards, pruning and the stats
-treat it.
+A minor release may add a status value. The release notes name the new
+value and say how it reads through `django.tasks`.
 
 Pin accordingly: `django-ox~=1.2.0` accepts patch releases only;
 `django-ox~=1.2` accepts the current major line.

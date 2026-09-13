@@ -268,7 +268,7 @@ def test_every_status_maps_to_a_django_tasks_status():
 def test_a_waiting_result_is_ready_and_unfinished(worker):
     from asgiref.sync import async_to_sync
 
-    result = _waiting.enqueue(add, [2, 3], {})
+    result = _waiting.enqueue(add, [2, 3], {}, using="default")
     fetched = [add.get_result(result.id), async_to_sync(add.aget_result)(result.id)]
     for reading in fetched:
         assert reading.status == TaskResultStatus.READY
@@ -278,7 +278,7 @@ def test_a_waiting_result_is_ready_and_unfinished(worker):
     assert result.status == TaskResultStatus.READY
     assert worker.run_once() is False
 
-    assert _waiting.release(result.id) is True
+    assert _waiting.release(result.id, lease_epoch=0, using="default") is True
     assert worker.run_once() is True
     result.refresh()
     assert result.status == TaskResultStatus.SUCCESSFUL
@@ -286,15 +286,21 @@ def test_a_waiting_result_is_ready_and_unfinished(worker):
     assert result.return_value == 5
 
 
-def test_an_unknown_stored_status_reads_as_ready():
+def test_an_unknown_stored_status_raises_as_it_did_before():
+    """
+    WAITING is the one status of django-ox's own that reads as READY. Any
+    other value this version does not know raises, as it did in 1.2.0. READY
+    would tell a loop polling a task that has in fact finished to keep going.
+    """
     from asgiref.sync import async_to_sync
 
     result = add.enqueue(1, 2)
     OxTask.objects.filter(pk=result.id).update(status="PAUSED")
 
-    fetched = default_task_backend.get_result(result.id)
-    assert fetched.status == TaskResultStatus.READY
-    assert not fetched.is_finished
-    assert public_status("PAUSED") == TaskResultStatus.READY
-    async_to_sync(result.arefresh)()
-    assert result.status == TaskResultStatus.READY
+    unknown = "'PAUSED' is not a valid TaskResultStatus"
+    with pytest.raises(ValueError, match=unknown):
+        public_status("PAUSED")
+    with pytest.raises(ValueError, match=unknown):
+        default_task_backend.get_result(result.id)
+    with pytest.raises(ValueError, match=unknown):
+        async_to_sync(result.arefresh)()

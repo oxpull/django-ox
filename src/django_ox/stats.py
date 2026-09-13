@@ -8,8 +8,10 @@ health check, or a metrics exporter, on any database django-ox supports.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 from django.db.models import Count, Max, Min, Q, QuerySet
 from django.db.models.functions import Coalesce
@@ -26,6 +28,7 @@ __all__ = [
     "queue_stats",
     "ready_count",
     "throughput",
+    "waiting_counts",
 ]
 
 DEFAULT_WINDOW = timedelta(minutes=5)
@@ -45,9 +48,8 @@ class QueueStats:
     discarded counts rows closed without running. Settled, not backlog, and
     not an outcome of any attempt.
 
-    waiting counts rows held back from every worker until something releases
-    them. django-ox never puts a row there by itself. Not settled and not
-    backlog: ready_count() and oldest_ready_age() leave them out.
+    WAITING rows are in no column. waiting_counts() reports them, so the
+    fields here stay the ones code already unpacks and compares.
     """
 
     queue_name: str
@@ -57,7 +59,6 @@ class QueueStats:
     successful: int
     lost: int = 0
     discarded: int = 0
-    waiting: int = 0
 
 
 def _for_queue(queryset: QuerySet[OxTask], queue_name: str | None) -> QuerySet[OxTask]:
@@ -91,7 +92,34 @@ def queue_stats() -> list[QueueStats]:
     rows, ordered by queue name. Unlike ready_count(), the ready column
     counts every READY row including tasks deferred to the future.
     """
+    return [
+        QueueStats(**{name: count for name, count in row.items() if name != "waiting"})
+        for row in _status_counts()
+    ]
+
+
+def waiting_counts() -> dict[str, int]:
+    """
+    WAITING rows per queue, for each queue that has any.
+
+    A waiting task is held back from every worker until something releases
+    it. django-ox never puts a task there by itself. It is not settled, and
+    it is not backlog: ready_count() and oldest_ready_age() leave it out.
+    """
     rows = (
+        OxTask.objects.filter(status=OxTask.Status.WAITING)
+        .values("queue_name")
+        .annotate(n=Count("pk"))
+        .order_by()
+    )
+    return {row["queue_name"]: row["n"] for row in rows}
+
+
+def _status_counts() -> list[Mapping[str, Any]]:
+    # Every status per queue in one grouped query, ordered by queue name.
+    # queue_stats() drops the waiting column, and django_ox.metrics reads
+    # every column, so a scrape still costs one query for the counts.
+    return list(
         OxTask.objects.values("queue_name")
         .annotate(
             ready=Count("pk", filter=Q(status=OxTask.Status.READY)),
@@ -104,7 +132,6 @@ def queue_stats() -> list[QueueStats]:
         )
         .order_by("queue_name")
     )
-    return [QueueStats(**row) for row in rows]
 
 
 def ready_count(queue_name: str | None = None) -> int:

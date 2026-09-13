@@ -2445,26 +2445,28 @@ from datetime import timedelta
 from django_ox import stats
 
 stats.queue_stats()
-# [QueueStats(queue_name="default", ready=3, running=1, failed=0, successful=214, lost=0, discarded=0, waiting=0),
-#  QueueStats(queue_name="emails", ready=0, running=0, failed=2, successful=560, lost=0, discarded=0, waiting=0)]
+# [QueueStats(queue_name="default", ready=3, running=1, failed=0, successful=214, lost=0, discarded=0),
+#  QueueStats(queue_name="emails", ready=0, running=0, failed=2, successful=560, lost=0, discarded=0)]
 
 stats.ready_count()  # tasks eligible to run right now
 stats.oldest_ready_age()  # timedelta, or None when no READY task is eligible
 stats.throughput(timedelta(minutes=5))  # terminal outcomes per minute
 stats.failure_rate(timedelta(minutes=5))  # 0.0 to 1.0, or None
 stats.last_claim_age()  # time since a worker last claimed
+stats.waiting_counts()  # WAITING tasks per queue, such as {"default": 4}
 ```
 
 | Function | Returns | Semantics |
 | --- | --- | --- |
-| `queue_stats()` | `list[QueueStats]` | Raw row counts per queue and status (`ready`, `running`, `failed`, `successful`, `lost`, `discarded`, `waiting`), one entry per queue with any rows. The `ready` column counts every READY row, including tasks deferred to a future `run_after`. `lost` counts tasks whose worker stopped reporting with no attempts left; see [the reaper](production.md#the-reaper). `discarded` counts tasks closed without running; see [Retrying and discarding](#retrying-and-discarding). `waiting` counts tasks held back from every worker until something releases them. django-ox never puts a task there by itself, and it is not backlog. |
+| `queue_stats()` | `list[QueueStats]` | Raw row counts per queue and status (`ready`, `running`, `failed`, `successful`, `lost`, `discarded`), one entry per queue with any rows. The `ready` column counts every READY row, including tasks deferred to a future `run_after`. `lost` counts tasks whose worker stopped reporting with no attempts left; see [the reaper](production.md#the-reaper). `discarded` counts tasks closed without running; see [Retrying and discarding](#retrying-and-discarding). A WAITING task is in no column. `waiting_counts()` counts those. |
 | `ready_count()` | `int` | READY tasks eligible to run now, mirroring the worker's dequeue predicate: deferred tasks do not count until `run_after` passes. This is the backlog number. |
 | `oldest_ready_age()` | `timedelta \| None` | Age of the oldest eligible READY task, measured from when it became eligible (`run_after` when set, `enqueued_at` otherwise), so a task deferred by a week does not read as a week of backlog. |
 | `throughput(window)` | `float` | Tasks reaching a terminal state (SUCCESSFUL or FAILED) per minute over the trailing window (default 5 minutes). |
 | `failure_rate(window)` | `float \| None` | Fraction of terminal outcomes in the window that FAILED, or `None` when nothing finished. Retries still pending are not outcomes and do not count. |
 | `last_claim_age()` | `timedelta \| None` | Time since any worker last claimed a task, or `None` if none ever was. This is claim activity, not a heartbeat: idle workers over an empty queue record nothing. |
+| `waiting_counts()` | `dict[str, int]` | WAITING tasks per queue, for each queue that has any. A waiting task is held back from every worker until something releases it. django-ox never puts a task there by itself, and it isn't backlog. |
 
-Every function except `queue_stats()` accepts a `queue_name` keyword to
+Every function except `queue_stats()` and `waiting_counts()` accepts a `queue_name` keyword to
 scope the metric to one queue.
 
 **Alert on two numbers: backlog depth (`ready_count`) and backlog age
@@ -2592,7 +2594,7 @@ Every metric is a gauge, with one sample per queue that has any row:
 
 | Metric | Labels | Value |
 | --- | --- | --- |
-| `django_ox_tasks` | `queue`, `status` | Rows by status, one of `ready`, `running`, `failed`, `successful`, `lost`, `discarded`, `waiting`. The same numbers as `queue_stats()`, so `ready` includes deferred tasks. |
+| `django_ox_tasks` | `queue`, `status` | Rows by status, one of `ready`, `running`, `failed`, `successful`, `lost`, `discarded`, `waiting`. The same numbers as `queue_stats()` and `waiting_counts()`, so `ready` includes deferred tasks. A sum over `status` includes waiting tasks, which aren't backlog. |
 | `django_ox_ready_tasks` | `queue` | `ready_count()`: READY tasks eligible to run now. The backlog number. |
 | `django_ox_oldest_ready_age_seconds` | `queue` | `oldest_ready_age()` in seconds. Absent when no READY task is eligible. |
 | `django_ox_last_claim_age_seconds` | `queue` | `last_claim_age()` in seconds. Absent until a worker has claimed on that queue. |
@@ -2840,8 +2842,10 @@ it in its own `discarded` column, and `ox_prune` deletes discarded rows
 with successful ones.
 
 WAITING is the seventh value. It reads as `READY` through `django.tasks`, so
-`is_finished` is false. Workers never claim it, `ox_prune` never deletes it,
-and retry skips it.
+`is_finished` is false. There, `READY` only means the task hasn't finished.
+It doesn't mean a worker can take it now. `OxTask.status` still says WAITING,
+and `waiting_counts()` counts it. Workers never claim a waiting task,
+`ox_prune` never deletes it, and retry skips it.
 
 ### The admin page
 
@@ -3062,9 +3066,9 @@ export names this page does not list; those names are not public.
   enforces the deadline with, so the two can differ by the size of a clock
   correction. `remaining()` is the one the watchdog agrees with.
 - **The metrics module** `django_ox.stats`: `queue_stats`, `ready_count`,
-  `oldest_ready_age`, `throughput`, `failure_rate`, `last_claim_age`, the
-  `QueueStats` dataclass, and `DEFAULT_WINDOW`, the trailing window the
-  rate functions default to.
+  `oldest_ready_age`, `throughput`, `failure_rate`, `last_claim_age`,
+  `waiting_counts`, the `QueueStats` dataclass, and `DEFAULT_WINDOW`, the
+  trailing window the rate functions default to.
 - **The Prometheus surface**: `django_ox.metrics.render_prometheus`,
   `render_openmetrics` and `collector`, the view `django_ox.views.metrics`,
   the `django_ox.urls` module with its `metrics` route name, and the metric
@@ -3122,10 +3126,8 @@ django-ox follows [Semantic Versioning](https://semver.org/):
 - **Minor releases add, they do not break.** Patch releases are bug fixes
   only.
 
-A minor release may add a status value. Code that reads `OxTask.status`
-should treat a value it does not know as unfinished. The changelog names each
-new value and says how claims, retries, discards, pruning and the stats
-treat it.
+A minor release may add a status value. The release notes name the new
+value and say how it reads through `django.tasks`.
 
 Pin accordingly: `django-ox~=1.2.0` accepts patch releases only;
 `django-ox~=1.2` accepts the current major line.
@@ -3548,26 +3550,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **One migration ships with this release.** `0008_waiting` adds a status
 choice and runs no SQL. django-ox never puts a task into the new status by
-itself. If you use workflows in Oxpull Pro, upgrade every process that uses
-django-ox against that database before you turn on `OPTIONS["WORKFLOWS"]`.
-That means workers, web processes, enqueue-only services and cron jobs.
+itself. An install that doesn't use workflows in Oxpull Pro upgrades and
+rolls back as it always has.
 
 A 1.2 process doesn't know the new status. Its admin shows a waiting task's
 status as `-` and has no Waiting filter. Its `discard`, `discard_many` and
 **Discard selected tasks** action skip waiting rows. Its `queue_stats()`,
 `django_ox_tasks` gauge and `ox_health` don't count them. Its `get_result()`
-and `refresh()` raise `ValueError` on a waiting task.
+and `refresh()` raise `ValueError` on a waiting task. Nothing in 1.2 releases
+one.
 
-Rolling back to 1.2 is not supported once waiting rows exist.
-`migrate django_ox 0007` refuses while any exist.
+**Turning on workflows in Oxpull Pro.** Take these steps for each database
+that holds django-ox's tables.
+
+1. Upgrade every process that uses django-ox against that database to this
+   release. That means workers, web and ASGI processes, enqueue-only
+   services, the reconciler and cron jobs.
+2. Run `migrate django_ox` on that database.
+3. Check your deploy inventory for any process still on 1.2. django-ox
+   can't see which version a process runs.
+4. Turn on `OPTIONS["WORKFLOWS"]`.
+
+**Rolling back to 1.2 after workflows have run.** Take these steps in
+order.
+
+1. Stop creating workflows in every process.
+2. Wait for the requests, jobs and transactions that were already creating
+   one to end.
+3. Let every workflow finish, or cancel it.
+4. Stop every process that could still start, retry or release a workflow
+   task. Keep them stopped until step 6 is done.
+5. On every database alias, run
+   `OxTask.objects.using(alias).filter(status="WAITING").count()`. Each
+   count must be 0.
+6. Run `migrate django_ox 0007 --database alias` for each alias. It refuses
+   while any task on that alias is WAITING.
+7. Deploy 1.2 everywhere.
+
+A backup that holds a WAITING task restores only into this release or a
+later one.
 
 ### Added
 
-- `OxTask.Status.WAITING`, `QueueStats.waiting`, and the `waiting` value of
-  the `status` label on `django_ox_tasks`. A waiting task reads as `READY`
-  through `django.tasks`. Workers never claim it, `ox_prune` never deletes
-  it, retry skips it, and it isn't backlog: `ready_count()`,
-  `oldest_ready_age()` and `ox_health` leave it out.
+- `OxTask.Status.WAITING`, `stats.waiting_counts()`, and the `waiting` value
+  of the `status` label on `django_ox_tasks`. A waiting task reads as `READY`
+  through `django.tasks`, which means it hasn't finished, not that a worker
+  can take it. Workers never claim it, `ox_prune` never deletes it, and retry
+  skips it. It isn't backlog, so `ready_count()`, `oldest_ready_age()` and
+  `ox_health` leave it out. `QueueStats` keeps its fields, and none of them
+  counts a waiting task.
 - `ox_prune --queue` restricts pruning to one queue's task rows, matching
   `ox_health --queue`, so queues with different retention needs can each
   be pruned with their own `--older-than`. Old schedule ticks are still
@@ -3580,8 +3611,8 @@ Rolling back to 1.2 is not supported once waiting rows exist.
 
 - `discard` and `discard_many` accept WAITING, and `DISCARDABLE_STATUSES`
   includes it.
-- A result whose stored status this version doesn't know reads as READY
-  instead of raising.
+- `django_ox_tasks` has a `waiting` sample for every queue, so a sum over its
+  `status` label now counts waiting tasks too.
 - `ox_health --max-age` and `--worker-timeout` accept the duration forms
   `ox_prune --older-than` takes (`7d`, `24h`, `90m`, `45s`). A plain number
   still means seconds, fractions included.

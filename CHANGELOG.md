@@ -9,26 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **One migration ships with this release.** `0008_waiting` adds a status
 choice and runs no SQL. django-ox never puts a task into the new status by
-itself. If you use workflows in Oxpull Pro, upgrade every process that uses
-django-ox against that database before you turn on `OPTIONS["WORKFLOWS"]`.
-That means workers, web processes, enqueue-only services and cron jobs.
+itself. An install that doesn't use workflows in Oxpull Pro upgrades and
+rolls back as it always has.
 
 A 1.2 process doesn't know the new status. Its admin shows a waiting task's
 status as `-` and has no Waiting filter. Its `discard`, `discard_many` and
 **Discard selected tasks** action skip waiting rows. Its `queue_stats()`,
 `django_ox_tasks` gauge and `ox_health` don't count them. Its `get_result()`
-and `refresh()` raise `ValueError` on a waiting task.
+and `refresh()` raise `ValueError` on a waiting task. Nothing in 1.2 releases
+one.
 
-Rolling back to 1.2 is not supported once waiting rows exist.
-`migrate django_ox 0007` refuses while any exist.
+**Turning on workflows in Oxpull Pro.** Take these steps for each database
+that holds django-ox's tables.
+
+1. Upgrade every process that uses django-ox against that database to this
+   release. That means workers, web and ASGI processes, enqueue-only
+   services, the reconciler and cron jobs.
+2. Run `migrate django_ox` on that database.
+3. Check your deploy inventory for any process still on 1.2. django-ox
+   can't see which version a process runs.
+4. Turn on `OPTIONS["WORKFLOWS"]`.
+
+**Rolling back to 1.2 after workflows have run.** Take these steps in
+order.
+
+1. Stop creating workflows in every process.
+2. Wait for the requests, jobs and transactions that were already creating
+   one to end.
+3. Let every workflow finish, or cancel it.
+4. Stop every process that could still start, retry or release a workflow
+   task. Keep them stopped until step 6 is done.
+5. On every database alias, run
+   `OxTask.objects.using(alias).filter(status="WAITING").count()`. Each
+   count must be 0.
+6. Run `migrate django_ox 0007 --database alias` for each alias. It refuses
+   while any task on that alias is WAITING.
+7. Deploy 1.2 everywhere.
+
+A backup that holds a WAITING task restores only into this release or a
+later one.
 
 ### Added
 
-- `OxTask.Status.WAITING`, `QueueStats.waiting`, and the `waiting` value of
-  the `status` label on `django_ox_tasks`. A waiting task reads as `READY`
-  through `django.tasks`. Workers never claim it, `ox_prune` never deletes
-  it, retry skips it, and it isn't backlog: `ready_count()`,
-  `oldest_ready_age()` and `ox_health` leave it out.
+- `OxTask.Status.WAITING`, `stats.waiting_counts()`, and the `waiting` value
+  of the `status` label on `django_ox_tasks`. A waiting task reads as `READY`
+  through `django.tasks`, which means it hasn't finished, not that a worker
+  can take it. Workers never claim it, `ox_prune` never deletes it, and retry
+  skips it. It isn't backlog, so `ready_count()`, `oldest_ready_age()` and
+  `ox_health` leave it out. `QueueStats` keeps its fields, and none of them
+  counts a waiting task.
 - `ox_prune --queue` restricts pruning to one queue's task rows, matching
   `ox_health --queue`, so queues with different retention needs can each
   be pruned with their own `--older-than`. Old schedule ticks are still
@@ -41,8 +70,8 @@ Rolling back to 1.2 is not supported once waiting rows exist.
 
 - `discard` and `discard_many` accept WAITING, and `DISCARDABLE_STATUSES`
   includes it.
-- A result whose stored status this version doesn't know reads as READY
-  instead of raising.
+- `django_ox_tasks` has a `waiting` sample for every queue, so a sum over its
+  `status` label now counts waiting tasks too.
 - `ox_health --max-age` and `--worker-timeout` accept the duration forms
   `ox_prune --older-than` takes (`7d`, `24h`, `90m`, `45s`). A plain number
   still means seconds, fractions included.

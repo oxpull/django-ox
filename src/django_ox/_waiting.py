@@ -15,22 +15,30 @@ they are cleaned up, which any older open transaction postpones. A row born
 WAITING has no READY entry to leave behind, and a row released from WAITING
 leaves its dead entries in the WAITING range, which no claim enters.
 
-Every move is one compare-and-set UPDATE on status, and the pinned forms also
-on lease_epoch, so it either moves a row from the state its caller expected or
-does nothing. The bulk forms sort their primary keys and issue their
-statements in that order inside one transaction: an error part-way moves
-nothing, and two callers lock rows in one order. Nothing here sends a
+Every move is one compare-and-set UPDATE on status and lease_epoch, so it
+either moves a row from the state its caller read or does nothing. There is
+no unpinned form. A caller decides from a read, and a row cancelled and
+revived after that read carries a higher epoch, so the stale decision matches
+nothing.
+
+Every function takes the database it writes to, and none falls back to a
+router. A row enqueued on one database is not there to move through another,
+and the return value says nothing moved.
+
+The bulk forms sort their primary keys and issue their statements in that
+order, so two callers lock rows in one order. Nothing here sends a
 django.tasks signal or writes a log event.
 """
 
 from __future__ import annotations
 
+import enum
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
 from typing import Any, cast
 
-from django.db import router, transaction
+from django.db import transaction
 from django.db.models import (
     BigIntegerField,
     Case,
@@ -54,15 +62,27 @@ TaskId = str | uuid.UUID
 _CANCELLABLE = (OxTask.Status.READY, OxTask.Status.WAITING)
 
 
+class Revival(enum.Enum):
+    """What revive_many() did with one row."""
+
+    REVIVED = "revived"
+    # No row with that primary key on the database named. It was never there,
+    # or it was deleted since, the way ox_prune deletes a DISCARDED row.
+    NOT_FOUND = "not found"
+    # The row is there, but it is not DISCARDED at the epoch given with it.
+    WRONG_STATUS_OR_EPOCH = "wrong status or epoch"
+
+
 def enqueue[**P, R](
     task: Task[P, R],
     args: Sequence[Any],
     kwargs: Mapping[str, Any],
     *,
-    using: str | None = None,
+    using: str,
 ) -> TaskResult[P, R]:
     """
-    Insert the row OxBackend.enqueue would insert for this call, as WAITING.
+    Insert the row OxBackend.enqueue would insert for this call, as WAITING,
+    on the database named.
 
     Built by the same OxBackend._row, so every column but status matches, and
     written with one INSERT in the caller's transaction. The result reads READY
@@ -85,16 +105,15 @@ def enqueue[**P, R](
     return cast("TaskResult[P, R]", task_result_from_db(db_task, task=task))
 
 
-def release(
-    task_id: TaskId, *, using: str | None = None, lease_epoch: int | None = None
-) -> bool:
+def release(task_id: TaskId, *, lease_epoch: int, using: str) -> bool:
     """
-    Move one WAITING row to READY. True when it moved.
+    Move one WAITING row to READY if it is still at lease_epoch. True when it
+    moved.
 
-    Keyed on the primary key and on status, plus lease_epoch when the caller
-    decided from an earlier read and passes the epoch it saw. One statement,
-    so there is no gap between checking the row and moving it. The epoch is
-    not bumped: no execution holds a waiting row, and the claim bumps it.
+    lease_epoch is the epoch the caller read when it decided to release. One
+    statement keyed on the primary key, status and that epoch, so there is no
+    gap between checking the row and moving it. The epoch is not bumped: no
+    execution holds a waiting row, and the claim bumps it.
 
     run_after becomes the later of now and its own value, so a task that asked
     to run later still does, and one that did not counts its age from its
@@ -103,52 +122,55 @@ def release(
     pk = actions._pk(task_id)
     if pk is None:
         return False
-    rows = _rows(using).filter(pk=pk, status=OxTask.Status.WAITING)
-    if lease_epoch is not None:
-        rows = rows.filter(lease_epoch=lease_epoch)
+    rows = OxTask.objects.using(using).filter(
+        pk=pk, status=OxTask.Status.WAITING, lease_epoch=lease_epoch
+    )
     return rows.update(**_released(timezone.now())) == 1
 
 
-def release_many(
-    task_ids: Iterable[TaskId], *, using: str | None = None
-) -> tuple[int, int]:
+def release_many(rows: Iterable[tuple[TaskId, int]], *, using: str) -> tuple[int, int]:
     """
-    release() for many rows, one UPDATE per thousand, in one transaction.
+    release() for many rows, each pinned to the epoch given with it.
 
-    Returns (changed, skipped), counted as django_ox.actions counts them:
-    duplicates once, and a row that was not WAITING, not there, or a malformed
-    id is skipped.
+    Returns (changed, skipped), counted as django_ox.actions counts them. An
+    id given twice counts once, with the first epoch given for it. A row that
+    is not WAITING at its epoch, is not there, or has a malformed id is
+    skipped.
+
+    One UPDATE per thousand rows, in primary-key order, and no transaction of
+    its own. Called outside a transaction, each chunk commits by itself, so
+    the call never holds every row's lock at once, and an error part-way
+    leaves the chunks before it released and the rest WAITING for a later
+    release to move. Called inside a transaction, every chunk belongs to that
+    transaction and commits or rolls back with it.
     """
-    ids, malformed = actions._ids(task_ids)
-    ids.sort()
-    alias = _alias(using)
+    pairs, malformed = _pinned(rows)
     released = _released(timezone.now())
     changed = 0
-    with transaction.atomic(using=alias):
-        for chunk in _chunks(ids):
-            changed += (
-                _rows(alias)
-                .filter(pk__in=chunk, status=OxTask.Status.WAITING)
-                .update(**released)
-            )
-    return changed, len(ids) + malformed - changed
+    for chunk in _chunks(pairs):
+        changed += _pinned_rows(using, chunk, (OxTask.Status.WAITING,)).update(
+            **released
+        )
+    skipped = len(pairs) + len({str(task_id) for task_id in malformed}) - changed
+    return changed, skipped
 
 
-def cancel_many(rows: Iterable[tuple[TaskId, int]], *, using: str | None = None) -> int:
+def cancel_many(rows: Iterable[tuple[TaskId, int]], *, using: str) -> int:
     """
     Close READY or WAITING rows without running them, each pinned to the epoch
     given with it. Returns how many moved.
 
     The same write django_ox.actions.discard makes: DISCARDED, finished_at
     stamped, the lock columns cleared, the epoch left alone. Unlike
-    discard_many it never matches a FAILED or LOST row.
+    discard_many it never matches a FAILED or LOST row. One transaction, so
+    an error part-way moves nothing.
     """
-    alias = _alias(using)
+    pairs, _ = _pinned(rows)
     now = timezone.now()
     moved = 0
-    with transaction.atomic(using=alias):
-        for chunk in _chunks(_pinned(rows)):
-            moved += _pinned_rows(alias, chunk, _CANCELLABLE).update(
+    with transaction.atomic(using=using):
+        for chunk in _chunks(pairs):
+            moved += _pinned_rows(using, chunk, _CANCELLABLE).update(
                 status=OxTask.Status.DISCARDED,
                 finished_at=now,
                 locked_by=None,
@@ -158,36 +180,62 @@ def cancel_many(rows: Iterable[tuple[TaskId, int]], *, using: str | None = None)
     return moved
 
 
-def revive_many(rows: Iterable[tuple[TaskId, int]], *, using: str | None = None) -> int:
+def revive_many(
+    rows: Iterable[tuple[TaskId, int]], *, using: str
+) -> dict[uuid.UUID, Revival]:
     """
     Move DISCARDED rows back to WAITING, each pinned to the epoch given with
-    it. Returns how many moved.
+    it. Returns what happened to each row, keyed by primary key, in key order.
+
+    Every row given gets an entry: REVIVED, NOT_FOUND or WRONG_STATUS_OR_EPOCH.
+    ox_prune deletes DISCARDED rows, so a row cancelled long enough ago can be
+    gone, and the caller hears that instead of finding one row fewer in a
+    count. An id given twice gets one entry, decided by the first epoch given
+    for it. A malformed id names no row to report on, so it raises ValueError
+    before anything moves.
 
     The epoch goes up, so a caller still holding a decision made from the
-    discarded row matches nothing. finished_at is cleared; attempts, errors
-    and run_after stay as they were. A revived row always waits: whatever
+    discarded row matches nothing. finished_at is cleared. attempts, errors
+    and run_after stay as they were. A revived row always waits, and whatever
     released it before decides again.
+
+    One transaction, so an error part-way moves nothing. Each chunk's rows
+    are read with a locking read in primary-key order before its UPDATE, so
+    each entry describes the row that UPDATE then moves or leaves.
     """
-    alias = _alias(using)
-    moved = 0
-    with transaction.atomic(using=alias):
-        for chunk in _chunks(_pinned(rows)):
-            moved += _pinned_rows(alias, chunk, (OxTask.Status.DISCARDED,)).update(
-                status=OxTask.Status.WAITING,
-                lease_epoch=F("lease_epoch") + 1,
-                finished_at=None,
-            )
-    return moved
-
-
-def _alias(using: str | None) -> str:
-    # The alias enqueue writes through, so a bulk move's transaction is opened
-    # on the connection its UPDATEs use.
-    return using if using is not None else router.db_for_write(OxTask)
-
-
-def _rows(using: str | None) -> QuerySet[OxTask]:
-    return OxTask.objects.using(_alias(using))
+    pairs, malformed = _pinned(rows)
+    if malformed:
+        raise ValueError(
+            f"{malformed[0]!r} is not a task id, so there is no row to revive "
+            "or to report on."
+        )
+    results: dict[uuid.UUID, Revival] = {}
+    with transaction.atomic(using=using):
+        for chunk in _chunks(pairs):
+            found = {
+                pk: (status, epoch)
+                for pk, status, epoch in OxTask.objects.using(using)
+                .select_for_update()
+                .filter(pk__in=[pk for pk, _ in chunk])
+                .order_by("pk")
+                .values_list("pk", "status", "lease_epoch")
+            }
+            revivable: list[tuple[uuid.UUID, int]] = []
+            for pk, epoch in chunk:
+                if pk not in found:
+                    results[pk] = Revival.NOT_FOUND
+                elif found[pk] != (OxTask.Status.DISCARDED, epoch):
+                    results[pk] = Revival.WRONG_STATUS_OR_EPOCH
+                else:
+                    results[pk] = Revival.REVIVED
+                    revivable.append((pk, epoch))
+            if revivable:
+                _pinned_rows(using, revivable, (OxTask.Status.DISCARDED,)).update(
+                    status=OxTask.Status.WAITING,
+                    lease_epoch=F("lease_epoch") + 1,
+                    finished_at=None,
+                )
+    return results
 
 
 def _released(now: datetime) -> dict[str, Any]:
@@ -208,22 +256,32 @@ def _chunks[T](items: list[T]) -> Iterator[list[T]]:
         yield items[start : start + size]
 
 
-def _pinned(rows: Iterable[tuple[TaskId, int]]) -> list[tuple[uuid.UUID, int]]:
-    """Usable (primary key, epoch) pairs in primary-key order, each key once."""
+def _pinned(
+    rows: Iterable[tuple[TaskId, int]],
+) -> tuple[list[tuple[uuid.UUID, int]], list[TaskId]]:
+    """
+    The usable (primary key, epoch) pairs in primary-key order, each key once
+    with the first epoch given for it, and the ids that are not UUIDs.
+    """
     seen: dict[uuid.UUID, int] = {}
+    malformed: list[TaskId] = []
     for task_id, epoch in rows:
         pk = actions._pk(task_id)
-        if pk is not None:
+        if pk is None:
+            malformed.append(task_id)
+        else:
             seen.setdefault(pk, int(epoch))
-    return sorted(seen.items())
+    return sorted(seen.items()), malformed
 
 
 def _pinned_rows(
-    alias: str,
+    using: str,
     chunk: list[tuple[uuid.UUID, int]],
     statuses: tuple[OxTask.Status, ...],
 ) -> QuerySet[OxTask]:
-    rows = _rows(alias).filter(pk__in=[pk for pk, _ in chunk], status__in=statuses)
+    rows = OxTask.objects.using(using).filter(
+        pk__in=[pk for pk, _ in chunk], status__in=statuses
+    )
     epochs = sorted({epoch for _, epoch in chunk})
     if len(epochs) == 1:
         return rows.filter(lease_epoch=epochs[0])

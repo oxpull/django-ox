@@ -122,7 +122,8 @@ class Command(BaseCommand):
             if not batch:
                 break
             # A row can leave the selection after that read: an operator
-            # retries it, or discards it and its finished_at becomes now.
+            # retries it, or discards it and its finished_at becomes now, or
+            # django_ox._waiting revives a DISCARDED row to WAITING.
             # Django's delete reads the rows again but then deletes by
             # primary key alone, so a row that changes between that read and
             # the DELETE is deleted anyway. The batch is therefore checked

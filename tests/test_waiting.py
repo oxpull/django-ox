@@ -413,6 +413,31 @@ class TestCancelAndRevive:
         }
         assert [current(row).lease_epoch for row in rows] == [1, 2, 2, 2]
 
+    def test_an_id_given_twice_is_decided_by_its_first_epoch(self):
+        """
+        Each pinned form takes an id once. A second pair for the same id,
+        with another epoch, changes nothing about how that row is decided.
+        """
+        row = held()
+        OxTask.objects.filter(pk=row.pk).update(lease_epoch=2)
+
+        # The first epoch is stale and the second is current: nothing moves.
+        assert _waiting.release_many([(row.pk, 1), (row.pk, 2)], using=DB) == (0, 1)
+        assert _waiting.cancel_many([(row.pk, 1), (str(row.pk), 2)], using=DB) == 0
+        assert (current(row).status, current(row).run_after) == (WAITING, None)
+
+        # The first epoch is current and the second is stale: it moves once.
+        assert _waiting.cancel_many([(row.pk, 2), (row.pk, 1)], using=DB) == 1
+        assert _waiting.revive_many([(row.pk, 1), (row.pk, 2)], using=DB) == {
+            row.pk: _waiting.Revival.WRONG_STATUS_OR_EPOCH
+        }
+        assert _waiting.revive_many([(row.pk, 2), (str(row.pk), 1)], using=DB) == {
+            row.pk: _waiting.Revival.REVIVED
+        }
+        assert (current(row).status, current(row).lease_epoch) == (WAITING, 3)
+        assert _waiting.release_many([(row.pk, 3), (row.pk, 2)], using=DB) == (1, 0)
+        assert current(row).status == READY
+
     def test_a_malformed_id_in_a_pinned_form_moves_nothing(self):
         row = held()
         malformed = [("not-a-uuid", 0), (uuid.uuid4(), 0)]

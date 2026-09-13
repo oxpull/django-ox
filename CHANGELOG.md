@@ -38,13 +38,20 @@ order.
    one to end.
 3. Let every workflow finish, or cancel it.
 4. Stop every process that could still start, retry or release a workflow
-   task. Keep them stopped until step 6 is done.
-5. On every database alias, run
+   task. Keep each one stopped until it runs 1.2.
+5. Turn off `OPTIONS["WORKFLOWS"]` in the settings every process starts
+   with.
+6. On every database alias, run
    `OxTask.objects.using(alias).filter(status="WAITING").count()`. Each
    count must be 0.
-6. Run `migrate django_ox 0007 --database alias` for each alias. It refuses
+7. Run `migrate django_ox 0007 --database alias` for each alias. It refuses
    while any task on that alias is WAITING.
-7. Deploy 1.2 everywhere.
+8. Deploy 1.2 everywhere. Then start the processes you stopped in step 4.
+
+The count and the migration look at the rows that exist when they run.
+Neither stops a process on this release from writing a WAITING task
+afterwards, and nothing at `0007` refuses one. That's why the processes from
+step 4 stay stopped until they run 1.2.
 
 A backup that holds a WAITING task restores only into this release or a
 later one.

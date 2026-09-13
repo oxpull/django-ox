@@ -90,7 +90,9 @@ def queue_stats() -> list[QueueStats]:
     """
     Raw row counts per queue and status, one entry per queue that has any
     rows, ordered by queue name. Unlike ready_count(), the ready column
-    counts every READY row including tasks deferred to the future.
+    counts every READY row including tasks deferred to the future. A queue
+    whose rows are all WAITING gets an entry of zeros, and waiting_counts()
+    has its count.
     """
     return [
         QueueStats(**{name: count for name, count in row.items() if name != "waiting"})

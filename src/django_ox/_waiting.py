@@ -118,6 +118,11 @@ def release(task_id: TaskId, *, lease_epoch: int, using: str) -> bool:
     run_after becomes the later of now and its own value, so a task that asked
     to run later still does, and one that did not counts its age from its
     release rather than from when it was inserted.
+
+    The move commits or rolls back with the caller's transaction, apart from
+    the insert enqueue() made. If that insert has committed and the release
+    rolls back, the row stays WAITING until a later release at the same epoch
+    moves it. Put both in one transaction, or release again.
     """
     pk = actions._pk(task_id)
     if pk is None:
@@ -162,8 +167,13 @@ def cancel_many(rows: Iterable[tuple[TaskId, int]], *, using: str) -> int:
 
     The same write django_ox.actions.discard makes: DISCARDED, finished_at
     stamped, the lock columns cleared, the epoch left alone. Unlike
-    discard_many it never matches a FAILED or LOST row. One transaction, so
-    an error part-way moves nothing.
+    discard_many it never matches a FAILED or LOST row. An id given twice is
+    decided by the first epoch given for it. One transaction, so an error
+    part-way moves nothing.
+
+    The count is all it returns. A row a worker claimed before the cancel
+    landed is RUNNING, not DISCARDED, and nothing here says which row that
+    was. A caller whose count is short reads its rows again to find out.
     """
     pairs, _ = _pinned(rows)
     now = timezone.now()

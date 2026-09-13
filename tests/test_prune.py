@@ -1,5 +1,6 @@
 import re
 import threading
+import time
 import uuid
 from datetime import timedelta
 from io import StringIO
@@ -7,11 +8,11 @@ from io import StringIO
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import connection, connections, transaction
+from django.db import OperationalError, connection, connections, transaction
 from django.db.models.signals import pre_delete
 from django.utils import timezone
 
-from django_ox import actions
+from django_ox import _waiting, actions
 from django_ox.durations import parse_duration
 from django_ox.models import OxScheduleTick, OxTask
 
@@ -332,14 +333,20 @@ def _sql(sql):
     return sql.replace('"', "").replace("`", "").upper()
 
 
+def _writes_or_locks(sql):
+    text = _sql(sql).lstrip()
+    return text.startswith(("UPDATE", "DELETE")) or "FOR UPDATE" in text
+
+
 class Beside:
     """
     An operator action, run on its own thread and connection while ox_prune
     is part way through deleting a batch.
 
     start() returns once the action has finished, or once it has waited in
-    its first write for GRACE seconds. A write that waits that long is
-    waiting on the prune, and cannot go on until the prune commits.
+    its first write or locking read for GRACE seconds. A statement that waits
+    that long is waiting on the prune, and cannot go on until the prune
+    commits.
     """
 
     GRACE = 2.0
@@ -353,7 +360,7 @@ class Beside:
 
     def _run(self):
         def note_write(execute, sql, params, many, context):
-            if _sql(sql).lstrip().startswith(("UPDATE", "DELETE")):
+            if _writes_or_locks(sql):
                 self.writing.set()
             return execute(sql, params, many, context)
 
@@ -496,6 +503,52 @@ def prune_while_an_action_is_open(action, *args, hold=5.0):
     if state["error"] is not None:
         raise state["error"]
     return out, state["result"], state["pruned_first"]
+
+
+def prune_beside_an_open_action(action, *args):
+    """
+    Run `action` in a transaction on its own thread, then ox_prune. The
+    action's transaction stays open until the prune sends its first write or
+    locking read, and commits a moment later, while that statement waits on
+    the rows the action wrote.
+    """
+    acted = threading.Event()
+    reached = threading.Event()
+    state = {"result": None, "error": None, "reached": False}
+
+    def act():
+        try:
+            with transaction.atomic(using="default"):
+                state["result"] = action()
+                acted.set()
+                reached.wait(30)
+                time.sleep(Beside.GRACE / 4)
+        except BaseException as exc:
+            state["error"] = exc
+        finally:
+            acted.set()
+            connections.close_all()
+
+    def note_reach(execute, sql, params, many, context):
+        if _writes_or_locks(sql):
+            state["reached"] = True
+            reached.set()
+        return execute(sql, params, many, context)
+
+    thread = threading.Thread(target=act)
+    thread.start()
+    assert acted.wait(30), "the action never ran"
+    try:
+        with connection.execute_wrapper(note_reach):
+            out = prune(*args)
+    finally:
+        reached.set()
+        thread.join(60)
+    assert not thread.is_alive(), "the action outlived the prune"
+    if state["error"] is not None:
+        raise state["error"]
+    assert state["reached"], "the prune never wrote or locked a row"
+    return out, state["result"]
 
 
 WIDEN = ["statement", "signal"]
@@ -676,3 +729,56 @@ class TestPruneAgainstOperatorActions:
         assert set(OxTask.objects.values_list("pk", "status")) == {
             (elsewhere, OxTask.Status.READY)
         }
+
+    @pytest.mark.parametrize("widen", WIDEN)
+    def test_a_revive_inside_the_delete_is_not_undone(self, widen):
+        """
+        A package built on django-ox can move a DISCARDED row back to WAITING.
+        A revive that reports the row revived keeps it. One the prune got to
+        first reports it not found.
+        """
+        victim, *_ = make_old_rows(5, OxTask.Status.DISCARDED)
+
+        def revive(_ids):
+            try:
+                return _waiting.revive_many([(victim, 0)], using="default")
+            except OperationalError:
+                # SQLite has no row locks. A revive that has read while the
+                # prune holds the write lock can't take it, and moves nothing.
+                if connection.vendor != "sqlite":
+                    raise
+                return None
+
+        out, result = prune_during_batch_delete(widen, revive)
+
+        row = OxTask.objects.filter(pk=victim).first()
+        if result == {victim: _waiting.Revival.REVIVED}:
+            assert row is not None, (
+                "revive_many() reported the row revived, and ox_prune deleted it anyway"
+            )
+            assert (row.status, row.lease_epoch) == (OxTask.Status.WAITING, 1)
+        else:
+            assert result in (None, {victim: _waiting.Revival.NOT_FOUND})
+            assert row is None
+        assert deleted_task_count(out) == 5 - OxTask.objects.count()
+
+    def test_a_prune_that_waits_on_an_open_revive_keeps_the_row(self):
+        """
+        The revive has moved the row back to WAITING and not yet committed
+        when the prune reaches the row. The prune waits for it, then finds the
+        row no longer prunable and leaves it.
+        """
+        victim, *_ = make_old_rows(3, OxTask.Status.DISCARDED)
+
+        out, result = prune_beside_an_open_action(
+            lambda: _waiting.revive_many([(victim, 0)], using="default")
+        )
+
+        assert result == {victim: _waiting.Revival.REVIVED}
+        row = OxTask.objects.filter(pk=victim).first()
+        assert row is not None, (
+            "revive_many() revived the row, and ox_prune deleted it once the "
+            "revive committed"
+        )
+        assert (row.status, row.lease_epoch) == (OxTask.Status.WAITING, 1)
+        assert deleted_task_count(out) == 2

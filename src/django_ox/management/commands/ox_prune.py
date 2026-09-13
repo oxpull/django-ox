@@ -1,7 +1,8 @@
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
-from django.db.models import QuerySet
+from django.db import connections, router, transaction
+from django.db.models import F, QuerySet
 from django.utils import timezone
 
 from django_ox.durations import parse_duration
@@ -98,7 +99,7 @@ class Command(BaseCommand):
             )
             return
 
-        deleted = self._delete_in_batches(prunable, options["batch_size"])
+        deleted = self._delete_tasks_in_batches(prunable, options["batch_size"])
         self.stdout.write(
             f"Deleted {deleted} {label} task row(s) "
             f"finished before {cutoff.isoformat()}."
@@ -109,14 +110,44 @@ class Command(BaseCommand):
             f"scheduled before {cutoff.isoformat()}."
         )
 
+    def _delete_tasks_in_batches(
+        self, prunable: QuerySet[OxTask], batch_size: int
+    ) -> int:
+        alias = router.db_for_write(OxTask)
+        locking_read = connections[alias].features.has_select_for_update
+        deleted = 0
+        while True:
+            batch = list(prunable.values_list("pk", flat=True)[:batch_size])
+            if not batch:
+                break
+            # A row can leave the selection after that read: an operator
+            # retries it, or discards it and its finished_at becomes now.
+            # Django's delete reads the rows again but then deletes by
+            # primary key alone, so a row that changes between that read and
+            # the DELETE is deleted anyway. The batch is therefore checked
+            # again under a lock, in the transaction that deletes it, and
+            # only the rows still prunable under that lock go.
+            #
+            # SQLite has no row locks, and Django drops FOR UPDATE there
+            # without raising. What serialises SQLite is being the writer,
+            # and a transaction that reads first starts as a reader. The
+            # no-op UPDATE makes this one the writer before it reads.
+            with transaction.atomic(using=alias):
+                selected = prunable.filter(pk__in=batch)
+                if locking_read:
+                    batch = list(
+                        selected.select_for_update().values_list("pk", flat=True)
+                    )
+                else:
+                    selected.update(finished_at=F("finished_at"))
+                deleted += prunable.filter(pk__in=batch).delete()[0]
+        return deleted
+
     def _delete_in_batches(self, prunable: QuerySet[Any], batch_size: int) -> int:
         deleted = 0
         while True:
             batch = list(prunable.values_list("pk", flat=True)[:batch_size])
             if not batch:
                 break
-            # The DELETE re-applies the selection predicate, so a row that
-            # left the set between the two statements (a FAILED row an
-            # operator retried, say) is not removed.
             deleted += prunable.filter(pk__in=batch).delete()[0]
         return deleted

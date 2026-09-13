@@ -28,11 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ox_prune --include-failed` no longer deletes a row that an operator retries
+  while its batch is being deleted. The DELETE matches rows by primary key
+  alone, so a FAILED or LOST row retried just before it ran was deleted anyway.
+  The retry still reported success, in the admin and in `django_ox.actions`. A
+  row discarded at that point was deleted too. Each batch is now checked again
+  inside the transaction that deletes it. Only rows that still qualify are
+  deleted, and nothing else can write to them until that transaction ends. A
+  retry that reports success now keeps its row. Without the flag, `ox_prune`
+  was not affected. Present since 0.3.0, which added retry and discard.
 - A stop signal could leave an idle `ox_worker` hung instead of draining.
   It stayed hung until a second signal or the process manager ended it,
   or for good when it was a worker process whose supervisor had been
-  killed. A worker that has
-  finished starting now drains on the signal. Present since 0.1.0.
+  killed. A worker that has finished starting now drains on the signal.
+  Present since 0.1.0.
 - A worker process whose supervisor died while the worker was still
   starting ran on as an orphan. It now drains and exits having claimed
   nothing. Present since 0.3.0.

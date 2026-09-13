@@ -26,14 +26,20 @@ router. A row enqueued on one database is not there to move through another,
 and the return value says nothing moved.
 
 The bulk forms sort their primary keys and send their chunks in that order.
-That orders the statements, not the locks inside one. An UPDATE locks rows in
-the order its plan reads them, and on PostgreSQL a chunk's UPDATE can run as
-a sequential scan that locks them in table order. So two calls, or a call and
-another writer, can still deadlock. The database then raises in one of them.
-cancel_many and revive_many run in one transaction, so the one that raises
-moves nothing. release_many called outside a transaction keeps the chunks
-that committed before the one that raised. Inside a caller's transaction,
-that transaction is lost with it.
+On a database with row locks, each chunk's UPDATE comes after a locking read
+of that chunk's rows ordered by primary key, in the same transaction. An
+UPDATE locks rows in the order its plan reads them, and on PostgreSQL a
+chunk's UPDATE can run as a sequential scan in table order. The read takes
+those locks first, in key order, so bulk calls take the rows they share in
+the same order. That is one more statement per chunk, not one per row.
+SQLite has no row locks and runs each UPDATE alone.
+
+A deadlock is still possible with a writer that locks the same rows in
+another order, or when a caller's transaction already holds some of them.
+The database then raises in one of the two. cancel_many and revive_many run
+in one transaction, so the one that raises moves nothing. release_many called
+outside a transaction keeps the chunks that committed before the one that
+raised. Inside a caller's transaction, that transaction is lost with it.
 
 Nothing here sends a django.tasks signal or writes a log event.
 """
@@ -43,10 +49,11 @@ from __future__ import annotations
 import enum
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, cast
 
-from django.db import transaction
+from django.db import connections, transaction
 from django.db.models import (
     BigIntegerField,
     Case,
@@ -150,20 +157,21 @@ def release_many(rows: Iterable[tuple[TaskId, int]], *, using: str) -> tuple[int
     is not WAITING at its epoch, is not there, or has a malformed id is
     skipped.
 
-    One UPDATE per thousand rows, in primary-key order, and no transaction of
-    its own. Called outside a transaction, each chunk commits by itself, so
-    the call never holds every row's lock at once, and an error part-way
-    leaves the chunks before it released and the rest WAITING for a later
-    release to move. Called inside a transaction, every chunk belongs to that
-    transaction and commits or rolls back with it.
+    One UPDATE per thousand rows, in primary-key order, and no transaction
+    around the whole call. Called outside a transaction, each chunk commits by
+    itself, so the call never holds every row's lock at once, and an error
+    part-way leaves the chunks before it released and the rest WAITING for a
+    later release to move. Called inside a transaction, every chunk belongs to
+    that transaction and commits or rolls back with it.
     """
     pairs, malformed = _pinned(rows)
     released = _released(timezone.now())
     changed = 0
     for chunk in _chunks(pairs):
-        changed += _pinned_rows(using, chunk, (OxTask.Status.WAITING,)).update(
-            **released
-        )
+        with _locked_in_key_order(using, chunk):
+            changed += _pinned_rows(using, chunk, (OxTask.Status.WAITING,)).update(
+                **released
+            )
     skipped = len(pairs) + len({str(task_id) for task_id in malformed}) - changed
     return changed, skipped
 
@@ -188,13 +196,14 @@ def cancel_many(rows: Iterable[tuple[TaskId, int]], *, using: str) -> int:
     moved = 0
     with transaction.atomic(using=using):
         for chunk in _chunks(pairs):
-            moved += _pinned_rows(using, chunk, _CANCELLABLE).update(
-                status=OxTask.Status.DISCARDED,
-                finished_at=now,
-                locked_by=None,
-                locked_at=None,
-                lease_expires_at=None,
-            )
+            with _locked_in_key_order(using, chunk):
+                moved += _pinned_rows(using, chunk, _CANCELLABLE).update(
+                    status=OxTask.Status.DISCARDED,
+                    finished_at=now,
+                    locked_by=None,
+                    locked_at=None,
+                    lease_expires_at=None,
+                )
     return moved
 
 
@@ -272,6 +281,34 @@ def _chunks[T](items: list[T]) -> Iterator[list[T]]:
     size = actions.UPDATE_CHUNK_SIZE
     for start in range(0, len(items), size):
         yield items[start : start + size]
+
+
+@contextmanager
+def _locked_in_key_order(
+    using: str, chunk: list[tuple[uuid.UUID, int]]
+) -> Iterator[None]:
+    """
+    Lock a chunk's rows in primary-key order and keep them locked for the body.
+
+    The read names every id in the chunk, whatever its status or epoch, so the
+    UPDATE inside moves rows this transaction already holds. That UPDATE keeps
+    its own status and epoch filter, which decides what moves. The read and
+    the UPDATE share a transaction. Inside one that is already open,
+    savepoint=False adds no statement. A database without row locks, SQLite
+    among them, runs the body alone.
+    """
+    if not connections[using].features.has_select_for_update:
+        yield
+        return
+    with transaction.atomic(using=using, savepoint=False):
+        list(
+            OxTask.objects.using(using)
+            .select_for_update()
+            .filter(pk__in=[pk for pk, _ in chunk])
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
+        yield
 
 
 def _pinned(

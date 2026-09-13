@@ -11,6 +11,7 @@ import ast
 import inspect
 import logging
 import re
+import threading
 import uuid
 from datetime import timedelta
 from io import StringIO
@@ -40,6 +41,7 @@ from django_ox.models import OxTask
 from django_ox.results import public_status
 from django_ox.worker import WRITABLE_STATUSES
 
+from .conftest import wait_for
 from .tasks import add
 from .test_worker import reap_away
 from .test_write_routing import ALT
@@ -647,6 +649,156 @@ def test_release_many_commits_each_chunk_on_its_own(ambient, monkeypatch):
         assert statuses == [WAITING] * 5
     else:
         assert statuses == [READY, READY, WAITING, WAITING, WAITING]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("helper", ["release_many", "cancel_many"])
+def test_each_chunk_is_locked_in_key_order_before_its_update(helper, monkeypatch):
+    monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
+    keys = sorted(row.pk for row in rows_for(helper, 5))
+    pinned = [(pk, 0) for pk in reversed(keys)]
+
+    with CaptureQueriesContext(connection) as ctx:
+        getattr(_waiting, helper)(pinned, using=DB)
+
+    statements, others = [], []
+    for query in ctx.captured_queries:
+        sql = query["sql"].strip()
+        verb = sql.split(None, 1)[0].upper()
+        if verb not in {"SELECT", "UPDATE"}:
+            others.append(sql)
+            continue
+        ids = []
+        for text in UUID_TEXT.findall(sql):
+            if uuid.UUID(text) not in ids:
+                ids.append(uuid.UUID(text))
+        statements.append((verb, ids, sql))
+
+    chunks = [keys[0:2], keys[2:4], keys[4:5]]
+    if connection.features.has_select_for_update:
+        expected = [(verb, chunk) for chunk in chunks for verb in ("SELECT", "UPDATE")]
+    else:
+        expected = [("UPDATE", chunk) for chunk in chunks]
+    assert [(verb, ids) for verb, ids, _ in statements] == expected, statements
+
+    table = connection.ops.quote_name(OxTask._meta.db_table)
+    pk = re.escape(f"{table}.{connection.ops.quote_name(OxTask._meta.pk.column)}")
+    # The read selects the key alone, so ORDER BY 1 is ORDER BY the key.
+    locking_read = re.compile(
+        rf"^SELECT {pk}(?: AS \S+)? FROM {re.escape(table)} WHERE .*"  # noqa: S608
+        rf" ORDER BY (?:1|{pk}) ASC FOR UPDATE$"
+    )
+    for verb, _, sql in statements:
+        if verb == "SELECT":
+            assert locking_read.search(sql), sql
+    # cancel_many's own transaction can add a savepoint and its release when
+    # it runs inside another one. Nothing more, and nothing per chunk.
+    assert len(others) <= 2, others
+
+
+def lock_waits():
+    """Other sessions on this test database that are waiting for a lock."""
+    with connection.cursor() as cursor:
+        if connection.vendor == "postgresql":
+            # Called inside a transaction, which would otherwise read the same
+            # snapshot of pg_stat_activity for as long as it stays open.
+            cursor.execute("SELECT pg_stat_clear_snapshot()")
+            cursor.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = "
+                "current_database() AND wait_event_type = 'Lock' "
+                "AND pid <> pg_backend_pid()"
+            )
+        else:
+            cursor.execute(
+                "SELECT count(*) FROM performance_schema.data_locks "
+                "WHERE object_schema = DATABASE() AND lock_status = 'WAITING'"
+            )
+        return cursor.fetchone()[0]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "second",
+    ["release_many", "cancel_many"],
+    ids=["release_many-against-cancel_many", "cancel_many-against-cancel_many"],
+)
+def test_two_bulk_calls_over_shared_rows_do_not_deadlock(second, monkeypatch):
+    """
+    Each call sorts its ids, so the order they are given in changes nothing.
+    What crosses is chunking. cancel_many is given four rows, in two chunks of
+    two, and the second call only the middle two, so its one chunk overlaps
+    both of cancel_many's. The rows are inserted largest key first, so a scan
+    in table order meets them in the reverse of key order.
+
+    cancel_many stops after its first chunk until the second call waits on a
+    lock. Locking in table order, the second call holds the third row while it
+    waits for the second, then cancel_many's next chunk waits for the third,
+    and the database breaks the deadlock by raising in one of them. Locking in
+    key order, the second call waits for the second row holding nothing, and
+    cancel_many finishes first.
+    """
+    if not connection.features.has_select_for_update:
+        pytest.skip("SQLite has no row locks to take in any order")
+    monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
+    keys = sorted(uuid.uuid4() for _ in range(4))
+    for pk in reversed(keys):
+        a_row(WAITING, pk=pk, lease_epoch=0)
+
+    first_chunk_held = threading.Event()
+    waited = []
+    real_chunks = _waiting._chunks
+
+    def chunks(items):
+        for index, chunk in enumerate(real_chunks(items)):
+            if index == 1 and threading.current_thread().name == "first":
+                first_chunk_held.set()
+                waited.append(wait_for(lambda: lock_waits() > 0, timeout=10))
+            yield chunk
+
+    monkeypatch.setattr(_waiting, "_chunks", chunks)
+    outcome = {}
+
+    def cancel_all():
+        return _waiting.cancel_many([(pk, 0) for pk in reversed(keys)], using=DB)
+
+    def the_middle_two():
+        first_chunk_held.wait(10)
+        return getattr(_waiting, second)([(pk, 0) for pk in keys[1:3]], using=DB)
+
+    def run(body):
+        name = threading.current_thread().name
+        try:
+            outcome[name] = body()
+        except Exception as exc:
+            outcome[name] = exc
+        finally:
+            connections.close_all()
+
+    threads = [
+        threading.Thread(target=run, args=(cancel_all,), name="first"),
+        threading.Thread(target=run, args=(the_middle_two,), name="second"),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+        assert not thread.is_alive(), f"the {thread.name} call did not finish"
+
+    raised = {name: exc for name, exc in outcome.items() if isinstance(exc, Exception)}
+    assert not raised, raised
+    # The interleaving happened: the second call waited on a row cancel_many
+    # held. Without that, a pass would say nothing about lock order.
+    assert waited == [True]
+    assert outcome["first"] == 4
+    assert outcome["second"] == ((0, 2) if second == "release_many" else 0)
+    assert (
+        list(
+            OxTask.objects.filter(pk__in=keys)
+            .order_by("pk")
+            .values_list("status", "lease_epoch")
+        )
+        == [(DISCARDED, 0)] * 4
+    )
 
 
 # -- the database a move is written to ----------------------------------------

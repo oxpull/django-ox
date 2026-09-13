@@ -168,6 +168,16 @@ class TestPrune:
         assert OxTask.objects.count() == 2
         assert "Deleted 0" in out
 
+    def test_prune_never_deletes_a_waiting_row(self):
+        # The same forced finished_at: a waiting row has not run, whatever
+        # its columns say, and the widest prune leaves it.
+        waiting = make_task(OxTask.Status.WAITING, finished_days_ago=399)
+
+        out = prune("--older-than=1s", "--include-failed")
+
+        assert set(OxTask.objects.values_list("pk", flat=True)) == {waiting.pk}
+        assert "Deleted 0" in out
+
     def test_older_than_cutoff_boundary(self):
         newer = make_task(OxTask.Status.SUCCESSFUL, finished_days_ago=0)
         OxTask.objects.filter(pk=newer.pk).update(

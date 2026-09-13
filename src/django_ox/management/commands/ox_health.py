@@ -55,9 +55,9 @@ class Command(BaseCommand):
             type=parse_seconds,
             default=None,
             help=(
-                "Fail when the oldest task waiting to run has waited longer "
-                "than this since becoming eligible. Accepts 7d, 24h, 90m, 45s, "
-                "or a plain number of seconds (default: no age check)."
+                "Fail when a READY task has been eligible to run for longer "
+                "than this. Accepts 7d, 24h, 90m, 45s, or a plain number of "
+                "seconds (default: no age check)."
             ),
         )
         parser.add_argument(
@@ -112,7 +112,7 @@ class Command(BaseCommand):
             and oldest.total_seconds() > max_age
         ):
             problems.append(
-                f"oldest waiting task is {_seconds(oldest)} old, "
+                f"oldest ready task is {_seconds(oldest)} old, "
                 f"over --max-age {max_age:g}s"
             )
         if worker_timeout is not None:

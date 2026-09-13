@@ -7,8 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**One migration ships with this release.** `0008_waiting` adds a status
+choice and runs no SQL. django-ox never puts a task into the new status by
+itself. If you use workflows in Oxpull Pro, upgrade every process that uses
+django-ox against that database before you turn on `OPTIONS["WORKFLOWS"]`.
+That means workers, web processes, enqueue-only services and cron jobs.
+
+A 1.2 process doesn't know the new status. Its admin shows a waiting task's
+status as `-` and has no Waiting filter. Its `discard`, `discard_many` and
+**Discard selected tasks** action skip waiting rows. Its `queue_stats()`,
+`django_ox_tasks` gauge and `ox_health` don't count them. Its `get_result()`
+and `refresh()` raise `ValueError` on a waiting task.
+
+Rolling back to 1.2 is not supported once waiting rows exist.
+`migrate django_ox 0007` refuses while any exist.
+
 ### Added
 
+- `OxTask.Status.WAITING`, `QueueStats.waiting`, and the `waiting` value of
+  the `status` label on `django_ox_tasks`. A waiting task reads as `READY`
+  through `django.tasks`. Workers never claim it, `ox_prune` never deletes
+  it, retry skips it, and it isn't backlog: `ready_count()`,
+  `oldest_ready_age()` and `ox_health` leave it out.
 - `ox_prune --queue` restricts pruning to one queue's task rows, matching
   `ox_health --queue`, so queues with different retention needs can each
   be pruned with their own `--older-than`. Old schedule ticks are still
@@ -19,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `discard` and `discard_many` accept WAITING, and `DISCARDABLE_STATUSES`
+  includes it.
+- A result whose stored status this version doesn't know reads as READY
+  instead of raising.
 - `ox_health --max-age` and `--worker-timeout` accept the duration forms
   `ox_prune --older-than` takes (`7d`, `24h`, `90m`, `45s`). A plain number
   still means seconds, fractions included.

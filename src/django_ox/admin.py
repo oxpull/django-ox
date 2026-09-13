@@ -136,10 +136,11 @@ class OxTaskAdmin(_ModelAdmin):
         ),
     )
 
-    # Rows are written by workers and by django_ox.actions only. The admin
-    # can read them and run the two actions; it cannot add, edit or delete
-    # one, because a hand-edited status would bypass the lease and a delete
-    # could take a row from under a running worker. ox_prune deletes.
+    # Rows are written by workers, by django_ox.actions and by
+    # django_ox._waiting. The admin can read them and run the two actions; it
+    # cannot add, edit or delete one, because a hand-edited status would
+    # bypass the lease and a delete could take a row from under a running
+    # worker. ox_prune deletes.
     def has_add_permission(self, request: HttpRequest) -> bool:
         return False
 

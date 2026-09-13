@@ -23,11 +23,11 @@ from datetime import timedelta
 from django_ox import stats
 
 stats.queue_stats()
-# [QueueStats(queue_name="default", ready=3, running=1, failed=0, successful=214, lost=0, discarded=0),
-#  QueueStats(queue_name="emails", ready=0, running=0, failed=2, successful=560, lost=0, discarded=0)]
+# [QueueStats(queue_name="default", ready=3, running=1, failed=0, successful=214, lost=0, discarded=0, waiting=0),
+#  QueueStats(queue_name="emails", ready=0, running=0, failed=2, successful=560, lost=0, discarded=0, waiting=0)]
 
 stats.ready_count()  # tasks eligible to run right now
-stats.oldest_ready_age()  # timedelta, or None when nothing waits
+stats.oldest_ready_age()  # timedelta, or None when no READY task is eligible
 stats.throughput(timedelta(minutes=5))  # terminal outcomes per minute
 stats.failure_rate(timedelta(minutes=5))  # 0.0 to 1.0, or None
 stats.last_claim_age()  # time since a worker last claimed
@@ -35,9 +35,9 @@ stats.last_claim_age()  # time since a worker last claimed
 
 | Function | Returns | Semantics |
 | --- | --- | --- |
-| `queue_stats()` | `list[QueueStats]` | Raw row counts per queue and status (`ready`, `running`, `failed`, `successful`, `lost`, `discarded`), one entry per queue with any rows. The `ready` column counts every READY row, including tasks deferred to a future `run_after`. `lost` counts tasks whose worker stopped reporting with no attempts left; see [the reaper](production.md#the-reaper). `discarded` counts tasks an operator closed without running; see [Retrying and discarding](#retrying-and-discarding). |
+| `queue_stats()` | `list[QueueStats]` | Raw row counts per queue and status (`ready`, `running`, `failed`, `successful`, `lost`, `discarded`, `waiting`), one entry per queue with any rows. The `ready` column counts every READY row, including tasks deferred to a future `run_after`. `lost` counts tasks whose worker stopped reporting with no attempts left; see [the reaper](production.md#the-reaper). `discarded` counts tasks closed without running; see [Retrying and discarding](#retrying-and-discarding). `waiting` counts tasks held back from every worker until something releases them. django-ox never puts a task there by itself, and it is not backlog. |
 | `ready_count()` | `int` | READY tasks eligible to run now, mirroring the worker's dequeue predicate: deferred tasks do not count until `run_after` passes. This is the backlog number. |
-| `oldest_ready_age()` | `timedelta \| None` | Age of the oldest task waiting to run, measured from when it became eligible (`run_after` when set, `enqueued_at` otherwise), so a task deferred by a week does not read as a week of backlog. |
+| `oldest_ready_age()` | `timedelta \| None` | Age of the oldest eligible READY task, measured from when it became eligible (`run_after` when set, `enqueued_at` otherwise), so a task deferred by a week does not read as a week of backlog. |
 | `throughput(window)` | `float` | Tasks reaching a terminal state (SUCCESSFUL or FAILED) per minute over the trailing window (default 5 minutes). |
 | `failure_rate(window)` | `float \| None` | Fraction of terminal outcomes in the window that FAILED, or `None` when nothing finished. Retries still pending are not outcomes and do not count. |
 | `last_claim_age()` | `timedelta \| None` | Time since any worker last claimed a task, or `None` if none ever was. This is claim activity, not a heartbeat: idle workers over an empty queue record nothing. |
@@ -64,7 +64,7 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 | `--queue` | all queues | Restrict the checks to one queue. |
 | `--format` | `text` | `json` prints one object on stdout instead of the `OK:` line: `ok`, `queue`, `backlog`, `oldest_age_seconds`, `last_claim_age_seconds` and `problems`. `queue` is `null` when no `--queue` is given. The figures are `null` when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. The object is printed on failure too, before the same non-zero exit. |
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. Deferred tasks do not count. |
-| `--max-age` | off | Fail when the oldest waiting task has waited longer than this since becoming eligible. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
+| `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 
 On success it prints the measured values, which is useful in cron mail
@@ -170,9 +170,9 @@ Every metric is a gauge, with one sample per queue that has any row:
 
 | Metric | Labels | Value |
 | --- | --- | --- |
-| `django_ox_tasks` | `queue`, `status` | Rows by status, one of `ready`, `running`, `failed`, `successful`, `lost`, `discarded`. The same numbers as `queue_stats()`, so `ready` includes deferred tasks. |
+| `django_ox_tasks` | `queue`, `status` | Rows by status, one of `ready`, `running`, `failed`, `successful`, `lost`, `discarded`, `waiting`. The same numbers as `queue_stats()`, so `ready` includes deferred tasks. |
 | `django_ox_ready_tasks` | `queue` | `ready_count()`: READY tasks eligible to run now. The backlog number. |
-| `django_ox_oldest_ready_age_seconds` | `queue` | `oldest_ready_age()` in seconds. Absent when nothing waits. |
+| `django_ox_oldest_ready_age_seconds` | `queue` | `oldest_ready_age()` in seconds. Absent when no READY task is eligible. |
 | `django_ox_last_claim_age_seconds` | `queue` | `last_claim_age()` in seconds. Absent until a worker has claimed on that queue. |
 | `django_ox_throughput_per_minute` | `queue` | `throughput()` over the default five-minute window. |
 | `django_ox_failure_rate` | `queue` | `failure_rate()` over the same window, 0 to 1. Absent when nothing finished. |
@@ -388,7 +388,7 @@ actions.discard(result.id)  # True if the row was closed
 | --- | --- | --- |
 | `retry(result_id)` | FAILED, LOST | Sets the row back to READY for one more attempt, clears `run_after` so it is eligible at once, and raises `max_attempts` to `attempts + 1`. The count, `worker_ids` and every per-attempt traceback stay as they were, so the record still says what happened before. The lease number goes up, so a LOST row's last worker, if it is still alive somewhere, writes nothing over the retry. |
 | `expire_lease(result_id)` | RUNNING | Sets the lease's expiry into the past so the next reaper pass reclaims the task; a renewal that lands before that pass restores the lease, so read the result and call it again if needed. The task itself keeps running; the lease number refuses its finish write once another worker holds the row, so this brings the ordinary reclaim forward rather than cancelling anything. For a lease granted with a timeout that turned out to be wrong: the row carries its own deadline, so changing the setting on the workers does not move it. |
-| `discard(result_id)` | READY, FAILED, LOST | Marks the row DISCARDED. A READY task that is discarded never runs; a discarded FAILED or LOST task is not retried. The attempt records stay. |
+| `discard(result_id)` | READY, WAITING, FAILED, LOST | Marks the row DISCARDED. A READY or WAITING task that is discarded never runs; a discarded FAILED or LOST task is not retried. The attempt records stay. |
 
 `retry_many(selection)` and `discard_many(selection)` make the same move
 for a queryset or a list of ids. They run one conditional UPDATE per
@@ -402,7 +402,7 @@ it without `task_enqueued`.
 
 Both single-row functions return `False` for any other state, for an id
 that is not in the table, and for a malformed id. `RUNNING` and `SUCCESSFUL` rows are never
-matched. A retry that races a second retry of the same row, or a discard
+matched, and `retry` never matches a `WAITING` row. A retry that races a second retry of the same row, or a discard
 that races a worker's claim, resolves to exactly one winner: the UPDATE
 pins the lease number it read, and the loser matches zero rows.
 
@@ -413,9 +413,13 @@ treatment as any at-least-once task: make the body idempotent.
 
 DISCARDED is the sixth value in the row's status column and reads as
 `FAILED` through `django.tasks`, which has four statuses, so `is_finished`
-is true and callers waiting on the result return. `queue_stats()` reports
+is true and a loop polling the result ends. `queue_stats()` reports
 it in its own `discarded` column, and `ox_prune` deletes discarded rows
 with successful ones.
+
+WAITING is the seventh value. It reads as `READY` through `django.tasks`, so
+`is_finished` is false. Workers never claim it, `ox_prune` never deletes it,
+and retry skips it.
 
 ### The admin page
 

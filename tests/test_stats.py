@@ -73,6 +73,28 @@ class TestQueueStats:
             ),
         ]
 
+    def test_waiting_is_counted_and_is_not_backlog(self):
+        make_task(OxTask.Status.WAITING, enqueued_minutes_ago=600)
+        make_task(OxTask.Status.WAITING, queue="emails")
+        make_task(OxTask.Status.READY, enqueued_minutes_ago=1)
+
+        empty = {"running": 0, "failed": 0, "successful": 0, "lost": 0}
+        assert stats.queue_stats() == [
+            stats.QueueStats(
+                queue_name="default", ready=1, discarded=0, waiting=1, **empty
+            ),
+            stats.QueueStats(
+                queue_name="emails", ready=0, discarded=0, waiting=1, **empty
+            ),
+        ]
+        assert stats.ready_count() == 1
+        assert stats.ready_count("emails") == 0
+        assert stats.oldest_ready_age() < timedelta(minutes=5)
+        assert stats.oldest_ready_age("emails") is None
+        assert stats.throughput() == 0
+        assert stats.failure_rate() is None
+        assert stats.last_claim_age() is None
+
 
 @pytest.mark.django_db
 class TestReadyCount:

@@ -101,6 +101,11 @@ django-ox follows [Semantic Versioning](https://semver.org/):
 - **Minor releases add, they do not break.** Patch releases are bug fixes
   only.
 
+A minor release may add a status value. Code that reads `OxTask.status`
+should treat a value it does not know as unfinished. The changelog names each
+new value and says how claims, retries, discards, pruning and the stats
+treat it.
+
 Pin accordingly: `django-ox~=1.2.0` accepts patch releases only;
 `django-ox~=1.2` accepts the current major line.
 

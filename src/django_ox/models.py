@@ -7,9 +7,9 @@ class OxTask(models.Model):
     """
     A queued task and its result record.
 
-    Rows double as the durable queue and the result store. Four of the six
+    Rows double as the durable queue and the result store. Four of the seven
     status values mirror django.tasks.TaskResultStatus, so conversion is a
-    plain value cast; LOST and DISCARDED are django-ox's own and are
+    plain value cast; LOST, DISCARDED and WAITING are django-ox's own and are
     translated at the boundary by django_ox.results.
     """
 
@@ -26,12 +26,17 @@ class OxTask(models.Model):
         # pending, so completion counting terminates; see results.py for
         # what callers of django.tasks see.
         LOST = "LOST"
-        # Written only by django_ox.actions.discard, on a READY, FAILED or
-        # LOST row. An operator closed the task without running it: a
-        # READY row never runs, a FAILED or LOST row is not retried.
-        # Terminal, never claimed, never written by a worker. Its previous
-        # attempts keep their records.
+        # Written by django_ox.actions.discard on a READY, WAITING, FAILED or
+        # LOST row, and by django_ox._waiting, which django-ox itself never
+        # calls, when a package built on django-ox cancels a task that has
+        # not run. Settled: never claimed and never written by a worker. The
+        # row does not run or retry unless django_ox._waiting revives it to
+        # WAITING. Its previous attempts keep their records.
         DISCARDED = "DISCARDED"
+        # Written only by django_ox._waiting, which django-ox itself never
+        # calls. Never claimed, reaped or pruned. Appended after DISCARDED so
+        # the existing members keep their order.
+        WAITING = "WAITING"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 

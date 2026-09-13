@@ -156,6 +156,23 @@ class TestHealth:
         make_ready(run_after_seconds=3600)
         health("--max-backlog=0")
 
+    def test_many_waiting_rows_fail_neither_backlog_nor_age(self):
+        an_hour_ago = timezone.now() - timedelta(hours=1)
+        OxTask.objects.bulk_create(
+            [
+                OxTask(
+                    task_path="tests.tasks.add",
+                    backend_name="default",
+                    status=OxTask.Status.WAITING,
+                    enqueued_at=an_hour_ago,
+                )
+                for _ in range(5000)
+            ],
+            batch_size=1000,
+        )
+        out = health("--max-backlog=0", "--max-age=1")
+        assert out.startswith("OK: backlog=0 oldest_age=none"), out
+
     def test_oldest_age_within_threshold_passes(self):
         make_ready(seconds_ago=120)
         health("--max-age=300")
@@ -194,7 +211,7 @@ class TestHealth:
             health("--max-backlog=0", "--max-age=60")
         message = str(excinfo.value)
         assert "backlog is 1" in message
-        assert "oldest waiting task" in message
+        assert "oldest ready task" in message
         assert "\n" not in message
 
     def test_max_age_accepts_the_duration_forms_prune_accepts(self):

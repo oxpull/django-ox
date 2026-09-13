@@ -37,7 +37,7 @@ __all__ = [
 CONTENT_TYPE_PROMETHEUS = "text/plain; version=0.0.4; charset=utf-8"
 CONTENT_TYPE_OPENMETRICS = "application/openmetrics-text; version=1.0.0; charset=utf-8"
 
-STATUSES = ("ready", "running", "failed", "successful", "lost", "discarded")
+STATUSES = ("ready", "running", "failed", "successful", "lost", "discarded", "waiting")
 
 METRIC_NAMES = (
     "django_ox_tasks",

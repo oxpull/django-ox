@@ -9,7 +9,7 @@ import pytest
 from django.db import connections
 from django.utils import timezone
 
-from django_ox import actions, stats
+from django_ox import _waiting, actions, stats
 from django_ox.compat import TaskResultStatus, default_task_backend
 from django_ox.models import OxTask
 from django_ox.worker import Worker
@@ -448,3 +448,87 @@ class TestMany:
         db_task.refresh_from_db()
         assert db_task.status == OxTask.Status.SUCCESSFUL
         assert db_task.return_value == 3
+
+
+@pytest.mark.django_db
+class TestWaitingRows:
+    def test_the_discardable_statuses_gain_waiting_and_nothing_else(self):
+        assert actions.DISCARDABLE_STATUSES == (
+            OxTask.Status.READY,
+            OxTask.Status.FAILED,
+            OxTask.Status.LOST,
+            OxTask.Status.WAITING,
+        )
+        assert actions.RETRYABLE_STATUSES == (OxTask.Status.FAILED, OxTask.Status.LOST)
+
+    def test_retry_and_expire_lease_refuse_waiting(self):
+        held = _waiting.enqueue(add, [1, 2], {})
+        before = OxTask.objects.filter(pk=held.id).values().get()
+
+        assert actions.retry(held.id) is False
+        assert actions.retry_many([held.id]) == (0, 1)
+        assert actions.expire_lease(held.id) is False
+
+        assert OxTask.objects.filter(pk=held.id).values().get() == before
+
+    def test_discard_closes_a_waiting_row(self, worker):
+        held = _waiting.enqueue(add, [1, 2], {})
+        other = _waiting.enqueue(add, [3, 4], {})
+
+        assert actions.discard(held.id) is True
+        assert actions.discard_many([other.id]) == (1, 0)
+
+        for result in (held, other):
+            row = OxTask.objects.get(pk=result.id)
+            assert row.status == OxTask.Status.DISCARDED
+            assert row.finished_at is not None
+            assert row.lease_epoch == 0
+            fetched = default_task_backend.get_result(result.id)
+            assert fetched.status == TaskResultStatus.FAILED
+        assert _waiting.release(held.id) is False
+        assert worker.run_once() is False
+
+
+@pytest.mark.django_db(transaction=True)
+def test_discard_racing_a_release_has_one_outcome():
+    """
+    A release leaves the row READY at the same epoch, which discard still
+    accepts. So in either order, and with both moves at once, the row ends
+    DISCARDED and discard reports it; release reports True only when it got
+    there first.
+    """
+    first = _waiting.enqueue(add, [1, 2], {})
+    assert _waiting.release(first.id) is True
+    assert actions.discard(first.id) is True
+
+    second = _waiting.enqueue(add, [1, 2], {})
+    assert actions.discard(second.id) is True
+    assert _waiting.release(second.id) is False
+
+    for result in (first, second):
+        assert OxTask.objects.get(pk=result.id).status == OxTask.Status.DISCARDED
+
+    for _ in range(10):
+        result = _waiting.enqueue(add, [1, 2], {})
+        barrier = threading.Barrier(2)
+        outcomes = {}
+
+        def race(name, move, result=result, barrier=barrier, outcomes=outcomes):
+            try:
+                barrier.wait(timeout=10)
+                outcomes[name] = move(result.id)
+            finally:
+                connections.close_all()
+
+        threads = [
+            threading.Thread(target=race, args=("release", _waiting.release)),
+            threading.Thread(target=race, args=("discard", actions.discard)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert set(outcomes) == {"release", "discard"}, outcomes
+        assert outcomes["discard"] is True, outcomes
+        assert OxTask.objects.get(pk=result.id).status == OxTask.Status.DISCARDED
+    assert Worker(backoff_initial=0).claim_one() is None

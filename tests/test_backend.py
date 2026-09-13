@@ -10,6 +10,7 @@ from django.core.management import call_command
 from django.db import transaction
 from django.utils import timezone
 
+from django_ox import _waiting
 from django_ox.compat import (
     TaskResultDoesNotExist,
     TaskResultMismatch,
@@ -18,6 +19,7 @@ from django_ox.compat import (
     task_enqueued,
 )
 from django_ox.models import OxTask
+from django_ox.results import public_status
 
 from .tasks import STATE, add, async_add, echo, record, send_email, with_context
 
@@ -246,3 +248,53 @@ def test_manage_py_check_cannot_see_a_missing_app_entry():
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "E001" not in completed.stderr
+
+
+def test_every_status_maps_to_a_django_tasks_status():
+    expected = {
+        OxTask.Status.READY: TaskResultStatus.READY,
+        OxTask.Status.RUNNING: TaskResultStatus.RUNNING,
+        OxTask.Status.FAILED: TaskResultStatus.FAILED,
+        OxTask.Status.SUCCESSFUL: TaskResultStatus.SUCCESSFUL,
+        OxTask.Status.LOST: TaskResultStatus.FAILED,
+        OxTask.Status.DISCARDED: TaskResultStatus.FAILED,
+        OxTask.Status.WAITING: TaskResultStatus.READY,
+    }
+    assert set(expected) == set(OxTask.Status)
+    for stored in OxTask.Status:
+        assert public_status(stored) == expected[stored], stored
+
+
+def test_a_waiting_result_is_ready_and_unfinished(worker):
+    from asgiref.sync import async_to_sync
+
+    result = _waiting.enqueue(add, [2, 3], {})
+    fetched = [add.get_result(result.id), async_to_sync(add.aget_result)(result.id)]
+    for reading in fetched:
+        assert reading.status == TaskResultStatus.READY
+        assert not reading.is_finished
+        assert reading.started_at is None
+    result.refresh()
+    assert result.status == TaskResultStatus.READY
+    assert worker.run_once() is False
+
+    assert _waiting.release(result.id) is True
+    assert worker.run_once() is True
+    result.refresh()
+    assert result.status == TaskResultStatus.SUCCESSFUL
+    assert result.is_finished
+    assert result.return_value == 5
+
+
+def test_an_unknown_stored_status_reads_as_ready():
+    from asgiref.sync import async_to_sync
+
+    result = add.enqueue(1, 2)
+    OxTask.objects.filter(pk=result.id).update(status="PAUSED")
+
+    fetched = default_task_backend.get_result(result.id)
+    assert fetched.status == TaskResultStatus.READY
+    assert not fetched.is_finished
+    assert public_status("PAUSED") == TaskResultStatus.READY
+    async_to_sync(result.arefresh)()
+    assert result.status == TaskResultStatus.READY

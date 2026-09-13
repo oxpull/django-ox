@@ -229,7 +229,7 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 | `--queue` | all queues | Restrict the checks to one queue. |
 | `--format` | `text` | `json` prints one object on stdout instead of the `OK:` line: `ok`, `queue`, `backlog`, `oldest_age_seconds`, `last_claim_age_seconds` and `problems`. `queue` is `null` when no `--queue` is given. The figures are `null` when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. The object is printed on failure too, before the same non-zero exit. |
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. |
-| `--max-age` | off | Fail when the oldest waiting task has waited longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
+| `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this long. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 
 Mounting `path("ox/", include("django_ox.urls"))` exposes `GET /ox/metrics`,
@@ -241,8 +241,8 @@ it: a filterable list, a read-only detail page with every attempt's
 traceback, and **Retry selected tasks** and **Discard selected tasks**
 actions. The same two operations are `django_ox.actions.retry(result_id)`
 and `django_ox.actions.discard(result_id)`. A retry is one more attempt on
-a FAILED or LOST task; a discard closes a READY, FAILED or LOST task without
-running it. Neither touches a running task.
+a FAILED or LOST task; a discard closes a READY, WAITING, FAILED or LOST task
+without running it. Neither touches a running task.
 
 Worker lifecycle events (claim, start, success, retry, failure, reclaim,
 shutdown) log to the `django_ox` logger with stable extra keys (task id,

@@ -71,6 +71,8 @@ def seed():
     make_task(OxTask.Status.SUCCESSFUL, finished_minutes_ago=1)
     make_task(OxTask.Status.LOST)
     make_task(OxTask.Status.DISCARDED)
+    # Older than every other row, so an age reading that counted it would show.
+    make_task(OxTask.Status.WAITING, enqueued_minutes_ago=600)
     make_task(OxTask.Status.SUCCESSFUL, queue="emails", finished_minutes_ago=30)
     make_task(OxTask.Status.RUNNING, queue="emails")
 
@@ -85,46 +87,67 @@ class TestRenderPrometheus:
         seed()
         lines = metrics.render_prometheus().splitlines()
         assert lines[:2] == FAMILY_HEADERS[:2]
-        assert lines[2:14] == [
+        assert lines[2:16] == [
             'django_ox_tasks{queue="default",status="ready"} 2',
             'django_ox_tasks{queue="default",status="running"} 1',
             'django_ox_tasks{queue="default",status="failed"} 1',
             'django_ox_tasks{queue="default",status="successful"} 3',
             'django_ox_tasks{queue="default",status="lost"} 1',
             'django_ox_tasks{queue="default",status="discarded"} 1',
+            'django_ox_tasks{queue="default",status="waiting"} 1',
             'django_ox_tasks{queue="emails",status="ready"} 0',
             'django_ox_tasks{queue="emails",status="running"} 1',
             'django_ox_tasks{queue="emails",status="failed"} 0',
             'django_ox_tasks{queue="emails",status="successful"} 1',
             'django_ox_tasks{queue="emails",status="lost"} 0',
             'django_ox_tasks{queue="emails",status="discarded"} 0',
+            'django_ox_tasks{queue="emails",status="waiting"} 0',
         ]
-        assert lines[14:18] == [
+        assert lines[16:20] == [
             *FAMILY_HEADERS[2:4],
             'django_ox_ready_tasks{queue="default"} 1',
             'django_ox_ready_tasks{queue="emails"} 0',
         ]
         # The ages depend on the clock, so their shape is pinned, not their value.
-        assert lines[18:21][:2] == FAMILY_HEADERS[4:6]
+        assert lines[20:23][:2] == FAMILY_HEADERS[4:6]
         assert re.fullmatch(
             r'django_ox_oldest_ready_age_seconds\{queue="default"\} 6\d\d(\.\d+)?',
-            lines[20],
+            lines[22],
         )
-        assert lines[21:24][:2] == FAMILY_HEADERS[6:8]
+        assert lines[23:26][:2] == FAMILY_HEADERS[6:8]
         assert re.fullmatch(
             r'django_ox_last_claim_age_seconds\{queue="default"\} 6\d(\.\d+)?',
-            lines[23],
+            lines[25],
         )
         # emails has no eligible task and no claim, so it has no age samples.
-        assert lines[24:28] == [
+        assert lines[26:30] == [
             *FAMILY_HEADERS[8:10],
             'django_ox_throughput_per_minute{queue="default"} 0.8',
             'django_ox_throughput_per_minute{queue="emails"} 0',
         ]
-        assert lines[28:] == [
+        assert lines[30:] == [
             *FAMILY_HEADERS[10:12],
             'django_ox_failure_rate{queue="default"} 0.25',
         ]
+
+    def test_every_status_has_a_label(self):
+        """A closed set: a status added to the model has to be exported on purpose."""
+        from dataclasses import fields
+
+        from django_ox.stats import QueueStats
+
+        assert len(set(metrics.STATUSES)) == len(metrics.STATUSES)
+        assert set(metrics.STATUSES) == {value.lower() for value in OxTask.Status}
+        assert set(metrics.STATUSES) <= {field.name for field in fields(QueueStats)}
+        # Appended, so the samples a dashboard already reads keep their order.
+        assert metrics.STATUSES[:6] == (
+            "ready",
+            "running",
+            "failed",
+            "successful",
+            "lost",
+            "discarded",
+        )
 
     def test_metric_names_are_pinned(self):
         assert metrics.METRIC_NAMES == (

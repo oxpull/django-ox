@@ -54,8 +54,9 @@ class Command(BaseCommand):
         if options["batch_size"] < 1:
             raise CommandError("--batch-size must be a positive integer.")
         cutoff = timezone.now() - parse_duration(options["older_than"])
-        # DISCARDED prunes with SUCCESSFUL: an operator has already closed
-        # the row, so there is nothing left on it to wait for.
+        # DISCARDED prunes with SUCCESSFUL: the row is already closed, so
+        # there is nothing left on it to wait for. WAITING is in neither
+        # list, because that task has not run.
         statuses = [OxTask.Status.SUCCESSFUL, OxTask.Status.DISCARDED]
         if options["include_failed"]:
             # LOST goes with FAILED rather than with SUCCESSFUL: it is the

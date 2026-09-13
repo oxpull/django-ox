@@ -42,9 +42,12 @@ class QueueStats:
     and they are not folded into either column. A steady lost count means
     workers are being reclaimed; see the Production guide on LOCK_TIMEOUT.
 
-    discarded counts rows an operator closed without running, through
-    django_ox.actions.discard or the admin action. Settled, not backlog,
-    and not an outcome of any attempt.
+    discarded counts rows closed without running. Settled, not backlog, and
+    not an outcome of any attempt.
+
+    waiting counts rows held back from every worker until something releases
+    them. django-ox never puts a row there by itself. Not settled and not
+    backlog: ready_count() and oldest_ready_age() leave them out.
     """
 
     queue_name: str
@@ -54,6 +57,7 @@ class QueueStats:
     successful: int
     lost: int = 0
     discarded: int = 0
+    waiting: int = 0
 
 
 def _for_queue(queryset: QuerySet[OxTask], queue_name: str | None) -> QuerySet[OxTask]:
@@ -96,6 +100,7 @@ def queue_stats() -> list[QueueStats]:
             successful=Count("pk", filter=Q(status=OxTask.Status.SUCCESSFUL)),
             lost=Count("pk", filter=Q(status=OxTask.Status.LOST)),
             discarded=Count("pk", filter=Q(status=OxTask.Status.DISCARDED)),
+            waiting=Count("pk", filter=Q(status=OxTask.Status.WAITING)),
         )
         .order_by("queue_name")
     )
@@ -109,7 +114,7 @@ def ready_count(queue_name: str | None = None) -> int:
 
 def oldest_ready_age(queue_name: str | None = None) -> timedelta | None:
     """
-    Age of the oldest task waiting to run, or None when nothing waits.
+    Age of the oldest eligible READY task, or None when there is none.
 
     Age is measured from the moment the task became eligible: run_after
     when set (deferred tasks and retries), enqueued_at otherwise. A task

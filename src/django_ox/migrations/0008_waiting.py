@@ -11,6 +11,10 @@ def refuse_while_waiting(
     Migrating back to 0007 means running a version that cannot read a waiting
     task and has nothing that would release one, so it is refused while any
     exists. When none does, the cost is one exists() on a status-led index.
+
+    None existing now doesn't stop a process on this release from writing one
+    afterwards, so the message sends the reader to the changelog's rollback
+    steps rather than giving a shorter procedure of its own.
     """
     task_model = apps.get_model("django_ox", "OxTask")
     waiting = task_model._default_manager.using(schema_editor.connection.alias).filter(
@@ -18,11 +22,12 @@ def refuse_while_waiting(
     )
     if waiting.exists():
         raise IrreversibleError(
-            f"Cannot unapply django_ox.0008_waiting: {waiting.count()} task(s) "
-            "are WAITING, and a django-ox version from before this migration "
-            "can neither read a waiting task nor release one. Stop creating the "
-            "workflows that hold tasks back, let them finish or cancel them "
-            "until no task is WAITING, then migrate back."
+            f"Cannot unapply django_ox.0008_waiting. {waiting.count()} task(s) "
+            "on this database are WAITING, and a django-ox version from before "
+            "this migration can't read a waiting task or release one. Follow "
+            '"Rolling back to 1.2 after workflows have run" in the changelog at '
+            "https://oxpull.com/django-ox/changelog/. Those steps keep every "
+            "process that can write a waiting task stopped until it runs 1.2."
         )
 
 

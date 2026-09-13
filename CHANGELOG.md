@@ -37,13 +37,21 @@ order.
 2. Wait for the requests, jobs and transactions that were already creating
    one to end.
 3. Let every workflow finish, or cancel it.
-4. Stop every process that could still start, retry or release a workflow
-   task. Keep each one stopped until it runs 1.2.
+4. Stop every process that can write a WAITING task. That's any process
+   that can create a workflow node, such as web and ASGI processes,
+   enqueue-only services, workers and cron jobs. It's also any process that
+   can retry a cancelled node. A process that's already running keeps the
+   settings it started with, so changing them in step 5 doesn't stop it.
+   Stop it, and keep it stopped until it runs 1.2.
 5. Turn off `OPTIONS["WORKFLOWS"]` in the settings every process starts
    with.
 6. On every database alias, run
    `OxTask.objects.using(alias).filter(status="WAITING").count()`. Each
-   count must be 0.
+   count must be 0. If one isn't, don't migrate. With the processes from
+   step 4 stopped, the tasks left belong to workflows that haven't finished
+   or been cancelled. Cancel those workflows and count again. A count that
+   goes up between two runs means a process that writes WAITING tasks is
+   still running. Find it and stop it first.
 7. Run `migrate django_ox 0007 --database alias` for each alias. It refuses
    while any task on that alias is WAITING.
 8. Deploy 1.2 everywhere. Then start the processes you stopped in step 4.

@@ -289,6 +289,41 @@ class TestRelease:
         }
         assert (current(other).status, current(other).lease_epoch) == (WAITING, 6)
 
+    @pytest.mark.parametrize(
+        "helper", ["release", "release_many", "cancel_many", "revive_many"]
+    )
+    def test_an_epoch_ahead_of_the_row_moves_nothing(self, helper):
+        """
+        The pin matches the epoch exactly. An epoch ahead of the row's matches
+        nothing, just as one behind it does. A bulk form is called with that
+        row alone, which filters on one epoch, and then beside a row named at
+        its own epoch, which pins each row through a CASE.
+        """
+        status = DISCARDED if helper == "revive_many" else WAITING
+        ahead, beside = a_row(status, lease_epoch=3), a_row(status, lease_epoch=3)
+        wrong, revived = (
+            _waiting.Revival.WRONG_STATUS_OR_EPOCH,
+            _waiting.Revival.REVIVED,
+        )
+
+        if helper == "release":
+            assert _waiting.release(ahead.pk, lease_epoch=4, using=DB) is False
+        else:
+            call = getattr(_waiting, helper)
+            alone = call([(ahead.pk, 4)], using=DB)
+            both = call([(ahead.pk, 4), (beside.pk, 3)], using=DB)
+            assert (alone, both) == {
+                "release_many": ((0, 1), (1, 1)),
+                "cancel_many": (0, 1),
+                "revive_many": (
+                    {ahead.pk: wrong},
+                    {ahead.pk: wrong, beside.pk: revived},
+                ),
+            }[helper]
+            assert current(beside).status != status
+        after = current(ahead)
+        assert (after.status, after.lease_epoch, after.run_after) == (status, 3, None)
+
     @pytest.mark.parametrize("bulk", [False, True], ids=["release", "release_many"])
     def test_release_keeps_a_later_run_after_and_otherwise_stamps_now(self, bulk):
         later = timezone.now() + timedelta(hours=2)
@@ -962,12 +997,22 @@ def applied_migrations(alias=DB):
     return {name for app, name in recorder.applied_migrations() if app == "django_ox"}
 
 
+ROLLBACK_STEPS = "Rolling back to 1.2 after workflows have run"
+
+
 @pytest.mark.django_db(transaction=True)
 def test_reversing_0008_refuses_while_waiting_rows_exist():
     row = held()
     try:
-        with pytest.raises(IrreversibleError, match="1 task"):
+        with pytest.raises(IrreversibleError, match="1 task") as refused:
             call_command("migrate", "django_ox", "0007_oxschedule", verbosity=0)
+        # A count of 0 at this moment is not a way back on its own, so the
+        # refusal sends the reader to the changelog's steps, which must exist.
+        message = str(refused.value)
+        assert f'"{ROLLBACK_STEPS}"' in message
+        assert "https://oxpull.com/django-ox/changelog/" in message
+        changelog = (REPO / "CHANGELOG.md").read_text()
+        assert f"**{ROLLBACK_STEPS}.**" in changelog
         assert current(row).status == WAITING
         assert "0008_waiting" in applied_migrations()
 

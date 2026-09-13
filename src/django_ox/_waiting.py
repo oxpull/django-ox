@@ -25,9 +25,17 @@ Every function takes the database it writes to, and none falls back to a
 router. A row enqueued on one database is not there to move through another,
 and the return value says nothing moved.
 
-The bulk forms sort their primary keys and issue their statements in that
-order, so two callers lock rows in one order. Nothing here sends a
-django.tasks signal or writes a log event.
+The bulk forms sort their primary keys and send their chunks in that order.
+That orders the statements, not the locks inside one. An UPDATE locks rows in
+the order its plan reads them, and on PostgreSQL a chunk's UPDATE can run as
+a sequential scan that locks them in table order. So two calls, or a call and
+another writer, can still deadlock. The database then raises in one of them.
+cancel_many and revive_many run in one transaction, so the one that raises
+moves nothing. release_many called outside a transaction keeps the chunks
+that committed before the one that raised. Inside a caller's transaction,
+that transaction is lost with it.
+
+Nothing here sends a django.tasks signal or writes a log event.
 """
 
 from __future__ import annotations

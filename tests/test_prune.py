@@ -179,6 +179,28 @@ class TestPrune:
         assert set(OxTask.objects.values_list("pk", flat=True)) == {waiting.pk}
         assert "Deleted 0" in out
 
+    def test_a_queue_prune_never_deletes_a_waiting_row(self):
+        # Waiting rows in the named queue and in another one, with the same
+        # forced finished_at. The finished row beside them shows the prune
+        # did delete something.
+        waiting = make_task(
+            OxTask.Status.WAITING, finished_days_ago=399, queue_name="emails"
+        )
+        elsewhere = make_task(OxTask.Status.WAITING, finished_days_ago=399)
+        make_task(OxTask.Status.SUCCESSFUL, finished_days_ago=399, queue_name="emails")
+        args = ("--queue", "emails", "--older-than=1s", "--include-failed")
+        label = "SUCCESSFUL/DISCARDED/FAILED/LOST (queue emails)"
+
+        dry = prune(*args, "--dry-run")
+        out = prune(*args)
+
+        assert f"Would delete 1 {label} task row(s)" in dry
+        assert f"Deleted 1 {label} task row(s)" in out
+        assert set(OxTask.objects.values_list("pk", flat=True)) == {
+            waiting.pk,
+            elsewhere.pk,
+        }
+
     def test_older_than_cutoff_boundary(self):
         newer = make_task(OxTask.Status.SUCCESSFUL, finished_days_ago=0)
         OxTask.objects.filter(pk=newer.pk).update(

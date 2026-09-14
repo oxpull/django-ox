@@ -11,6 +11,8 @@ updates:
     groups:
       dev-tooling:
         patterns: ["pytest*", "ruff", "mypy", "django-stubs", "psycopg*"]
+    cooldown:
+      default-days: 7
 
   # Pinned action SHAs go stale quietly and are a supply-chain surface.
   - package-ecosystem: github-actions
@@ -18,3 +20,5 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7

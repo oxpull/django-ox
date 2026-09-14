@@ -218,6 +218,38 @@ class TestPrune:
         assert "Deleted 5" in out
         assert OxTask.objects.count() == 0
 
+    @pytest.mark.parametrize(
+        "args", [(), ("--queue", "default")], ids=["every-queue", "queue"]
+    )
+    def test_the_locking_read_takes_its_rows_in_key_order(self, args):
+        # A locking read locks rows in the order it reads them. In key order,
+        # it takes the rows it shares with any writer that also locks in key
+        # order in the same order, so one waits for the other and they can't
+        # deadlock over those rows.
+        if not connection.features.has_select_for_update:
+            pytest.skip("SQLite has no row locks, and its prune sends no locking read")
+        for _ in range(3):
+            make_task(OxTask.Status.SUCCESSFUL, finished_days_ago=8)
+        statements = []
+
+        def record(execute, sql, params, many, context):
+            statements.append(_sql(sql).strip())
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(record):
+            out = prune(*args, "--batch-size=2")
+
+        locking = [sql for sql in statements if "FOR UPDATE" in sql]
+        assert len(locking) == 2, statements
+        # The pk is the only column the read selects, so ORDER BY 1 is the pk.
+        in_key_order = re.compile(
+            r"SELECT DJANGO_OX_OXTASK\.ID(?: AS PK)? FROM .*"
+            r" ORDER BY (?:1|PK|DJANGO_OX_OXTASK\.ID) ASC FOR UPDATE"
+        )
+        for sql in locking:
+            assert in_key_order.fullmatch(sql), sql
+        assert deleted_task_count(out) == 3
+
     def test_prunes_old_ticks_but_keeps_each_schedules_latest(self):
         make_tick("a", scheduled_days_ago=30)
         make_tick("a", scheduled_days_ago=20)

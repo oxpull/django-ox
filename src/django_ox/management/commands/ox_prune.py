@@ -135,8 +135,16 @@ class Command(BaseCommand):
             with transaction.atomic(using=alias):
                 selected = prunable.filter(pk__in=batch)
                 if locking_read:
+                    # In primary-key order. Without an ORDER BY the read locks
+                    # rows in the order its plan reads them, which on
+                    # PostgreSQL can be table order. A writer that locks the
+                    # same rows in key order could then hold a row this read
+                    # waits for while this read holds one that writer needs,
+                    # and the database would abort one of the two.
                     batch = list(
-                        selected.select_for_update().values_list("pk", flat=True)
+                        selected.select_for_update()
+                        .order_by("pk")
+                        .values_list("pk", flat=True)
                     )
                 else:
                     selected.update(finished_at=F("finished_at"))

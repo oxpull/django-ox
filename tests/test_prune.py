@@ -7,7 +7,7 @@ from io import StringIO
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import connection, connections
+from django.db import connection, connections, transaction
 from django.db.models.signals import pre_delete
 from django.utils import timezone
 
@@ -261,12 +261,13 @@ class TestPrune:
             call_command("ox_prune", "--batch-size=0")
 
 
-def make_old_rows(n, status):
+def make_old_rows(n, status, *, queue_name="default"):
     now = timezone.now()
     rows = [
         OxTask(
             task_path="tests.tasks.add",
             backend_name="default",
+            queue_name=queue_name,
             enqueued_at=now - timedelta(days=31),
             status=status,
             attempts=3,
@@ -280,7 +281,7 @@ def make_old_rows(n, status):
 
 
 def deleted_task_count(out):
-    match = re.search(r"Deleted (\d+) \S+ task row\(s\)", out)
+    match = re.search(r"Deleted (\d+) \S+(?: \(queue \S+\))? task row\(s\)", out)
     assert match is not None, out
     return int(match.group(1))
 
@@ -381,6 +382,15 @@ def prune_during_batch_delete(widen, action, *args):
     return out, started[0].finish()
 
 
+def set_status_only(pk):
+    """
+    Move a row to READY and leave finished_at as it was. No operator action
+    does that. Each one that moves a finished row also writes finished_at.
+    This one changes the status alone.
+    """
+    return OxTask.objects.filter(pk=pk).update(status=OxTask.Status.READY) == 1
+
+
 def prune_after_batch_selected(action, *args):
     """
     Run ox_prune and run `action` to completion once, just after the prune
@@ -404,6 +414,46 @@ def prune_after_batch_selected(action, *args):
         out = prune(*args)
     assert state["ran"], "the prune never read a batch"
     return out, state["result"]
+
+
+def prune_while_an_action_is_open(action, *args, hold=5.0):
+    """
+    Run `action` in a transaction on its own thread, then ox_prune. The
+    action's transaction stays open until the prune has finished, or for
+    `hold` seconds, whichever comes first.
+
+    Returns the prune's output, the action's result, and whether the prune
+    finished while the action's transaction was still open. A prune that
+    waits on a row the action wrote can't finish before then.
+    """
+    acted = threading.Event()
+    pruned = threading.Event()
+    state = {"result": None, "error": None, "pruned_first": False}
+
+    def act():
+        try:
+            with transaction.atomic(using="default"):
+                state["result"] = action()
+                acted.set()
+                state["pruned_first"] = pruned.wait(hold)
+        except BaseException as exc:
+            state["error"] = exc
+        finally:
+            acted.set()
+            connections.close_all()
+
+    thread = threading.Thread(target=act)
+    thread.start()
+    assert acted.wait(30), "the action never ran"
+    try:
+        out = prune(*args)
+    finally:
+        pruned.set()
+        thread.join(60)
+    assert not thread.is_alive(), "the action outlived the prune"
+    if state["error"] is not None:
+        raise state["error"]
+    return out, state["result"], state["pruned_first"]
 
 
 WIDEN = ["statement", "signal"]
@@ -465,25 +515,38 @@ class TestPruneAgainstOperatorActions:
         assert deleted_task_count(out) == 1500 - OxTask.objects.count()
 
     @pytest.mark.parametrize(
+        "args", [(), ("--queue", "emails")], ids=["every-queue", "queue"]
+    )
+    @pytest.mark.parametrize(
         "act,moved_to",
         [
             (actions.retry, OxTask.Status.READY),
             (actions.discard, OxTask.Status.DISCARDED),
+            (set_status_only, OxTask.Status.READY),
         ],
-        ids=["retry", "discard"],
+        ids=["retry", "discard", "status-only"],
     )
     def test_a_row_that_left_the_selection_before_the_delete_survives(
-        self, act, moved_to
+        self, act, moved_to, args
     ):
-        victim, *_ = make_old_rows(5, OxTask.Status.FAILED)
+        # Each move takes the row out of the selection a different way. A
+        # retry clears finished_at and sets a status the prune never deletes.
+        # A discard sets a status the prune deletes and stamps finished_at
+        # with now. A status change alone leaves finished_at old. So the
+        # check needs the cutoff for the discard and the status for the
+        # status change, with or without --queue.
+        victim, *_ = make_old_rows(5, OxTask.Status.FAILED, queue_name="emails")
 
-        out, moved = prune_after_batch_selected(lambda: act(victim), "--include-failed")
+        out, moved = prune_after_batch_selected(
+            lambda: act(victim), *args, "--include-failed"
+        )
 
         assert moved is True
         row = OxTask.objects.filter(pk=victim).first()
+        command = " ".join(["ox_prune", *args, "--include-failed"])
         assert row is not None, (
             f"{act.__name__}() moved the row before its batch was deleted, "
-            "and ox_prune --include-failed deleted it anyway"
+            f"and {command} deleted it anyway"
         )
         assert row.status == moved_to
         assert deleted_task_count(out) == 4
@@ -505,3 +568,69 @@ class TestPruneAgainstOperatorActions:
             (pk, OxTask.Status.READY) for pk in failed
         }
         assert "Deleted 5 SUCCESSFUL/DISCARDED task row(s)" in out
+
+    @pytest.mark.parametrize("widen", WIDEN)
+    def test_a_queue_prune_keeps_rows_retried_inside_the_delete(self, widen):
+        """
+        ox_prune --queue checks each batch again, as a prune of every queue
+        does. A retry in the named queue that lands while its batch is deleted
+        either keeps its row or reports that nothing moved. Rows in another
+        queue are neither deleted nor counted, whether they were retried or
+        not.
+        """
+        victim, *_ = make_old_rows(5, OxTask.Status.FAILED, queue_name="emails")
+        retried, untouched = make_old_rows(2, OxTask.Status.FAILED)
+
+        def act(_ids):
+            return actions.retry(victim), actions.retry(retried)
+
+        out, (moved, moved_elsewhere) = prune_during_batch_delete(
+            widen, act, "--queue", "emails", "--include-failed"
+        )
+
+        row = OxTask.objects.filter(pk=victim).first()
+        if moved:
+            assert row is not None, (
+                "retry() reported that it moved the row, and "
+                "ox_prune --queue emails --include-failed deleted it anyway"
+            )
+            assert row.status == OxTask.Status.READY
+        else:
+            assert row is None
+        assert moved_elsewhere is True
+        assert set(
+            OxTask.objects.filter(queue_name="default").values_list("pk", "status")
+        ) == {(retried, OxTask.Status.READY), (untouched, OxTask.Status.FAILED)}
+        left = OxTask.objects.filter(queue_name="emails").count()
+        assert deleted_task_count(out) == 5 - left
+        assert "(queue emails)" in out
+
+    @pytest.mark.parametrize(
+        "args,pruned_first",
+        [(("--queue", "emails"), True), ((), False)],
+        ids=["queue", "every-queue"],
+    )
+    def test_a_queue_prune_does_not_wait_on_another_queues_retry(
+        self, args, pruned_first
+    ):
+        """
+        A retry in the default queue has moved its row and not committed. A
+        prune of the emails queue neither locks that row nor waits for it. A
+        prune of every queue selected the row and has to wait, which shows
+        the test can see a wait.
+        """
+        if not connection.features.has_select_for_update:
+            pytest.skip("SQLite lets one writer in at a time, whatever the queue")
+        make_old_rows(3, OxTask.Status.FAILED, queue_name="emails")
+        (elsewhere,) = make_old_rows(1, OxTask.Status.FAILED)
+
+        out, moved, finished = prune_while_an_action_is_open(
+            lambda: actions.retry(elsewhere), *args, "--include-failed"
+        )
+
+        assert moved is True
+        assert finished is pruned_first
+        assert deleted_task_count(out) == 3
+        assert set(OxTask.objects.values_list("pk", "status")) == {
+            (elsewhere, OxTask.Status.READY)
+        }

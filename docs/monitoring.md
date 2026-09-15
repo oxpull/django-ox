@@ -406,11 +406,10 @@ waits for the prune. Before, it could fail with a deadlock. The call locks
 every row it was given, whatever its status, until it ends. A worker that
 writes to one of those rows waits for it.
 
-A deadlock is still possible with other writers. A call made with no
-transaction open starts again from its first row after a deadlock or a
-serialization failure, three attempts in all. Called inside a transaction
-of your own, it doesn't. The error reaches you, and your transaction has to
-start over.
+A deadlock is still possible with other writers. After one, a call made
+with no transaction open starts again from its first row. It stops after
+three attempts in all. Called inside a transaction of your own, it doesn't.
+The error reaches you, and your transaction has to start over.
 
 The actions write the table directly and send no `django.tasks` signal: a
 discard finishes the result without `task_finished`, and a retry requeues

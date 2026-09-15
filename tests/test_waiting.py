@@ -19,7 +19,13 @@ from pathlib import Path
 
 import pytest
 from django.core.management import call_command
-from django.db import DatabaseError, connection, connections, transaction
+from django.db import (
+    DatabaseError,
+    OperationalError,
+    connection,
+    connections,
+    transaction,
+)
 from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.recorder import MigrationRecorder
 from django.db.models import QuerySet
@@ -42,6 +48,7 @@ from django_ox.results import public_status
 from django_ox.worker import WRITABLE_STATUSES
 
 from .conftest import wait_for
+from .contention import failing, simulated
 from .tasks import add
 from .test_worker import reap_away
 from .test_write_routing import ALT
@@ -799,6 +806,162 @@ def test_two_bulk_calls_over_shared_rows_do_not_deadlock(second, monkeypatch):
         )
         == [(DISCARDED, 0)] * 4
     )
+
+
+# -- deadlocks and serialization failures -------------------------------------
+
+
+def needs_a_locking_read(statement):
+    """
+    A contention error is simulated in place of a chunk's UPDATE, or of its
+    locking read, where a deadlock with a writer that holds a row outside the
+    chunk lands. SQLite has no locking read.
+    """
+    if statement == "SELECT" and not connections[DB].features.has_select_for_update:
+        pytest.skip("SQLite has no locking read to lose on")
+
+
+def five_rows(helper, monkeypatch):
+    """Five rows in chunks of 2, 2 and 1, given in reverse key order."""
+    monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
+    keys = sorted(row.pk for row in rows_for(helper, 5))
+    return keys, [(pk, 0) for pk in reversed(keys)]
+
+
+def chunks_of(seen):
+    return [ids for _, ids in seen]
+
+
+def statuses(keys):
+    rows = dict(OxTask.objects.filter(pk__in=keys).values_list("pk", "status"))
+    return [rows[pk] for pk in keys]
+
+
+@pytest.mark.django_db(transaction=True)
+class TestContendedHelpers:
+    """
+    Outside a transaction, release_many runs a chunk that lost a deadlock or a
+    serialization failure again, and cancel_many runs the whole call again,
+    three attempts in all. revive_many never does. Inside a caller's
+    transaction none of them does. The errors are simulated in place of one
+    statement, shaped as Django raises the drivers' (tests/test_contention.py
+    pins the shape against real ones).
+    """
+
+    @pytest.mark.parametrize("kind", ["postgresql-deadlock", "mysql-deadlock"])
+    @pytest.mark.parametrize("statement", ["UPDATE", "SELECT"])
+    def test_release_many_runs_the_chunk_that_lost_again(
+        self, statement, kind, monkeypatch
+    ):
+        needs_a_locking_read(statement)
+        keys, pinned = five_rows("release_many", monkeypatch)
+
+        with failing(statement, lambda: simulated(kind), lambda n: n == 2) as seen:
+            assert _waiting.release_many(pinned, using=DB) == (5, 0)
+
+        # The second chunk lost and ran again. The first had committed, so it
+        # did not.
+        assert chunks_of(seen) == [keys[0:2], keys[2:4], keys[2:4], keys[4:5]]
+        assert statuses(keys) == [READY] * 5
+
+    @pytest.mark.parametrize("kind", ["postgresql-serialization", "mysql-deadlock"])
+    def test_release_many_stops_after_three_attempts_at_one_chunk(
+        self, kind, monkeypatch
+    ):
+        keys, pinned = five_rows("release_many", monkeypatch)
+
+        with (
+            failing("UPDATE", lambda: simulated(kind), lambda n: n >= 2) as seen,
+            pytest.raises(OperationalError),
+        ):
+            _waiting.release_many(pinned, using=DB)
+
+        assert chunks_of(seen) == [keys[0:2]] + [keys[2:4]] * 3
+        assert statuses(keys) == [READY, READY, WAITING, WAITING, WAITING]
+
+    @pytest.mark.parametrize("kind", ["postgresql-deadlock", "mysql-deadlock"])
+    @pytest.mark.parametrize("statement", ["UPDATE", "SELECT"])
+    def test_cancel_many_runs_the_whole_call_again(self, statement, kind, monkeypatch):
+        needs_a_locking_read(statement)
+        keys, pinned = five_rows("cancel_many", monkeypatch)
+
+        with failing(statement, lambda: simulated(kind), lambda n: n == 2) as seen:
+            assert _waiting.cancel_many(pinned, using=DB) == 5
+
+        # The second chunk lost, which rolled back the first chunk's move too,
+        # so the call ran again from the first chunk.
+        assert chunks_of(seen) == [
+            keys[0:2],
+            keys[2:4],
+            keys[0:2],
+            keys[2:4],
+            keys[4:5],
+        ]
+        assert statuses(keys) == [DISCARDED] * 5
+        assert set(OxTask.objects.values_list("lease_epoch", flat=True)) == {0}
+
+    @pytest.mark.parametrize("kind", ["postgresql-serialization", "mysql-deadlock"])
+    def test_cancel_many_stops_after_three_attempts(self, kind, monkeypatch):
+        keys, pinned = five_rows("cancel_many", monkeypatch)
+
+        with (
+            failing("UPDATE", lambda: simulated(kind), lambda n: True) as seen,
+            pytest.raises(OperationalError),
+        ):
+            _waiting.cancel_many(pinned, using=DB)
+
+        assert chunks_of(seen) == [keys[0:2]] * 3
+        assert statuses(keys) == [WAITING] * 5
+
+    @pytest.mark.parametrize("ambient", [False, True], ids=["autocommit", "atomic"])
+    @pytest.mark.parametrize("kind", ["postgresql-deadlock", "mysql-deadlock"])
+    def test_revive_many_never_runs_again(self, kind, ambient, monkeypatch):
+        keys, pinned = five_rows("revive_many", monkeypatch)
+
+        with (
+            failing("UPDATE", lambda: simulated(kind), lambda n: n == 2) as seen,
+            pytest.raises(OperationalError),
+        ):
+            if ambient:
+                with transaction.atomic(using=DB):
+                    _waiting.revive_many(pinned, using=DB)
+            else:
+                _waiting.revive_many(pinned, using=DB)
+
+        assert chunks_of(seen) == [keys[0:2], keys[2:4]]
+        assert statuses(keys) == [DISCARDED] * 5
+
+    @pytest.mark.parametrize("helper", ["release_many", "cancel_many"])
+    @pytest.mark.parametrize("kind", ["postgresql-deadlock", "mysql-deadlock"])
+    def test_inside_a_callers_transaction_nothing_runs_again(
+        self, helper, kind, monkeypatch
+    ):
+        keys, pinned = five_rows(helper, monkeypatch)
+
+        with (
+            failing("UPDATE", lambda: simulated(kind), lambda n: n == 2) as seen,
+            pytest.raises(OperationalError),
+            transaction.atomic(using=DB),
+        ):
+            getattr(_waiting, helper)(pinned, using=DB)
+
+        assert chunks_of(seen) == [keys[0:2], keys[2:4]]
+        assert statuses(keys) == [WAITING] * 5
+
+    @pytest.mark.parametrize("helper", ["release_many", "cancel_many"])
+    def test_any_other_database_error_is_raised_at_once(self, helper, monkeypatch):
+        keys, pinned = five_rows(helper, monkeypatch)
+
+        with (
+            failing(
+                "UPDATE", lambda: OperationalError("disk I/O error"), lambda n: n == 1
+            ) as seen,
+            pytest.raises(OperationalError, match="disk I/O"),
+        ):
+            getattr(_waiting, helper)(pinned, using=DB)
+
+        assert chunks_of(seen) == [keys[0:2]]
+        assert statuses(keys) == [WAITING] * 5
 
 
 # -- the database a move is written to ----------------------------------------

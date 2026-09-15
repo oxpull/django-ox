@@ -36,10 +36,14 @@ SQLite has no row locks and runs each UPDATE alone.
 
 A deadlock is still possible with a writer that locks the same rows in
 another order, or when a caller's transaction already holds some of them.
-The database then raises in one of the two. cancel_many and revive_many run
-in one transaction, so the one that raises moves nothing. release_many called
-outside a transaction keeps the chunks that committed before the one that
-raised. Inside a caller's transaction, that transaction is lost with it.
+The database then raises in one of the two. At REPEATABLE READ it can also
+refuse a write with a serialization failure. Called with no transaction
+open, release_many runs a chunk that lost one of those again, and
+cancel_many runs the whole call again, three attempts in all. Each attempt
+redoes the locking read and the UPDATE. revive_many never runs again, and
+the error reaches its caller with nothing moved. Inside a caller's
+transaction nothing runs again. The error reaches the caller, and that
+transaction is lost with it.
 
 Nothing here sends a django.tasks signal or writes a log event.
 """
@@ -51,6 +55,7 @@ import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime
+from functools import partial
 from typing import Any, cast
 
 from django.db import connections, transaction
@@ -65,7 +70,7 @@ from django.db.models import (
 )
 from django.utils import timezone
 
-from . import actions
+from . import _contention, actions
 from .backend import OxBackend
 from .compat import Task, TaskResult
 from .models import OxTask
@@ -161,17 +166,26 @@ def release_many(rows: Iterable[tuple[TaskId, int]], *, using: str) -> tuple[int
     around the whole call. Called outside a transaction, each chunk commits by
     itself, so the call never holds every row's lock at once, and an error
     part-way leaves the chunks before it released and the rest WAITING for a
-    later release to move. Called inside a transaction, every chunk belongs to
-    that transaction and commits or rolls back with it.
+    later release to move. A chunk that loses a deadlock or a serialization
+    failure there runs again in a new transaction, three attempts in all,
+    and counts once it has committed. Called inside a transaction, every
+    chunk belongs to that transaction and commits or rolls back with it, and
+    nothing runs again.
     """
     pairs, malformed = _pinned(rows)
     released = _released(timezone.now())
-    changed = 0
-    for chunk in _chunks(pairs):
+
+    def release_chunk(chunk: list[tuple[uuid.UUID, int]]) -> int:
+        # Returned from inside the block, so it reaches the caller once the
+        # chunk has committed, or with the caller's transaction still open.
         with _locked_in_key_order(using, chunk):
-            changed += _pinned_rows(using, chunk, (OxTask.Status.WAITING,)).update(
+            return _pinned_rows(using, chunk, (OxTask.Status.WAITING,)).update(
                 **released
             )
+
+    changed = 0
+    for chunk in _chunks(pairs):
+        changed += _contention.run(using, partial(release_chunk, chunk))
     skipped = len(pairs) + len({str(task_id) for task_id in malformed}) - changed
     return changed, skipped
 
@@ -185,7 +199,10 @@ def cancel_many(rows: Iterable[tuple[TaskId, int]], *, using: str) -> int:
     stamped, the lock columns cleared, the epoch left alone. Unlike
     discard_many it never matches a FAILED or LOST row. An id given twice is
     decided by the first epoch given for it. One transaction, so an error
-    part-way moves nothing.
+    part-way moves nothing. When the call opened that transaction, a deadlock
+    or a serialization failure runs the whole call again from its first
+    chunk, three attempts in all. Inside a caller's transaction the error
+    reaches the caller.
 
     The count is all it returns. A row a worker claimed before the cancel
     landed is RUNNING, not DISCARDED, and nothing here says which row that
@@ -193,18 +210,22 @@ def cancel_many(rows: Iterable[tuple[TaskId, int]], *, using: str) -> int:
     """
     pairs, _ = _pinned(rows)
     now = timezone.now()
-    moved = 0
-    with transaction.atomic(using=using):
-        for chunk in _chunks(pairs):
-            with _locked_in_key_order(using, chunk):
-                moved += _pinned_rows(using, chunk, _CANCELLABLE).update(
-                    status=OxTask.Status.DISCARDED,
-                    finished_at=now,
-                    locked_by=None,
-                    locked_at=None,
-                    lease_expires_at=None,
-                )
-    return moved
+
+    def cancel() -> int:
+        moved = 0
+        with transaction.atomic(using=using):
+            for chunk in _chunks(pairs):
+                with _locked_in_key_order(using, chunk):
+                    moved += _pinned_rows(using, chunk, _CANCELLABLE).update(
+                        status=OxTask.Status.DISCARDED,
+                        finished_at=now,
+                        locked_by=None,
+                        locked_at=None,
+                        lease_expires_at=None,
+                    )
+        return moved
+
+    return _contention.run(using, cancel)
 
 
 def revive_many(
@@ -228,7 +249,9 @@ def revive_many(
 
     One transaction, so an error part-way moves nothing. Each chunk's rows
     are read with a locking read in primary-key order before its UPDATE, so
-    each entry describes the row that UPDATE then moves or leaves.
+    each entry describes the row that UPDATE then moves or leaves. After a
+    deadlock or a serialization failure it doesn't run again, whether or not
+    a transaction was open. The error reaches the caller with nothing moved.
     """
     pairs, malformed = _pinned(rows)
     if malformed:

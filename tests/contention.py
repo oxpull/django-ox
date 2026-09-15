@@ -7,7 +7,7 @@ import re
 import uuid
 from contextlib import contextmanager
 
-from django.db import OperationalError, connection
+from django.db import DEFAULT_DB_ALIAS, OperationalError, connections
 
 
 class PsycopgError(Exception):
@@ -55,12 +55,12 @@ def normalized(sql):
 
 
 @contextmanager
-def failing(prefix, make_error, fail_on):
+def failing(prefix, make_error, fail_on, using=DEFAULT_DB_ALIAS):
     """
-    Raise make_error() in place of this thread's statements that start with
-    prefix (compared without quotes, in upper case) whenever fail_on(n) is true
-    for n, that statement's 1-based count. Yields the list of (sql, ids) for
-    every such statement, sent or failed.
+    Raise make_error() in place of this thread's statements on the database
+    `using` that start with prefix (compared without quotes, in upper case)
+    whenever fail_on(n) is true for n, that statement's 1-based count. Yields
+    the list of (sql, ids) for every such statement, sent or failed.
     """
     seen = []
 
@@ -76,5 +76,5 @@ def failing(prefix, make_error, fail_on):
                 raise make_error()
         return execute(sql, params, many, context)
 
-    with connection.execute_wrapper(wrapper):
+    with connections[using].execute_wrapper(wrapper):
         yield seen

@@ -401,15 +401,15 @@ hundred UPDATEs, and either all of it lands or none does.
 They sort the ids first and take the rows in primary key order. On
 PostgreSQL and MySQL each UPDATE follows a locking read of its thousand
 rows, which is one more statement per thousand. `ox_prune` takes rows in
-the same order. So a bulk retry or discard of rows that a prune is deleting
-waits for the prune, where it could fail with a deadlock before. The call
-locks every row it was given, whatever its status, until it ends. A worker
-that writes to one of those rows waits for it.
+the same order. So a bulk retry or discard of rows a prune is deleting
+waits for the prune. Before, it could fail with a deadlock. The call locks
+every row it was given, whatever its status, until it ends. A worker that
+writes to one of those rows waits for it.
 
-A deadlock is still possible with other writers. When a call opens its own
-transaction and hits a deadlock or a serialization failure, it starts again
-from its first row, three attempts in all. Called inside a transaction of
-your own, it doesn't. The error reaches you, and your transaction has to
+A deadlock is still possible with other writers. A call made with no
+transaction open starts again from its first row after a deadlock or a
+serialization failure, three attempts in all. Called inside a transaction
+of your own, it doesn't. The error reaches you, and your transaction has to
 start over.
 
 The actions write the table directly and send no `django.tasks` signal: a

@@ -979,6 +979,28 @@ class TestPruneAfterContention:
         }
 
     @pytest.mark.parametrize("kind", CONTENTION)
+    def test_a_batch_that_lost_leaves_the_next_batch_its_own_three_attempts(self, kind):
+        """
+        The three attempts belong to the batch, not to the run. Five rows in
+        batches of two, where the first batch loses once and then commits, and
+        the second loses twice before it commits. The second batch's third
+        attempt is the one that deletes it, so the command finishes and every
+        row is gone. A run that shared one budget across its batches would
+        stop here with two rows left.
+        """
+        make_old_rows(5, OxTask.Status.FAILED)
+
+        with failing(
+            self.DELETE, lambda: simulated(kind), lambda n: n in (1, 3, 4)
+        ) as deletes:
+            out = prune(*self.ARGS)
+
+        # Batch one twice, batch two three times, batch three once.
+        assert len(deletes) == 6
+        assert deleted_task_count(out) == 5
+        assert OxTask.objects.count() == 0
+
+    @pytest.mark.parametrize("kind", CONTENTION)
     def test_a_batch_that_keeps_losing_stops_the_prune_and_a_rerun_finishes(self, kind):
         make_old_rows(5, OxTask.Status.FAILED)
 

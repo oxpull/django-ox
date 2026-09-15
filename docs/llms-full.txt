@@ -3558,6 +3558,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ox_health --max-age` and `--worker-timeout` accepted `nan`, `inf` and
+  numbers that round to `inf`. A threshold set to one of those could never
+  be exceeded, so that check could not fail. It passed however old the
+  oldest task waiting to run or the last claim was. `--max-backlog` takes
+  an int and was not affected, and neither was the `--worker-timeout`
+  branch that reports no claim at all. They are refused as usage errors
+  now. Present since 0.1.0.
 - A stop signal could leave an idle `ox_worker` hung instead of draining.
   It stayed hung until a second signal or the process manager ended it,
   or for good when it was a worker process whose supervisor had been

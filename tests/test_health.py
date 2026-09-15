@@ -4,7 +4,7 @@ from datetime import timedelta
 from io import StringIO
 
 import pytest
-from django.core.management import call_command
+from django.core.management import call_command, execute_from_command_line
 from django.core.management.base import CommandError
 from django.db import DatabaseError
 from django.utils import timezone
@@ -244,6 +244,30 @@ class TestHealth:
         with pytest.raises(CommandError, match="must be"):
             health(flag)
 
+    @pytest.mark.parametrize(
+        "flag",
+        [
+            "--max-age=nan",
+            "--max-age=inf",
+            "--max-age=1e400",
+            "--worker-timeout=nan",
+            "--worker-timeout=inf",
+        ],
+    )
+    def test_rejects_a_threshold_no_figure_can_exceed(self, flag, capsys):
+        """
+        A task two hours old exceeds any real --max-age. It exceeds no nan
+        and no inf, so the age check could not fail while the flag took
+        them. --worker-timeout took them the same way.
+        """
+        make_ready(seconds_ago=7200)
+        with pytest.raises(SystemExit) as exit_info:
+            execute_from_command_line(["manage.py", "ox_health", flag])
+        assert exit_info.value.code == 2
+        err = capsys.readouterr().err
+        assert "invalid duration" in err
+        assert "Traceback" not in err
+
 
 class TestParseSeconds:
     @pytest.mark.parametrize(
@@ -275,6 +299,14 @@ class TestParseSeconds:
             "7 d",
             "1.5d",
             pytest.param("9" * 400 + "d", id="overflow"),
+            # float() takes all of these, and a threshold set to one of them
+            # can never be exceeded.
+            "nan",
+            "NaN",
+            "inf",
+            "-inf",
+            "Infinity",
+            "1e400",
         ],
     )
     def test_rejects_garbage(self, value):

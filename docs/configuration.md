@@ -168,8 +168,9 @@ python manage.py ox_prune --older-than 7d
 | `--dry-run` | off | Report how many rows would be deleted without deleting any. |
 
 Only SUCCESSFUL and DISCARDED rows (and, with `--include-failed`, FAILED and
-LOST rows) whose `finished_at` is past the cutoff are deleted. READY and RUNNING rows are
-never touched, whatever their age. Rows from the recurring-schedule tick
+LOST rows) whose `finished_at` is past the cutoff are deleted. READY, WAITING
+and RUNNING rows are never touched, whatever their age. Rows from the
+recurring-schedule tick
 log are pruned with the same cutoff, always keeping each schedule's most
 recent tick; that row anchors missed-tick recovery and deleting it would
 make the schedule re-anchor. The latest tick row of a schedule that has

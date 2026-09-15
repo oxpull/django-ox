@@ -101,8 +101,14 @@ django-ox follows [Semantic Versioning](https://semver.org/):
 - **Minor releases add, they do not break.** Patch releases are bug fixes
   only.
 
-A minor release may add a status value. The release notes name the new
-value and say how it reads through `django.tasks`.
+A minor release may add a status value. A process still on the previous
+minor release can't read a task in the new status. `get_result()` and
+`refresh()` raise `ValueError` on it. The admin shows its status as `-` and
+has no filter for it. Bulk discards skip it, and `queue_stats()`, the
+`django_ox_tasks` gauge and `ox_health` don't count it. Upgrade every
+process that shares a database before anything writes the new status. The
+release notes name the value, say how it reads through `django.tasks`, and
+give the upgrade and rollback steps.
 
 Pin accordingly: `django-ox~=1.2.0` accepts patch releases only;
 `django-ox~=1.2` accepts the current major line.

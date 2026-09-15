@@ -3,9 +3,9 @@ Moves into and out of OxTask.Status.WAITING. Not public API.
 
 django-ox itself never calls anything here. A package built on django-ox
 does, under an exact version pin, to hold a task back from every worker until
-something outside the worker decides it may run. The functions are private so
-that holding tasks back stays that package's feature rather than a promise
-this one makes; tests/test_waiting.py pins their signatures and guards, so a
+something outside the worker decides it may run. The functions are private:
+django-ox makes no promise about them, and a package that calls them pins an
+exact version. tests/test_waiting.py pins their signatures and guards, so a
 change here fails this repository's suite first.
 
 A held task is inserted WAITING, never inserted READY and then moved. status

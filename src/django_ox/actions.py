@@ -184,10 +184,10 @@ def discard(result_id: str | uuid.UUID) -> bool:
     lease_epoch as read), so a READY row that a worker claims in the same
     instant goes to exactly one of them. A WAITING row released in the same
     instant is still closed: the release leaves it READY at the epoch this
-    read. The epoch is not bumped: DISCARDED
-    is not a state any worker writes onto, so there is no holder to fence
-    out, and a LOST row's straggler write is already refused by status.
-    The row keeps attempts, worker_ids and errors as they were.
+    call read. The epoch is not bumped: DISCARDED is not a state any worker
+    writes onto, so there is no holder to fence out, and a LOST row's
+    straggler write is already refused by status. The row keeps attempts,
+    worker_ids and errors as they were.
     """
     pk = _pk(result_id)
     if pk is None:

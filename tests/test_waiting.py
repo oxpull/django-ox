@@ -33,7 +33,7 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 import django_ox
-from django_ox import _waiting, actions
+from django_ox import _contention, _waiting, actions
 from django_ox.backend import OxBackend
 from django_ox.compat import (
     IMMEDIATE_BACKEND_PATH,
@@ -832,6 +832,11 @@ def chunks_of(seen):
     return [ids for _, ids in seen]
 
 
+def unmoved(helper):
+    """The status five_rows gives a helper's rows."""
+    return DISCARDED if helper == "revive_many" else WAITING
+
+
 def statuses(keys):
     rows = dict(OxTask.objects.filter(pk__in=keys).values_list("pk", "status"))
     return [rows[pk] for pk in keys]
@@ -841,10 +846,10 @@ def statuses(keys):
 class TestContendedHelpers:
     """
     Outside a transaction, release_many runs a chunk that lost a deadlock or a
-    serialization failure again, and cancel_many runs the whole call again,
-    three attempts in all. revive_many never does. Inside a caller's
-    transaction none of them does. The errors are simulated in place of one
-    statement, shaped as Django raises the drivers' (tests/test_contention.py
+    serialization failure again. cancel_many and revive_many run the whole
+    call again. Each stops after three attempts in all. Inside a caller's
+    transaction none of them runs again. The errors are simulated in place of
+    one statement, shaped as Django raises the drivers' (tests/test_contention.py
     pins the shape against real ones).
     """
 
@@ -913,25 +918,82 @@ class TestContendedHelpers:
         assert chunks_of(seen) == [keys[0:2]] * 3
         assert statuses(keys) == [WAITING] * 5
 
-    @pytest.mark.parametrize("ambient", [False, True], ids=["autocommit", "atomic"])
+    @pytest.mark.parametrize("kind", ["postgresql-serialization", "mysql-deadlock"])
+    @pytest.mark.parametrize("statement", ["UPDATE", "SELECT"])
+    def test_revive_many_runs_the_whole_call_again(self, statement, kind, monkeypatch):
+        needs_a_locking_read(statement)
+        keys, pinned = five_rows("revive_many", monkeypatch)
+
+        with failing(statement, lambda: simulated(kind), lambda n: n == 2) as seen:
+            results = _waiting.revive_many(pinned, using=DB)
+
+        assert results == dict.fromkeys(keys, _waiting.Revival.REVIVED)
+        assert list(results) == keys
+        # The second chunk lost, which rolled back the first chunk's move too,
+        # so the call ran again from the first chunk.
+        assert chunks_of(seen) == [
+            keys[0:2],
+            keys[2:4],
+            keys[0:2],
+            keys[2:4],
+            keys[4:5],
+        ]
+        assert statuses(keys) == [WAITING] * 5
+        # One bump each. The first attempt's bump rolled back with it.
+        assert set(OxTask.objects.values_list("lease_epoch", flat=True)) == {1}
+
+    def test_revive_many_reports_the_rows_the_last_attempt_found(self, monkeypatch):
+        keys, pinned = five_rows("revive_many", monkeypatch)
+        real_pause = _contention.pause
+        seen = []
+
+        def pause(attempt):
+            # Between the attempts, one row is pruned and another moves on.
+            # Their statements are not the helper's, so they are not kept.
+            kept = len(seen)
+            OxTask.objects.filter(pk=keys[0]).delete()
+            OxTask.objects.filter(pk=keys[3]).update(lease_epoch=5)
+            del seen[kept:]
+            real_pause(attempt)
+
+        monkeypatch.setattr(_contention, "pause", pause)
+        kind = "postgresql-deadlock"
+        with failing("UPDATE", lambda: simulated(kind), lambda n: n == 2) as updates:
+            seen = updates
+            results = _waiting.revive_many(pinned, using=DB)
+
+        assert chunks_of(seen) == [
+            keys[0:2],
+            keys[2:4],
+            keys[1:2],
+            keys[2:3],
+            keys[4:5],
+        ]
+        assert results == {
+            keys[0]: _waiting.Revival.NOT_FOUND,
+            keys[1]: _waiting.Revival.REVIVED,
+            keys[2]: _waiting.Revival.REVIVED,
+            keys[3]: _waiting.Revival.WRONG_STATUS_OR_EPOCH,
+            keys[4]: _waiting.Revival.REVIVED,
+        }
+        assert list(results) == keys
+        assert statuses(keys[1:]) == [WAITING, WAITING, DISCARDED, WAITING]
+
     @pytest.mark.parametrize("kind", ["postgresql-deadlock", "mysql-deadlock"])
-    def test_revive_many_never_runs_again(self, kind, ambient, monkeypatch):
+    def test_revive_many_stops_after_three_attempts(self, kind, monkeypatch):
         keys, pinned = five_rows("revive_many", monkeypatch)
 
         with (
-            failing("UPDATE", lambda: simulated(kind), lambda n: n == 2) as seen,
+            failing("UPDATE", lambda: simulated(kind), lambda n: True) as seen,
             pytest.raises(OperationalError),
         ):
-            if ambient:
-                with transaction.atomic(using=DB):
-                    _waiting.revive_many(pinned, using=DB)
-            else:
-                _waiting.revive_many(pinned, using=DB)
+            _waiting.revive_many(pinned, using=DB)
 
-        assert chunks_of(seen) == [keys[0:2], keys[2:4]]
+        assert chunks_of(seen) == [keys[0:2]] * 3
         assert statuses(keys) == [DISCARDED] * 5
+        assert set(OxTask.objects.values_list("lease_epoch", flat=True)) == {0}
 
-    @pytest.mark.parametrize("helper", ["release_many", "cancel_many"])
+    @pytest.mark.parametrize("helper", ["release_many", "cancel_many", "revive_many"])
     @pytest.mark.parametrize("kind", ["postgresql-deadlock", "mysql-deadlock"])
     def test_inside_a_callers_transaction_nothing_runs_again(
         self, helper, kind, monkeypatch
@@ -946,9 +1008,9 @@ class TestContendedHelpers:
             getattr(_waiting, helper)(pinned, using=DB)
 
         assert chunks_of(seen) == [keys[0:2], keys[2:4]]
-        assert statuses(keys) == [WAITING] * 5
+        assert statuses(keys) == [unmoved(helper)] * 5
 
-    @pytest.mark.parametrize("helper", ["release_many", "cancel_many"])
+    @pytest.mark.parametrize("helper", ["release_many", "cancel_many", "revive_many"])
     def test_any_other_database_error_is_raised_at_once(self, helper, monkeypatch):
         keys, pinned = five_rows(helper, monkeypatch)
 
@@ -961,7 +1023,7 @@ class TestContendedHelpers:
             getattr(_waiting, helper)(pinned, using=DB)
 
         assert chunks_of(seen) == [keys[0:2]]
-        assert statuses(keys) == [WAITING] * 5
+        assert statuses(keys) == [unmoved(helper)] * 5
 
 
 # -- the database a move is written to ----------------------------------------

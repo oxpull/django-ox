@@ -38,12 +38,11 @@ A deadlock is still possible with a writer that locks the same rows in
 another order, or when a caller's transaction already holds some of them.
 The database then raises in one of the two. At REPEATABLE READ it can also
 refuse a write with a serialization failure. Called with no transaction
-open, release_many runs a chunk that lost one of those again, and
-cancel_many runs the whole call again, three attempts in all. Each attempt
-redoes the locking read and the UPDATE. revive_many never runs again, and
-the error reaches its caller with nothing moved. Inside a caller's
-transaction nothing runs again. The error reaches the caller, and that
-transaction is lost with it.
+open, release_many runs a chunk that lost one of those again. cancel_many
+and revive_many run the whole call again from its first chunk. Each stops
+after three attempts in all, and each attempt redoes the locking reads and
+the UPDATEs. Inside a caller's transaction nothing runs again. The error
+reaches the caller, and that transaction is lost with it.
 
 Nothing here sends a django.tasks signal or writes a log event.
 """
@@ -249,9 +248,11 @@ def revive_many(
 
     One transaction, so an error part-way moves nothing. Each chunk's rows
     are read with a locking read in primary-key order before its UPDATE, so
-    each entry describes the row that UPDATE then moves or leaves. After a
-    deadlock or a serialization failure it doesn't run again, whether or not
-    a transaction was open. The error reaches the caller with nothing moved.
+    each entry describes the row that UPDATE then moves or leaves. When the
+    call opened that transaction, a deadlock or a serialization failure runs
+    the whole call again from its first chunk, three attempts in all. The
+    entries then come from the attempt that committed. Inside a caller's
+    transaction the error reaches the caller with nothing moved.
     """
     pairs, malformed = _pinned(rows)
     if malformed:
@@ -259,33 +260,37 @@ def revive_many(
             f"{malformed[0]!r} is not a task id, so there is no row to revive "
             "or to report on."
         )
-    results: dict[uuid.UUID, Revival] = {}
-    with transaction.atomic(using=using):
-        for chunk in _chunks(pairs):
-            found = {
-                pk: (status, epoch)
-                for pk, status, epoch in OxTask.objects.using(using)
-                .select_for_update()
-                .filter(pk__in=[pk for pk, _ in chunk])
-                .order_by("pk")
-                .values_list("pk", "status", "lease_epoch")
-            }
-            revivable: list[tuple[uuid.UUID, int]] = []
-            for pk, epoch in chunk:
-                if pk not in found:
-                    results[pk] = Revival.NOT_FOUND
-                elif found[pk] != (OxTask.Status.DISCARDED, epoch):
-                    results[pk] = Revival.WRONG_STATUS_OR_EPOCH
-                else:
-                    results[pk] = Revival.REVIVED
-                    revivable.append((pk, epoch))
-            if revivable:
-                _pinned_rows(using, revivable, (OxTask.Status.DISCARDED,)).update(
-                    status=OxTask.Status.WAITING,
-                    lease_epoch=F("lease_epoch") + 1,
-                    finished_at=None,
-                )
-    return results
+
+    def revive() -> dict[uuid.UUID, Revival]:
+        results: dict[uuid.UUID, Revival] = {}
+        with transaction.atomic(using=using):
+            for chunk in _chunks(pairs):
+                found = {
+                    pk: (status, epoch)
+                    for pk, status, epoch in OxTask.objects.using(using)
+                    .select_for_update()
+                    .filter(pk__in=[pk for pk, _ in chunk])
+                    .order_by("pk")
+                    .values_list("pk", "status", "lease_epoch")
+                }
+                revivable: list[tuple[uuid.UUID, int]] = []
+                for pk, epoch in chunk:
+                    if pk not in found:
+                        results[pk] = Revival.NOT_FOUND
+                    elif found[pk] != (OxTask.Status.DISCARDED, epoch):
+                        results[pk] = Revival.WRONG_STATUS_OR_EPOCH
+                    else:
+                        results[pk] = Revival.REVIVED
+                        revivable.append((pk, epoch))
+                if revivable:
+                    _pinned_rows(using, revivable, (OxTask.Status.DISCARDED,)).update(
+                        status=OxTask.Status.WAITING,
+                        lease_epoch=F("lease_epoch") + 1,
+                        finished_at=None,
+                    )
+        return results
+
+    return _contention.run(using, revive)
 
 
 def _released(now: datetime) -> dict[str, Any]:

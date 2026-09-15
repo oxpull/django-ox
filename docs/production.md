@@ -153,10 +153,11 @@ runs in its own process group, and why the systemd unit above sets
 A worker whose supervisor dies without signalling it (SIGKILL, an OOM kill)
 does not run on as an orphan. On Linux the kernel sends it SIGTERM the
 moment the supervisor exits (`PR_SET_PDEATHSIG`), so it drains through its
-ordinary signal path. Everywhere else, and on Linux in the window before
-that flag is set, the worker notices within one poll interval that its
-parent pid has changed, logs `worker_orphaned` at WARNING, drains and
-exits.
+ordinary signal path. Everywhere else, the worker notices within one poll
+interval that its parent pid is no longer the supervisor's, logs
+`worker_orphaned` at WARNING, drains and exits. A worker whose supervisor
+is already gone when the worker finishes starting makes the same check
+before its first poll, and exits having claimed nothing.
 
 ## Scaling out
 

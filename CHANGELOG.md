@@ -22,6 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ox_health --max-age` and `--worker-timeout` accept the duration forms
   `ox_prune --older-than` takes (`7d`, `24h`, `90m`, `45s`). A plain number
   still means seconds, fractions included.
+- A worker ended by a second stop signal exits with code 130 without
+  logging `second signal received; forcing exit.` first; the
+  `--processes` supervisor still logs its own line.
+
+### Fixed
+
+- A stop signal could leave an idle `ox_worker` hung instead of draining.
+  It stayed hung until a second signal or the process manager ended it,
+  or for good when it was a worker process whose supervisor had been
+  killed. A worker that has
+  finished starting now drains on the signal. Present since 0.1.0.
+- A worker process whose supervisor died while the worker was still
+  starting ran on as an orphan. It now drains and exits having claimed
+  nothing. Present since 0.3.0.
+- If the `--processes` supervisor hit an error while running, a second
+  stop signal did not send SIGKILL to a worker process that would not
+  exit, and the supervisor waited for it forever. The second and third
+  signals now escalate as they do in any other stop. Present since 0.3.0.
 
 ## [1.2.0] - 2026-09-12
 

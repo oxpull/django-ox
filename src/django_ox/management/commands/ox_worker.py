@@ -1,17 +1,21 @@
 import argparse
 import logging
 import os
+import queue
 import signal
 import sys
+import threading
+from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 
 from django_ox.compat import DEFAULT_TASK_BACKEND_ALIAS
-from django_ox.supervisor import STOP_SIGNALS, Supervisor
+from django_ox.supervisor import STOP_SIGNALS, SUPERVISOR_PID_ENV, Supervisor
 from django_ox.timeouts import RECYCLE_EXIT_CODE
-from django_ox.worker import worker_class
+from django_ox.worker import Worker, worker_class
 
 logger = logging.getLogger("django_ox")
 
@@ -72,6 +76,9 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args: Any, **options: Any) -> None:
+        # Removed at once, so a task that starts an ox_worker of its own does
+        # not pass this process's supervisor on to it.
+        supervisor_pid = os.environ.pop(SUPERVISOR_PID_ENV, None)
         if options["processes"] < 1:
             raise CommandError("--processes must be at least 1.")
         if options["verbosity"] > 0 and not logger.handlers:
@@ -100,8 +107,16 @@ class Command(BaseCommand):
 
         parent_pid = None
         if options["worker_index"] is not None:
-            parent_pid = os.getppid()
-            _die_with_parent()
+            # A getppid() read here names whoever adopted the child if the
+            # supervisor died first, and the orphan would watch that pid
+            # forever. The snapshot remains for a child started without the
+            # variable, such as one a supervisor still running the previous
+            # release restarts after an upgrade.
+            if supervisor_pid is not None:
+                with suppress(ValueError):
+                    parent_pid = int(supervisor_pid)
+            if parent_pid is None:
+                parent_pid = os.getppid()
 
         queues = (
             [q.strip() for q in options["queues"].split(",") if q.strip()]
@@ -118,31 +133,18 @@ class Command(BaseCommand):
             parent_pid=parent_pid,
         )
 
-        signals_seen = 0
+        retire_signal_thread = install_stop_handlers(worker)
+        if parent_pid is not None:
+            # After the handlers: a parent-death signal armed before they
+            # exist would kill the child instead of draining it. A supervisor
+            # that died before the arming sends nothing; run() compares the
+            # parent with parent_pid before every poll, its first included.
+            _die_with_parent()
 
-        def handle_signal(signum: int, frame: Any) -> None:
-            # Counted here rather than read off worker.stopping: a worker
-            # that is recycling is already stopping, and the operator's
-            # first signal during that drain should not be the force-exit.
-            nonlocal signals_seen
-            signals_seen += 1
-            if signals_seen > 1:
-                logger.error(
-                    "Worker %s: second signal received; forcing exit.", worker.worker_id
-                )
-                os._exit(130)
-            logger.info(
-                "Worker %s received %s; draining in-flight tasks. "
-                "Signal again to force exit.",
-                worker.worker_id,
-                signal.Signals(signum).name,
-            )
-            worker.request_stop()
-
-        signal.signal(signal.SIGTERM, handle_signal)
-        signal.signal(signal.SIGINT, handle_signal)
-
-        worker.run()
+        try:
+            worker.run()
+        finally:
+            retire_signal_thread()
         if worker.recycling:
             # A thread the timeout could not stop is still running. A normal
             # exit would wait for it at interpreter shutdown, which is the
@@ -155,12 +157,84 @@ class Command(BaseCommand):
         sys.exit(0)
 
 
+def install_stop_handlers(worker: Worker) -> Callable[[], None]:
+    """
+    Make SIGTERM and SIGINT drain ``worker``, and a second one exit at once.
+
+    Returns the function that ends the helper thread once ``run()`` returns.
+    """
+    stop_requests: queue.SimpleQueue[int | None] = queue.SimpleQueue()
+    signals_seen = 0
+
+    def handle_signal(signum: int, frame: Any) -> None:
+        # Only a count, a SimpleQueue.put and os._exit belong here. Python
+        # runs this on the main thread wherever that thread was, including
+        # inside Event.wait() with the stop Event's lock held, so
+        # request_stop(), logging or anything else that takes a lock can
+        # block forever on the lock its own thread holds. SimpleQueue.put is
+        # documented as safe to call from a signal handler.
+        #
+        # Counted here rather than read off worker.stopping: a worker that
+        # is recycling is already stopping, and the operator's first signal
+        # during that drain should not be the force-exit.
+        nonlocal signals_seen
+        signals_seen += 1
+        if signals_seen > 1:
+            # Nothing is written first, not even with os.write: a stderr
+            # pipe that nobody is reading would block the exit.
+            os._exit(130)
+        stop_requests.put(signum)
+
+    def act_on_stop_requests() -> None:
+        while (signum := stop_requests.get()) is not None:
+            # The stop first: a log handler that raises or blocks must not
+            # cost the drain.
+            worker.request_stop()
+            with suppress(Exception):
+                logger.info(
+                    "Worker %s received %s; draining in-flight tasks. "
+                    "Signal again to force exit.",
+                    worker.worker_id,
+                    signal.Signals(signum).name,
+                )
+
+    # The handlers first: off the main thread signal.signal() raises, and
+    # nothing should be left behind when it does. A signal that arrives
+    # before the thread starts waits in the queue. A daemon, so a forced
+    # exit need not wait for it.
+    signums = (signal.SIGTERM, signal.SIGINT)
+    previous = {signum: signal.getsignal(signum) for signum in signums}
+    for signum in signums:
+        signal.signal(signum, handle_signal)
+    thread = threading.Thread(
+        target=act_on_stop_requests, name="ox-signal", daemon=True
+    )
+    try:
+        thread.start()
+    except BaseException:
+        # Handlers that fed a queue nobody reads would swallow a stop, and a
+        # signal already queued is one nobody else will act on. This is
+        # ordinary code, not a handler, so it can stop the worker itself.
+        for signum, handler in previous.items():
+            if handler is not None:
+                signal.signal(signum, handler)
+        if not stop_requests.empty():
+            worker.request_stop()
+        raise
+
+    def retire() -> None:
+        stop_requests.put(None)
+        thread.join(timeout=1.0)
+
+    return retire
+
+
 def _die_with_parent() -> None:
     """
     On Linux, ask the kernel to SIGTERM this process when its parent exits
-    (PR_SET_PDEATHSIG). The worker also polls ``os.getppid()``, which covers
-    every platform and the window before this call; this is the prompt
-    version. Best effort: anything missing or refused is ignored.
+    (PR_SET_PDEATHSIG). The worker also compares ``os.getppid()`` with the
+    supervisor's pid, which covers every platform, a supervisor that died
+    before this call and a refused call; this is the prompt version.
     """
     if not sys.platform.startswith("linux"):
         return
@@ -168,7 +242,12 @@ def _die_with_parent() -> None:
         import ctypes
 
         libc = ctypes.CDLL(None, use_errno=True)
-        libc.prctl(1, signal.SIGTERM, 0, 0, 0)  # PR_SET_PDEATHSIG
+        if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
+            logger.debug(
+                "PR_SET_PDEATHSIG refused (errno %d); the parent pid check "
+                "still applies",
+                ctypes.get_errno(),
+            )
     except (OSError, AttributeError):
         return
 

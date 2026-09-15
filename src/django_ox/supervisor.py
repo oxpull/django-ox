@@ -21,6 +21,7 @@ codes: see _record_exit.
 
 import logging
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -79,6 +80,13 @@ STOP_SIGNALS = tuple(
 FORCE_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
+# Set in each child's environment to the supervisor's pid, read before the
+# child existed, so a child whose supervisor is already gone can tell. An
+# environment variable rather than a flag: a child running an older release,
+# as after a downgrade in place, ignores it instead of refusing to start.
+SUPERVISOR_PID_ENV = "OX_SUPERVISOR_PID"
+
+
 def child_command(
     worker_args: list[str], index: int, argv0: str | None = None
 ) -> list[str]:
@@ -115,6 +123,7 @@ def _child_env() -> dict[str, str]:
     module = getattr(settings, "SETTINGS_MODULE", None)
     if module:
         env["DJANGO_SETTINGS_MODULE"] = module
+    env[SUPERVISOR_PID_ENV] = str(os.getpid())
     return env
 
 
@@ -162,11 +171,12 @@ class Supervisor:
         self._cap_tripped = False
         self._signals_seen = 0
         self._kill_at: float | None = None
+        # What handle_signal records and the run loop acts on.
+        self._signals: queue.SimpleQueue[int] = queue.SimpleQueue()
         # Guards the stop flag and the restart decision together, so a stop
-        # requested between the two never starts a child that nobody will
-        # signal. Signal handlers run on this same thread, between two
-        # bytecodes of whatever it was doing, so the lock has to be
-        # re-entrant for them.
+        # requested from another thread between the two never starts a
+        # child that nobody will signal. Re-entrant because _start_due holds
+        # it while it calls _start, which takes it too.
         self._lock = threading.RLock()
 
     # -- children ----------------------------------------------------------
@@ -191,8 +201,8 @@ class Supervisor:
             self._exit_codes.pop(index, None)
             self._restart_due.pop(index, None)
         if self._stopping:
-            # A stop request landed while Popen was running; the handler
-            # could not see this child yet.
+            # A stop requested from another thread landed while Popen was
+            # running, before this child was in _children to be signalled.
             with suppress(ProcessLookupError):
                 proc.send_signal(signal.SIGTERM)
 
@@ -342,28 +352,44 @@ class Supervisor:
     # -- signals -----------------------------------------------------------
 
     def handle_signal(self, signum: int, frame: Any) -> None:
-        self._signals_seen += 1
-        name = signal.Signals(signum).name
-        if self._signals_seen == 1:
-            logger.info(
-                "Received %s; stopping %d worker process(es). "
-                "Signal again to force exit.",
-                name,
-                len(self._children),
-            )
-        elif self._kill_at is None:
-            logger.error(
-                "Second signal received; forcing worker exit, SIGKILL in %.0fs.",
-                self.kill_grace,
-            )
-            self._kill_at = time.monotonic() + self.kill_grace
-        else:
-            # A third signal: the operator has waited long enough.
-            self._kill_at = time.monotonic()
-        self.request_stop()
-        # Children treat SIGTERM and SIGINT the same way, and their second
-        # signal is the force-exit, so the supervisor's count is theirs.
-        self._signal_children(signal.SIGTERM)
+        # Records the signal and nothing else; the run loop acts on it
+        # within POLL_INTERVAL. Python runs a handler on the main thread in
+        # the middle of whatever that thread was doing, which may be a log
+        # write or a held lock, and a handler that logs or locks there can
+        # fail or block. SimpleQueue.put is documented as safe to call from
+        # a signal handler.
+        self._signals.put(signum)
+
+    def _process_signals(self) -> None:
+        """Act on the signals handle_signal recorded, oldest first."""
+        while True:
+            try:
+                signum = self._signals.get_nowait()
+            except queue.Empty:
+                return
+            self._signals_seen += 1
+            name = signal.Signals(signum).name
+            if self._signals_seen == 1:
+                logger.info(
+                    "Received %s; stopping %d worker process(es). "
+                    "Signal again to force exit.",
+                    name,
+                    len(self._children),
+                )
+            elif self._kill_at is None:
+                logger.error(
+                    "Second signal received; forcing worker exit, SIGKILL in %.0fs.",
+                    self.kill_grace,
+                )
+                self._kill_at = time.monotonic() + self.kill_grace
+            else:
+                # A third signal: the operator has waited long enough.
+                self._kill_at = time.monotonic()
+            self.request_stop()
+            # Children treat SIGTERM and SIGINT the same way, and their
+            # second signal is the force-exit, so the supervisor's count is
+            # theirs.
+            self._signal_children(signal.SIGTERM)
 
     def request_stop(self) -> None:
         with self._lock:
@@ -385,9 +411,16 @@ class Supervisor:
             extra={"event": "supervisor_started", "processes": self.processes},
         )
         for index in range(self.processes):
+            # Between starts, so a stop that lands while children are being
+            # started ends the starting too, and one that arrived before
+            # run() starts nothing.
+            self._process_signals()
+            if self._stopping:
+                break
             self._start(index)
         try:
             while self._children or (self._restart_due and not self._stopping):
+                self._process_signals()
                 self._reap_exited()
                 self._start_due()
                 self._kill_overdue()
@@ -397,9 +430,16 @@ class Supervisor:
             # exception), leave no child behind.
             self.request_stop()
             self._signal_children(signal.SIGTERM)
-            for index, proc in self._children.items():
-                self._record_exit(index, proc.wait())
-            self._children.clear()
+            # Polled rather than waited on: the signals only this loop acts
+            # on include the second and third, which are what turn a child
+            # that will not exit into a SIGKILL.
+            while True:
+                self._process_signals()
+                self._kill_overdue()
+                self._reap_exited()
+                if not self._children:
+                    break
+                time.sleep(POLL_INTERVAL)
         # A recycle that lands during a stop is a worker that finished the
         # job it was asked to do, not a failure to report upwards.
         failures = [

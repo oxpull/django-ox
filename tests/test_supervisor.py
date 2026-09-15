@@ -14,14 +14,21 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
 from django.conf import settings
 from django.db import connection
 
+from django_ox import supervisor as supervisor_module
 from django_ox.models import OxTask
-from django_ox.supervisor import Supervisor, child_command
+from django_ox.supervisor import (
+    SUPERVISOR_PID_ENV,
+    Supervisor,
+    _child_env,
+    child_command,
+)
 from django_ox.worker import Worker
 
 from .conftest import start_worker_thread, wait_for
@@ -581,6 +588,17 @@ def test_child_command_reinvokes_a_single_worker():
     ]
 
 
+def test_each_child_is_told_the_supervisors_pid_in_its_environment():
+    """
+    The child compares its parent with this pid rather than with a getppid()
+    of its own, which names the adopter if the supervisor died first. It is
+    not a flag: a child running an older release would refuse the flag and
+    never start.
+    """
+    assert _child_env()[SUPERVISOR_PID_ENV] == str(os.getpid())
+    assert SUPERVISOR_PID_ENV == "OX_SUPERVISOR_PID"
+
+
 def test_child_command_reuses_the_script_by_absolute_path(tmp_path, monkeypatch):
     script = tmp_path / "manage.py"
     script.write_text("")
@@ -700,9 +718,111 @@ class TestEscalation:
         assert not alive(stuck)
 
 
+class FakeChild:
+    """A child process that runs until it is signalled, then drains."""
+
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.signals: list[int] = []
+        self.pid = 0
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def send_signal(self, signum: int) -> None:
+        self.signals.append(signum)
+        if self.returncode is None:
+            self.returncode = 0
+
+
+def fake_children(monkeypatch, on_start=None) -> list[FakeChild]:
+    """Make the supervisor start FakeChild objects instead of processes."""
+    started: list[FakeChild] = []
+
+    def popen(argv, **kwargs):
+        child = FakeChild()
+        started.append(child)
+        if on_start is not None:
+            on_start(child, len(started))
+        return child
+
+    monkeypatch.setattr(supervisor_module.subprocess, "Popen", popen)
+    return started
+
+
+class TestStopWhileStarting:
+    def test_a_signal_before_run_starts_nothing(self, monkeypatch):
+        started = fake_children(monkeypatch)
+        supervisor = Supervisor(processes=2, worker_args=[])
+        supervisor.handle_signal(signal.SIGTERM, None)
+        assert supervisor.run() == 0
+        assert started == []
+
+    def test_a_signal_between_starts_ends_the_starting(self, monkeypatch):
+        """
+        The handler runs while the first child is being started; the start
+        loop acts on it before the next start, as it did when the handler
+        set the stop itself.
+        """
+        supervisor = Supervisor(processes=8, worker_args=[])
+
+        def on_start(child, count):
+            if count == 1:
+                supervisor.handle_signal(signal.SIGTERM, None)
+
+        started = fake_children(monkeypatch, on_start)
+        assert supervisor.run() == 0
+        assert len(started) == 1
+        assert started[0].signals == [signal.SIGTERM]
+
+
 class TestStopRestartRace:
+    def test_a_recorded_signal_is_acted_on_before_a_restart(self, monkeypatch):
+        """
+        A slot has died and its restart falls due while the loop sleeps, and
+        a signal is recorded in the same sleep, where the handler most often
+        runs. The next pass acts on the signal before it restarts anything,
+        so nothing starts.
+        """
+
+        def on_start(child, count):
+            if count == 1:
+                child.returncode = -signal.SIGKILL
+
+        started = fake_children(monkeypatch, on_start)
+        supervisor = Supervisor(processes=1, worker_args=[], restart_delay=3600)
+        real_sleep = time.sleep
+        recorded = False
+
+        def sleep(seconds):
+            nonlocal recorded
+            if supervisor._restart_due and not recorded:
+                recorded = True
+                for index in list(supervisor._restart_due):
+                    supervisor._restart_due[index] = 0.0
+                supervisor.handle_signal(signal.SIGTERM, None)
+            real_sleep(seconds)
+
+        monkeypatch.setattr(
+            supervisor_module,
+            "time",
+            types.SimpleNamespace(monotonic=time.monotonic, sleep=sleep),
+        )
+        thread, result = run_in_thread(supervisor)
+        thread.join(timeout=10)
+        if thread.is_alive():
+            supervisor.request_stop()
+            supervisor._signal_children(signal.SIGTERM)
+            thread.join(timeout=10)
+        assert recorded
+        assert len(started) == 1
+        assert result == [128 + signal.SIGKILL]
+
     def test_a_stop_just_before_the_restart_starts_nothing(self, monkeypatch):
-        """A stop that lands between the snapshot and Popen must start nothing."""
+        """
+        A stop requested between the restart decision and Popen, as another
+        thread embedding the supervisor could, must start nothing.
+        """
         in_process_env(monkeypatch)
         supervisor = Supervisor(
             processes=1,
@@ -716,7 +836,7 @@ class TestStopRestartRace:
             nonlocal starts
             starts += 1
             if starts == 2:
-                supervisor.handle_signal(signal.SIGTERM, None)
+                supervisor.request_stop()
             original(index)
 
         monkeypatch.setattr(supervisor, "_start", patched)
@@ -741,6 +861,7 @@ def test_a_second_signal_forwards_again(monkeypatch):
 
     supervisor.handle_signal(signal.SIGINT, None)
     supervisor.handle_signal(signal.SIGINT, None)
+    supervisor._process_signals()
 
     assert supervisor.stopping
     assert sent == [signal.SIGTERM, signal.SIGTERM]

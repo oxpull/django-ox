@@ -306,9 +306,14 @@ class TestProcessesTwo:
             r"Worker process \d exited with signal SIGKILL; restarting", log
         )
         row = OxTask.objects.get(id=result.id)
-        assert row.attempts == 2
-        assert len(row.worker_ids) == 2
+        # At-least-once execution: on a slow runner the second holder can
+        # miss a lease renewal, the reaper hands the task back, and a third
+        # claim runs it. Assert what the worker promises, not an exact count.
+        assert row.attempts >= 2
+        assert len(row.worker_ids) == row.attempts
         assert row.worker_ids[0] == holder
+        if row.attempts > 2:
+            assert "lost its lease" in log
 
 
 class TestReinvocation:

@@ -12,6 +12,7 @@ import inspect
 import logging
 import re
 import threading
+import time
 import uuid
 from datetime import timedelta
 from io import StringIO
@@ -48,7 +49,7 @@ from django_ox.results import public_status
 from django_ox.worker import WRITABLE_STATUSES
 
 from .conftest import wait_for
-from .contention import failing, simulated
+from .contention import descending, failing, in_key_order, simulated
 from .tasks import add
 from .test_worker import reap_away
 from .test_write_routing import ALT
@@ -432,7 +433,7 @@ class TestCancelAndRevive:
             kept.pk: _waiting.Revival.REVIVED,
             never_cancelled.pk: _waiting.Revival.WRONG_STATUS_OR_EPOCH,
         }
-        assert list(results) == sorted(results)
+        assert list(results) == in_key_order(results)
         assert (current(kept).status, current(kept).lease_epoch) == (WAITING, 1)
         untouched = current(never_cancelled)
         assert (untouched.status, untouched.lease_epoch) == (WAITING, 0)
@@ -602,7 +603,7 @@ class TestBulk:
         monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
         rows = rows_for(helper, 5)
         # Interleaved epochs, so ordering by epoch would break key order.
-        for index, row in enumerate(sorted(rows, key=lambda r: r.pk)):
+        for index, row in enumerate(in_key_order(rows, by=lambda r: r.pk)):
             OxTask.objects.filter(pk=row.pk).update(lease_epoch=index % 2)
         given = sorted(rows, key=lambda r: r.pk, reverse=True)
         given = given[1::2] + given[::2]
@@ -623,7 +624,26 @@ class TestBulk:
             statements.append(ids)
         assert [len(ids) for ids in statements] == [2, 2, 1], statements
         issued = [pk for ids in statements for pk in ids]
-        assert issued == sorted(row.pk for row in rows)
+        assert issued == in_key_order(row.pk for row in rows)
+
+    @pytest.mark.parametrize("helper", BULK)
+    def test_the_chunks_follow_the_key_order_of_the_database(self, helper, monkeypatch):
+        """
+        As for the _many actions in tests/test_actions.py, with the database's
+        key order swapped for one no database uses.
+        """
+        monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
+        rows = rows_for(helper, 5)
+        keys = sorted((row.pk for row in rows), reverse=True)
+        monkeypatch.setattr(actions, "_key_order", lambda alias: descending)
+
+        with failing("UPDATE", lambda: None, lambda n: False) as seen:
+            moved = run_bulk(helper, sorted(rows, key=lambda row: row.pk))
+
+        assert moved == all_moved(helper, rows)
+        assert chunks_of(seen) == [keys[0:2], keys[2:4], keys[4:5]]
+        if helper == "revive_many":
+            assert list(moved) == keys
 
 
 @pytest.mark.django_db(transaction=True)
@@ -638,7 +658,7 @@ def test_release_many_commits_each_chunk_on_its_own(ambient, monkeypatch):
     caller's transaction the chunks commit or roll back with it.
     """
     monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
-    rows = sorted((held() for _ in range(5)), key=lambda row: row.pk)
+    rows = in_key_order((held() for _ in range(5)), by=lambda row: row.pk)
     pinned = [(row.pk, 0) for row in reversed(rows)]
 
     calls = update_that_fails_second(monkeypatch)
@@ -662,7 +682,7 @@ def test_release_many_commits_each_chunk_on_its_own(ambient, monkeypatch):
 @pytest.mark.parametrize("helper", ["release_many", "cancel_many"])
 def test_each_chunk_is_locked_in_key_order_before_its_update(helper, monkeypatch):
     monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
-    keys = sorted(row.pk for row in rows_for(helper, 5))
+    keys = in_key_order(row.pk for row in rows_for(helper, 5))
     pinned = [(pk, 0) for pk in reversed(keys)]
 
     with CaptureQueriesContext(connection) as ctx:
@@ -703,6 +723,22 @@ def test_each_chunk_is_locked_in_key_order_before_its_update(helper, monkeypatch
     assert len(others) <= 2, others
 
 
+def waiting_for_a_lock(count=1, timeout=10):
+    """
+    Wait until `count` other sessions are queued for a lock. True if they
+    were. MariaDB serves INNODB_TRX from a cache it refreshes only after
+    100 ms without a read, so a poll comes after a pause longer than that,
+    and the first read of a round is never the last round's snapshot.
+    """
+    if getattr(connection, "mysql_is_mariadb", False):
+        return wait_for(
+            lambda: time.sleep(0.15) or lock_waits() >= count,
+            timeout=timeout,
+            interval=0,
+        )
+    return wait_for(lambda: lock_waits() >= count, timeout=timeout)
+
+
 def lock_waits():
     """Other sessions on this test database that are waiting for a lock."""
     with connection.cursor() as cursor:
@@ -714,6 +750,12 @@ def lock_waits():
                 "SELECT count(*) FROM pg_stat_activity WHERE datname = "
                 "current_database() AND wait_event_type = 'Lock' "
                 "AND pid <> pg_backend_pid()"
+            )
+        elif getattr(connection, "mysql_is_mariadb", False):
+            # MariaDB has no performance_schema.data_locks.
+            cursor.execute(
+                "SELECT count(*) FROM information_schema.INNODB_TRX "
+                "WHERE trx_state = 'LOCK WAIT'"
             )
         else:
             cursor.execute(
@@ -747,7 +789,7 @@ def test_two_bulk_calls_over_shared_rows_do_not_deadlock(second, monkeypatch):
     if not connection.features.has_select_for_update:
         pytest.skip("SQLite has no row locks to take in any order")
     monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
-    keys = sorted(uuid.uuid4() for _ in range(4))
+    keys = in_key_order(uuid.uuid4() for _ in range(4))
     for pk in reversed(keys):
         a_row(WAITING, pk=pk, lease_epoch=0)
 
@@ -759,7 +801,7 @@ def test_two_bulk_calls_over_shared_rows_do_not_deadlock(second, monkeypatch):
         for index, chunk in enumerate(real_chunks(items)):
             if index == 1 and threading.current_thread().name == "first":
                 first_chunk_held.set()
-                waited.append(wait_for(lambda: lock_waits() > 0, timeout=10))
+                waited.append(waiting_for_a_lock())
             yield chunk
 
     monkeypatch.setattr(_waiting, "_chunks", chunks)
@@ -824,7 +866,7 @@ def needs_a_locking_read(statement):
 def five_rows(helper, monkeypatch):
     """Five rows in chunks of 2, 2 and 1, given in reverse key order."""
     monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
-    keys = sorted(row.pk for row in rows_for(helper, 5))
+    keys = in_key_order(row.pk for row in rows_for(helper, 5))
     return keys, [(pk, 0) for pk in reversed(keys)]
 
 

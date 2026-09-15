@@ -22,9 +22,8 @@ from django_ox import _waiting, actions
 from django_ox.durations import parse_duration
 from django_ox.models import OxScheduleTick, OxTask
 
-from .conftest import wait_for
-from .contention import CONTENTION, failing, simulated
-from .test_waiting import lock_waits
+from .contention import CONTENTION, failing, in_key_order, simulated
+from .test_waiting import waiting_for_a_lock
 
 
 def make_task(status, *, finished_days_ago=None, queue_name="default"):
@@ -865,7 +864,7 @@ def test_a_bulk_action_and_a_prune_of_the_same_rows_wait_rather_than_deadlock(
     """
     if not connection.features.has_select_for_update:
         pytest.skip("SQLite has no row locks to take in any order")
-    small, large = sorted(uuid.uuid4() for _ in range(2))
+    small, large = in_key_order(uuid.uuid4() for _ in range(2))
     old_failed_rows([large, small])
     held = large if waits_first == "action" else small
 
@@ -916,7 +915,7 @@ def test_a_bulk_action_and_a_prune_of_the_same_rows_wait_rather_than_deadlock(
         thread = threading.Thread(target=watched, args=(name, callers[name]))
         thread.start()
         threads.append(thread)
-        waited.append(wait_for(lambda count=count: lock_waits() >= count, timeout=10))
+        waited.append(waiting_for_a_lock(count))
     release.set()
     for thread in [holder, *threads]:
         thread.join(60)

@@ -5,6 +5,7 @@ django_ox.actions: retry and discard as compare-and-set moves on one row.
 import re
 import threading
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from django.db import OperationalError, connection, connections, transaction
@@ -16,7 +17,14 @@ from django_ox.compat import TaskResultStatus, default_task_backend
 from django_ox.models import OxTask
 from django_ox.worker import Worker
 
-from .contention import CONTENTION, UUID_TEXT, failing, simulated
+from .contention import (
+    CONTENTION,
+    UUID_TEXT,
+    descending,
+    failing,
+    in_key_order,
+    simulated,
+)
 from .tasks import STATE, add, fail_always, flaky
 from .test_worker import reap_away
 
@@ -560,7 +568,7 @@ def test_chunks_go_in_key_order_each_locked_before_its_update(name, monkeypatch)
     them in that index's order.
     """
     monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
-    keys = sorted(row.pk for row in seed(OxTask.Status.FAILED, 5))
+    keys = in_key_order(row.pk for row in seed(OxTask.Status.FAILED, 5))
     given = [keys[3], keys[0], keys[4], keys[1], keys[2]]
 
     with CaptureQueriesContext(connection) as ctx:
@@ -601,6 +609,80 @@ def test_chunks_go_in_key_order_each_locked_before_its_update(name, monkeypatch)
     assert set(OxTask.objects.values_list("status", flat=True)) == {MOVED_TO[name]}
 
 
+# The order MariaDB 10.11 and 11.4 read these values back in, from a uuid
+# primary key column, with ORDER BY on the key.
+MARIADB_UUID_ORDER = [
+    "00000000-0000-0000-0000-000000000000",
+    "a0000000-0000-0a00-8000-000000000000",
+    "c0000000-0000-5fff-ffff-000000000000",
+    "ffffffff-ffff-4fff-bfff-000000000001",
+    "00000000-0000-4000-8000-000000000002",
+    "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+    "017f22e2-79b0-7cc3-98c4-dc0c0c07398f",
+    "1ec9414c-232a-6b00-b3c8-9e6bdeced846",
+    "12345678-9abc-4def-8123-456789abcdef",
+    "b0000000-0000-4000-4000-000000000000",
+    "fedcba98-7654-4321-8fed-cba987654321",
+    "d0000000-0000-6000-8000-000000000000",
+]
+
+
+@pytest.mark.django_db
+def test_the_key_order_is_the_order_the_database_reads_keys_in():
+    keys = [row.pk for row in seed(OxTask.Status.FAILED, 300)]
+    assert in_key_order(keys) == list(
+        OxTask.objects.order_by("pk").values_list("pk", flat=True)
+    )
+
+
+def test_mariadb_key_order_follows_its_uuid_column():
+    expected = [uuid.UUID(text) for text in MARIADB_UUID_ORDER]
+    assert sorted(expected) != expected
+    assert sorted(sorted(expected), key=actions._mariadb_uuid_order) == expected
+
+
+@pytest.mark.parametrize(
+    ("vendor", "native_uuid", "mariadb"),
+    [
+        ("mysql", True, True),
+        ("mysql", False, False),
+        ("postgresql", True, False),
+        ("sqlite", False, False),
+    ],
+)
+def test_only_a_uuid_column_on_mysql_gets_mariadbs_order(vendor, native_uuid, mariadb):
+    alias = "key-order-probe"
+    connections[alias] = SimpleNamespace(
+        vendor=vendor, features=SimpleNamespace(has_native_uuid_field=native_uuid)
+    )
+    try:
+        key = actions._key_order(alias)
+    finally:
+        del connections[alias]
+    values = [uuid.UUID(text) for text in MARIADB_UUID_ORDER]
+    expected = values if mariadb else sorted(values)
+    assert sorted(values[1::2] + values[::2], key=key) == expected
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", list(MANY))
+def test_the_chunks_follow_the_key_order_of_the_database(name, monkeypatch):
+    """
+    The order comes from actions._key_order.
+    test_the_key_order_is_the_order_the_database_reads_keys_in pins that to
+    the database under test. Here it is swapped for descending order, which
+    no database uses, so a sort that ignored it would show on any of them.
+    """
+    monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
+    monkeypatch.setattr(actions, "_key_order", lambda alias: descending)
+    keys = sorted((row.pk for row in seed(OxTask.Status.FAILED, 5)), reverse=True)
+
+    with failing("UPDATE", lambda: None, lambda n: False) as updates:
+        assert MANY[name](sorted(keys)) == (5, 0)
+
+    assert [ids for _, ids in updates] == [keys[0:2], keys[2:4], keys[4:5]]
+
+
 def epochs():
     return dict(OxTask.objects.values_list("pk", "lease_epoch"))
 
@@ -622,7 +704,7 @@ class TestContendedBulkCalls:
         self, kind, name, monkeypatch
     ):
         monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
-        keys = sorted(row.pk for row in seed(OxTask.Status.FAILED, 5))
+        keys = in_key_order(row.pk for row in seed(OxTask.Status.FAILED, 5))
         before = epochs()
 
         with failing("UPDATE", lambda: simulated(kind), lambda n: n == 2) as updates:

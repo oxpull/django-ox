@@ -10,17 +10,18 @@ transaction. None of them ever moves a RUNNING row: a running task
 belongs to the worker holding its lease, and the reaper is the only party
 that takes a lease away.
 
-The _many forms sort the ids before they chunk them. On a database with row
-locks, each chunk's UPDATE comes after a locking read of that chunk's ids in
-key order, so the whole call takes its rows in key order. That is the order
-ox_prune and django_ox._waiting lock in, so a call and one of them wait for
-each other instead of deadlocking over the rows they share. Sorting is what
-MySQL needs, where an UPDATE already walks a chunk's ids in key order but the
-chunks came in the order they were given. The locking read is what PostgreSQL
-needs, where the UPDATE can visit rows in table order. It names the ids
-alone, with no status, so MySQL reads it from the primary key rather than a
-status index. It therefore locks every row in the chunk, whatever its status,
-until the call ends. A worker writing to one of them waits for that.
+The _many forms sort the ids before they chunk them, in the order the
+database keeps its keys. On a database with row locks, each chunk's UPDATE
+comes after a locking read of that chunk's ids in key order, so the whole
+call takes its rows in key order. That is the order ox_prune and
+django_ox._waiting lock in, so a call and one of them wait for each other
+instead of deadlocking over the rows they share. Sorting is what MySQL
+needs, where an UPDATE already walks a chunk's ids in key order but the
+chunks came in the order they were given. The locking read is what
+PostgreSQL needs, where the UPDATE can visit rows in table order. It names
+the ids alone, with no status, so MySQL reads it from the primary key rather
+than a status index. It therefore locks every row in the chunk, whatever its
+status, until the call ends. A worker writing to one of them waits for that.
 
 A deadlock is still possible with a writer that locks the same rows in
 another order. When a _many call opened the transaction itself, a deadlock
@@ -37,7 +38,7 @@ retried task next runs.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import timedelta
 from typing import Any
 
@@ -210,6 +211,36 @@ def discard(result_id: str | uuid.UUID) -> bool:
     return updated == 1
 
 
+def _key_order(alias: str) -> Callable[[uuid.UUID], bytes]:
+    """
+    A sort key that puts primary keys in the order the database `alias` keeps
+    them in, which is the order an ORDER BY on the key reads and locks them.
+
+    PostgreSQL, MySQL and SQLite order a UUIDField by its bytes. On MariaDB
+    10.7 and later, Django gives it MariaDB's own uuid column, which orders
+    some values by their fields in reverse. Every uuid4 is one of them.
+    """
+    connection = connections[alias]
+    if connection.vendor == "mysql" and connection.features.has_native_uuid_field:
+        return _mariadb_uuid_order
+    return _uuid_bytes
+
+
+def _uuid_bytes(pk: uuid.UUID) -> bytes:
+    return pk.bytes
+
+
+def _mariadb_uuid_order(pk: uuid.UUID) -> bytes:
+    # MariaDB orders a uuid value by its node, clock sequence, time-high,
+    # time-mid and time-low fields, in that order, when its seventh byte is
+    # 0x01 to 0x5f and its ninth byte has the top bit set. Any other value it
+    # orders byte by byte.
+    raw = pk.bytes
+    if 0 < raw[6] < 0x60 and raw[8] & 0x80:
+        return raw[10:] + raw[8:10] + raw[6:8] + raw[4:6] + raw[:4]
+    return raw
+
+
 def _ids(
     selection: QuerySet[OxTask] | Iterable[str | uuid.UUID],
 ) -> tuple[list[uuid.UUID], int]:
@@ -237,13 +268,14 @@ def _move_in_key_order(
     """
     The _many forms' write. Returns how many rows moved.
 
-    The ids go in sorted, one chunk at a time. On a database with row locks a
-    locking read of the chunk's ids comes first. The transaction is opened on
-    the database OxTask writes to, which is where every statement below goes.
+    The ids go in the database's key order, one chunk at a time. On a
+    database with row locks a locking read of the chunk's ids comes first.
+    The transaction is opened on the database OxTask writes to, which is where
+    every statement below goes.
     """
     alias = router.db_for_write(OxTask)
     locking_read = connections[alias].features.has_select_for_update
-    ordered = sorted(ids)
+    ordered = sorted(ids, key=_key_order(alias))
 
     def move() -> int:
         changed = 0

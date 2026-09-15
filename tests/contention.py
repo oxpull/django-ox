@@ -9,6 +9,8 @@ from contextlib import contextmanager
 
 from django.db import DEFAULT_DB_ALIAS, OperationalError, connections
 
+from django_ox import actions
+
 
 class PsycopgError(Exception):
     """A psycopg error: the SQLSTATE is an attribute of the driver's exception."""
@@ -48,6 +50,20 @@ CONTENTION = ["postgresql-deadlock", "postgresql-serialization", "mysql-deadlock
 UUID_TEXT = re.compile(
     r"[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}"
 )
+
+
+def in_key_order(items, by=None, using=DEFAULT_DB_ALIAS):
+    """
+    items in the order the database `using` keeps primary keys in, which is
+    the order the bulk calls lock rows in. by(item) gives an item's key.
+    """
+    key = actions._key_order(using)
+    return sorted(items, key=lambda item: key(by(item) if by else item))
+
+
+def descending(pk):
+    """A key order no database uses, for tests that must tell it apart."""
+    return bytes(255 - byte for byte in pk.bytes)
 
 
 def normalized(sql):

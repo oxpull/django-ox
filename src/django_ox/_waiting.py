@@ -25,7 +25,8 @@ Every function takes the database it writes to, and none falls back to a
 router. A row enqueued on one database is not there to move through another,
 and the return value says nothing moved.
 
-The bulk forms sort their primary keys and send their chunks in that order.
+The bulk forms sort their primary keys in the order the database keeps
+them, and send their chunks in that order.
 On a database with row locks, each chunk's UPDATE comes after a locking read
 of that chunk's rows ordered by primary key, in the same transaction. An
 UPDATE locks rows in the order its plan reads them, and on PostgreSQL a
@@ -171,7 +172,7 @@ def release_many(rows: Iterable[tuple[TaskId, int]], *, using: str) -> tuple[int
     chunk belongs to that transaction and commits or rolls back with it, and
     nothing runs again.
     """
-    pairs, malformed = _pinned(rows)
+    pairs, malformed = _pinned(rows, using)
     released = _released(timezone.now())
 
     def release_chunk(chunk: list[tuple[uuid.UUID, int]]) -> int:
@@ -207,7 +208,7 @@ def cancel_many(rows: Iterable[tuple[TaskId, int]], *, using: str) -> int:
     landed is RUNNING, not DISCARDED, and nothing here says which row that
     was. A caller whose count is short reads its rows again to find out.
     """
-    pairs, _ = _pinned(rows)
+    pairs, _ = _pinned(rows, using)
     now = timezone.now()
 
     def cancel() -> int:
@@ -254,7 +255,7 @@ def revive_many(
     entries then come from the attempt that committed. Inside a caller's
     transaction the error reaches the caller with nothing moved.
     """
-    pairs, malformed = _pinned(rows)
+    pairs, malformed = _pinned(rows, using)
     if malformed:
         raise ValueError(
             f"{malformed[0]!r} is not a task id, so there is no row to revive "
@@ -340,11 +341,12 @@ def _locked_in_key_order(
 
 
 def _pinned(
-    rows: Iterable[tuple[TaskId, int]],
+    rows: Iterable[tuple[TaskId, int]], using: str
 ) -> tuple[list[tuple[uuid.UUID, int]], list[TaskId]]:
     """
-    The usable (primary key, epoch) pairs in primary-key order, each key once
-    with the first epoch given for it, and the ids that are not UUIDs.
+    The usable (primary key, epoch) pairs in the primary-key order of the
+    database `using`, each key once with the first epoch given for it, and
+    the ids that are not UUIDs.
     """
     seen: dict[uuid.UUID, int] = {}
     malformed: list[TaskId] = []
@@ -354,7 +356,8 @@ def _pinned(
             malformed.append(task_id)
         else:
             seen.setdefault(pk, int(epoch))
-    return sorted(seen.items()), malformed
+    key = actions._key_order(using)
+    return sorted(seen.items(), key=lambda pair: key(pair[0])), malformed
 
 
 def _pinned_rows(

@@ -182,6 +182,14 @@ prunes every schedule's old ticks at its own cutoff, so when queues are
 pruned separately, the shortest `--older-than` decides how much tick
 history stays.
 
+`ox_prune` deletes task rows one batch at a time, and each batch commits by
+itself. It checks each batch again under a lock before it deletes it, and it
+takes those locks in primary key order. A batch that hits a deadlock or a
+serialization failure runs again in a new transaction, three attempts in all.
+If it still fails, `ox_prune` stops and exits non-zero. The batches it deleted
+before that stay deleted. Run it again and it deletes the rest. Called inside
+a transaction of your own, it doesn't retry, and the error reaches you.
+
 ## ox_health
 
 A health check for cron alerting and container probes: exits 0 when

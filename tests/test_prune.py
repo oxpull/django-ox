@@ -23,6 +23,7 @@ from django_ox.durations import parse_duration
 from django_ox.models import OxScheduleTick, OxTask
 
 from .conftest import wait_for
+from .contention import CONTENTION, failing, simulated
 from .test_waiting import lock_waits
 
 
@@ -933,3 +934,120 @@ def test_a_bulk_action_and_a_prune_of_the_same_rows_wait_rather_than_deadlock(
         assert deleted_task_count(outcome["prune"]) == 2
         assert outcome["action"] == (0, 2)
         assert rows == {}
+
+
+@pytest.mark.django_db(transaction=True)
+class TestPruneAfterContention:
+    """
+    ox_prune commits batch by batch. A batch that loses a deadlock or a
+    serialization failure runs again in a new transaction, up to three times,
+    and after that the command stops with an error that says a rerun finishes.
+    The errors are simulated in place of the batch's DELETE, shaped as Django
+    raises the drivers' (tests/test_contention.py pins the shape).
+    """
+
+    ARGS = ("--include-failed", "--batch-size=2")
+    DELETE = "DELETE FROM DJANGO_OX_OXTASK"
+
+    @pytest.mark.parametrize("kind", CONTENTION)
+    def test_a_batch_that_loses_runs_again_and_checks_its_rows_again(self, kind):
+        make_old_rows(5, OxTask.Status.FAILED)
+        state = {"retried": None}
+
+        def act(execute, sql, params, many, context):
+            # The first statement after the lost DELETE belongs to the second
+            # attempt at that batch. Before it runs, an operator retries one of
+            # the batch's rows on another connection.
+            if len(deletes) == 2 and state["retried"] is None:
+                pk = deletes[1][1][0]
+                beside = Beside(lambda: actions.retry(pk))
+                beside.thread.start()
+                assert beside.finish() is True
+                state["retried"] = pk
+            return execute(sql, params, many, context)
+
+        with (
+            connection.execute_wrapper(act),
+            failing(self.DELETE, lambda: simulated(kind), lambda n: n == 2) as deletes,
+        ):
+            out = prune(*self.ARGS)
+
+        # Batches of 2, 1 (the retried row left its batch) and 1.
+        assert deleted_task_count(out) == 4
+        assert len(deletes) == 4
+        assert set(OxTask.objects.values_list("pk", "status")) == {
+            (state["retried"], OxTask.Status.READY)
+        }
+
+    @pytest.mark.parametrize("kind", CONTENTION)
+    def test_a_batch_that_keeps_losing_stops_the_prune_and_a_rerun_finishes(self, kind):
+        make_old_rows(5, OxTask.Status.FAILED)
+
+        with (
+            failing(self.DELETE, lambda: simulated(kind), lambda n: n >= 2) as deletes,
+            pytest.raises(CommandError) as info,
+        ):
+            prune(*self.ARGS)
+
+        assert str(info.value) == (
+            "Stopped after deleting 2 SUCCESSFUL/DISCARDED/FAILED/LOST task row(s). "
+            "The next batch hit a database deadlock or serialization failure 3 "
+            "times. The rows already deleted stay deleted. Run ox_prune again to "
+            "prune the rest."
+        )
+        assert isinstance(info.value.__cause__, OperationalError)
+        assert len(deletes) == 1 + 3
+        assert OxTask.objects.count() == 3
+
+        assert deleted_task_count(prune(*self.ARGS)) == 3
+        assert OxTask.objects.count() == 0
+
+    def test_a_batch_whose_commit_fails_counts_once(self, monkeypatch):
+        make_old_rows(5, OxTask.Status.FAILED)
+        wrapper = connections["default"]
+        real_commit = wrapper.commit
+        failed = []
+
+        def commit():
+            if not failed:
+                failed.append(True)
+                raise simulated("postgresql-serialization")
+            return real_commit()
+
+        monkeypatch.setattr(wrapper, "commit", commit)
+        out = prune(*self.ARGS)
+        monkeypatch.undo()
+
+        assert failed == [True]
+        assert deleted_task_count(out) == 5
+        assert OxTask.objects.count() == 0
+
+    @pytest.mark.parametrize("kind", CONTENTION)
+    def test_inside_a_callers_transaction_a_lost_batch_is_not_run_again(self, kind):
+        make_old_rows(5, OxTask.Status.FAILED)
+
+        with (
+            failing(self.DELETE, lambda: simulated(kind), lambda n: n == 1) as deletes,
+            pytest.raises(OperationalError),
+            transaction.atomic(),
+        ):
+            prune(*self.ARGS)
+
+        assert len(deletes) == 1
+        assert OxTask.objects.count() == 5
+
+    def test_any_other_database_error_stops_the_prune_at_once(self):
+        make_old_rows(5, OxTask.Status.FAILED)
+
+        with (
+            failing(
+                self.DELETE,
+                lambda: OperationalError("disk I/O error"),
+                lambda n: n == 2,
+            ) as deletes,
+            pytest.raises(OperationalError, match="disk I/O"),
+        ):
+            prune(*self.ARGS)
+
+        assert len(deletes) == 2
+        assert OxTask.objects.count() == 3

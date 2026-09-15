@@ -92,6 +92,11 @@ later one.
 - When `retry_many` or `discard_many` opens its own transaction, a deadlock
   or a serialization failure starts the call again, three attempts in all.
   Inside a transaction of your own, the error still reaches you.
+- `ox_prune` still commits batch by batch. It now locks each batch's rows in
+  primary key order, and a batch that hits a deadlock or a serialization
+  failure runs again in a new transaction, three attempts in all. If it
+  still fails, the command exits non-zero. The batches before it stay
+  deleted, and running `ox_prune` again deletes the rest.
 - `discard` and `discard_many` accept WAITING, and `DISCARDABLE_STATUSES`
   includes it.
 - `django_ox_tasks` has a `waiting` sample for every queue, so a sum over its

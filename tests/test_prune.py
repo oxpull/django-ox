@@ -8,13 +8,22 @@ from io import StringIO
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import OperationalError, connection, connections, transaction
+from django.db import (
+    DatabaseError,
+    OperationalError,
+    connection,
+    connections,
+    transaction,
+)
 from django.db.models.signals import pre_delete
 from django.utils import timezone
 
 from django_ox import _waiting, actions
 from django_ox.durations import parse_duration
 from django_ox.models import OxScheduleTick, OxTask
+
+from .conftest import wait_for
+from .test_waiting import lock_waits
 
 
 def make_task(status, *, finished_days_ago=None, queue_name="default"):
@@ -804,3 +813,123 @@ class TestPruneAgainstOperatorActions:
         )
         assert (row.status, row.lease_epoch) == (OxTask.Status.WAITING, 1)
         assert deleted_task_count(out) == 2
+
+
+def old_failed_rows(keys, *, queue_name="default"):
+    """Old FAILED rows with these keys, inserted in the order given."""
+    now = timezone.now()
+    for pk in keys:
+        OxTask.objects.create(
+            id=pk,
+            task_path="tests.tasks.add",
+            backend_name="default",
+            queue_name=queue_name,
+            enqueued_at=now - timedelta(days=31),
+            status=OxTask.Status.FAILED,
+            attempts=3,
+            max_attempts=3,
+            finished_at=now - timedelta(days=30),
+        )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("waits_first", ["action", "prune"])
+@pytest.mark.parametrize(
+    "act,moved_to",
+    [
+        (actions.retry_many, OxTask.Status.READY),
+        (actions.discard_many, OxTask.Status.DISCARDED),
+    ],
+    ids=["retry_many", "discard_many"],
+)
+def test_a_bulk_action_and_a_prune_of_the_same_rows_wait_rather_than_deadlock(
+    act, moved_to, waits_first
+):
+    """
+    Two old FAILED rows, the larger key inserted first, so a scan in table
+    order meets them in the reverse of key order. A third session holds one of
+    them. The first caller waits on it, the second caller starts and waits
+    too, and then the holder commits.
+
+    An action whose UPDATE locks in table order deadlocks with the prune in
+    both of these on PostgreSQL. When the action waits first, on the larger
+    key, the prune takes the smaller key while it queues for the larger, and
+    the action wants the smaller one next. When the prune waits first, on the
+    smaller key, the action takes the larger one while it queues for the
+    smaller, and the prune wants the larger one next. Locking in key order,
+    the second caller queues for the smaller key holding nothing.
+
+    Every statement on both sides is watched. A deadlock a retry then hid
+    still fails the test.
+    """
+    if not connection.features.has_select_for_update:
+        pytest.skip("SQLite has no row locks to take in any order")
+    small, large = sorted(uuid.uuid4() for _ in range(2))
+    old_failed_rows([large, small])
+    held = large if waits_first == "action" else small
+
+    locked = threading.Event()
+    release = threading.Event()
+    errors = []
+    outcome = {}
+
+    def hold():
+        try:
+            with transaction.atomic():
+                list(
+                    OxTask.objects.select_for_update().filter(pk=held).values_list("pk")
+                )
+                locked.set()
+                release.wait(30)
+        finally:
+            locked.set()
+            connections.close_all()
+
+    def watched(name, body):
+        def note(execute, sql, params, many, context):
+            try:
+                return execute(sql, params, many, context)
+            except DatabaseError as exc:
+                errors.append((name, exc))
+                raise
+
+        try:
+            with connection.execute_wrapper(note):
+                outcome[name] = body()
+        except Exception as exc:
+            outcome[name] = exc
+        finally:
+            connections.close_all()
+
+    callers = {
+        "action": lambda: act([small, large]),
+        "prune": lambda: prune("--include-failed"),
+    }
+    order = [waits_first, "prune" if waits_first == "action" else "action"]
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert locked.wait(10)
+    threads = []
+    waited = []
+    for count, name in enumerate(order, start=1):
+        thread = threading.Thread(target=watched, args=(name, callers[name]))
+        thread.start()
+        threads.append(thread)
+        waited.append(wait_for(lambda count=count: lock_waits() >= count, timeout=10))
+    release.set()
+    for thread in [holder, *threads]:
+        thread.join(60)
+        assert not thread.is_alive()
+
+    # The interleaving happened: each caller waited on a lock.
+    assert waited == [True, True]
+    assert errors == []
+    rows = dict(OxTask.objects.values_list("pk", "status"))
+    if waits_first == "action":
+        assert outcome["action"] == (2, 0)
+        assert rows == {small: moved_to, large: moved_to}
+        assert deleted_task_count(outcome["prune"]) == 0
+    else:
+        assert deleted_task_count(outcome["prune"]) == 2
+        assert outcome["action"] == (0, 2)
+        assert rows == {}

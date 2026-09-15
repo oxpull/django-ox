@@ -83,6 +83,15 @@ later one.
 
 ### Changed
 
+- `retry_many` and `discard_many` sort the ids and lock each thousand rows in
+  primary key order before they update them. That's one more statement per
+  thousand rows on PostgreSQL and MySQL. A bulk retry or discard of rows that
+  `ox_prune` is deleting now waits for it, where it could fail with a
+  deadlock before. The call locks every row it was given, whatever its
+  status, until it ends.
+- When `retry_many` or `discard_many` opens its own transaction, a deadlock
+  or a serialization failure starts the call again, three attempts in all.
+  Inside a transaction of your own, the error still reaches you.
 - `discard` and `discard_many` accept WAITING, and `DISCARDABLE_STATUSES`
   includes it.
 - `django_ox_tasks` has a `waiting` sample for every queue, so a sum over its
@@ -105,6 +114,10 @@ later one.
   deleted, and nothing else can write to them until that transaction ends. A
   retry that reports success now keeps its row. Without the flag, `ox_prune`
   was not affected. Present since 0.3.0, which added retry and discard.
+- `retry_many` and `discard_many` open their transaction on the database
+  that `OxTask` writes to. Under a router that sends it somewhere else, each
+  UPDATE committed by itself, so an error part-way could leave some rows
+  moved.
 - A stop signal could leave an idle `ox_worker` hung instead of draining.
   It stayed hung until a second signal or the process manager ended it,
   or for good when it was a worker process whose supervisor had been

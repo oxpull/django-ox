@@ -2,11 +2,13 @@
 django_ox.actions: retry and discard as compare-and-set moves on one row.
 """
 
+import re
 import threading
 import uuid
 
 import pytest
-from django.db import connections
+from django.db import OperationalError, connection, connections, transaction
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from django_ox import _waiting, actions, stats
@@ -14,6 +16,7 @@ from django_ox.compat import TaskResultStatus, default_task_backend
 from django_ox.models import OxTask
 from django_ox.worker import Worker
 
+from .contention import CONTENTION, UUID_TEXT, failing, simulated
 from .tasks import STATE, add, fail_always, flaky
 from .test_worker import reap_away
 
@@ -410,17 +413,21 @@ class TestMany:
     def test_twenty_thousand_rows_is_one_update_per_chunk(self):
         """
         One SELECT for the ids, one UPDATE per UPDATE_CHUNK_SIZE ids, and the
-        transaction's own statements. Never a query per row.
+        transaction's own statements. Where there are row locks, one locking
+        read per chunk as well. Never a query per row.
         """
-        from django.test.utils import CaptureQueriesContext
-
         seed(OxTask.Status.FAILED, 14000)
         seed(OxTask.Status.SUCCESSFUL, 6000)
         with CaptureQueriesContext(connections["default"]) as ctx:
             assert actions.retry_many(OxTask.objects.all()) == (14000, 6000)
         updates = [q for q in ctx.captured_queries if q["sql"].startswith("UPDATE")]
+        locks = [q for q in ctx.captured_queries if "FOR UPDATE" in q["sql"]]
         assert len(updates) == 20000 // actions.UPDATE_CHUNK_SIZE
-        assert len(ctx) <= len(updates) + 3
+        if connection.features.has_select_for_update:
+            assert len(locks) == len(updates)
+        else:
+            assert locks == []
+        assert len(ctx) <= len(updates) + len(locks) + 3
         assert OxTask.objects.filter(status=OxTask.Status.READY).count() == 14000
 
     def test_bulk_retry_fences_the_straggler_out(self, worker):
@@ -536,3 +543,148 @@ def test_discard_racing_a_release_has_one_outcome():
         assert outcomes["discard"] is True, outcomes
         assert OxTask.objects.get(pk=result.id).status == OxTask.Status.DISCARDED
     assert Worker(backoff_initial=0).claim_one() is None
+
+
+MANY = {"retry_many": actions.retry_many, "discard_many": actions.discard_many}
+MOVED_TO = {"retry_many": OxTask.Status.READY, "discard_many": OxTask.Status.DISCARDED}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", list(MANY))
+def test_chunks_go_in_key_order_each_locked_before_its_update(name, monkeypatch):
+    """
+    The ids are sorted before they are chunked, whatever order they are given
+    in. Where there are row locks, each chunk's UPDATE follows a locking read
+    of that chunk's ids in key order. The read names the ids and nothing else:
+    with a status in it, MySQL can read the rows from a status index and lock
+    them in that index's order.
+    """
+    monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
+    keys = sorted(row.pk for row in seed(OxTask.Status.FAILED, 5))
+    given = [keys[3], keys[0], keys[4], keys[1], keys[2]]
+
+    with CaptureQueriesContext(connection) as ctx:
+        assert MANY[name](given) == (5, 0)
+
+    statements = []
+    for query in ctx.captured_queries:
+        sql = query["sql"].strip()
+        verb = sql.split(None, 1)[0].upper()
+        if verb not in {"SELECT", "UPDATE"}:
+            continue
+        ids = []
+        for text in UUID_TEXT.findall(sql):
+            if uuid.UUID(text) not in ids:
+                ids.append(uuid.UUID(text))
+        statements.append((verb, ids, sql))
+
+    chunks = [keys[0:2], keys[2:4], keys[4:5]]
+    if connection.features.has_select_for_update:
+        expected = [(verb, chunk) for chunk in chunks for verb in ("SELECT", "UPDATE")]
+    else:
+        expected = [("UPDATE", chunk) for chunk in chunks]
+    assert [(verb, ids) for verb, ids, _ in statements] == expected, statements
+
+    table = connection.ops.quote_name(OxTask._meta.db_table)
+    pk = re.escape(f"{table}.{connection.ops.quote_name(OxTask._meta.pk.column)}")
+    status = re.escape(f"{table}.{connection.ops.quote_name('status')}")
+    # The read selects the key alone, so ORDER BY 1 is ORDER BY the key.
+    locking_read = re.compile(
+        rf"^SELECT {pk}(?: AS \S+)? FROM {re.escape(table)} "  # noqa: S608
+        rf"WHERE {pk} IN \([^()]*\) ORDER BY (?:1|{pk}) ASC FOR UPDATE$"
+    )
+    for verb, _, sql in statements:
+        if verb == "SELECT":
+            assert locking_read.search(sql), sql
+        else:
+            assert re.search(rf"{status} IN \(", sql), sql
+    assert set(OxTask.objects.values_list("status", flat=True)) == {MOVED_TO[name]}
+
+
+def epochs():
+    return dict(OxTask.objects.values_list("pk", "lease_epoch"))
+
+
+@pytest.mark.django_db(transaction=True)
+class TestContendedBulkCalls:
+    """
+    A bulk call that opened its own transaction and loses a deadlock or a
+    serialization failure starts again from its first chunk, three attempts in
+    all. Anything else, and anything inside a caller's transaction, goes to
+    the caller at once. The errors are simulated in place of an UPDATE, shaped
+    as Django raises the drivers' (tests/test_contention.py pins the shape
+    against real ones).
+    """
+
+    @pytest.mark.parametrize("name", list(MANY))
+    @pytest.mark.parametrize("kind", CONTENTION)
+    def test_a_call_that_loses_runs_again_from_its_first_chunk(
+        self, kind, name, monkeypatch
+    ):
+        monkeypatch.setattr(actions, "UPDATE_CHUNK_SIZE", 2)
+        keys = sorted(row.pk for row in seed(OxTask.Status.FAILED, 5))
+        before = epochs()
+
+        with failing("UPDATE", lambda: simulated(kind), lambda n: n == 2) as updates:
+            assert MANY[name](list(reversed(keys))) == (5, 0)
+
+        # The second chunk lost, which rolled back the first one's move too.
+        # The call then ran again from the first chunk, not from the second.
+        assert [ids for _, ids in updates] == [
+            keys[0:2],
+            keys[2:4],
+            keys[0:2],
+            keys[2:4],
+            keys[4:5],
+        ]
+        assert set(OxTask.objects.values_list("status", flat=True)) == {MOVED_TO[name]}
+        # Moved once each: a retry bumps the epoch by one, a discard not at all.
+        bump = 1 if name == "retry_many" else 0
+        assert epochs() == {pk: epoch + bump for pk, epoch in before.items()}
+
+    @pytest.mark.parametrize("name", list(MANY))
+    @pytest.mark.parametrize("kind", CONTENTION)
+    def test_a_call_that_keeps_losing_raises_after_three_attempts(self, kind, name):
+        seed(OxTask.Status.FAILED, 3)
+
+        with (
+            failing("UPDATE", lambda: simulated(kind), lambda n: True) as updates,
+            pytest.raises(OperationalError),
+        ):
+            MANY[name](OxTask.objects.all())
+
+        assert len(updates) == 3
+        assert set(OxTask.objects.values_list("status", flat=True)) == {
+            OxTask.Status.FAILED
+        }
+
+    @pytest.mark.parametrize("name", list(MANY))
+    def test_any_other_database_error_is_raised_at_once(self, name):
+        seed(OxTask.Status.FAILED, 3)
+
+        with (
+            failing(
+                "UPDATE", lambda: OperationalError("disk I/O error"), lambda n: True
+            ) as updates,
+            pytest.raises(OperationalError, match="disk I/O"),
+        ):
+            MANY[name](OxTask.objects.all())
+
+        assert len(updates) == 1
+
+    @pytest.mark.parametrize("name", list(MANY))
+    @pytest.mark.parametrize("kind", CONTENTION)
+    def test_inside_a_callers_transaction_nothing_runs_again(self, kind, name):
+        seed(OxTask.Status.FAILED, 3)
+
+        with (
+            failing("UPDATE", lambda: simulated(kind), lambda n: n == 1) as updates,
+            pytest.raises(OperationalError),
+            transaction.atomic(),
+        ):
+            MANY[name](OxTask.objects.all())
+
+        assert len(updates) == 1
+        assert set(OxTask.objects.values_list("status", flat=True)) == {
+            OxTask.Status.FAILED
+        }

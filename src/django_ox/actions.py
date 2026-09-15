@@ -6,9 +6,27 @@ Each single-row function is one compare-and-set UPDATE keyed on the row's
 status and its lease epoch, so it either moves the row from the state it
 read or does nothing and reports that. The _many forms do the same move
 for a selection in one conditional UPDATE per thousand ids, inside one
-transaction. None of them ever touches a RUNNING row: a running task
+transaction. None of them ever moves a RUNNING row: a running task
 belongs to the worker holding its lease, and the reaper is the only party
 that takes a lease away.
+
+The _many forms sort the ids before they chunk them. On a database with row
+locks, each chunk's UPDATE comes after a locking read of that chunk's ids in
+key order, so the whole call takes its rows in key order. That is the order
+ox_prune and django_ox._waiting lock in, so a call and one of them wait for
+each other instead of deadlocking over the rows they share. Sorting is what
+MySQL needs, where an UPDATE already walks a chunk's ids in key order but the
+chunks came in the order they were given. The locking read is what PostgreSQL
+needs, where the UPDATE can visit rows in table order. It names the ids
+alone, with no status, so MySQL reads it from the primary key rather than a
+status index. It therefore locks every row in the chunk, whatever its status,
+until the call ends. A worker writing to one of them waits for that.
+
+A deadlock is still possible with a writer that locks the same rows in
+another order. When a _many call opened the transaction itself, a deadlock
+or a serialization failure starts it again from its first chunk, three
+attempts in all. Inside a caller's transaction the error goes to the
+caller.
 
 The actions write the table directly and send no django.tasks signal: a
 discard finishes the result without task_finished, and a retry requeues
@@ -21,11 +39,13 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable
 from datetime import timedelta
+from typing import Any
 
-from django.db import transaction
+from django.db import connections, router, transaction
 from django.db.models import F, QuerySet
 from django.utils import timezone
 
+from . import _contention
 from .models import OxTask
 
 __all__ = [
@@ -209,6 +229,41 @@ def _ids(
     return list(seen), len(malformed)
 
 
+def _move_in_key_order(
+    ids: list[uuid.UUID],
+    statuses: tuple[OxTask.Status, ...],
+    values: dict[str, Any],
+) -> int:
+    """
+    The _many forms' write. Returns how many rows moved.
+
+    The ids go in sorted, one chunk at a time. On a database with row locks a
+    locking read of the chunk's ids comes first. The transaction is opened on
+    the database OxTask writes to, which is where every statement below goes.
+    """
+    alias = router.db_for_write(OxTask)
+    locking_read = connections[alias].features.has_select_for_update
+    ordered = sorted(ids)
+
+    def move() -> int:
+        changed = 0
+        with transaction.atomic(using=alias):
+            for start in range(0, len(ordered), UPDATE_CHUNK_SIZE):
+                chunk = OxTask.objects.filter(
+                    pk__in=ordered[start : start + UPDATE_CHUNK_SIZE]
+                )
+                if locking_read:
+                    list(
+                        chunk.select_for_update()
+                        .order_by("pk")
+                        .values_list("pk", flat=True)
+                    )
+                changed += chunk.filter(status__in=statuses).update(**values)
+        return changed
+
+    return _contention.run(alias, move)
+
+
 def retry_many(
     selection: QuerySet[OxTask] | Iterable[str | uuid.UUID],
 ) -> tuple[int, int]:
@@ -228,24 +283,26 @@ def retry_many(
     becomes attempts + 1 from the row's own count, so the next claim is
     the one extra attempt this grants. The whole call runs in one
     transaction: an error part-way leaves every row as it was.
+
+    The ids go in key order, and each chunk is locked before its UPDATE, as
+    the module docstring says. A deadlock or serialization failure in a
+    transaction this call opened starts the call again, three attempts in all.
     """
     ids, malformed = _ids(selection)
-    changed = 0
-    with transaction.atomic():
-        for start in range(0, len(ids), UPDATE_CHUNK_SIZE):
-            changed += OxTask.objects.filter(
-                pk__in=ids[start : start + UPDATE_CHUNK_SIZE],
-                status__in=RETRYABLE_STATUSES,
-            ).update(
-                status=OxTask.Status.READY,
-                lease_epoch=F("lease_epoch") + 1,
-                max_attempts=F("attempts") + 1,
-                run_after=None,
-                finished_at=None,
-                locked_by=None,
-                locked_at=None,
-                lease_expires_at=None,
-            )
+    changed = _move_in_key_order(
+        ids,
+        RETRYABLE_STATUSES,
+        {
+            "status": OxTask.Status.READY,
+            "lease_epoch": F("lease_epoch") + 1,
+            "max_attempts": F("attempts") + 1,
+            "run_after": None,
+            "finished_at": None,
+            "locked_by": None,
+            "locked_at": None,
+            "lease_expires_at": None,
+        },
+    )
     return changed, len(ids) + malformed - changed
 
 
@@ -260,21 +317,18 @@ def discard_many(
     status in DISCARDABLE_STATUSES, so a READY row that a worker claims in
     the same instant goes to exactly one of them, and the epoch is not
     bumped, for the reason given on discard(). One transaction for the
-    whole call.
+    whole call, with the key order and the retries retry_many() has.
     """
     ids, malformed = _ids(selection)
-    changed = 0
-    now = timezone.now()
-    with transaction.atomic():
-        for start in range(0, len(ids), UPDATE_CHUNK_SIZE):
-            changed += OxTask.objects.filter(
-                pk__in=ids[start : start + UPDATE_CHUNK_SIZE],
-                status__in=DISCARDABLE_STATUSES,
-            ).update(
-                status=OxTask.Status.DISCARDED,
-                finished_at=now,
-                locked_by=None,
-                locked_at=None,
-                lease_expires_at=None,
-            )
+    changed = _move_in_key_order(
+        ids,
+        DISCARDABLE_STATUSES,
+        {
+            "status": OxTask.Status.DISCARDED,
+            "finished_at": timezone.now(),
+            "locked_by": None,
+            "locked_at": None,
+            "lease_expires_at": None,
+        },
+    )
     return changed, len(ids) + malformed - changed

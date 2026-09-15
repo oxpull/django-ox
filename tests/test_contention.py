@@ -56,11 +56,85 @@ def test_a_postgresql_error_that_is_not_contention_is_not():
     assert not _contention.is_contention(error)
 
 
+class Psycopg2Error(Exception):
+    """A psycopg2 error: the SQLSTATE is the driver exception's pgcode."""
+
+    def __init__(self, pgcode, message):
+        super().__init__(message)
+        self.pgcode = pgcode
+
+
+@pytest.mark.parametrize("code", ["40P01", "40001"])
+def test_a_psycopg2_deadlock_or_serialization_failure_is_contention(code):
+    error = OperationalError("deadlock detected")
+    error.__cause__ = Psycopg2Error(code, "deadlock detected")
+    assert _contention.is_contention(error)
+    other = OperationalError("canceling statement")
+    other.__cause__ = Psycopg2Error("57014", "canceling statement")
+    assert not _contention.is_contention(other)
+
+
 @pytest.mark.django_db(transaction=True)
 def test_only_a_connection_with_no_transaction_open_gets_the_retries():
     assert _contention.attempts("default") == _contention.ATTEMPTS == 3
     with transaction.atomic():
         assert _contention.attempts("default") == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_connection_with_autocommit_off_gets_no_retries():
+    """
+    With autocommit off and no atomic block, the caller's code opened the
+    transaction and commits it, so it owns what an error rolls back.
+    """
+    transaction.set_autocommit(False)
+    try:
+        assert _contention.attempts("default") == 1
+    finally:
+        transaction.rollback()
+        transaction.set_autocommit(True)
+
+
+def test_the_pause_is_jittered_and_grows_with_each_attempt(monkeypatch):
+    slept = []
+    monkeypatch.setattr(_contention.time, "sleep", slept.append)
+    for _ in range(20):
+        _contention.pause(1)
+    for _ in range(20):
+        _contention.pause(2)
+    first, second = slept[:20], slept[20:]
+    # Two sessions that just deadlocked pause for different times.
+    assert len(set(first)) > 1
+    assert len(set(second)) > 1
+    assert all(0.025 <= s <= 0.075 for s in first), first
+    assert all(0.05 <= s <= 0.15 for s in second), second
+
+
+def test_run_pauses_between_attempts_and_raises_the_last_error(monkeypatch):
+    pauses = []
+    monkeypatch.setattr(_contention, "pause", pauses.append)
+    monkeypatch.setattr(_contention, "attempts", lambda using: 3)
+    calls = []
+
+    def body():
+        calls.append(True)
+        raise simulated("mysql-deadlock")
+
+    with pytest.raises(OperationalError):
+        _contention.run("default", body)
+    assert (len(calls), pauses) == (3, [1, 2])
+
+    calls.clear()
+    pauses.clear()
+
+    def succeeds_second():
+        calls.append(True)
+        if len(calls) == 1:
+            raise simulated("postgresql-deadlock")
+        return "done"
+
+    assert _contention.run("default", succeeds_second) == "done"
+    assert (len(calls), pauses) == (2, [1])
 
 
 def old_failed(pk):

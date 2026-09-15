@@ -6,7 +6,7 @@ from datetime import timedelta
 from io import StringIO
 
 import pytest
-from django.core.management import call_command
+from django.core.management import ManagementUtility, call_command
 from django.core.management.base import CommandError
 from django.db import (
     DatabaseError,
@@ -1001,6 +1001,34 @@ class TestPruneAfterContention:
 
         assert deleted_task_count(prune(*self.ARGS)) == 3
         assert OxTask.objects.count() == 0
+
+    @pytest.mark.parametrize("kind", CONTENTION)
+    def test_a_prune_that_gives_up_exits_non_zero_from_the_command_line(
+        self, kind, monkeypatch, capsys
+    ):
+        """
+        Through the command line, as cron runs it, rather than call_command.
+        The command exits 1 with the message on stderr, having paused between
+        its attempts at the batch.
+        """
+        make_old_rows(5, OxTask.Status.FAILED)
+        pauses = []
+        monkeypatch.setattr("django_ox._contention.pause", pauses.append)
+        # The system checks read every alias, which this test doesn't open.
+        argv = ["manage.py", "ox_prune", *self.ARGS, "--skip-checks"]
+
+        with (
+            failing(self.DELETE, lambda: simulated(kind), lambda n: n >= 2),
+            pytest.raises(SystemExit) as info,
+        ):
+            ManagementUtility(argv).execute()
+
+        assert info.value.code == 1
+        err = capsys.readouterr().err
+        assert "Stopped after deleting 2 " in err
+        assert "Run ox_prune again to prune the rest." in err
+        assert pauses == [1, 2]
+        assert OxTask.objects.count() == 3
 
     def test_a_batch_whose_commit_fails_counts_once(self, monkeypatch):
         make_old_rows(5, OxTask.Status.FAILED)

@@ -145,14 +145,15 @@ Django 6.0 and later ship the Tasks framework in core. The Django 5.2 legs
 install the `django-tasks` backport and run the whole suite against it, which
 is what `django-ox[backport]` pulls in.
 
-Django 6.1 changed which databases the system checks run against. They now
-run against every alias in `DATABASES` unless the command names one. django-ox
-models use `JSONField`, so Django opens each alias to ask whether it supports
-the field. If every alias is reachable, this costs one connection per command
-and nothing else. If one is not, pass `--skip-checks` to `ox_worker`,
-`ox_prune` or `ox_health`, and `--database` to `manage.py check`. Django 6.0 is
-unaffected, and so is an alias on PostgreSQL. The [changelog](changelog.md)
-has the rest, including what a database router does and does not fix.
+Django 6.1 changed which databases the system checks run against. A command
+that runs the full checks and does not name a database now checks every alias
+in `DATABASES`. Checking a SQLite or MySQL alias opens a connection and runs
+one query. The cost grows with the number of aliases, and every such command
+pays it. An alias that cannot be reached ends the command. Pass
+`--skip-checks` to `ox_worker`, `ox_prune` or `ox_health`, and `--database` to
+`manage.py check`. Django 6.0 is unaffected, and so is an alias on PostgreSQL.
+The [changelog](changelog.md) has the mechanism, the router fix, and why
+`--database` alone is not enough.
 
 The support floor tracks Django's own: when a Python or Django version
 reaches end of life upstream, a later django-ox minor release may drop it,

@@ -872,7 +872,15 @@ class Worker:
                 # mirrored onto the instance from here; re-read the row so
                 # the instance and the row agree. The PostgreSQL path gets
                 # this for free from RETURNING *.
-                candidate.refresh_from_db()
+                #
+                # On the alias the claim was written to, and the alias is
+                # what makes this a read of the row it just claimed.
+                # Unqualified, it follows db_for_read: under a router that
+                # splits reads from writes the worker is handed the row as
+                # it stood before the claim, runs the task holding a lease
+                # the row no longer has, and its own finish write is fenced
+                # out. This branch is every claim on MySQL and MariaDB.
+                candidate.refresh_from_db(using=self._db_alias)
                 return candidate
         # Optimistic compare-and-set. attempts and lease_epoch double as
         # version counters: if another worker claimed (and possibly

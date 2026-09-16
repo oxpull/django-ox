@@ -76,6 +76,28 @@ class Command(DatabaseCommand):
             ),
         )
 
+    #: Set once an object has been printed, so a failure before handle()
+    #: is reported and one inside it is not reported twice.
+    _reported = False
+
+    def execute(self, *args: Any, **options: Any) -> Any:
+        """
+        Report a failure before `handle()` in the format that was asked for.
+
+        The system checks run first, and scoping them to one alias is what
+        opens the connection, so a database that is down ends the command
+        there. Without this, `--format json` against one prints nothing on
+        stdout, where it is documented to print an object with the figures
+        null and the reason in `problems`. A healthcheck reads that object,
+        and a healthcheck is what this flag is for.
+        """
+        try:
+            return super().execute(*args, **options)
+        except CommandError as exc:
+            if options.get("format") == "json" and not self._reported:
+                self._write_json(options.get("queue"), None, None, None, [str(exc)])
+            raise
+
     def handle(self, *args: Any, **options: Any) -> None:
         max_backlog: int | None = options["max_backlog"]
         max_age: float | None = options["max_age"]
@@ -157,6 +179,7 @@ class Command(DatabaseCommand):
         claim_age: timedelta | None,
         problems: list[str],
     ) -> None:
+        self._reported = True
         self.stdout.write(
             json.dumps(
                 {

@@ -146,6 +146,20 @@ The response is `text/plain; version=0.0.4`. A scraper that sends
 same text, and `HEAD` is answered for load-balancer checks. Each scrape is
 five aggregate queries over the task table, however many queues there are.
 
+The scrape reads the alias `OxTask` is written to, which is the queue your
+workers are running. To keep scrape traffic off that database, name another
+alias where you mount the view:
+
+```python
+from django_ox.views import metrics
+
+path("ox/metrics", metrics, {"using": "replica"})  # scrape a replica instead
+```
+
+A replica that is behind reports the queue as it was, which is the trade.
+The alias comes from the URLconf rather than from the request, so whoever
+scrapes cannot choose the database.
+
 **The endpoint has no authentication of its own.** The numbers are not
 secret, but the queue names and the shape of your traffic are yours to keep,
 so put the route behind the project's policy before it goes near the public

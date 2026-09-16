@@ -76,10 +76,12 @@ dev server. A reachable alias is opened too, so each extra alias costs a
 connection on every such command. Django 6.0 does not do this, and nothing
 in django-ox changed.
 
-django-ox's own commands name a database. `ox_worker`, `ox_prune`,
-`ox_health` and `ox_import_beat_schedules` each pass their alias to the
-checks, so none of them checks an alias you did not ask for. That is new in
-this release, and it holds whether or not you pass `--database`.
+django-ox's own commands don't check an alias you didn't ask for.
+`ox_prune`, `ox_health` and `ox_import_beat_schedules` each pass the alias
+they work on to the checks. `ox_worker` passes an empty list, so the checks
+that take a database run against nothing: a worker has to start while its
+database is down and wait for it. Both are new in this release, and both hold
+whether or not you pass `--database`.
 
 For every other command, `--skip-checks` is the cheapest way out and needs
 no settings change. `manage.py check` has no `--skip-checks`. Give it
@@ -124,10 +126,11 @@ question from a constant, so a PostgreSQL alias is unaffected.
   to work on. It defaults to the alias `OxTask` writes to, the way
   `migrate --database` defaults to one. `ox_worker` names it in the command
   line of each `--processes` child, so one router answering differently in
-  two processes cannot split a fleet across two databases. All four
-  django-ox commands now pass their alias to the system checks, which is
-  what `migrate` does. `ox_import_beat_schedules` already had the flag and
-  now does this too.
+  two processes cannot split a fleet across two databases. `ox_prune`,
+  `ox_health` and `ox_import_beat_schedules` pass their alias to the system
+  checks, which is what `migrate` does; `ox_import_beat_schedules` already
+  had the flag and now does this too. `ox_worker` names no alias there, for
+  the reason under Changed.
 
 ### Changed
 
@@ -153,7 +156,34 @@ question from a constant, so a PostgreSQL alias is unaffected.
 - `django_ox.stats`, `django_ox.metrics.collect()`, `render_prometheus()`,
   `render_openmetrics()` and `collector()` take `using` to name the alias to
   read. Left out, they read the alias `OxTask` writes to. On a project with
-  no database router that is the same connection they always used.
+  no database router that is the same connection they always used. The
+  shipped endpoint takes it from the URLconf:
+  `path("ox/metrics", metrics, {"using": "replica"})` serves scrapes from a
+  replica and keeps them off the primary. It's a mount argument rather than
+  a query parameter, so whoever scrapes can't choose the database.
+- `ox_worker` hands the system checks no database alias, so starting a
+  worker opens no connection before its first poll. A worker started while
+  its database is down logs `worker_poll_failed` and polls again a second
+  later, on Django 5.2, 6.0 and 6.1 alike, instead of exiting. That's the
+  path it already takes when the database goes away while it runs, and a
+  process manager restarting a worker into a database that's still down
+  gives up long before the database is back. What that costs: the system
+  checks that need a database don't run for `ox_worker`. A database that
+  can't hold the schema, such as SQLite without JSON support or MySQL with
+  a column type Django refuses, is reported by every other django-ox
+  command and by `manage.py check --database <alias>`, and reaches a worker
+  as a failing poll in the log instead. A configuration error still stops a
+  worker at startup, because those checks don't need a database.
+- On MySQL, `ox_prune`, `ox_health` and `ox_import_beat_schedules` run
+  Django's database checks for their alias on every invocation. On a
+  connection without strict mode that prints `mysql.W002` each time,
+  including from cron. Turn strict mode on, which is what the warning asks
+  for, or put `mysql.W002` in `SILENCED_SYSTEM_CHECKS`.
+- `ox_prune`, `ox_health` and `ox_import_beat_schedules` report a database
+  they can't reach as one line, `Database unreachable: <reason>`, and exit
+  non-zero. `ox_health --format json` prints its object with the figures
+  null and the reason in `problems`, wherever in the run the database was
+  found to be down.
 - `ox_health --max-age` and `--worker-timeout` accept the duration forms
   `ox_prune --older-than` takes (`7d`, `24h`, `90m`, `45s`). A plain number
   still means seconds, fractions included.
@@ -172,11 +202,50 @@ question from a constant, so a PostgreSQL alias is unaffected.
   `ox_health` answered from the replica. Over 40 READY tasks six hours old
   on the primary it printed `OK: backlog=0` and exited 0. With
   `--format json` it said `"ok": true`. A container healthcheck on it
-  reported green over a queue that was stuck. Both now read the alias the
-  task rows are written to, and so do `django_ox.stats`, the metrics
-  endpoint, `django_ox.actions` and `get_result()`. `ox_prune` finishes and reports
-  what it deleted; `ox_health` reports the backlog the workers see. Present
-  in every release from 0.1.0 to 1.2.0.
+  reported green over a queue that was stuck. `ox_prune` now finishes and
+  reports what it deleted; `ox_health` reports the backlog the workers see.
+  Present in every release from 0.1.0 to 1.2.0.
+
+  Both read the alias the task rows are written to, and so does every other
+  reading django-ox makes of its own rows: `django_ox.stats`, the metrics
+  renderings and the endpoint, `django_ox.actions`, `get_result()`,
+  `enqueue()` and `enqueue_many()`, the worker's claim and its completion,
+  the reaper, the stored schedules and their admin. A test in the suite
+  drives that whole surface under a router that refuses any read django-ox
+  makes of its own rows on a replica, so the sweep is a property the suite
+  holds rather than a claim. One read is exempt and named there: the
+  **Last tick** column of the schedule changelist, which Django reads
+  through `db_for_read` along with every other column of that page, and
+  pinning one column would make one page answer from two databases. What a
+  changelist and a change form read is Django's to route, which is what a
+  replica is for; every write the admin makes goes to the primary.
+- A worker no longer loses a task's result under a router that sends reads
+  to a replica. On MySQL and MariaDB every claim re-reads the row it has
+  just claimed, and that read followed `db_for_read`. The worker was handed
+  the row as it stood before the claim, so it ran the task holding a lease
+  the row no longer had: its own finish write matched no row, the result
+  was lost, and the row sat RUNNING until the reaper requeued it. The
+  re-read now names the alias the claim was written to. PostgreSQL claims
+  in one statement and reached this only through a subclass that overrides
+  `claim_filter_q()` without `claim_filter_sql()`. SQLite takes the
+  compare-and-set path and was never affected. Present since 0.2.0.
+- Stored schedules read the database they are written to. Under a router
+  that sends reads to a replica, creating or editing a schedule checked the
+  name against the replica, so a name already taken on the primary passed
+  validation and the INSERT raised `IntegrityError`, which the admin showed
+  as a server error rather than as "Schedule with this Name already
+  exists." `update_schedule()` and the admin's add page then read the row
+  back from the replica: a row the replica had not seen yet raised
+  `OxSchedule.DoesNotExist` after a write that had succeeded, and an older
+  one came back holding the values that write had just replaced. The
+  **Enable**, **Disable** and **Run selected schedules once now** actions
+  read their rows from the replica too, so a manual run could carry
+  arguments that had already been changed. All of it now reads the alias
+  the schedules are written to. The unique index on the name is unchanged:
+  a check can't win a race against an insert that commits between the check
+  and the write, so the index is what makes the name unique and the check
+  is what turns the ordinary duplicate into a field error. Present since
+  1.2.0, which added stored schedules.
 - `ox_prune --include-failed` no longer deletes a row that an operator retries
   while its batch is being deleted. The DELETE matches rows by primary key
   alone, so a FAILED or LOST row retried just before it ran was deleted anyway.

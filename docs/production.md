@@ -3,8 +3,11 @@
 The worker is a plain foreground process: `manage.py ox_worker`, run
 under whatever supervises your other processes. It rides out a database that goes away and comes back: a failed pass is
 logged as `worker_poll_failed`, the connection is reopened, and the loop
-carries on. A process manager is still what brings it back from a crash or a
-recycle. Run it under `Restart=always` (as in the unit
+carries on. It starts the same way. A worker started while the database is
+down opens no connection before its first poll, logs that pass and polls
+again, so a restart during a database bounce waits for the database instead
+of exiting into a restart loop. A process manager is still what brings it
+back from a crash or a recycle. Run it under `Restart=always` (as in the unit
 below). This page covers systemd,
 scaling, shutdown, the reaper, and monitoring.
 

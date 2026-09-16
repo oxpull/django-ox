@@ -24,6 +24,13 @@ logger = logging.getLogger("django_ox")
 class Command(DatabaseCommand):
     help = "Run a django-ox worker that executes tasks from the database queue."
 
+    # A worker outlives the database it works on. The poll that cannot
+    # reach it logs and waits, so a restart costs a pass rather than the
+    # process, and that is worth more here than a startup check: an exit
+    # would hand a restarting worker straight back to the same unreachable
+    # database, and a process manager gives up after a few of those.
+    checks_the_database = False
+
     def add_arguments(self, parser: CommandParser) -> None:
         super().add_arguments(parser)
         parser.add_argument(

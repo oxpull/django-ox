@@ -471,7 +471,11 @@ class OxScheduleAdmin(_ScheduleAdmin):
             # containing None, and the log entry records the row's id as
             # the string "None", so its history is attached to nothing.
             obj.pk = created.pk
-            obj.refresh_from_db()
+            # From the alias the row was written to, which is the one the
+            # service function resolved and used. Unqualified this follows
+            # db_for_read, and a replica that has not seen the row yet
+            # raises DoesNotExist on a save that succeeded.
+            obj.refresh_from_db(using=created._state.db)
 
     def has_change_permission(
         self, request: HttpRequest, obj: OxSchedule | None = None
@@ -532,6 +536,12 @@ class OxScheduleAdmin(_ScheduleAdmin):
         *,
         enabled: bool,
     ) -> None:
+        # The rows this action works on come from the alias it writes to,
+        # the way delete_queryset takes them. The queryset Django hands an
+        # action names no alias, so unqualified it is read through
+        # db_for_read: on a replica that is behind, the selection and the
+        # count below are of rows as they were, not as they are.
+        queryset = queryset.using(stored.schedule_db_alias())
         changed = 0
         for schedule in queryset:
             if not self.has_change_permission(request, schedule):
@@ -601,6 +611,11 @@ class OxScheduleAdmin(_ScheduleAdmin):
             source = stored.DatabaseScheduleSource(options, alias)
         now = timezone.now()
         run, skipped, overridden, refused = 0, 0, 0, 0
+        # A manual run enqueues from the row's own values rather than
+        # re-reading them, so the alias this reads is the alias the run
+        # carries: unqualified, a schedule edited a moment ago would run
+        # with the arguments a lagging replica still holds.
+        queryset = queryset.using(stored.schedule_db_alias())
         for schedule in queryset:
             if not self.has_change_permission(request, schedule):
                 # Counted separately from `skipped`, which reports a row

@@ -45,7 +45,8 @@ export names this page does not list; those names are not public.
   `waiting_counts`, the `QueueStats` dataclass, and `DEFAULT_WINDOW`, the
   trailing window the rate functions default to.
 - **The Prometheus surface**: `django_ox.metrics.render_prometheus`,
-  `render_openmetrics` and `collector`, the view `django_ox.views.metrics`,
+  `render_openmetrics` and `collector`, the view `django_ox.views.metrics`
+  with the `using` argument it takes from the URLconf,
   the `django_ox.urls` module with its `metrics` route name, and the metric
   names and label names listed on the [Monitoring](monitoring.md#prometheus)
   page. `METRIC_NAMES` is that list in code; `CONTENT_TYPE_PROMETHEUS` and
@@ -149,9 +150,12 @@ Django 6.1 changed which databases the system checks run against. A command
 that runs the full checks and does not name a database now checks every alias
 in `DATABASES`. Checking a SQLite or MySQL alias opens a connection and runs
 one query. The cost grows with the number of aliases, and every such command
-pays it. An alias that cannot be reached ends the command. django-ox's own commands
-name a database and pass it to the checks, so none of them is affected. For
-the rest, pass `--skip-checks`, or `--database` to `manage.py check`. Django
+pays it. An alias that cannot be reached ends the command. django-ox's own commands are
+not affected. `ox_prune`, `ox_health` and `ox_import_beat_schedules` name the
+alias they work on and pass it to the checks. `ox_worker` passes an empty list,
+so no alias is checked at all and a worker starts while its database is down
+and waits for it. For the rest, pass `--skip-checks`, or `--database` to
+`manage.py check`. Django
 6.0 is unaffected, and so is an alias on PostgreSQL. The
 [changelog](changelog.md) has the mechanism, the router fix, and why
 `--database` alone is not enough on a command that does not pass it on.

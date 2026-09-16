@@ -26,6 +26,7 @@ statement on the read alias turns that into a failed assertion instead.
 """
 
 import contextlib
+import json
 import uuid
 from datetime import timedelta
 from io import StringIO
@@ -33,7 +34,7 @@ from io import StringIO
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import connections
+from django.db import OperationalError, connections
 from django.utils import timezone
 
 from django_ox import actions, metrics, stats
@@ -225,6 +226,34 @@ class TestUnderAReplicaThatIsBehind:
             rendered = metrics.render_prometheus()
         assert 'django_ox_ready_tasks{queue="default"} 40' in rendered
 
+    def test_the_shipped_view_reads_the_primary(self):
+        from django.test import RequestFactory
+
+        from django_ox import views
+
+        self._backlog(40)
+        with no_statement_on(REPLICA):
+            response = views.metrics(RequestFactory().get("/metrics"))
+        assert 'django_ox_ready_tasks{queue="default"} 40' in response.content.decode()
+
+    def test_the_shipped_view_can_be_mounted_on_another_alias(self):
+        """
+        A project that served scrapes off a replica before this release has
+        to be able to keep doing it, and the view is the only way in: a
+        query parameter would let whoever scrapes choose the database.
+        """
+        from django.test import RequestFactory
+
+        from django_ox import views
+
+        self._backlog(40)
+        response = views.metrics(RequestFactory().get("/metrics"), using=REPLICA)
+        # The replica holds none of the backlog, which is the point.
+        assert 'django_ox_ready_tasks{queue="default"} 40' not in (
+            response.content.decode()
+        )
+        assert OxTask.objects.using(REPLICA).count() == 0
+
     def test_actions_read_the_primary(self):
         rows = _rows(
             1,
@@ -341,12 +370,13 @@ class TestTheChecksAreScopedToOneAlias:
     a command names none, and checking a SQLite or MySQL alias opens a
     connection to it. A --database flag that leaves that alone is half a
     flag: the command still ends on an alias it was told not to touch.
-    Django's own `migrate` scopes them, and so do these four.
+    Django's own `migrate` scopes them, and so do the three commands that
+    run once and report. The worker is the exception, below.
     """
 
     @pytest.mark.parametrize(
         "name",
-        ["ox_prune", "ox_health", "ox_worker", "ox_import_beat_schedules"],
+        ["ox_prune", "ox_health", "ox_import_beat_schedules"],
     )
     def test_the_flag_reaches_the_checks(self, name):
         from django.core.management import load_command_class
@@ -355,7 +385,7 @@ class TestTheChecksAreScopedToOneAlias:
         kwargs = command.get_check_kwargs({"database": PRIMARY})
         assert kwargs["databases"] == [PRIMARY]
 
-    @pytest.mark.parametrize("name", ["ox_prune", "ox_health", "ox_worker"])
+    @pytest.mark.parametrize("name", ["ox_prune", "ox_health"])
     def test_without_the_flag_the_checks_take_the_write_alias(self, name, settings):
         from django.core.management import load_command_class
 
@@ -363,3 +393,136 @@ class TestTheChecksAreScopedToOneAlias:
         command = load_command_class("django_ox", name)
         kwargs = command.get_check_kwargs({"database": None})
         assert kwargs["databases"] == [PRIMARY]
+
+
+@pytest.mark.django_db(databases=[REPLICA, PRIMARY])
+class TestTheWorkerStartsWithoutItsDatabase:
+    """
+    A worker has to outlive the database it works on.
+
+    `ox_worker` already handles a database that goes away: the poll logs
+    `worker_poll_failed`, drops the connection and waits, and the next pass
+    reconnects. Scoping its system checks to an alias undid that, because
+    JSONField's support check opens the connection before `handle()` runs,
+    so a worker started while the database was down exited instead of
+    waiting for it. Measured on Django 5.2, 6.0 and 6.1.
+
+    A configuration error is a different thing and still stops it at once:
+    that distinction is what these two hold together.
+    """
+
+    def test_the_worker_hands_the_checks_no_alias(self):
+        from django.core.management import load_command_class
+
+        command = load_command_class("django_ox", "ox_worker")
+        assert command.get_check_kwargs({"database": None})["databases"] == []
+        assert command.get_check_kwargs({"database": PRIMARY})["databases"] == []
+
+    def test_the_worker_s_checks_do_not_open_the_database(self, monkeypatch):
+        """
+        The effect rather than the argument. With the alias named, the
+        checks reach a database that is down and the command ends there.
+        """
+        from django.core import checks
+        from django.core.management import load_command_class
+
+        connection = connections[PRIMARY]
+        # The support check asks once per process and remembers; a suite
+        # that has already run has the answer cached.
+        monkeypatch.delitem(
+            connection.features.__dict__, "supports_json_field", raising=False
+        )
+
+        def unreachable():
+            raise OperationalError("could not connect to server")
+
+        monkeypatch.setattr(connection, "ensure_connection", unreachable)
+        worker = load_command_class("django_ox", "ox_worker")
+        prune = load_command_class("django_ox", "ox_prune")
+        # No raise: nothing the worker's checks run opens a connection.
+        checks.run_checks(**worker.get_check_kwargs({"database": PRIMARY}))
+        with pytest.raises(OperationalError):
+            checks.run_checks(**prune.get_check_kwargs({"database": PRIMARY}))
+
+    def test_a_configuration_error_still_stops_the_worker(self, settings):
+        """
+        Retrying an unreachable database is not the same as retrying a
+        misdeploy, and the checks that find a misdeploy still run.
+        """
+        from django.core.management.base import SystemCheckError
+
+        settings.TASKS = {
+            "default": {
+                "BACKEND": "django_ox.backend.OxBackend",
+                "QUEUES": ["default"],
+                "OPTIONS": {"SCHEDULE_SOURCE": "nowhere.NotAClass"},
+            }
+        }
+        # skip_checks=False: call_command skips them by default, and the
+        # checks are the whole of what this asserts.
+        with pytest.raises(SystemCheckError) as caught:
+            call_command("ox_worker", "--interval", "0.01", skip_checks=False)
+        assert "django_ox.E006" in str(caught.value)
+
+
+@pytest.mark.django_db(databases=[REPLICA, PRIMARY])
+class TestADatabaseThatIsDownIsOneLine:
+    """
+    Scoping the checks to an alias is what opens the connection, so a
+    database that is down is now found inside Django's check framework.
+    Left alone that arrives as a driver traceback, in cron mail and in a
+    container's probe log, where every other failure these commands have is
+    one line. `ox_health --format json` is the sharpest case: its object is
+    documented to carry the reason, and a healthcheck reads the object.
+    """
+
+    @pytest.fixture
+    def unreachable(self, monkeypatch):
+        """The write alias, refusing to connect the way a dead server does."""
+        connection = connections[PRIMARY]
+        # Asked once per process and remembered, so a suite that has
+        # already run has the answer cached.
+        monkeypatch.delitem(
+            connection.features.__dict__, "supports_json_field", raising=False
+        )
+
+        def refuse():
+            raise OperationalError("could not connect to server")
+
+        monkeypatch.setattr(connection, "ensure_connection", refuse)
+
+    @pytest.mark.parametrize("name", ["ox_prune", "ox_health"])
+    def test_the_checks_report_it_as_a_sentence(self, unreachable, name):
+        with pytest.raises(CommandError) as caught:
+            call_command(name, "--database", PRIMARY, skip_checks=False)
+        assert "Database unreachable" in str(caught.value)
+
+    def test_health_json_still_prints_its_object(self, unreachable):
+        out = StringIO()
+        with pytest.raises(CommandError):
+            call_command(
+                "ox_health",
+                "--database",
+                PRIMARY,
+                "--format",
+                "json",
+                skip_checks=False,
+                stdout=out,
+            )
+        reported = json.loads(out.getvalue())
+        assert reported["ok"] is False
+        assert reported["backlog"] is None
+        assert "Database unreachable" in reported["problems"][0]
+
+    def test_the_object_is_printed_once(self, settings):
+        """
+        A failure inside handle() prints its own object, and the wrapper
+        must not print a second one on the way out.
+        """
+        settings.DATABASE_ROUTERS = [_ReplicaReadRouter()]
+        out = StringIO()
+        with pytest.raises(CommandError):
+            call_command(
+                "ox_health", "--max-backlog", "-1", "--format", "json", stdout=out
+            )
+        assert out.getvalue().count('"ok"') == 1

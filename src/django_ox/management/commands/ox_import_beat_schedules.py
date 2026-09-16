@@ -14,7 +14,7 @@ from typing import Any
 
 from django.conf import settings
 from django.core.management.base import CommandError
-from django.db import connections, router
+from django.db import DatabaseError, connections, router
 
 from ...models import OxSchedule
 from .._database import DatabaseCommand
@@ -53,7 +53,16 @@ class Command(DatabaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         alias = self.database(options)
         connection = connections[alias]
-        if BEAT_TABLE not in connection.introspection.table_names():
+        # Reading someone else's table starts by asking which tables are
+        # there, so this is where a database that is not there is found.
+        # One line, the way the missing-table case below is: this command
+        # prints code for a person to read, and a driver traceback in the
+        # middle of that is nothing they can act on.
+        try:
+            tables = connection.introspection.table_names()
+        except DatabaseError as exc:
+            raise CommandError(f"Database unreachable: {exc}") from exc
+        if BEAT_TABLE not in tables:
             raise CommandError(
                 f"No {BEAT_TABLE} table on database {alias!r}. Point --database "
                 "at the one holding your django-celery-beat schedules."

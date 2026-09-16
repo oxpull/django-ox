@@ -3588,47 +3588,49 @@ status as `-` and has no Waiting filter. Its `discard`, `discard_many` and
 and `refresh()` raise `ValueError` on a waiting task. Nothing in 1.2 releases
 one.
 
-**Turning on workflows in Oxpull Pro.** Take these steps for each database
-that holds django-ox's tables.
+**Rolling back to 1.2 after workflows have run.** A WAITING task is a task
+row whose status is `WAITING`. No worker claims it, the reaper doesn't reap
+it, `ox_prune` doesn't delete it, and retry skips it. django-ox writes that
+status onto no row of its own, and releases no row that holds it. Something
+built on django-ox does both, and on this release that is workflows in Oxpull
+Pro.
 
-1. Upgrade every process that uses django-ox against that database to this
-   release. That means workers, web and ASGI processes, enqueue-only
-   services, the reconciler and cron jobs.
-2. Run `migrate django_ox` on that database.
-3. Check your deploy inventory for any process still on 1.2. django-ox
-   can't see which version a process runs.
-4. Turn on `OPTIONS["WORKFLOWS"]`.
+Turning workflows on, and turning them off again, is Oxpull Pro configuration,
+and Oxpull's own documentation has those steps. This section is the django-ox
+half. See [Pro](https://oxpull.com/django-ox/pro/).
 
-**Rolling back to 1.2 after workflows have run.** Take these steps in
-order.
+`migrate django_ox 0007` refuses while any task is WAITING on the database it
+migrates. A version from before `0008_waiting` can't read a waiting task and
+has nothing that would release one, so those rows would sit there for good.
+The refusal reads through the connection being migrated, so waiting rows on
+one alias neither block nor excuse the way back on another.
 
-1. Stop creating workflows in every process.
-2. Wait for the requests, jobs and transactions that were already creating
-   one to end.
-3. Let every workflow finish, or cancel it.
-4. Stop every process that can write a WAITING task. That's any process
-   that can create a workflow node, such as web and ASGI processes,
-   enqueue-only services, workers and cron jobs. It's also any process that
-   can retry a cancelled node. A process that's already running keeps the
-   settings it started with, so changing them in step 5 doesn't stop it.
-   Stop it, and keep it stopped until it runs 1.2.
-5. Turn off `OPTIONS["WORKFLOWS"]` in the settings every process starts
-   with.
-6. On every database alias, run
-   `OxTask.objects.using(alias).filter(status="WAITING").count()`. Each
-   count must be 0. If one isn't, don't migrate. With the processes from
-   step 4 stopped, the tasks left belong to workflows that haven't finished
-   or been cancelled. Cancel those workflows and count again. A count that
-   goes up between two runs means a process that writes WAITING tasks is
-   still running. Find it and stop it first.
-7. Run `migrate django_ox 0007 --database alias` for each alias. It refuses
+Take these steps in order, for each database that holds django-ox's tables.
+
+1. Stop whatever writes WAITING tasks from writing more. Then wait for the
+   requests, jobs and transactions that were already writing one to end.
+2. Finish or cancel the work the remaining waiting rows belong to. Only what
+   wrote a waiting row releases it, so django-ox can't do this part for you.
+3. Stop every process that can write a WAITING task, and keep it stopped
+   until it runs 1.2. That's any process that enqueues, such as web and ASGI
+   processes, enqueue-only services, workers and cron jobs. A process that's
+   already running keeps the settings it started with, so a settings change
+   doesn't stop it.
+4. On every database alias, run
+   `OxTask.objects.using(alias).filter(status="WAITING").count()`. Each count
+   must be 0. If one isn't, don't migrate. With the processes from step 3
+   stopped, the rows left belong to work that hasn't finished or been
+   cancelled. Finish or cancel it and count again. A count that goes up
+   between two runs means a process that writes WAITING tasks is still
+   running. Find it and stop it first.
+5. Run `migrate django_ox 0007 --database alias` for each alias. It refuses
    while any task on that alias is WAITING.
-8. Deploy 1.2 everywhere. Then start the processes you stopped in step 4.
+6. Deploy 1.2 everywhere. Then start the processes you stopped in step 3.
 
-The count and the migration look at the rows that exist when they run.
-Neither stops a process on this release from writing a WAITING task
-afterwards, and nothing at `0007` refuses one. That's why the processes from
-step 4 stay stopped until they run 1.2.
+The count and the migration look at the rows that exist when they run. Neither
+stops a process on this release from writing a WAITING task afterwards, and
+nothing at `0007` refuses one. That's why the processes from step 3 stay
+stopped until they run 1.2.
 
 A backup that holds a WAITING task restores only into this release or a
 later one.

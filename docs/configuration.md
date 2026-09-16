@@ -81,6 +81,7 @@ python manage.py ox_worker [options]
 | `--processes` | `1` | Worker processes to run. At `1` the command is the worker. Above `1` it supervises that many copies of itself, each a full worker with its own connections, lease renewal, reaper and `--concurrency` thread pool, so `--processes 2 --concurrency 4` runs eight tasks at once. See [Threads and processes](production.md#threads-and-processes). |
 | `--interval` | `1.0` | Polling interval in seconds when idle. When tasks are in flight the worker wakes as soon as one finishes, so this does not bound throughput. |
 | `--lock-timeout` | backend `LOCK_TIMEOUT`, or 300 | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |
+| `--database` | the alias `OxTask` writes to | Database alias to run against. Each `--processes` child is given the same one, so one router answering differently in two processes can't split a fleet across two databases. |
 
 The command also honors Django's standard `-v/--verbosity`: at the default
 verbosity it logs worker lifecycle and warnings to stderr, and `-v 2`
@@ -166,6 +167,7 @@ python manage.py ox_prune --older-than 7d
 | `--include-failed` | off | Also delete FAILED and LOST rows. By default they are kept, because they hold the per-attempt tracebacks and can be retried. |
 | `--batch-size` | `1000` | Rows per DELETE statement, so pruning a large table never takes a long lock or builds a giant IN clause. Must be at least 1. |
 | `--dry-run` | off | Report how many rows would be deleted without deleting any. |
+| `--database` | the alias `OxTask` writes to | Database alias to prune. The rows it reads and the rows it deletes are on that one alias. |
 
 Only SUCCESSFUL and DISCARDED rows (and, with `--include-failed`, FAILED and
 LOST rows) whose `finished_at` is past the cutoff are deleted. READY, WAITING
@@ -208,6 +210,7 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. Tasks deferred to a future `run_after` do not count. |
 | `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
+| `--database` | the alias `OxTask` writes to | Database alias to check. The figures come from that alias, so the check reports the queue your workers are running. |
 
 Check semantics, probe examples, and guidance on which check fits which
 alert are on the

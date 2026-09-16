@@ -4,6 +4,12 @@ Read-only queue metrics computed from the task table.
 Every function here is a plain ORM query over OxTask: no extra state, no
 signals, no worker involvement. Safe to call from a request, a shell, a
 health check, or a metrics exporter, on any database django-ox supports.
+
+Each reading comes from the alias the task rows are written to, which
+``using`` overrides. It is never the alias ``db_for_read`` points at. Under
+a router that sends reads to a replica, a replica that is behind reports a
+backlog that has already been worked off, or none at all, and a health
+check reading it passes while the queue is stuck.
 """
 
 from __future__ import annotations
@@ -13,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from django.db import router
 from django.db.models import Count, Max, Min, Q, QuerySet
 from django.db.models.functions import Coalesce
 from django.utils import timezone
@@ -32,6 +39,15 @@ __all__ = [
 ]
 
 DEFAULT_WINDOW = timedelta(minutes=5)
+
+
+def _alias(using: str | None) -> str:
+    """The alias to read on: the one given, or the one OxTask writes to."""
+    return using if using is not None else router.db_for_write(OxTask)
+
+
+def _tasks(alias: str) -> QuerySet[OxTask]:
+    return OxTask.objects.using(alias)
 
 
 @dataclass(frozen=True)
@@ -67,26 +83,30 @@ def _for_queue(queryset: QuerySet[OxTask], queue_name: str | None) -> QuerySet[O
     return queryset
 
 
-def _ready(queue_name: str | None, now: datetime) -> QuerySet[OxTask]:
+def _ready(alias: str, queue_name: str | None, now: datetime) -> QuerySet[OxTask]:
     # Mirrors the worker's dequeue predicate: READY and due, so a task
     # deferred to a future run_after does not count as backlog.
-    queryset = OxTask.objects.filter(status=OxTask.Status.READY).filter(
-        Q(run_after__isnull=True) | Q(run_after__lte=now)
+    queryset = (
+        _tasks(alias)
+        .filter(status=OxTask.Status.READY)
+        .filter(Q(run_after__isnull=True) | Q(run_after__lte=now))
     )
     return _for_queue(queryset, queue_name)
 
 
-def _finished(window: timedelta, queue_name: str | None) -> QuerySet[OxTask]:
+def _finished(
+    alias: str, window: timedelta, queue_name: str | None
+) -> QuerySet[OxTask]:
     if window <= timedelta(0):
         raise ValueError("window must be a positive timedelta.")
-    queryset = OxTask.objects.filter(
+    queryset = _tasks(alias).filter(
         status__in=(OxTask.Status.SUCCESSFUL, OxTask.Status.FAILED),
         finished_at__gte=timezone.now() - window,
     )
     return _for_queue(queryset, queue_name)
 
 
-def queue_stats() -> list[QueueStats]:
+def queue_stats(using: str | None = None) -> list[QueueStats]:
     """
     Raw row counts per queue and status, one entry per queue that has any
     rows, ordered by queue name. Unlike ready_count(), the ready column
@@ -96,11 +116,11 @@ def queue_stats() -> list[QueueStats]:
     """
     return [
         QueueStats(**{name: count for name, count in row.items() if name != "waiting"})
-        for row in _status_counts()
+        for row in _status_counts(_alias(using))
     ]
 
 
-def waiting_counts() -> dict[str, int]:
+def waiting_counts(using: str | None = None) -> dict[str, int]:
     """
     WAITING rows per queue, for each queue that has any.
 
@@ -109,7 +129,8 @@ def waiting_counts() -> dict[str, int]:
     it is not backlog: ready_count() and oldest_ready_age() leave it out.
     """
     rows = (
-        OxTask.objects.filter(status=OxTask.Status.WAITING)
+        _tasks(_alias(using))
+        .filter(status=OxTask.Status.WAITING)
         .values("queue_name")
         .annotate(n=Count("pk"))
         .order_by()
@@ -117,12 +138,13 @@ def waiting_counts() -> dict[str, int]:
     return {row["queue_name"]: row["n"] for row in rows}
 
 
-def _status_counts() -> list[Mapping[str, Any]]:
+def _status_counts(alias: str) -> list[Mapping[str, Any]]:
     # Every status per queue in one grouped query, ordered by queue name.
     # queue_stats() drops the waiting column, and django_ox.metrics reads
     # every column, so a scrape still costs one query for the counts.
     return list(
-        OxTask.objects.values("queue_name")
+        _tasks(alias)
+        .values("queue_name")
         .annotate(
             ready=Count("pk", filter=Q(status=OxTask.Status.READY)),
             running=Count("pk", filter=Q(status=OxTask.Status.RUNNING)),
@@ -136,12 +158,14 @@ def _status_counts() -> list[Mapping[str, Any]]:
     )
 
 
-def ready_count(queue_name: str | None = None) -> int:
+def ready_count(queue_name: str | None = None, using: str | None = None) -> int:
     """READY tasks currently eligible to run (run_after unset or passed)."""
-    return _ready(queue_name, timezone.now()).count()
+    return _ready(_alias(using), queue_name, timezone.now()).count()
 
 
-def oldest_ready_age(queue_name: str | None = None) -> timedelta | None:
+def oldest_ready_age(
+    queue_name: str | None = None, using: str | None = None
+) -> timedelta | None:
     """
     Age of the oldest eligible READY task, or None when there is none.
 
@@ -150,7 +174,7 @@ def oldest_ready_age(queue_name: str | None = None) -> timedelta | None:
     deferred by a week does not show up as a week of backlog.
     """
     now = timezone.now()
-    oldest: datetime | None = _ready(queue_name, now).aggregate(
+    oldest: datetime | None = _ready(_alias(using), queue_name, now).aggregate(
         oldest=Min(Coalesce("run_after", "enqueued_at"))
     )["oldest"]
     if oldest is None:
@@ -159,25 +183,29 @@ def oldest_ready_age(queue_name: str | None = None) -> timedelta | None:
 
 
 def throughput(
-    window: timedelta = DEFAULT_WINDOW, queue_name: str | None = None
+    window: timedelta = DEFAULT_WINDOW,
+    queue_name: str | None = None,
+    using: str | None = None,
 ) -> float:
     """
     Tasks that reached a terminal state (SUCCESSFUL or FAILED) per
     minute, over the trailing window.
     """
-    finished = _finished(window, queue_name).count()
+    finished = _finished(_alias(using), window, queue_name).count()
     return finished / (window.total_seconds() / 60.0)
 
 
 def failure_rate(
-    window: timedelta = DEFAULT_WINDOW, queue_name: str | None = None
+    window: timedelta = DEFAULT_WINDOW,
+    queue_name: str | None = None,
+    using: str | None = None,
 ) -> float | None:
     """
     Fraction of terminal outcomes in the trailing window that FAILED,
     between 0.0 and 1.0, or None when nothing finished in the window.
     Retries still pending are not outcomes and do not count.
     """
-    counts = _finished(window, queue_name).aggregate(
+    counts = _finished(_alias(using), window, queue_name).aggregate(
         finished=Count("pk"),
         failed=Count("pk", filter=Q(status=OxTask.Status.FAILED)),
     )
@@ -188,7 +216,9 @@ def failure_rate(
     return failed / finished
 
 
-def last_claim_age(queue_name: str | None = None) -> timedelta | None:
+def last_claim_age(
+    queue_name: str | None = None, using: str | None = None
+) -> timedelta | None:
     """
     Time since any worker last claimed a task (from last_attempted_at,
     which every claim writes), or None when no task was ever claimed.
@@ -198,9 +228,9 @@ def last_claim_age(queue_name: str | None = None) -> timedelta | None:
     steady traffic.
     """
     now = timezone.now()
-    latest: datetime | None = _for_queue(OxTask.objects.all(), queue_name).aggregate(
-        latest=Max("last_attempted_at")
-    )["latest"]
+    latest: datetime | None = _for_queue(
+        _tasks(_alias(using)).all(), queue_name
+    ).aggregate(latest=Max("last_attempted_at"))["latest"]
     if latest is None:
         return None
     return now - latest
@@ -211,14 +241,16 @@ def last_claim_age(queue_name: str | None = None) -> timedelta | None:
 # does not grow with the number of queues.
 
 
-def _ready_counts(now: datetime) -> dict[str, int]:
-    rows = _ready(None, now).values("queue_name").annotate(n=Count("pk")).order_by()
+def _ready_counts(alias: str, now: datetime) -> dict[str, int]:
+    rows = (
+        _ready(alias, None, now).values("queue_name").annotate(n=Count("pk")).order_by()
+    )
     return {row["queue_name"]: row["n"] for row in rows}
 
 
-def _oldest_ready(now: datetime) -> dict[str, datetime]:
+def _oldest_ready(alias: str, now: datetime) -> dict[str, datetime]:
     rows = (
-        _ready(None, now)
+        _ready(alias, None, now)
         .values("queue_name")
         .annotate(oldest=Min(Coalesce("run_after", "enqueued_at")))
         .order_by()
@@ -226,9 +258,10 @@ def _oldest_ready(now: datetime) -> dict[str, datetime]:
     return {row["queue_name"]: row["oldest"] for row in rows}
 
 
-def _last_claims() -> dict[str, datetime]:
+def _last_claims(alias: str) -> dict[str, datetime]:
     rows = (
-        OxTask.objects.values("queue_name")
+        _tasks(alias)
+        .values("queue_name")
         .annotate(latest=Max("last_attempted_at"))
         .order_by()
     )
@@ -237,9 +270,9 @@ def _last_claims() -> dict[str, datetime]:
     }
 
 
-def _finished_counts(window: timedelta) -> dict[str, tuple[int, int]]:
+def _finished_counts(alias: str, window: timedelta) -> dict[str, tuple[int, int]]:
     rows = (
-        _finished(window, None)
+        _finished(alias, window, None)
         .values("queue_name")
         .annotate(
             finished=Count("pk"),

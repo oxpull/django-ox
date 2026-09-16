@@ -1,19 +1,21 @@
 from typing import Any
 
-from django.core.management.base import BaseCommand, CommandError, CommandParser
-from django.db import DatabaseError, connections, router, transaction
+from django.core.management.base import CommandError, CommandParser
+from django.db import DatabaseError, connections, transaction
 from django.db.models import F, QuerySet
 from django.utils import timezone
 
 from django_ox import _contention
 from django_ox.durations import parse_duration
+from django_ox.management._database import DatabaseCommand
 from django_ox.models import OxScheduleTick, OxTask
 
 
-class Command(BaseCommand):
+class Command(DatabaseCommand):
     help = "Delete finished task rows older than a cutoff."
 
     def add_arguments(self, parser: CommandParser) -> None:
+        super().add_arguments(parser)
         parser.add_argument(
             "--queue",
             default=None,
@@ -54,6 +56,9 @@ class Command(BaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         if options["batch_size"] < 1:
             raise CommandError("--batch-size must be a positive integer.")
+        # Once, before the first statement. Every queryset below is built on
+        # this alias, so the rows the command reads are the rows it deletes.
+        alias = self.database(options)
         cutoff = timezone.now() - parse_duration(options["older_than"])
         # DISCARDED prunes with SUCCESSFUL: the row is already closed, so
         # there is nothing left on it to wait for. WAITING is in neither
@@ -65,7 +70,9 @@ class Command(BaseCommand):
             # the lease was lost, and the same kind to discard. Leaving it
             # out of both would make it the one status that never prunes.
             statuses += [OxTask.Status.FAILED, OxTask.Status.LOST]
-        prunable = OxTask.objects.filter(status__in=statuses, finished_at__lt=cutoff)
+        prunable = OxTask.objects.using(alias).filter(
+            status__in=statuses, finished_at__lt=cutoff
+        )
         label = "/".join(statuses)
         queue: str | None = options["queue"]
         if queue is not None:
@@ -80,15 +87,12 @@ class Command(BaseCommand):
         # schedule's latest tick is the anchor the dispatcher measures
         # missed ticks against. Keep that row whatever its age: deleting it
         # would make the schedule re-anchor and skip a pending tick.
+        ticks = OxScheduleTick.objects.using(alias)
         anchors = [
-            OxScheduleTick.objects.filter(schedule_name=name).latest("scheduled_for").pk
-            for name in OxScheduleTick.objects.values_list(
-                "schedule_name", flat=True
-            ).distinct()
+            ticks.filter(schedule_name=name).latest("scheduled_for").pk
+            for name in ticks.values_list("schedule_name", flat=True).distinct()
         ]
-        prunable_ticks = OxScheduleTick.objects.filter(
-            scheduled_for__lt=cutoff
-        ).exclude(pk__in=anchors)
+        prunable_ticks = ticks.filter(scheduled_for__lt=cutoff).exclude(pk__in=anchors)
 
         if options["dry_run"]:
             self.stdout.write(
@@ -101,7 +105,9 @@ class Command(BaseCommand):
             )
             return
 
-        deleted = self._delete_tasks_in_batches(prunable, options["batch_size"], label)
+        deleted = self._delete_tasks_in_batches(
+            prunable, options["batch_size"], label, alias
+        )
         self.stdout.write(
             f"Deleted {deleted} {label} task row(s) "
             f"finished before {cutoff.isoformat()}."
@@ -113,9 +119,8 @@ class Command(BaseCommand):
         )
 
     def _delete_tasks_in_batches(
-        self, prunable: QuerySet[OxTask], batch_size: int, label: str
+        self, prunable: QuerySet[OxTask], batch_size: int, label: str, alias: str
     ) -> int:
-        alias = router.db_for_write(OxTask)
         # Each batch commits by itself. One that loses a deadlock or a
         # serialization failure runs again in a new transaction, which checks
         # the batch again under the lock and deletes again. Not inside a

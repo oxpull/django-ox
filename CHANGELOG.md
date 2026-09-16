@@ -76,23 +76,25 @@ dev server. A reachable alias is opened too, so each extra alias costs a
 connection on every such command. Django 6.0 does not do this, and nothing
 in django-ox changed.
 
-The cheapest way out is `--skip-checks`, which needs no settings change.
-`ox_worker`, `ox_prune` and `ox_health` all take it, and `ox_worker` passes
-it to each `--processes` child. `manage.py check` has no `--skip-checks`.
-Give it `--database` and name the alias you want checked.
+django-ox's own commands name a database. `ox_worker`, `ox_prune`,
+`ox_health` and `ox_import_beat_schedules` each pass their alias to the
+checks, so none of them checks an alias you did not ask for. That is new in
+this release, and it holds whether or not you pass `--database`.
 
-A database router fixes every command at once. Django skips an alias whose
-`allow_migrate` returns false for the model. A router that keeps django-ox's
-tables on one alias therefore stops the checks touching the others. Set
-`allow_migrate` only. A router that also sets `db_for_read` sends `ox_prune`
-and `ox_health` to the replica, which is a worse problem.
+For every other command, `--skip-checks` is the cheapest way out and needs
+no settings change. `manage.py check` has no `--skip-checks`. Give it
+`--database` and name the alias you want checked.
 
-`--database` on its own is not the exemption. `migrate` is the one command
-that passes that flag to the checks. `showmigrations`, `sqlmigrate`,
-`dumpdata`, `flush` and django-ox's `ox_import_beat_schedules` all accept
-`--database` and still check every alias. `SILENCED_SYSTEM_CHECKS` does not
-help either. The connection raises before there is a check message to
-silence.
+`--database` on its own is not the exemption. A command has to pass the
+flag to the checks, and most do not. `showmigrations`, `sqlmigrate`,
+`dumpdata` and `flush` all accept `--database` and still check every alias.
+`SILENCED_SYSTEM_CHECKS` does not help either. The connection raises before
+there is a check message to silence.
+
+A database router fixes every command at once, yours included. Django skips
+an alias whose `allow_migrate` returns false for the model. A router that
+keeps django-ox's tables on one alias therefore stops the checks touching
+the others.
 
 Two field checks reach a connection. On SQLite, Django asks the alias
 whether it supports `JSONField`, and the answer comes from a query. On
@@ -118,6 +120,14 @@ question from a constant, so a PostgreSQL alias is unaffected.
 - `ox_health --format json` prints the check figures as one JSON object
   for container healthchecks and monitoring agents. On a failing check the
   object is still printed, and the exit status is unchanged.
+- `--database` on `ox_prune`, `ox_health` and `ox_worker`, naming the alias
+  to work on. It defaults to the alias `OxTask` writes to, the way
+  `migrate --database` defaults to one. `ox_worker` names it in the command
+  line of each `--processes` child, so one router answering differently in
+  two processes cannot split a fleet across two databases. All four
+  django-ox commands now pass their alias to the system checks, which is
+  what `migrate` does. `ox_import_beat_schedules` already had the flag and
+  now does this too.
 
 ### Changed
 
@@ -140,6 +150,10 @@ question from a constant, so a PostgreSQL alias is unaffected.
   includes it.
 - `django_ox_tasks` has a `waiting` sample for every queue, so a sum over its
   `status` label now counts waiting tasks too.
+- `django_ox.stats`, `django_ox.metrics.collect()`, `render_prometheus()`,
+  `render_openmetrics()` and `collector()` take `using` to name the alias to
+  read. Left out, they read the alias `OxTask` writes to. On a project with
+  no database router that is the same connection they always used.
 - `ox_health --max-age` and `--worker-timeout` accept the duration forms
   `ox_prune --older-than` takes (`7d`, `24h`, `90m`, `45s`). A plain number
   still means seconds, fractions included.
@@ -149,6 +163,20 @@ question from a constant, so a PostgreSQL alias is unaffected.
 
 ### Fixed
 
+- `ox_prune` and `ox_health` no longer read a replica. Under a router that
+  sends reads to one, every query they made went there while their writes
+  went to the primary. `ox_prune` deletes in batches, and the loop ends when
+  its candidate read comes back empty. A replica that is up and behind never
+  comes back empty. So the command emptied the primary and kept going: 20
+  rows to 0, still running a minute later, and the operator had to kill it.
+  `ox_health` answered from the replica. Over 40 READY tasks six hours old
+  on the primary it printed `OK: backlog=0` and exited 0. With
+  `--format json` it said `"ok": true`. A container healthcheck on it
+  reported green over a queue that was stuck. Both now read the alias the
+  task rows are written to, and so do `django_ox.stats`, the metrics
+  endpoint, `django_ox.actions` and `get_result()`. `ox_prune` finishes and reports
+  what it deleted; `ox_health` reports the backlog the workers see. Present
+  in every release from 0.1.0 to 1.2.0.
 - `ox_prune --include-failed` no longer deletes a row that an operator retries
   while its batch is being deleted. The DELETE matches rows by primary key
   alone, so a FAILED or LOST row retried just before it ran was deleted anyway.

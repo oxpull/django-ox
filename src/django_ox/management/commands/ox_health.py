@@ -2,11 +2,12 @@ import json
 from datetime import timedelta
 from typing import Any, NoReturn
 
-from django.core.management.base import BaseCommand, CommandError, CommandParser
+from django.core.management.base import CommandError, CommandParser
 from django.db import DatabaseError
 
 from django_ox import stats
 from django_ox.durations import parse_seconds
+from django_ox.management._database import DatabaseCommand
 
 
 def _seconds(value: timedelta | None) -> str:
@@ -17,7 +18,7 @@ def _total_seconds(value: timedelta | None) -> float | None:
     return None if value is None else value.total_seconds()
 
 
-class Command(BaseCommand):
+class Command(DatabaseCommand):
     help = (
         "Check queue health. Exits 0 when every enabled check passes, "
         "non-zero with a one-line reason otherwise. With no flags, only "
@@ -25,6 +26,7 @@ class Command(BaseCommand):
     )
 
     def add_arguments(self, parser: CommandParser) -> None:
+        super().add_arguments(parser)
         parser.add_argument(
             "--format",
             choices=["text", "json"],
@@ -86,6 +88,14 @@ class Command(BaseCommand):
                 self._write_json(queue, None, None, None, [reason])
             raise CommandError(reason)
 
+        # Once: the three figures below are three readings of one queue, so
+        # they come from one alias rather than one each. Reported the way
+        # the other bad arguments are, so --format json still gets an object.
+        try:
+            alias = self.database(options)
+        except CommandError as exc:
+            _invalid(str(exc))
+
         if max_backlog is not None and max_backlog < 0:
             _invalid("--max-backlog must be zero or a positive integer.")
         if max_age is not None and max_age <= 0:
@@ -94,9 +104,9 @@ class Command(BaseCommand):
             _invalid("--worker-timeout must be a positive number of seconds.")
 
         try:
-            backlog = stats.ready_count(queue)
-            oldest = stats.oldest_ready_age(queue)
-            claim_age = stats.last_claim_age(queue)
+            backlog = stats.ready_count(queue, using=alias)
+            oldest = stats.oldest_ready_age(queue, using=alias)
+            claim_age = stats.last_claim_age(queue, using=alias)
         except DatabaseError as exc:
             reason = f"Database unreachable: {exc}"
             if as_json:

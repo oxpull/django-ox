@@ -47,6 +47,14 @@ stats.waiting_counts()  # WAITING tasks per queue, such as {"default": 4}
 Every function except `queue_stats()` and `waiting_counts()` accepts a `queue_name` keyword to
 scope the metric to one queue.
 
+Every one of them also accepts `using`, the database alias to read. Left
+out, they read the alias `OxTask` is written to, never the one
+`db_for_read` points at. On a project with no database router those are the
+same connection. On one that sends reads to a replica they are not, and a
+replica that is behind would answer for a queue nobody is running. The same
+goes for `ox_health` and the Prometheus endpoint, which read these
+functions.
+
 **Alert on two numbers: backlog depth (`ready_count`) and backlog age
 (`oldest_ready_age`).** Neither works alone. Depth looks fine while one poisoned
 task starves the queue. Age looks fine during a flood of fresh work.
@@ -68,6 +76,7 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. Deferred tasks do not count. |
 | `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
+| `--database` | the alias `OxTask` writes to | Database alias to check. The figures come from that alias, so the check reports the queue your workers are running. |
 
 On success it prints the measured values, which is useful in cron mail
 and probe logs:

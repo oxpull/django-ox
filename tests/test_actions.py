@@ -403,15 +403,18 @@ class TestMany:
         seed(OxTask.Status.FAILED, 2500)
         ids = list(OxTask.objects.values_list("pk", flat=True))
         calls = []
-        original = actions.OxTask.objects.filter
+        original = actions.OxTask.objects.using
 
-        def filter_then_fail(*args, **kwargs):
+        # One per chunk, and the alias is named rather than routed, so this
+        # is the seam the chunk's queryset is built on. Failing the second
+        # call fails the second chunk, before its UPDATE.
+        def using_then_fail(*args, **kwargs):
             calls.append(1)
             if len(calls) == 2:
                 raise RuntimeError("boom")
             return original(*args, **kwargs)
 
-        monkeypatch.setattr(actions.OxTask.objects, "filter", filter_then_fail)
+        monkeypatch.setattr(actions.OxTask.objects, "using", using_then_fail)
         with pytest.raises(RuntimeError):
             actions.retry_many(ids)
         monkeypatch.undo()

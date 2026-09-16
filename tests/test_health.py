@@ -107,7 +107,7 @@ class TestHealth:
         assert str(error) == "; ".join(report["problems"])
 
     def test_json_database_unreachable_still_prints_the_object(self, monkeypatch):
-        def boom(queue_name=None):
+        def boom(queue_name=None, using=None):
             raise DatabaseError("connection refused")
 
         monkeypatch.setattr(ox_health.stats, "ready_count", boom)
@@ -133,7 +133,7 @@ class TestHealth:
         assert str(error) == "--max-backlog must be zero or a positive integer."
 
     def test_database_unreachable_fails_with_reason(self, monkeypatch):
-        def boom(queue_name=None):
+        def boom(queue_name=None, using=None):
             raise DatabaseError("connection refused")
 
         monkeypatch.setattr(ox_health.stats, "ready_count", boom)

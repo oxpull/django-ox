@@ -248,7 +248,7 @@ class TestCollector:
                 self.name = name
                 self.labels = labels
 
-        collector = metrics._OxCollector(Family, timedelta(minutes=5))
+        collector = metrics._OxCollector(Family, timedelta(minutes=5), None)
         described = {family.name: family.labels for family in collector.describe()}
         assert described["django_ox_tasks"] == ["queue", "status"]
         others = {

@@ -484,6 +484,7 @@ class Worker:
         parent_pid: int | None = None,
         task_timeout: float | None = None,
         task_timeout_grace: float | None = None,
+        db_alias: str | None = None,
     ) -> None:
         backend = task_backends[backend_alias]
         if not isinstance(backend, OxBackend):
@@ -599,7 +600,12 @@ class Worker:
             f"{socket.gethostname()[:40]}-{os.getpid()}-{get_random_string(8)}{suffix}"
         )
         self._stop = Event()
-        self._db_alias = router.db_for_write(OxTask)
+        # Resolved once, here, and every statement this worker runs goes to
+        # it. ox_worker --database sets it; otherwise it is the alias the
+        # router sends OxTask writes to.
+        self._db_alias = (
+            db_alias if db_alias is not None else router.db_for_write(OxTask)
+        )
         # (pk, lease_epoch) of every execution running right now, added and
         # removed by execute(). Renewal reads it rather than renewing
         # everything stamped with this worker_id, so a row whose execution

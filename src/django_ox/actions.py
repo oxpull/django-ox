@@ -29,6 +29,13 @@ or a serialization failure starts it again from its first chunk, three
 attempts in all. Inside a caller's transaction the error goes to the
 caller.
 
+Each call resolves the alias OxTask writes to once and runs every statement
+on it, its reads included. Left unqualified, the read that a
+compare-and-set needs would follow db_for_read: under a router that sends
+reads to a replica, a call would read one database and write another, and
+against a replica that is behind it would read a row it is about to
+contradict, or fail to find one that is there.
+
 The actions write the table directly and send no django.tasks signal: a
 discard finishes the result without task_finished, and a retry requeues
 it without task_enqueued. The worker's signals fire as usual when a
@@ -73,6 +80,11 @@ DISCARDABLE_STATUSES = (
 )
 
 
+def _rows() -> QuerySet[OxTask]:
+    """OxTask on the one alias a call reads and writes."""
+    return OxTask.objects.using(router.db_for_write(OxTask))
+
+
 def _pk(result_id: str | uuid.UUID) -> uuid.UUID | None:
     if isinstance(result_id, uuid.UUID):
         return result_id
@@ -112,14 +124,15 @@ def retry(result_id: str | uuid.UUID) -> bool:
     pk = _pk(result_id)
     if pk is None:
         return False
+    rows = _rows()
     row = (
-        OxTask.objects.filter(pk=pk, status__in=RETRYABLE_STATUSES)
+        rows.filter(pk=pk, status__in=RETRYABLE_STATUSES)
         .values("lease_epoch", "attempts")
         .first()
     )
     if row is None:
         return False
-    updated = OxTask.objects.filter(
+    updated = rows.filter(
         pk=pk,
         status__in=RETRYABLE_STATUSES,
         lease_epoch=row["lease_epoch"],
@@ -164,7 +177,8 @@ def expire_lease(result_id: str | uuid.UUID) -> bool:
     # every clock a fleet plausibly has.
     already_expired = timezone.now() - timedelta(days=1)
     updated = (
-        OxTask.objects.filter(pk=pk, status=OxTask.Status.RUNNING)
+        _rows()
+        .filter(pk=pk, status=OxTask.Status.RUNNING)
         .exclude(locked_at=None)
         .update(lease_expires_at=already_expired, locked_at=already_expired)
     )
@@ -192,14 +206,15 @@ def discard(result_id: str | uuid.UUID) -> bool:
     pk = _pk(result_id)
     if pk is None:
         return False
+    rows = _rows()
     epoch = (
-        OxTask.objects.filter(pk=pk, status__in=DISCARDABLE_STATUSES)
+        rows.filter(pk=pk, status__in=DISCARDABLE_STATUSES)
         .values_list("lease_epoch", flat=True)
         .first()
     )
     if epoch is None:
         return False
-    updated = OxTask.objects.filter(
+    updated = rows.filter(
         pk=pk, status__in=DISCARDABLE_STATUSES, lease_epoch=epoch
     ).update(
         status=OxTask.Status.DISCARDED,
@@ -243,10 +258,19 @@ def _mariadb_uuid_order(pk: uuid.UUID) -> bytes:
 
 def _ids(
     selection: QuerySet[OxTask] | Iterable[str | uuid.UUID],
+    alias: str,
 ) -> tuple[list[uuid.UUID], int]:
-    """The distinct usable ids, and how many distinct items were malformed."""
+    """
+    The distinct usable ids, and how many distinct items were malformed.
+
+    A queryset is read on `alias`, whatever it was built on, because the
+    UPDATE that follows runs there. Reading the ids anywhere else would
+    move rows chosen on one database by their state on another.
+    """
     if isinstance(selection, QuerySet):
-        raw: Iterable[str | uuid.UUID] = selection.values_list("pk", flat=True)
+        raw: Iterable[str | uuid.UUID] = selection.using(alias).values_list(
+            "pk", flat=True
+        )
     else:
         raw = selection
     seen: dict[uuid.UUID, None] = {}
@@ -261,6 +285,7 @@ def _ids(
 
 
 def _move_in_key_order(
+    alias: str,
     ids: list[uuid.UUID],
     statuses: tuple[OxTask.Status, ...],
     values: dict[str, Any],
@@ -270,10 +295,9 @@ def _move_in_key_order(
 
     The ids go in the database's key order, one chunk at a time. On a
     database with row locks a locking read of the chunk's ids comes first.
-    The transaction is opened on the database OxTask writes to, which is where
-    every statement below goes.
+    The transaction is opened on `alias`, which is where every statement
+    below goes, the locking read included.
     """
-    alias = router.db_for_write(OxTask)
     locking_read = connections[alias].features.has_select_for_update
     ordered = sorted(ids, key=_key_order(alias))
 
@@ -281,7 +305,7 @@ def _move_in_key_order(
         changed = 0
         with transaction.atomic(using=alias):
             for start in range(0, len(ordered), UPDATE_CHUNK_SIZE):
-                chunk = OxTask.objects.filter(
+                chunk = OxTask.objects.using(alias).filter(
                     pk__in=ordered[start : start + UPDATE_CHUNK_SIZE]
                 )
                 if locking_read:
@@ -320,8 +344,10 @@ def retry_many(
     the module docstring says. A deadlock or serialization failure in a
     transaction this call opened starts the call again, three attempts in all.
     """
-    ids, malformed = _ids(selection)
+    alias = router.db_for_write(OxTask)
+    ids, malformed = _ids(selection, alias)
     changed = _move_in_key_order(
+        alias,
         ids,
         RETRYABLE_STATUSES,
         {
@@ -351,8 +377,10 @@ def discard_many(
     bumped, for the reason given on discard(). One transaction for the
     whole call, with the key order and the retries retry_many() has.
     """
-    ids, malformed = _ids(selection)
+    alias = router.db_for_write(OxTask)
+    ids, malformed = _ids(selection, alias)
     changed = _move_in_key_order(
+        alias,
         ids,
         DISCARDABLE_STATUSES,
         {

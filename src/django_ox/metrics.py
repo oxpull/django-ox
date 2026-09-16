@@ -10,6 +10,10 @@ nothing else; there is no counter state held in the process.
 Every number here is a gauge. The task table is pruned, so a monotonic
 counter of finished tasks cannot be derived from it; throughput and the
 failure rate are trailing-window readings over stats.DEFAULT_WINDOW.
+
+The numbers come from the alias the task rows are written to, which
+``using`` overrides, for the reason django_ox.stats gives: a scrape of a
+replica that is behind reports a queue that is not the one running.
 """
 
 from __future__ import annotations
@@ -77,7 +81,9 @@ class MetricFamily:
     samples: tuple[tuple[dict[str, str], float], ...]
 
 
-def collect(window: timedelta = stats.DEFAULT_WINDOW) -> list[MetricFamily]:
+def collect(
+    window: timedelta = stats.DEFAULT_WINDOW, using: str | None = None
+) -> list[MetricFamily]:
     """
     Every metric family, one sample per queue, in METRIC_NAMES order.
 
@@ -90,13 +96,16 @@ def collect(window: timedelta = stats.DEFAULT_WINDOW) -> list[MetricFamily]:
     give (eligible backlog, oldest wait, last claim, the finished window).
     """
     now = timezone.now()
+    # Resolved once, so the five queries below are five readings of one
+    # database rather than of whatever each of them routed to.
+    alias = stats._alias(using)
     # Every status per queue in one query: queue_stats() and waiting_counts()
     # would be two.
-    rows = stats._status_counts()
-    ready_by_queue = stats._ready_counts(now)
-    oldest_by_queue = stats._oldest_ready(now)
-    claims_by_queue = stats._last_claims()
-    finished_by_queue = stats._finished_counts(window)
+    rows = stats._status_counts(alias)
+    ready_by_queue = stats._ready_counts(alias, now)
+    oldest_by_queue = stats._oldest_ready(alias, now)
+    claims_by_queue = stats._last_claims(alias)
+    finished_by_queue = stats._finished_counts(alias, window)
     minutes = window.total_seconds() / 60.0
     tasks: list[tuple[dict[str, str], float]] = []
     ready: list[tuple[dict[str, str], float]] = []
@@ -143,8 +152,8 @@ def _format_value(value: float) -> str:
     return repr(value)
 
 
-def _lines(window: timedelta) -> Iterator[str]:
-    for family in collect(window):
+def _lines(window: timedelta, using: str | None) -> Iterator[str]:
+    for family in collect(window, using):
         yield f"# HELP {family.name} {family.help}"
         yield f"# TYPE {family.name} gauge"
         for labels, value in family.samples:
@@ -154,19 +163,23 @@ def _lines(window: timedelta) -> Iterator[str]:
             yield f"{family.name}{{{rendered}}} {_format_value(value)}"
 
 
-def render_prometheus(window: timedelta = stats.DEFAULT_WINDOW) -> str:
+def render_prometheus(
+    window: timedelta = stats.DEFAULT_WINDOW, using: str | None = None
+) -> str:
     """The metrics in the Prometheus text exposition format, version 0.0.4."""
-    return "\n".join(_lines(window)) + "\n"
+    return "\n".join(_lines(window, using)) + "\n"
 
 
-def render_openmetrics(window: timedelta = stats.DEFAULT_WINDOW) -> str:
+def render_openmetrics(
+    window: timedelta = stats.DEFAULT_WINDOW, using: str | None = None
+) -> str:
     """
     The same metrics in OpenMetrics 1.0 text format.
 
     Gauges render identically in the two formats; OpenMetrics adds a
     terminating # EOF line, which is the whole difference here.
     """
-    return render_prometheus(window) + "# EOF\n"
+    return render_prometheus(window, using) + "# EOF\n"
 
 
 def _label_names(name: str) -> list[str]:
@@ -176,9 +189,10 @@ def _label_names(name: str) -> list[str]:
 class _OxCollector:
     """A prometheus_client Collector over collect(). Built by collector()."""
 
-    def __init__(self, family_class: Any, window: timedelta) -> None:
+    def __init__(self, family_class: Any, window: timedelta, using: str | None) -> None:
         self._family_class = family_class
         self._window = window
+        self._using = using
 
     def describe(self) -> Iterator[Any]:
         # Lets a registry register the collector without querying the
@@ -188,7 +202,7 @@ class _OxCollector:
             yield self._family_class(name, _HELP[name], labels=_label_names(name))
 
     def collect(self) -> Iterator[Any]:
-        for family in collect(self._window):
+        for family in collect(self._window, self._using):
             label_names = _label_names(family.name)
             metric = self._family_class(family.name, family.help, labels=label_names)
             for labels, value in family.samples:
@@ -196,7 +210,9 @@ class _OxCollector:
             yield metric
 
 
-def collector(window: timedelta = stats.DEFAULT_WINDOW) -> Any:
+def collector(
+    window: timedelta = stats.DEFAULT_WINDOW, using: str | None = None
+) -> Any:
     """
     A Collector for a prometheus_client registry, when that package is
     installed. django-ox does not depend on it; the import happens here.
@@ -213,4 +229,4 @@ def collector(window: timedelta = stats.DEFAULT_WINDOW) -> Any:
             "django_ox.metrics.collector() needs prometheus_client, which is not "
             "installed. render_prometheus() needs no extra package."
         ) from exc
-    return _OxCollector(core.GaugeMetricFamily, window)
+    return _OxCollector(core.GaugeMetricFamily, window, using)

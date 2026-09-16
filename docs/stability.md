@@ -145,6 +145,15 @@ Django 6.0 and later ship the Tasks framework in core. The Django 5.2 legs
 install the `django-tasks` backport and run the whole suite against it, which
 is what `django-ox[backport]` pulls in.
 
+Django 6.1 changed which databases the system checks run against. They now
+run against every alias in `DATABASES` unless the command names one.
+django-ox models use `JSONField`, so Django opens each alias to ask whether it
+supports the field. `manage.py check`, `ox_worker`, `ox_prune` and `ox_health`
+all fail if one of those aliases is unreachable. Give your database router an
+`allow_migrate` that returns `False` for that alias, and Django skips it.
+Django 6.0 is unaffected, and so is an alias on PostgreSQL. The
+[changelog](changelog.md) has the rest.
+
 The support floor tracks Django's own: when a Python or Django version
 reaches end of life upstream, a later django-ox minor release may drop it,
 announced in the changelog. Databases: PostgreSQL, SQLite and MySQL 8 are

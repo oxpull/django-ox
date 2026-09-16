@@ -85,6 +85,23 @@ later one.
 
 ### Changed
 
+- On Django 6.1, `manage.py check` and most other management commands open
+  every alias in `DATABASES`. Django 6.1 runs the system checks against
+  every configured alias unless the command names one. django-ox models use
+  `JSONField`, and Django asks SQLite and MySQL over a connection whether
+  the alias supports it. If one of those aliases is unreachable, the command
+  exits before it does anything. The common case is a replica alias that is
+  not reachable from where the command runs. `ox_worker`, `ox_prune` and
+  `ox_health` run the checks like any other command, so they fail the same
+  way. Give your database router an `allow_migrate` that returns `False` for
+  that alias, and Django skips it. A router with no `allow_migrate`, or one
+  that returns `None`, does not skip it. `check --database` and `migrate
+  --database` name one alias, so they were never affected. `ox_worker`,
+  `ox_prune` and `ox_health` take no `--database` flag, so the router is the
+  way out for them. Even a reachable alias is now opened, which costs a
+  connection on every management command. Django 6.0 is unaffected. An alias
+  on PostgreSQL is never opened for this, because Django reads its JSON
+  support from a class attribute.
 - `retry_many` and `discard_many` sort the ids and lock each thousand rows in
   primary key order before they update them. That's one more statement per
   thousand rows on PostgreSQL and MySQL. A bulk retry or discard of rows

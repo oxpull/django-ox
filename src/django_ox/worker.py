@@ -533,9 +533,11 @@ class Worker:
             if recycle_drain_budget is not None
             else self.lock_timeout
         )
-        # A third of the timeout leaves room for two consecutive renewals to
-        # be missed (a slow query, a blip, one skipped scheduling slot)
-        # before the reaper is entitled to conclude anything.
+        # A third of the timeout leaves room for one missed renewal (a slow
+        # query, a blip, one skipped scheduling slot) and no more. The loop
+        # waits this interval after each renewal rather than firing on a
+        # fixed schedule, so a round costs the wait plus the UPDATE and three
+        # of them always exceed the lease.
         self.renew_interval: float = (
             renew_interval
             if renew_interval is not None

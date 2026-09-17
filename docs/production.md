@@ -534,11 +534,15 @@ Two consequences:
 
 Set `LOCK_TIMEOUT` above the longest gap you expect between a worker's lease
 renewals, not above your longest task. Renewal runs every `LOCK_TIMEOUT / 3`
-seconds, so two consecutive renewals can be missed before anything is
-reclaimed. The value is really a statement about how long a worker may be
-unresponsive before you want its work handed to somebody else: too low and a
-paused or overloaded worker loses tasks it was going to finish, too high and
-recovery after a real crash is slow.
+seconds, which covers one missed renewal. The next one still lands while the
+lease is valid. Two misses in a row do not fit. The loop waits that interval
+after each renewal, not on a fixed schedule. Every round therefore costs the
+wait plus the UPDATE. Three rounds always come to more than the lease. A
+second miss in a row leaves the lease expired and the task reclaimable. The
+value is really a statement about how long a worker may be unresponsive
+before you want its work handed to somebody else: too low and a paused or
+overloaded worker loses tasks it was going to finish, too high and recovery
+after a real crash is slow.
 
 Watch for `task_lease_lost` in the logs. It records an attempt whose result
 was discarded because the lease had already been reclaimed, and a steady

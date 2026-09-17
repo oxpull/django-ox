@@ -347,7 +347,7 @@ on the alias it writes them to. `ox_prune`, `ox_health` and `ox_worker`
 take `--database` to name the alias to work on. See
 [Read replicas](https://oxpull.com/django-ox/configuration/#read-replicas).
 
-Batches, unique tasks and rate limiting are in
+Batches, unique tasks, rate limiting and workflows are in
 [Oxpull Pro](https://oxpull.com/django-ox/pro/), a paid add-on; <https://oxpull.com/> has the details. Metrics stay in this
 package: `django_ox.stats` and `ox_health` are free and stay free.
 

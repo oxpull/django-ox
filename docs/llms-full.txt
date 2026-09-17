@@ -195,7 +195,7 @@ up the transactional enqueue.
   processes under one supervisor. See
   [Production](production.md#threads-and-processes).
 
-Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a paid add-on; <https://oxpull.com/> has the details.
+Batches, unique tasks, rate limiting and workflows are in [Oxpull Pro](pro.md), a paid add-on; <https://oxpull.com/> has the details.
 Metrics stay in this package: `django_ox.stats` and `ox_health` are free and
 stay free.
 
@@ -1455,10 +1455,10 @@ to exercise claiming and retries for real.
 
 ## Not in the core
 
-Batches, unique or deduplicated tasks, and rate limiting are in
+Batches, unique or deduplicated tasks, rate limiting and workflows are in
 [Oxpull Pro](pro.md), a paid add-on. Metrics are in the
 free tier: `django_ox.stats` and `manage.py ox_health` ship in the core. Chains
-and workflows are on the Pro roadmap, undated.
+are on the Pro roadmap, undated.
 
 ---
 
@@ -1564,8 +1564,8 @@ with the row it belongs to, so there is nothing to wrap.
 
 Queues, priorities and `run_after` map directly. Celery's chains,
 groups and chords, and routing across multiple brokers, are outside the
-package; chains and workflows are on the [Oxpull Pro](pro.md) roadmap,
-undated.
+package; workflows are in [Oxpull Pro](pro.md), a paid add-on, and chains
+are on its roadmap, undated.
 
 ## From huey
 
@@ -1724,9 +1724,9 @@ function", open since 2020-12-19 with 98 upvotes [^celery-6552].
   [benchmarks](benchmarks.md) page gives measured numbers with the method.
   If your workload is above them, a broker-based queue is the right tool, and
   the cost is the second datastore.
-- **Chains, groups and chords.** Not in django-ox. Batches are in
-  [Oxpull Pro](pro.md), a paid add-on; chains and
-  workflows are on the Pro roadmap, undated.
+- **Chains, groups and chords.** Not in django-ox. Batches and workflows
+  are in [Oxpull Pro](pro.md), a paid add-on; chains are on the Pro
+  roadmap, undated.
 - **CPU-bound tasks in one process.** Worker concurrency is a thread pool.
   Run `ox_worker --processes N --concurrency 1` for N interpreters, or pick
   a queue with a process pool.
@@ -3327,8 +3327,8 @@ durable queue, transactional enqueue, retries, reaper, graceful drain,
 priorities, deferred tasks, recurring tasks and pruning are the free tier,
 permanently. Nothing that works today moves behind the paid tier.
 
-**Oxpull Pro** is a paid add-on for three problems that show up once a queue
-is carrying real volume. All three are built and tested. <https://oxpull.com/> has the details.
+**Oxpull Pro** is a paid add-on for four problems that show up once a queue
+is carrying real volume. All four are built and tested. <https://oxpull.com/> has the details.
 
 Pro requires Django 6.0 or later. It builds on `django.tasks`, which is part
 of Django core from 6.0. django-ox itself also runs on Django 5.2 LTS through
@@ -3372,8 +3372,15 @@ the `django-tasks` backport; Pro does not.
   boundary can carry up to 2(N + W - 1 + U). A count that cannot be
   written is logged and the attempt runs; three uncounted admissions in a
   row on one limit close it until a write lands.
+- **Workflows.** Declare a set of tasks with dependencies. A node runs only
+  after every node it depends on has succeeded. The backend declares
+  `OPTIONS["WORKFLOWS"]`, sets `OPTIONS["WORKER_CLASS"]` to
+  `oxpull.worker.OxpullWorker`, and schedules `oxpull.workflows.reconcile`.
+  Without that schedule, `create()` and `seal()` refuse, and
+  `manage.py check` reports `oxpull.W003`. Workflows need django-ox
+  1.3.0, and Oxpull Pro 1.3.0 pins that version exactly.
 
-All three run on the databases the free tier tests in CI: SQLite,
+Pro runs on the databases the free tier tests in CI: SQLite,
 PostgreSQL and MySQL 8. MariaDB 10.6+ takes the same claim path but is not
 part of the tested matrix. Batches have been measured to 1,000,000 members
 in a single batch on all three, with every count checked against the task
@@ -3399,7 +3406,7 @@ Docker on localhost, each width against an empty database.
 
 ## What Pro is not
 
-Workflows and chains are on the roadmap, undated. Rate limiting caps how
+Chains are on the roadmap, undated. Rate limiting caps how
 often a task starts, not how many run at once; concurrency limiting is a
 different mechanism and is not in Pro. Metrics stay free: the stats API and
 the health command are in the open source package and remain there.
@@ -3424,7 +3431,7 @@ of the period you have paid for. The full terms are stated at purchase.
 
 ## Waitlist
 
-If Pro would earn its keep in your deployment, say which of the three
+If Pro would earn its keep in your deployment, say which of these
 features matters to you. That ordering decides what gets built after these.
 Join the waitlist below, or write to support@oxpull.com.
 
@@ -3625,8 +3632,8 @@ TASKS = {
   `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend` on Django 6.0+, and the same
   paths under `django_tasks.backends.` on Django 5.2 LTS.
-- Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a
-  paid add-on. `django_ox.stats` and `ox_health`
+- Batches, unique tasks, rate limiting and workflows are in
+  [Oxpull Pro](pro.md), a paid add-on. `django_ox.stats` and `ox_health`
   are in django-ox.
 
 ## How to verify it works

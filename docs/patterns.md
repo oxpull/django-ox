@@ -266,7 +266,7 @@ to exercise claiming and retries for real.
 
 ## Not in the core
 
-Batches, unique or deduplicated tasks, and rate limiting are in
+Batches, unique or deduplicated tasks, rate limiting and workflows are in
 [Oxpull Pro](pro.md), a paid add-on. Metrics are in the
 free tier: `django_ox.stats` and `manage.py ox_health` ship in the core. Chains
-and workflows are on the Pro roadmap, undated.
+are on the Pro roadmap, undated.

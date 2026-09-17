@@ -188,7 +188,7 @@ up the transactional enqueue.
   processes under one supervisor. See
   [Production](production.md#threads-and-processes).
 
-Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a paid add-on; <https://oxpull.com/> has the details.
+Batches, unique tasks, rate limiting and workflows are in [Oxpull Pro](pro.md), a paid add-on; <https://oxpull.com/> has the details.
 Metrics stay in this package: `django_ox.stats` and `ox_health` are free and
 stay free.
 

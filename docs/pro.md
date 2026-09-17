@@ -5,8 +5,8 @@ durable queue, transactional enqueue, retries, reaper, graceful drain,
 priorities, deferred tasks, recurring tasks and pruning are the free tier,
 permanently. Nothing that works today moves behind the paid tier.
 
-**Oxpull Pro** is a paid add-on for three problems that show up once a queue
-is carrying real volume. All three are built and tested. <https://oxpull.com/> has the details.
+**Oxpull Pro** is a paid add-on for four problems that show up once a queue
+is carrying real volume. All four are built and tested. <https://oxpull.com/> has the details.
 
 Pro requires Django 6.0 or later. It builds on `django.tasks`, which is part
 of Django core from 6.0. django-ox itself also runs on Django 5.2 LTS through
@@ -50,8 +50,15 @@ the `django-tasks` backport; Pro does not.
   boundary can carry up to 2(N + W - 1 + U). A count that cannot be
   written is logged and the attempt runs; three uncounted admissions in a
   row on one limit close it until a write lands.
+- **Workflows.** Declare a set of tasks with dependencies. A node runs only
+  after every node it depends on has succeeded. The backend declares
+  `OPTIONS["WORKFLOWS"]`, sets `OPTIONS["WORKER_CLASS"]` to
+  `oxpull.worker.OxpullWorker`, and schedules `oxpull.workflows.reconcile`.
+  Without that schedule, `create()` and `seal()` refuse, and
+  `manage.py check` reports `oxpull.W003`. Workflows need django-ox
+  1.3.0, and Oxpull Pro 1.3.0 pins that version exactly.
 
-All three run on the databases the free tier tests in CI: SQLite,
+Pro runs on the databases the free tier tests in CI: SQLite,
 PostgreSQL and MySQL 8. MariaDB 10.6+ takes the same claim path but is not
 part of the tested matrix. Batches have been measured to 1,000,000 members
 in a single batch on all three, with every count checked against the task
@@ -77,7 +84,7 @@ Docker on localhost, each width against an empty database.
 
 ## What Pro is not
 
-Workflows and chains are on the roadmap, undated. Rate limiting caps how
+Chains are on the roadmap, undated. Rate limiting caps how
 often a task starts, not how many run at once; concurrency limiting is a
 different mechanism and is not in Pro. Metrics stay free: the stats API and
 the health command are in the open source package and remain there.
@@ -102,7 +109,7 @@ of the period you have paid for. The full terms are stated at purchase.
 
 ## Waitlist
 
-If Pro would earn its keep in your deployment, say which of the three
+If Pro would earn its keep in your deployment, say which of these
 features matters to you. That ordering decides what gets built after these.
 Join the waitlist below, or write to support@oxpull.com.
 

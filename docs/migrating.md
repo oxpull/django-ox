@@ -98,8 +98,8 @@ with the row it belongs to, so there is nothing to wrap.
 
 Queues, priorities and `run_after` map directly. Celery's chains,
 groups and chords, and routing across multiple brokers, are outside the
-package; chains and workflows are on the [Oxpull Pro](pro.md) roadmap,
-undated.
+package; workflows are in [Oxpull Pro](pro.md), a paid add-on, and chains
+are on its roadmap, undated.
 
 ## From huey
 

@@ -189,8 +189,8 @@ TASKS = {
   `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend` on Django 6.0+, and the same
   paths under `django_tasks.backends.` on Django 5.2 LTS.
-- Batches, unique tasks and rate limiting are in [Oxpull Pro](pro.md), a
-  paid add-on. `django_ox.stats` and `ox_health`
+- Batches, unique tasks, rate limiting and workflows are in
+  [Oxpull Pro](pro.md), a paid add-on. `django_ox.stats` and `ox_health`
   are in django-ox.
 
 ## How to verify it works

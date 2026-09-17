@@ -130,7 +130,9 @@ question from a constant, so a PostgreSQL alias is unaffected.
   `ox_health` and `ox_import_beat_schedules` pass their alias to the system
   checks, which is what `migrate` does; `ox_import_beat_schedules` already
   had the flag and now does this too. `ox_worker` names no alias there, for
-  the reason under Changed.
+  the reason under Changed. The flag is not checked against the router. A
+  worker pointed at another alias works on that one, while the admin,
+  `stats` and the actions still read the router's. Nothing warns.
 
 ### Changed
 
@@ -206,26 +208,45 @@ question from a constant, so a PostgreSQL alias is unaffected.
   reports what it deleted; `ox_health` reports the backlog the workers see.
   Present in every release from 0.1.0 to 1.2.0.
 
-  Both read the alias the task rows are written to, and so does every other
-  reading django-ox makes of its own rows. That means `django_ox.stats`, the
-  metrics renderings and the endpoint, `django_ox.actions`, `get_result()`,
-  `enqueue()` and `enqueue_many()`. It also means the worker's claim and its
-  completion, the reaper, the stored schedules, and every admin page for
-  both models. Nothing is exempt.
+  Both read the alias the task rows are written to, and so does the rest
+  of django-ox's reading of its own rows: `django_ox.stats`, the metrics
+  renderings and the endpoint, `django_ox.actions`, `get_result()`,
+  `enqueue()` and `enqueue_many()`, the worker's claim and its completion,
+  the reaper, the stored schedules, and both admins.
 
-  A test in the suite drives that surface under a router that refuses any
-  such read on a replica. It drives the admin over HTTP, because calling an
-  admin method is not the same as opening the page. It opens the changelist
-  with its filters, the change form's GET and POST, and the add page with
-  its redirect. It runs **Delete selected schedules** through its
-  confirmation, and it opens the task list. The sweep is a property the
-  suite holds rather than a claim.
+  That list is what a test in the suite drives, under a router that
+  refuses any such read on a replica. It drives the admin over HTTP,
+  because calling an admin method is not the same as opening the page.
+  For both models it opens the changelist and its filters, search, facet
+  counts, show-all view and raw-id popup. It opens the history page and
+  runs every action the admin offers. For schedules it also opens the
+  change form's GET and POST, the add page and the redirect after it, and
+  both delete confirmations. It calls the autocomplete endpoint another
+  app's form uses to fill in a task. Those pages are what the test
+  covers, and over them the sweep is a property the suite holds rather
+  than a claim.
 
-  You can still point a read at a replica by asking for one.
+  **The admin reads the primary, and no setting changes that.** Every
+  page of both admins reads the database its writes go to. Before this
+  release those pages followed the read alias, so a router that splits
+  reads sent them to a replica. Measured over 27 identical admin
+  requests, 116 of django-ox's 158 statements moved off the replica and
+  onto the primary. The total is unchanged, so no page runs more queries
+  than it did, but the load lands on the database your workers use. If
+  you were serving admin reads off a replica on purpose, this ends it.
+
+  That is the right default, because the admin is not a reading page. It
+  writes back what it read. A change form submits every field, including
+  the ones nobody touched, so a form built from a replica overwrites
+  newer values on the primary. Nothing raises and nothing is logged.
+
+  What you can still point at a replica is what you ask for by name.
   `django_ox.stats`, `collect()`, the renderings and the endpoint take
   `using`, so `path("ox/metrics", metrics, {"using": "replica"})` keeps
   scrapes off the primary. Your own queries are untouched: a router you
   wrote still sends your reads of the task table where you send them.
+  [Configuration](https://oxpull.com/django-ox/configuration/#read-replicas)
+  covers what django-ox pins and two places it cannot reach.
 - A worker no longer loses a task's result under a router that sends reads
   to a replica. On MySQL and MariaDB every claim re-reads the row it has
   just claimed, and that read followed `db_for_read`. The worker was handed

@@ -53,7 +53,9 @@ under those views is allowed to route.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
+import re
 import sys
 import traceback
 import uuid
@@ -363,8 +365,24 @@ def schedule_fields(**over) -> dict[str, object]:
 SCHEDULES = "admin:django_ox_oxschedule_changelist"
 SCHEDULE_ADD = "admin:django_ox_oxschedule_add"
 SCHEDULE_CHANGE = "admin:django_ox_oxschedule_change"
+SCHEDULE_HISTORY = "admin:django_ox_oxschedule_history"
+SCHEDULE_DELETE = "admin:django_ox_oxschedule_delete"
 TASKS = "admin:django_ox_oxtask_changelist"
 TASK_CHANGE = "admin:django_ox_oxtask_change"
+TASK_HISTORY = "admin:django_ox_oxtask_history"
+AUTOCOMPLETE = "admin:autocomplete"
+
+#: What another app's autocomplete widget sends to reach `OxTaskAdmin`.
+#:
+#: The endpoint takes the referring model and field, finds the model on the
+#: far side of that foreign key, and asks the admin registered for it. Any
+#: project field pointing at `OxTask` lands in the same place;
+#: `OxScheduleTick.task` is one django-ox already ships.
+TASK_AUTOCOMPLETE = {
+    "app_label": "django_ox",
+    "model_name": "oxscheduletick",
+    "field_name": "task",
+}
 
 #: An admin page runs far more statements than a command does, between the
 #: session, the user, the permissions and the page's own queries. The budget
@@ -1126,6 +1144,102 @@ class TestTheAdminOverHttp:
             == OxTask.Status.READY
         )
 
+    # -- the pages that are neither a changelist nor a change form --------
+    #
+    # A first version of this class drove the changelist, the change form,
+    # the add page, the actions and `delete_selected`, and said so. That left
+    # six page shapes a person reaches from those same pages, and a test that
+    # names the surface it drives has to drive the surface it names.
+
+    def test_the_history_page_and_the_delete_confirmation(
+        self, armed, registry, operator
+    ):
+        """
+        Two pages that reach a single row through `ModelAdmin.get_object`.
+
+        `get_object` reads `get_queryset`, so both follow the pin. Unpinned,
+        the history page tells the person the row was deleted and the
+        confirmation page offers to delete nothing.
+        """
+        snapshot_to_replica()
+        row = stored.create_schedule(**schedule_fields(name="historic"))
+        task = a_task(status=OxTask.Status.FAILED, finished_at=timezone.now())
+        with armed():
+            schedule_history = operator.get(reverse(SCHEDULE_HISTORY, args=[row.pk]))
+        assert schedule_history.status_code == 200
+        assert "historic" in schedule_history.content.decode()
+        with armed():
+            task_history = operator.get(reverse(TASK_HISTORY, args=[task.pk]))
+        assert task_history.status_code == 200
+        delete = reverse(SCHEDULE_DELETE, args=[row.pk])
+        with armed():
+            confirm = operator.get(delete)
+        assert confirm.status_code == 200
+        assert "Are you sure" in confirm.content.decode()
+        with armed():
+            done = operator.post(delete, {"post": "yes"})
+        assert done.status_code == 302
+        assert any("was deleted successfully" in line for line in said(done))
+        assert OxSchedule.objects.using(PRIMARY).filter(pk=row.pk).count() == 0
+        assert OxSchedule.objects.using(REPLICA).count() == 0
+
+    def test_the_changelist_variants_a_person_can_ask_for(
+        self, armed, registry, operator
+    ):
+        """
+        Facet counts, show-all and the raw-id popup.
+
+        Each is the changelist under a query parameter, and each takes a
+        different path through `ChangeList`: facets run extra aggregates,
+        show-all drops the paginator, and the popup validates `_to_field`
+        before it builds the page. All three start at the same pinned
+        `get_queryset`, which is why one pin covers them.
+        """
+        snapshot_to_replica()
+        rows = [
+            stored.create_schedule(**schedule_fields(name="on")),
+            stored.create_schedule(**schedule_fields(name="off", enabled=False)),
+        ]
+        wanted = {row.pk for row in rows}
+        with armed():
+            faceted = operator.get(reverse(SCHEDULES), {"_facets": "True"})
+        assert faceted.status_code == 200
+        # One enabled, one not, both on cron, none on an interval. Every
+        # count comes from the changelist queryset, so a replica that has
+        # seen none of these rows renders four zeroes.
+        counts = re.findall(r"\((\d+)\)", faceted.content.decode())
+        assert sorted(counts) == ["0", "1", "1", "2"]
+        with armed():
+            everything = operator.get(reverse(SCHEDULES), {"all": ""})
+        assert everything.context["cl"].show_all is True
+        assert {s.pk for s in everything.context["cl"].result_list} == wanted
+        with armed():
+            popup = operator.get(reverse(SCHEDULES), {"_to_field": "id", "_popup": "1"})
+        assert popup.context["cl"].to_field == "id"
+        assert {s.pk for s in popup.context["cl"].result_list} == wanted
+        assert OxSchedule.objects.using(REPLICA).count() == 0
+
+    def test_the_autocomplete_endpoint_another_form_calls(self, armed, operator):
+        """
+        `/admin/autocomplete/`, which no django-ox page opens.
+
+        A project whose own model has a foreign key to `OxTask` and lists it
+        in `autocomplete_fields` sends the browser here, and the endpoint
+        answers from `OxTaskAdmin.get_queryset`. Unpinned it offers no task
+        the replica has not seen, so the field cannot be filled in.
+        """
+        snapshot_to_replica()
+        task = a_task(status=OxTask.Status.FAILED, finished_at=timezone.now())
+        with armed():
+            answered = operator.get(
+                reverse(AUTOCOMPLETE),
+                TASK_AUTOCOMPLETE | {"term": str(task.pk)[:8]},
+            )
+        assert answered.status_code == 200
+        offered = json.loads(answered.content.decode())
+        assert [choice["id"] for choice in offered["results"]] == [str(task.pk)]
+        assert OxTask.objects.using(REPLICA).count() == 0
+
 
 @pytest.mark.django_db(databases=[REPLICA, PRIMARY])
 class TestTheInventory:
@@ -1363,6 +1477,17 @@ class TestTheInventory:
                     follow=True,
                 )
                 assert posted.status_code == 200
+        with armed("admin schedule changelist, facet counts"):
+            faceted = client.get(reverse(SCHEDULES), {"_facets": "True"})
+            assert faceted.status_code == 200
+        with armed("admin schedule changelist, show all"):
+            assert client.get(reverse(SCHEDULES), {"all": ""}).status_code == 200
+        with armed("admin schedule changelist, raw id popup"):
+            popup = client.get(reverse(SCHEDULES), {"_to_field": "id", "_popup": "1"})
+            assert popup.status_code == 200
+        with armed("admin schedule history page"):
+            history = client.get(reverse(SCHEDULE_HISTORY, args=[listed.pk]))
+            assert history.status_code == 200
         selected = {
             "action": "delete_selected",
             ACTION_CHECKBOX_NAME: [str(listed.pk)],
@@ -1373,6 +1498,14 @@ class TestTheInventory:
             done = client.post(reverse(SCHEDULES), selected | {"post": "yes"})
             assert done.status_code == 302
         assert not OxSchedule.objects.using(PRIMARY).filter(pk=listed.pk).exists()
+
+        single = stored.create_schedule(**schedule_fields(name="one-by-one"))
+        delete = reverse(SCHEDULE_DELETE, args=[single.pk])
+        with armed("admin single delete confirmation"):
+            assert client.get(delete).status_code == 200
+        with armed("admin single delete, confirmed"):
+            assert client.post(delete, {"post": "yes"}).status_code == 302
+        assert not OxSchedule.objects.using(PRIMARY).filter(pk=single.pk).exists()
 
         failed = a_task(status=OxTask.Status.FAILED, finished_at=timezone.now())
         with armed("admin task changelist"):
@@ -1387,6 +1520,23 @@ class TestTheInventory:
             assert client.get(reverse(TASKS), filters).status_code == 200
         with armed("admin task page"):
             assert client.get(reverse(TASK_CHANGE, args=[failed.pk])).status_code == 200
+        with armed("admin task changelist, facet counts"):
+            faceted = client.get(reverse(TASKS), {"_facets": "True"})
+            assert faceted.status_code == 200
+        with armed("admin task changelist, show all"):
+            assert client.get(reverse(TASKS), {"all": ""}).status_code == 200
+        with armed("admin task changelist, raw id popup"):
+            popup = client.get(reverse(TASKS), {"_to_field": "id", "_popup": "1"})
+            assert popup.status_code == 200
+        with armed("admin task history page"):
+            history = client.get(reverse(TASK_HISTORY, args=[failed.pk]))
+            assert history.status_code == 200
+        with armed("admin autocomplete endpoint for OxTask"):
+            answered = client.get(
+                reverse(AUTOCOMPLETE), TASK_AUTOCOMPLETE | {"term": ""}
+            )
+            assert answered.status_code == 200
+            assert json.loads(answered.content.decode())["results"]
         with armed("admin task actions over HTTP"):
             for action in ("retry_selected", "discard_selected"):
                 acted = client.post(

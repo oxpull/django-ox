@@ -81,7 +81,7 @@ python manage.py ox_worker [options]
 | `--processes` | `1` | Worker processes to run. At `1` the command is the worker. Above `1` it supervises that many copies of itself, each a full worker with its own connections, lease renewal, reaper and `--concurrency` thread pool, so `--processes 2 --concurrency 4` runs eight tasks at once. See [Threads and processes](production.md#threads-and-processes). |
 | `--interval` | `1.0` | Polling interval in seconds when idle. When tasks are in flight the worker wakes as soon as one finishes, so this does not bound throughput. |
 | `--lock-timeout` | backend `LOCK_TIMEOUT`, or 300 | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |
-| `--database` | the alias `OxTask` writes to | Database alias to run against. Each `--processes` child is given the same one, so one router answering differently in two processes can't split a fleet across two databases. |
+| `--database` | the alias `OxTask` writes to | Database alias to run against. Each `--processes` child is given the same one, so one router answering differently in two processes can't split a fleet across two databases. It is not checked against the router; see [Read replicas](#read-replicas). |
 
 The command also honors Django's standard `-v/--verbosity`: at the default
 verbosity it logs worker lifecycle and warnings to stderr, and `-v 2`
@@ -264,3 +264,47 @@ alert are on the
 
 The worker performs the same schedule and timeout validation at startup, so
 a bad deploy fails loudly rather than skipping dispatches.
+
+## Read replicas
+
+Under a router that sends reads to a replica, django-ox reads its own rows
+on the alias it writes them to. That covers `django_ox.stats`, the metrics
+renderings and the endpoint, `django_ox.actions`, `get_result()`,
+`enqueue()` and `enqueue_many()`, the worker, the reaper, the stored
+schedules, and both admins. A replica is behind by design, and each of
+those reads is a read of something just written.
+
+The admin has no way out of that. Every page reads the primary, and no
+setting changes it, because the admin writes back what it read. A change
+form submits every field, including the ones nobody edited, so a form
+built from a replica overwrites newer values on the primary. Nothing
+raises and nothing is logged. Expect the admin's read load on the database
+your workers use.
+
+What you can point at a replica is what you ask for by name. `stats`,
+`collect()`, both metrics renderings and the metrics view take `using`:
+
+```python
+path("ox/metrics", metrics, {"using": "replica"})  # scrape a replica
+```
+
+A replica that is behind reports the queue as it was, which is the trade.
+Your own queries are untouched: a router you wrote still sends your reads
+of the task table where you send them.
+
+### Two things django-ox cannot pin for you
+
+**Your own `ModelAdmin` with a foreign key to `OxTask` or `OxSchedule`.**
+Django builds that field from `db_for_read` twice: once for the choices
+the select offers, and again when the model validates what was posted. On
+a lagging replica the select offers no row the replica has not seen.
+Pinning the form field alone does not help: the second check still reads
+the replica. If your project has such a field, have your router
+answer the write alias for django-ox's models. django-ox reads its own
+rows there anyway, so nothing else moves.
+
+**`ox_worker --database`.** The flag is not checked against the router. A
+worker pointed at another alias works on that one alone, while the admin,
+`stats` and `ox_health` without the flag read the router's alias.
+`django_ox.E008` constrains routers, not this flag. Leave it unset unless
+you mean it.

@@ -8,6 +8,12 @@ see; the detail page is read-only, with every attempt's traceback; and two
 actions call django_ox.actions.retry_many and discard_many on the selected
 rows, one conditional UPDATE per thousand rows in one transaction, and
 report counts.
+
+Every page here reads the database its rows are written to, and both
+get_queryset methods below say so. A ModelAdmin builds its queryset from the
+default manager, which follows db_for_read. Under a router that sends reads
+to a replica these pages would answer from a database no worker writes, and
+the change form submits what it rendered.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ from django import forms
 from django.conf import settings
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied
-from django.db import transaction
+from django.db import router, transaction
 from django.db.models import QuerySet
 from django.http import HttpRequest
 from django.utils import timezone
@@ -153,6 +159,18 @@ class OxTaskAdmin(_ModelAdmin):
         self, request: HttpRequest, obj: OxTask | None = None
     ) -> bool:
         return False
+
+    def get_queryset(self, request: HttpRequest) -> QuerySet[OxTask]:
+        """
+        The alias the task rows are written to, for every page here.
+
+        A changelist, a detail page and the queryset an action is handed all
+        start here, so this one line decides the database all of them read.
+        Left to `db_for_read`, a router that splits reads sends this page to
+        a replica: a task enqueued a moment ago is not in the list, and the
+        detail page for one that exists reports it as deleted.
+        """
+        return super().get_queryset(request).using(router.db_for_write(self.model))
 
     @admin.display(description="Attempt errors")
     def attempt_errors(self, obj: OxTask) -> str:
@@ -385,6 +403,25 @@ class OxScheduleAdmin(_ScheduleAdmin):
         self._warn_if_nothing_dispatches(request)
         return super().add_view(request, form_url, extra_context)
 
+    def get_queryset(self, request: HttpRequest) -> QuerySet[OxSchedule]:
+        """
+        The alias the schedules are written to, for every page here.
+
+        The same pin `OxTaskAdmin` makes, and here a write depends on it.
+        The change form is built from this queryset and submits every field,
+        so a form rendered from a replica writes the replica's values back
+        over the primary. `stored.update_schedule` takes the row lock and
+        writes only the submitted fields to stop a caller holding a stale
+        copy doing exactly that, and a stale form walks straight through it.
+        Nothing raises and nothing is logged; the newer values are gone.
+
+        Django's own `ModelAdmin.get_object` reads this queryset too. So does
+        the count `delete_selected` takes before it deletes. Unpinned, the
+        redirect after an add lands on "doesn't exist" for a row that was
+        just written, and the delete action removes nothing and says nothing.
+        """
+        return super().get_queryset(request).using(stored.schedule_db_alias())
+
     def get_form(
         self,
         request: HttpRequest,
@@ -412,8 +449,15 @@ class OxScheduleAdmin(_ScheduleAdmin):
 
     @admin.display(description="Last tick")
     def last_tick(self, obj: OxSchedule) -> str:
+        # The alias the tick rows are written to, which is the one the rest
+        # of this page is read from: django_ox.E008 refuses a router that
+        # puts the two tables on different databases. Unqualified, this one
+        # column would follow db_for_read while every other column on the
+        # row came from the primary, and the page would disagree with
+        # itself about when the schedule last ran.
         tick = (
-            OxScheduleTick.objects.filter(schedule_name=f"{STORED_KEY_PREFIX}{obj.pk}")
+            OxScheduleTick.objects.using(router.db_for_write(OxScheduleTick))
+            .filter(schedule_name=f"{STORED_KEY_PREFIX}{obj.pk}")
             .order_by("-scheduled_for")
             .values_list("scheduled_for", flat=True)
             .first()

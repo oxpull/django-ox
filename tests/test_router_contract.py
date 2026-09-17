@@ -40,12 +40,14 @@ is a read replica that is up and behind. It records nothing and refuses
 nothing. It is here to show what the reads the contract catches actually do
 to a person, and to hold that shape once they are fixed.
 
-The admin is driven through `save_model`, the form and the actions directly
-rather than over HTTP under the contract router. A view frame of django-ox's
-own sits underneath every read a request makes, Django's included, and rule 1
-would report all of them at that one line. The HTTP path is covered under
-`LaggingReplicaRouter`, where the assertion is the outcome and the call site
-does not matter.
+The admin is driven over HTTP as well as through `save_model`, the form and
+the actions. Driving the methods alone is what let three defects through: both
+`get_queryset` methods sat on the allow-list as reads that never fire, and
+they fire on every admin page a person opens. A request costs the attribution
+precision, not detection. `changelist_view` and `add_view` are django-ox's own
+overrides, so rule 1 reports every read underneath them at that one line; a
+coarse name for a read that must not happen is still a failure, and nothing
+under those views is allowed to route.
 """
 
 from __future__ import annotations
@@ -62,8 +64,10 @@ from types import FrameType
 
 import pytest
 from django import forms
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
 from django.contrib.admin.sites import AdminSite
 from django.contrib.auth.models import Permission, User
+from django.contrib.messages import get_messages
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -77,6 +81,7 @@ from django_ox import actions, metrics, stats, stored
 from django_ox import admin as ox_admin
 from django_ox.models import OxSchedule, OxScheduleChange, OxScheduleTick, OxTask
 from django_ox.registry import ArgsForm, ScheduleKind, register
+from django_ox.schedules import STORED_KEY_PREFIX
 from django_ox.worker import Worker
 
 from . import tasks
@@ -118,28 +123,29 @@ class ReplicaRead(BaseException):
 
 #: Reads that legitimately follow `db_for_read`, each with the reason.
 #:
-#: One entry, and it is the admin's read-only rendering. Django routes a
-#: changelist through `db_for_read` itself and reads far more than this column
-#: to build the page; pinning django-ox's part of it to the primary would make
-#: one page answer from two databases and disagree with itself. What the admin
-#: *writes* is a separate question, and the tests below hold it to the primary.
-ALLOWED_REPLICA_READS = {
-    "admin.py:last_tick": (
-        "The Last tick column of the schedule changelist, rendered beside "
-        "columns Django has already read from the replica."
-    ),
-}
+#: Empty, and that is the finding rather than an omission. It held one entry,
+#: the schedule changelist's **Last tick** column, whose reason was that Django
+#: routes the rest of that page through `db_for_read` anyway and pinning one
+#: column would make one page answer from two databases. Driving the admin over
+#: HTTP showed what that reasoning rested on: the page's own queryset was
+#: routed, and the change form built from it submitted the replica's values
+#: back over the primary. Both `get_queryset` methods are pinned now, so the
+#: rest of the page comes from the primary and the column has to come from
+#: there too. `test_the_allow_list_is_consulted_and_records_what_it_lets_through`
+#: exercises this branch with a synthetic entry, because an allow-list that is
+#: empty and an allow-list that does not work look the same from outside.
+ALLOWED_REPLICA_READS: dict[str, str] = {}
 
 #: What the contract does not reach, stated rather than left to be discovered.
 #:
-#: A queryset Django's own `ModelAdmin` builds and Django's own template
-#: iterates has no django-ox frame on the stack under either rule, so the
-#: router cannot attribute it and does not refuse it. That is the changelist
-#: and the change form, and it is the same read the entry above describes;
-#: `test_djangos_own_admin_read_is_outside_the_contract` pins the boundary so
-#: it is a tested fact rather than a silent gap. The moment django-ox's own
-#: code iterates such a queryset the contract applies again, which is how the
-#: two admin actions below are caught.
+#: A read with no django-ox frame on the stack under either rule cannot be
+#: attributed, so the router does not refuse it. Nothing in the shipped admin
+#: is in that position any more: every page's queryset starts at a
+#: `get_queryset` the package defines and carries an alias from there, so it
+#: never consults `db_for_read` at all.
+#: `test_the_admin_queryset_is_pinned_rather_than_routed` holds that, and
+#: `test_a_project_s_own_read_is_left_on_the_replica` holds the other side:
+#: a project reading the task table itself still gets its replica.
 
 
 def _ox_site(frame: FrameType) -> str | None:
@@ -352,6 +358,43 @@ def schedule_fields(**over) -> dict[str, object]:
     }
     fields.update(over)
     return fields
+
+
+SCHEDULES = "admin:django_ox_oxschedule_changelist"
+SCHEDULE_ADD = "admin:django_ox_oxschedule_add"
+SCHEDULE_CHANGE = "admin:django_ox_oxschedule_change"
+TASKS = "admin:django_ox_oxtask_changelist"
+TASK_CHANGE = "admin:django_ox_oxtask_change"
+
+#: An admin page runs far more statements than a command does, between the
+#: session, the user, the permissions and the page's own queries. The budget
+#: is still here to catch a loop that does not end, so it is generous rather
+#: than tight.
+PAGE_BUDGET = 400
+
+
+def schedule_post(**over) -> dict[str, str]:
+    """Every field the schedule form submits, the way a browser sends them."""
+    data = {
+        "name": "nightly",
+        "task_key": "report",
+        "trigger": "cron",
+        "cron": "0 2 * * *",
+        "every_seconds": "",
+        "phase_seconds": "0",
+        "arguments": "{}",
+        "enabled": "on",
+        "end_time_0": "",
+        "end_time_1": "",
+        "starting_deadline_seconds": "",
+    }
+    data.update(over)
+    return data
+
+
+def said(response) -> list[str]:
+    """The messages the admin put in front of the person."""
+    return [str(message) for message in get_messages(response.wsgi_request)]
 
 
 def snapshot_to_replica() -> None:
@@ -759,18 +802,33 @@ class TestTheRouterContract:
             row.refresh_from_db()
         assert caught.value.site == "OxTask.refresh_from_db"
 
-    def test_a_named_exception_is_recorded_rather_than_refused(
-        self, armed, registry, router
+    def test_the_allow_list_is_consulted_and_records_what_it_lets_through(
+        self, armed, router, monkeypatch
     ):
         """
-        The other half of the control: the allow-list is consulted, the read
-        is let through, and it is on the record rather than invisible.
+        The other half of the control, and the reason it is synthetic.
+
+        `ALLOWED_REPLICA_READS` is empty. An empty allow-list and an allow-list
+        whose branch is broken look the same from outside, so this puts one
+        entry in for the length of the test and shows what the branch does:
+        the read is let through, answered by the replica, and recorded rather
+        than invisible. The last assertion is what an entry costs. The object
+        comes back holding the value the replica still has, which is why every
+        real entry was removed.
         """
-        row = stored.create_schedule(**schedule_fields())
-        site = ox_admin.OxScheduleAdmin(OxSchedule, AdminSite())
+        monkeypatch.setitem(
+            ALLOWED_REPLICA_READS,
+            "OxTask.refresh_from_db",
+            "synthetic; this test only",
+        )
+        row = a_task()
+        snapshot_to_replica()
+        OxTask.objects.using(PRIMARY).filter(pk=row.pk).update(queue_name="emails")
         with armed():
-            assert site.last_tick(row) == "never"
-        assert ("OxScheduleTick", "admin.py:last_tick") in router.allowed
+            row.refresh_from_db()
+        assert ("OxTask", "OxTask.refresh_from_db") in router.allowed
+        assert row.queue_name == "default"
+        assert OxTask.objects.using(PRIMARY).get(pk=row.pk).queue_name == "emails"
 
     def test_a_project_s_own_read_is_left_on_the_replica(self, armed):
         """
@@ -783,28 +841,290 @@ class TestTheRouterContract:
             assert OxTask.objects.count() == 0
         assert OxTask.objects.using(PRIMARY).count() == 1
 
-    def test_djangos_own_admin_read_is_outside_the_contract(self, armed, registry):
+    def test_the_admin_queryset_is_pinned_rather_than_routed(self, armed, registry):
         """
-        The boundary of the harness, asserted rather than left to be found.
+        The boundary of the harness, closed rather than documented.
 
         A queryset `ModelAdmin` builds and a template iterates puts no
-        django-ox frame on the stack: by the time the router is asked, the
-        admin method has returned and the frames are Django's `QuerySet` and
-        the caller's. So the changelist and the change form read the replica,
-        which is the decision the Last tick column already documents, and the
-        contract cannot police them. The moment django-ox's own code iterates
-        such a queryset the contract applies again, which is what catches
-        `_set_enabled` and `run_once_now`.
+        django-ox frame on the stack, so the router cannot attribute it and
+        would not refuse it. That used to be where the changelist and the
+        change form sat, and it is why three defects survived a harness that
+        looked complete. Both `get_queryset` methods now name an alias, so the
+        queryset never asks `db_for_read` and there is nothing left for the
+        contract to miss.
         """
-        stored.create_schedule(**schedule_fields())
-        site = ox_admin.OxScheduleAdmin(OxSchedule, AdminSite())
+        row = stored.create_schedule(**schedule_fields())
+        task = a_task()
         request = RequestFactory().get("/")
         request.user = _AllowedUser()
+        schedules = ox_admin.OxScheduleAdmin(OxSchedule, AdminSite())
+        tasks_admin = ox_admin.OxTaskAdmin(OxTask, AdminSite())
         with armed():
-            # No ReplicaRead, and the replica is empty, so the page django-ox
-            # would render here shows nothing while the row exists.
-            assert list(site.get_queryset(request)) == []
-        assert OxSchedule.objects.using(PRIMARY).count() == 1
+            assert schedules.get_queryset(request).db == PRIMARY
+            assert tasks_admin.get_queryset(request).db == PRIMARY
+            assert [s.pk for s in schedules.get_queryset(request)] == [row.pk]
+            assert [t.pk for t in tasks_admin.get_queryset(request)] == [task.pk]
+        assert OxSchedule.objects.using(REPLICA).count() == 0
+        assert OxTask.objects.using(REPLICA).count() == 0
+
+
+@pytest.mark.django_db(databases=[REPLICA, PRIMARY])
+class TestTheAdminOverHttp:
+    """
+    The admin driven the way a person drives it, under the contract router.
+
+    This is the surface the first version of this file could not see. It said
+    two `get_queryset` methods never fire, which was true of a harness calling
+    `save_model` and the actions directly and false of every page. Three
+    defects lived in that gap, all of them on stored schedules, which is
+    1.2.0's headline feature.
+
+    Every test asserts twice. That no read django-ox owns reached the replica
+    is the router's answer. That the page did the right thing for the person
+    is the assertion the router cannot make, and it is the one that failed
+    while the contract was green.
+
+    The replica is snapshotted and then left behind, so a row written after it
+    exists on the primary alone. That is what a read replica is for the whole
+    window these pages care about.
+    """
+
+    @pytest.fixture(autouse=True)
+    def router(self, settings):
+        contract = ContractRouter()
+        settings.DATABASE_ROUTERS = [contract]
+        return contract
+
+    @pytest.fixture
+    def armed(self, router):
+        @contextlib.contextmanager
+        def arm(budget: int = PAGE_BUDGET):
+            router.armed = True
+            try:
+                with statement_budget(budget):
+                    yield router
+            finally:
+                router.armed = False
+
+        return arm
+
+    @pytest.fixture
+    def operator(self, client):
+        """
+        A superuser, logged in, before the contract is armed.
+
+        The session, the user and the admin log are not django-ox's tables, so
+        the router says nothing about them and the login works off `default`
+        as it always did.
+        """
+        client.force_login(
+            User.objects.create_superuser("contract", "c@example.com", "pw")
+        )
+        return client
+
+    # -- the schedule changelist ------------------------------------------
+
+    def test_the_changelist_lists_the_rows_the_workers_have(
+        self, armed, registry, operator
+    ):
+        snapshot_to_replica()
+        row = stored.create_schedule(**schedule_fields())
+        with armed():
+            page = operator.get(reverse(SCHEDULES))
+        assert page.status_code == 200
+        assert [s.pk for s in page.context["cl"].result_list] == [row.pk]
+        assert OxSchedule.objects.using(REPLICA).count() == 0
+
+    def test_the_changelist_filters_and_search_read_the_primary(
+        self, armed, registry, operator
+    ):
+        snapshot_to_replica()
+        on = stored.create_schedule(**schedule_fields(name="on"))
+        stored.create_schedule(**schedule_fields(name="off", enabled=False))
+        with armed():
+            page = operator.get(
+                reverse(SCHEDULES),
+                {"enabled__exact": "1", "trigger__exact": "cron", "q": "on"},
+            )
+        assert page.status_code == 200
+        assert [s.pk for s in page.context["cl"].result_list] == [on.pk]
+
+    def test_the_last_tick_column_comes_from_its_row_s_database(
+        self, armed, registry, operator
+    ):
+        """
+        The column that used to be the allow-list's only entry.
+
+        Its reason was that the rest of the page came from the replica, so
+        pinning this one read would split the page across two databases. The
+        rest of the page comes from the primary now, so the reasoning reverses
+        and the column has to be pinned too. A tick written after the snapshot
+        is on the primary alone; unpinned this column reports "never" beside a
+        row that ran an hour ago.
+        """
+        row = stored.create_schedule(**schedule_fields())
+        snapshot_to_replica()
+        ran_at = timezone.now() - timedelta(hours=1)
+        OxScheduleTick.objects.using(PRIMARY).create(
+            schedule_name=f"{STORED_KEY_PREFIX}{row.pk}",
+            scheduled_for=ran_at,
+            created_at=ran_at,
+        )
+        with armed():
+            page = operator.get(reverse(SCHEDULES))
+        assert page.status_code == 200
+        body = page.content.decode()
+        assert f"{ran_at:%Y-%m-%d %H:%M}" in body
+        # The cell itself, not the word: the page also carries the warning
+        # about schedules that are "stored and never dispatched".
+        assert ">never<" not in body
+        assert OxScheduleTick.objects.using(REPLICA).count() == 0
+
+    # -- the change form, and the write it feeds ---------------------------
+
+    def test_the_change_form_renders_the_row_as_it_stands(
+        self, armed, registry, operator
+    ):
+        row = stored.create_schedule(**schedule_fields())
+        snapshot_to_replica()
+        OxSchedule.objects.using(PRIMARY).filter(pk=row.pk).update(cron="0 9 * * *")
+        with armed():
+            page = operator.get(reverse(SCHEDULE_CHANGE, args=[row.pk]))
+        assert page.status_code == 200
+        assert page.context["adminform"].form.initial["cron"] == "0 9 * * *"
+
+    def test_saving_the_change_form_cannot_write_a_stale_copy_back(
+        self, armed, registry, operator
+    ):
+        """
+        The serious one, and it is silent.
+
+        A change form submits every field, including the ones the person did
+        not touch. Rendered from a replica, Save writes the replica's values
+        over the primary's newer ones. `stored.update_schedule` takes the row
+        lock and writes only the submitted fields precisely to stop a caller
+        holding a stale copy doing this, and the admin handed it a stale copy.
+        Nothing raised and nothing was logged.
+
+        The POST carries what the page rendered, the way a browser does, so
+        the test follows the person rather than a payload written by hand.
+        """
+        row = stored.create_schedule(**schedule_fields())
+        snapshot_to_replica()
+        OxSchedule.objects.using(PRIMARY).filter(pk=row.pk).update(cron="0 9 * * *")
+        url = reverse(SCHEDULE_CHANGE, args=[row.pk])
+        with armed():
+            page = operator.get(url)
+        shown = page.context["adminform"].form.initial["cron"]
+        with armed():
+            saved = operator.post(
+                url, schedule_post(name="renamed", cron=shown, _save="Save")
+            )
+        assert saved.status_code == 302
+        after = OxSchedule.objects.using(PRIMARY).get(pk=row.pk)
+        assert after.name == "renamed"
+        assert after.cron == "0 9 * * *"
+
+    # -- the add page, and the redirect that follows it --------------------
+
+    def test_the_add_page_redirect_finds_the_row_it_just_wrote(
+        self, armed, registry, operator
+    ):
+        """
+        `ModelAdmin.get_object` reads `get_queryset`, so "save and continue
+        editing" looked the row up on the replica that had never seen it. The
+        person was told the schedule they had just made does not exist, and
+        dropped on the admin index.
+        """
+        snapshot_to_replica()
+        with armed():
+            added = operator.post(
+                reverse(SCHEDULE_ADD),
+                schedule_post(name="fresh", _continue="Save and continue editing"),
+                follow=True,
+            )
+        assert added.status_code == 200
+        row = OxSchedule.objects.using(PRIMARY).get(name="fresh")
+        assert added.redirect_chain == [(reverse(SCHEDULE_CHANGE, args=[row.pk]), 302)]
+        told = said(added)
+        assert any("was added successfully" in line for line in told)
+        assert not any("Perhaps it was deleted" in line for line in told)
+
+    # -- delete_selected ---------------------------------------------------
+
+    def test_delete_selected_deletes_the_rows_and_says_so(
+        self, armed, registry, operator
+    ):
+        """
+        Django takes `len(queryset)` on the queryset `get_queryset` returned,
+        and returns early when it is zero without reaching django-ox's own
+        `delete_queryset`. On a replica that has not seen the rows that count
+        was zero, so the action deleted nothing and emitted no message at all.
+        """
+        snapshot_to_replica()
+        rows = [
+            stored.create_schedule(**schedule_fields(name=f"s{n}")) for n in range(3)
+        ]
+        selected = {
+            "action": "delete_selected",
+            ACTION_CHECKBOX_NAME: [str(row.pk) for row in rows],
+        }
+        with armed():
+            confirm = operator.post(reverse(SCHEDULES), selected)
+        assert confirm.status_code == 200
+        assert "Are you sure" in confirm.content.decode()
+        with armed():
+            done = operator.post(reverse(SCHEDULES), selected | {"post": "yes"})
+        assert done.status_code == 302
+        assert any("Successfully deleted 3" in line for line in said(done))
+        assert OxSchedule.objects.using(PRIMARY).count() == 0
+
+    # -- the task admin ----------------------------------------------------
+
+    def test_the_task_changelist_its_filters_and_a_task_page(self, armed, operator):
+        snapshot_to_replica()
+        ready = [a_task() for _ in range(2)]
+        failed = a_task(status=OxTask.Status.FAILED, finished_at=timezone.now())
+        with armed():
+            listing = operator.get(reverse(TASKS))
+        assert listing.status_code == 200
+        assert {t.pk for t in listing.context["cl"].result_list} == {
+            row.pk for row in [*ready, failed]
+        }
+        with armed():
+            filtered = operator.get(
+                reverse(TASKS),
+                {
+                    "status__exact": OxTask.Status.FAILED,
+                    "queue_name": "default",
+                    "q": "tests.tasks.add",
+                    "enqueued_at__year": str(timezone.now().year),
+                },
+            )
+        assert [t.pk for t in filtered.context["cl"].result_list] == [failed.pk]
+        with armed():
+            detail = operator.get(reverse(TASK_CHANGE, args=[failed.pk]))
+        assert detail.status_code == 200
+        assert OxTask.objects.using(REPLICA).count() == 0
+
+    def test_a_task_action_posted_from_the_changelist(self, armed, operator):
+        snapshot_to_replica()
+        failed = a_task(status=OxTask.Status.FAILED, finished_at=timezone.now())
+        with armed():
+            acted = operator.post(
+                reverse(TASKS),
+                {
+                    "action": "retry_selected",
+                    ACTION_CHECKBOX_NAME: [str(failed.pk)],
+                },
+                follow=True,
+            )
+        assert acted.status_code == 200
+        assert any("Retried 1 task(s)." in line for line in said(acted))
+        assert (
+            OxTask.objects.using(PRIMARY).get(pk=failed.pk).status
+            == OxTask.Status.READY
+        )
 
 
 @pytest.mark.django_db(databases=[REPLICA, PRIMARY])
@@ -826,14 +1146,16 @@ class TestTheInventory:
         settings.DATABASE_ROUTERS = [recorder]
         return recorder
 
-    def test_no_read_django_ox_owns_reaches_a_replica(self, router, registry, settings):
-        self._drive_every_workflow(router, settings)
+    def test_no_read_django_ox_owns_reaches_a_replica(
+        self, router, registry, settings, client
+    ):
+        self._drive_every_workflow(router, settings, client)
         assert not router.offences, "\n".join(
             ["reads django-ox owns that followed db_for_read:", ""]
             + [f"  {where}\n      {what}" for where, what in router.offences.items()]
         )
 
-    def _drive_every_workflow(self, router, settings):
+    def _drive_every_workflow(self, router, settings, client):
         from django.tasks import task_backends
 
         from django_ox import bulk, views
@@ -996,6 +1318,83 @@ class TestTheInventory:
         with armed("OxTaskAdmin actions"):
             task_site.retry_selected(request, OxTask.objects.all())
             task_site.discard_selected(request, OxTask.objects.all())
+
+        # -- and all of it again over HTTP, which is where a person is --
+        # Calling the methods above is not the same surface. `get_queryset`,
+        # `get_object` and Django's own `delete_selected` only run on a
+        # request, and that is where the three admin defects were.
+        self._drive_the_admin_over_http(armed, client)
+
+    def _drive_the_admin_over_http(self, armed, client):
+        client.force_login(
+            User.objects.create_superuser("inventory", "i@example.com", "pw")
+        )
+        listed = stored.create_schedule(**schedule_fields(name="listed"))
+        OxScheduleTick.objects.using(PRIMARY).create(
+            schedule_name=f"{STORED_KEY_PREFIX}{listed.pk}",
+            scheduled_for=timezone.now(),
+            created_at=timezone.now(),
+        )
+        change = reverse(SCHEDULE_CHANGE, args=[listed.pk])
+        with armed("admin schedule changelist"):
+            assert client.get(reverse(SCHEDULES)).status_code == 200
+        with armed("admin schedule changelist, filtered and searched"):
+            filters = {"enabled__exact": "1", "trigger__exact": "cron", "q": "listed"}
+            assert client.get(reverse(SCHEDULES), filters).status_code == 200
+        with armed("admin change form, GET"):
+            assert client.get(change).status_code == 200
+        with armed("admin change form, POST"):
+            saved = client.post(change, schedule_post(name="listed", _save="Save"))
+            assert saved.status_code == 302
+        with armed("admin add page, GET"):
+            assert client.get(reverse(SCHEDULE_ADD)).status_code == 200
+        with armed("admin add page, POST and the redirect after it"):
+            added = client.post(
+                reverse(SCHEDULE_ADD),
+                schedule_post(name="typed-in", _continue="Save and continue editing"),
+                follow=True,
+            )
+            assert added.redirect_chain and added.status_code == 200
+        for action in ("disable_selected", "enable_selected", "run_once_now"):
+            with armed(f"admin {action} over HTTP"):
+                posted = client.post(
+                    reverse(SCHEDULES),
+                    {"action": action, ACTION_CHECKBOX_NAME: [str(listed.pk)]},
+                    follow=True,
+                )
+                assert posted.status_code == 200
+        selected = {
+            "action": "delete_selected",
+            ACTION_CHECKBOX_NAME: [str(listed.pk)],
+        }
+        with armed("admin delete_selected, the confirmation page"):
+            assert client.post(reverse(SCHEDULES), selected).status_code == 200
+        with armed("admin delete_selected, confirmed"):
+            done = client.post(reverse(SCHEDULES), selected | {"post": "yes"})
+            assert done.status_code == 302
+        assert not OxSchedule.objects.using(PRIMARY).filter(pk=listed.pk).exists()
+
+        failed = a_task(status=OxTask.Status.FAILED, finished_at=timezone.now())
+        with armed("admin task changelist"):
+            assert client.get(reverse(TASKS)).status_code == 200
+        with armed("admin task changelist, filtered, searched, by date"):
+            filters = {
+                "status__exact": OxTask.Status.FAILED,
+                "queue_name": "default",
+                "q": "tests.tasks.add",
+                "enqueued_at__year": str(timezone.now().year),
+            }
+            assert client.get(reverse(TASKS), filters).status_code == 200
+        with armed("admin task page"):
+            assert client.get(reverse(TASK_CHANGE, args=[failed.pk])).status_code == 200
+        with armed("admin task actions over HTTP"):
+            for action in ("retry_selected", "discard_selected"):
+                acted = client.post(
+                    reverse(TASKS),
+                    {"action": action, ACTION_CHECKBOX_NAME: [str(failed.pk)]},
+                    follow=True,
+                )
+                assert acted.status_code == 200
 
 
 @contextlib.contextmanager

@@ -3820,18 +3820,25 @@ question from a constant, so a PostgreSQL alias is unaffected.
   Present in every release from 0.1.0 to 1.2.0.
 
   Both read the alias the task rows are written to, and so does every other
-  reading django-ox makes of its own rows: `django_ox.stats`, the metrics
-  renderings and the endpoint, `django_ox.actions`, `get_result()`,
-  `enqueue()` and `enqueue_many()`, the worker's claim and its completion,
-  the reaper, the stored schedules and their admin. A test in the suite
-  drives that whole surface under a router that refuses any read django-ox
-  makes of its own rows on a replica, so the sweep is a property the suite
-  holds rather than a claim. One read is exempt and named there: the
-  **Last tick** column of the schedule changelist, which Django reads
-  through `db_for_read` along with every other column of that page, and
-  pinning one column would make one page answer from two databases. What a
-  changelist and a change form read is Django's to route, which is what a
-  replica is for; every write the admin makes goes to the primary.
+  reading django-ox makes of its own rows. That means `django_ox.stats`, the
+  metrics renderings and the endpoint, `django_ox.actions`, `get_result()`,
+  `enqueue()` and `enqueue_many()`. It also means the worker's claim and its
+  completion, the reaper, the stored schedules, and every admin page for
+  both models. Nothing is exempt.
+
+  A test in the suite drives that surface under a router that refuses any
+  such read on a replica. It drives the admin over HTTP, because calling an
+  admin method is not the same as opening the page. It opens the changelist
+  with its filters, the change form's GET and POST, and the add page with
+  its redirect. It runs **Delete selected schedules** through its
+  confirmation, and it opens the task list. The sweep is a property the
+  suite holds rather than a claim.
+
+  You can still point a read at a replica by asking for one.
+  `django_ox.stats`, `collect()`, the renderings and the endpoint take
+  `using`, so `path("ox/metrics", metrics, {"using": "replica"})` keeps
+  scrapes off the primary. Your own queries are untouched: a router you
+  wrote still sends your reads of the task table where you send them.
 - A worker no longer loses a task's result under a router that sends reads
   to a replica. On MySQL and MariaDB every claim re-reads the row it has
   just claimed, and that read followed `db_for_read`. The worker was handed
@@ -3859,6 +3866,27 @@ question from a constant, so a PostgreSQL alias is unaffected.
   and the write, so the index is what makes the name unique and the check
   is what turns the ordinary duplicate into a field error. Present since
   1.2.0, which added stored schedules.
+- The schedule admin no longer writes a stale copy of a row over a newer
+  one. Under a router that sends reads to a replica, Django built the
+  changelist and the change form from the replica. A change form submits
+  every field, so **Save** wrote the replica's values back over the
+  primary's. There was no error and no warning, and the newer values were
+  gone. `update_schedule()` takes the row lock and writes only the
+  submitted fields to stop this, and a stale form walked through it.
+
+  Two more followed from the same read. **Save and continue editing** on
+  the add page looked the new row up on the replica. The person was told
+  the schedule they had just made doesn't exist, and landed on the admin
+  index. **Delete selected schedules** counted the rows on the replica,
+  found none, and returned before it reached django-ox's own delete. It
+  deleted nothing and said nothing at all.
+
+  Both admins now read the alias their rows are written to, and so does the
+  **Last tick** column. The task list, its filters and a task's page read
+  the replica too. A task enqueued a moment ago was missing from the list,
+  and a task's own page reported it as deleted. The schedule pages are
+  present since 1.2.0, which added stored schedules; the task pages since
+  0.3.0, which added them.
 - `ox_prune --include-failed` no longer deletes a row that an operator retries
   while its batch is being deleted. The DELETE matches rows by primary key
   alone, so a FAILED or LOST row retried just before it ran was deleted anyway.

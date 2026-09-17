@@ -338,8 +338,14 @@ path, so admin access does not become permission to run anything. See
 The core is finite on purpose: a durable queue, a worker, recurring
 schedules, monitoring, and nothing else to operate. Outside the current
 scope: interrupting one chosen running task on demand (every attempt can be
-bounded with `TASK_TIMEOUT`), and multi-database routing (every django-ox
-table lives on the one database your router sends `OxTask` to).
+bounded with `TASK_TIMEOUT`).
+
+django-ox keeps all its own tables on one database, the one your router
+sends `OxTask` to. `django_ox.E008` reports a router that splits them.
+Under a router that sends reads to a replica, django-ox reads its own rows
+on the alias it writes them to. `ox_prune`, `ox_health` and `ox_worker`
+take `--database` to name the alias to work on. See
+[Read replicas](https://oxpull.com/django-ox/configuration/#read-replicas).
 
 Batches, unique tasks and rate limiting are in
 [Oxpull Pro](https://oxpull.com/django-ox/pro/), a paid add-on; <https://oxpull.com/> has the details. Metrics stay in this

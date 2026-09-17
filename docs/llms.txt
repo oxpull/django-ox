@@ -140,9 +140,13 @@ Operational facts to get right:
   task table is registered in the admin with the same two actions.
 - Run `migrate` before rolling workers, not from the worker process.
 - Out of scope in the core: interrupting one chosen running task on demand
-  (every attempt can be bounded with `TASK_TIMEOUT`), and multi-database
-  routing (every table lives on the database your router sends `OxTask` to).
-  For tests, point `TASKS` at
+  (every attempt can be bounded with `TASK_TIMEOUT`).
+- Every django-ox table lives on the database your router sends `OxTask` to,
+  and `django_ox.E008` reports a router that splits them. Under a router that
+  sends reads to a replica, django-ox reads its own rows on the alias it
+  writes them to. `ox_prune`, `ox_health` and `ox_worker` take `--database`
+  to name the alias to work on.
+- For tests, point `TASKS` at
   `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend` on Django 6.0+; on Django 5.2 LTS
   the same paths under `django_tasks.backends.`.

@@ -799,7 +799,7 @@ class TestTheRouterContract:
         assert moved.status == OxTask.Status.RUNNING
 
     def test_the_backend_reads_a_result_back_from_the_primary(self, armed):
-        from django.tasks import task_backends
+        from django_ox.compat import task_backends
 
         row = a_task()
         with armed():
@@ -1270,9 +1270,8 @@ class TestTheInventory:
         )
 
     def _drive_every_workflow(self, router, settings, client):
-        from django.tasks import task_backends
-
         from django_ox import bulk, views
+        from django_ox.compat import task_backends
 
         def armed(operation):
             router.armed = True

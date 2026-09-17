@@ -272,7 +272,7 @@ class TestUnderAReplicaThatIsBehind:
         )
 
     def test_a_result_is_read_back_from_the_primary(self):
-        from django.tasks import task_backends
+        from django_ox.compat import task_backends
 
         backend = task_backends["default"]
         rows = _rows(

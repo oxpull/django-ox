@@ -156,11 +156,19 @@ command names the alias it checks, so none of them opens another one.
 work on and pass it to the checks. `ox_worker` passes an empty list, so no
 alias is checked at all and a worker starts while its database is down and
 waits for it. What that costs: the system checks that need a database don't
-run for `ox_worker`. A database that can't hold the schema, such as SQLite
-without JSON support, reaches a worker as a failing poll in the log. Every
-other django-ox command reports it, and so does
-`manage.py check --database <alias>`. A configuration error still stops a
-worker at startup, because those checks don't need a database. For the rest,
+run for `ox_worker`. A SQLite build without JSON support fails
+`fields.E180`. `manage.py check --database <alias>` reports it, and so does
+every other django-ox command; each exits non-zero. A worker on that alias
+starts and runs tasks anyway, because SQLite stores those columns as text,
+and it logs nothing. On MySQL, Django's column-type checks emit warnings, so
+`check` still exits 0. The case an operator actually hits is a database with
+no django-ox tables. `check --database <alias>` does not report that: it
+exits 0 and reports no issues. `migrate --check --database <alias>` is what
+exits non-zero, and it prints nothing at all. The worker logs
+`worker_poll_failed` on every pass. A check that cannot fail is worse than
+no check at all. Run `migrate --check` for the alias before you start a
+worker on it. A configuration error still stops a worker at startup, because
+those checks don't need a database. For the rest,
 pass `--skip-checks`, or `--database` to `manage.py check`. Django 6.0 is
 unaffected, and so is an alias on PostgreSQL. The [changelog](changelog.md)
 has the mechanism, what a router does and does not fix, and why `--database`

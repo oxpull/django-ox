@@ -1780,20 +1780,24 @@ of date, open an issue with the link that shows it.
 
 # Production
 
-The worker is a plain foreground process: `manage.py ox_worker`, run
-under whatever supervises your other processes. It rides out a database that goes away and comes back: a failed pass is
-logged as `worker_poll_failed`, the connection is reopened, and the loop
-carries on. It starts the same way. A worker started while the database is
-down opens no connection before its first poll, logs that pass and polls
-again, so a restart during a database bounce waits for the database instead
-of exiting into a restart loop. What that costs: the system checks that need
-a database don't run for `ox_worker`. A database that can't hold the schema
-reaches the worker as a failing poll rather than at startup.
-`manage.py check --database <alias>` is what reports it. A configuration
-error still stops a worker at startup. A process manager is still what brings it
-back from a crash or a recycle. Run it under `Restart=always` (as in the unit
-below). This page covers systemd,
-scaling, shutdown, the reaper, and monitoring.
+The worker is a plain foreground process: `manage.py ox_worker`, run under
+whatever supervises your other processes. It rides out a database that goes
+away and comes back: a failed pass is logged as `worker_poll_failed`, the
+connection is reopened, and the loop carries on. It starts the same way. A
+worker started while the database is down opens no connection before its
+first poll, logs that pass and polls again, so a restart during a database
+bounce waits for the database instead of exiting into a restart loop. What
+that costs: the system checks that need a database don't run for
+`ox_worker`. A SQLite build without JSON support fails `fields.E180`, which
+`manage.py check --database <alias>` reports. The worker runs on that alias
+anyway and logs nothing. A database with no django-ox tables reaches the
+worker as a failing poll instead, and `check` does not report it.
+`manage.py migrate --check --database <alias>` does, by exit status alone.
+Run both for the alias before you start a worker on it. A configuration
+error still stops a worker at startup. A process manager is still what
+brings it back from a crash or a recycle. Run it under `Restart=always` (as
+in the unit below). This page covers systemd, scaling, shutdown, the reaper,
+and monitoring.
 
 ## Running under systemd
 
@@ -3280,11 +3284,19 @@ command names the alias it checks, so none of them opens another one.
 work on and pass it to the checks. `ox_worker` passes an empty list, so no
 alias is checked at all and a worker starts while its database is down and
 waits for it. What that costs: the system checks that need a database don't
-run for `ox_worker`. A database that can't hold the schema, such as SQLite
-without JSON support, reaches a worker as a failing poll in the log. Every
-other django-ox command reports it, and so does
-`manage.py check --database <alias>`. A configuration error still stops a
-worker at startup, because those checks don't need a database. For the rest,
+run for `ox_worker`. A SQLite build without JSON support fails
+`fields.E180`. `manage.py check --database <alias>` reports it, and so does
+every other django-ox command; each exits non-zero. A worker on that alias
+starts and runs tasks anyway, because SQLite stores those columns as text,
+and it logs nothing. On MySQL, Django's column-type checks emit warnings, so
+`check` still exits 0. The case an operator actually hits is a database with
+no django-ox tables. `check --database <alias>` does not report that: it
+exits 0 and reports no issues. `migrate --check --database <alias>` is what
+exits non-zero, and it prints nothing at all. The worker logs
+`worker_poll_failed` on every pass. A check that cannot fail is worse than
+no check at all. Run `migrate --check` for the alias before you start a
+worker on it. A configuration error still stops a worker at startup, because
+those checks don't need a database. For the rest,
 pass `--skip-checks`, or `--database` to `manage.py check`. Django 6.0 is
 unaffected, and so is an alias on PostgreSQL. The [changelog](changelog.md)
 has the mechanism, what a router does and does not fix, and why `--database`
@@ -3854,12 +3866,17 @@ question from a constant, so a PostgreSQL alias is unaffected.
   path it already takes when the database goes away while it runs, and a
   process manager restarting a worker into a database that's still down
   gives up long before the database is back. What that costs: the system
-  checks that need a database don't run for `ox_worker`. A database that
-  can't hold the schema, such as SQLite without JSON support or MySQL with
-  a column type Django refuses, is reported by every other django-ox
-  command and by `manage.py check --database <alias>`, and reaches a worker
-  as a failing poll in the log instead. A configuration error still stops a
-  worker at startup, because those checks don't need a database.
+  checks that need a database don't run for `ox_worker`. A SQLite build
+  without JSON support fails `fields.E180`. `manage.py check --database
+  <alias>` reports it, and so does every other django-ox command; each
+  exits non-zero. A worker on that alias starts and runs tasks anyway,
+  because SQLite stores those columns as text, and it logs nothing. The
+  other case is a database with no django-ox tables. `check --database
+  <alias>` does not report that: it exits 0 and reports no issues.
+  `migrate --check --database <alias>` is what exits non-zero, and it
+  prints nothing at all. The worker logs `worker_poll_failed` on every
+  pass. A configuration error still stops a worker at startup, because
+  those checks don't need a database.
 - On MySQL, `ox_prune`, `ox_health` and `ox_import_beat_schedules` run
   Django's database checks for their alias on every invocation. On a
   connection without strict mode that prints `mysql.W002` each time,

@@ -187,12 +187,17 @@ question from a constant, so a PostgreSQL alias is unaffected.
   path it already takes when the database goes away while it runs, and a
   process manager restarting a worker into a database that's still down
   gives up long before the database is back. What that costs: the system
-  checks that need a database don't run for `ox_worker`. A database that
-  can't hold the schema, such as SQLite without JSON support or MySQL with
-  a column type Django refuses, is reported by every other django-ox
-  command and by `manage.py check --database <alias>`, and reaches a worker
-  as a failing poll in the log instead. A configuration error still stops a
-  worker at startup, because those checks don't need a database.
+  checks that need a database don't run for `ox_worker`. A SQLite build
+  without JSON support fails `fields.E180`. `manage.py check --database
+  <alias>` reports it, and so does every other django-ox command; each
+  exits non-zero. A worker on that alias starts and runs tasks anyway,
+  because SQLite stores those columns as text, and it logs nothing. The
+  other case is a database with no django-ox tables. `check --database
+  <alias>` does not report that: it exits 0 and reports no issues.
+  `migrate --check --database <alias>` is what exits non-zero, and it
+  prints nothing at all. The worker logs `worker_poll_failed` on every
+  pass. A configuration error still stops a worker at startup, because
+  those checks don't need a database.
 - On MySQL, `ox_prune`, `ox_health` and `ox_import_beat_schedules` run
   Django's database checks for their alias on every invocation. On a
   connection without strict mode that prints `mysql.W002` each time,

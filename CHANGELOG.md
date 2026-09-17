@@ -93,10 +93,19 @@ flag to the checks, and most do not. `showmigrations`, `sqlmigrate`,
 `SILENCED_SYSTEM_CHECKS` does not help either. The connection raises before
 there is a check message to silence.
 
-A database router fixes every command at once, yours included. Django skips
-an alias whose `allow_migrate` returns false for the model. A router that
-keeps django-ox's tables on one alias therefore stops the checks touching
-the others.
+A database router fixes the commands that name no alias, `runserver` among
+them. Django skips an alias whose `allow_migrate` returns false for the
+model. A router that keeps django-ox's tables on one alias therefore stops
+those checks touching the others.
+
+The router does not cover an alias you name. `manage.py check --database
+<alias>` runs Django's backend checks for that alias, and no router is read
+on that path. On MySQL those checks ask the server for its `sql_mode`, which
+opens the connection. An unreachable alias named that way ends the command,
+router or no router. It's the same read behind the `mysql.W002` warning under
+Changed. On SQLite and PostgreSQL the backend checks open nothing, so naming
+an unreachable alias is harmless there. Pass `--database` only for aliases
+the machine can reach.
 
 Two field checks reach a connection. On SQLite, Django asks the alias
 whether it supports `JSONField`, and the answer comes from a query. On

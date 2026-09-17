@@ -150,15 +150,21 @@ Django 6.1 changed which databases the system checks run against. A command
 that runs the full checks and does not name a database now checks every alias
 in `DATABASES`. Checking a SQLite or MySQL alias opens a connection and runs
 one query. The cost grows with the number of aliases, and every such command
-pays it. An alias that cannot be reached ends the command. django-ox's own commands are
-not affected. `ox_prune`, `ox_health` and `ox_import_beat_schedules` name the
-alias they work on and pass it to the checks. `ox_worker` passes an empty list,
-so no alias is checked at all and a worker starts while its database is down
-and waits for it. For the rest, pass `--skip-checks`, or `--database` to
-`manage.py check`. Django
-6.0 is unaffected, and so is an alias on PostgreSQL. The
-[changelog](changelog.md) has the mechanism, the router fix, and why
-`--database` alone is not enough on a command that does not pass it on.
+pays it. An alias that cannot be reached ends the command. Each django-ox
+command names the alias it checks, so none of them opens another one.
+`ox_prune`, `ox_health` and `ox_import_beat_schedules` name the alias they
+work on and pass it to the checks. `ox_worker` passes an empty list, so no
+alias is checked at all and a worker starts while its database is down and
+waits for it. What that costs: the system checks that need a database don't
+run for `ox_worker`. A database that can't hold the schema, such as SQLite
+without JSON support, reaches a worker as a failing poll in the log. Every
+other django-ox command reports it, and so does
+`manage.py check --database <alias>`. A configuration error still stops a
+worker at startup, because those checks don't need a database. For the rest,
+pass `--skip-checks`, or `--database` to `manage.py check`. Django 6.0 is
+unaffected, and so is an alias on PostgreSQL. The [changelog](changelog.md)
+has the mechanism, what a router does and does not fix, and why `--database`
+alone is not enough on a command that does not pass it on.
 
 The support floor tracks Django's own: when a Python or Django version
 reaches end of life upstream, a later django-ox minor release may drop it,

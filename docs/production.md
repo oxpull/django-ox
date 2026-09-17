@@ -6,7 +6,11 @@ logged as `worker_poll_failed`, the connection is reopened, and the loop
 carries on. It starts the same way. A worker started while the database is
 down opens no connection before its first poll, logs that pass and polls
 again, so a restart during a database bounce waits for the database instead
-of exiting into a restart loop. A process manager is still what brings it
+of exiting into a restart loop. What that costs: the system checks that need
+a database don't run for `ox_worker`. A database that can't hold the schema
+reaches the worker as a failing poll rather than at startup.
+`manage.py check --database <alias>` is what reports it. A configuration
+error still stops a worker at startup. A process manager is still what brings it
 back from a crash or a recycle. Run it under `Restart=always` (as in the unit
 below). This page covers systemd,
 scaling, shutdown, the reaper, and monitoring.

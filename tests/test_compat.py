@@ -23,20 +23,34 @@ from django_ox import compat
 # the same function as django_tasks.utils.normalize_json.
 FORBIDDEN_PREFIXES = ("django.tasks", "django_tasks", "django.utils.json")
 
-SRC = pathlib.Path(django_ox.__file__).parent
+SRC = pathlib.Path(django_ox.__file__).resolve().parent
+TESTS = pathlib.Path(__file__).resolve().parent
+ROOT = TESTS.parent
 
 
-def django_ox_modules():
-    """Every shipped module except compat itself."""
-    return sorted(p for p in SRC.rglob("*.py") if p.name != "compat.py")
+def _label(path):
+    """The path as the repository spells it, so a failure names the file."""
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:  # pragma: no cover - defensive
+        return str(path)
 
 
-@pytest.mark.parametrize("path", django_ox_modules(), ids=lambda p: p.name)
+def modules_held_to_compat():
+    """Every shipped module except compat itself, and every test module."""
+    candidates = [*SRC.rglob("*.py"), *TESTS.rglob("*.py")]
+    return sorted(p for p in candidates if p.name != "compat.py")
+
+
+@pytest.mark.parametrize("path", modules_held_to_compat(), ids=_label)
 def test_only_compat_imports_the_tasks_framework(path):
     """
     A direct `from django.tasks import ...` anywhere else is an ImportError on
     Django 5.2, and one that only fires for users, since CI on 6.0 would never
     reach it. Catch it in the source instead of at a user's traceback.
+
+    Test modules are held to the same rule. One that reaches around compat
+    passes on every 6.x leg and fails only on the 5.2 one.
     """
     tree = ast.parse(path.read_text(), filename=str(path))
     offenders = []
@@ -50,7 +64,7 @@ def test_only_compat_imports_the_tasks_framework(path):
         if name.startswith(FORBIDDEN_PREFIXES):
             offenders.append(f"{name} (line {node.lineno})")
     assert not offenders, (
-        f"{path.relative_to(SRC)} imports the Tasks framework directly: "
+        f"{_label(path)} imports the Tasks framework directly: "
         f"{offenders}. Import it from django_ox.compat instead."
     )
 

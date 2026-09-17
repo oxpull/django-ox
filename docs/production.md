@@ -128,7 +128,7 @@ a task thread that its timeout could not stop; see
 This maps directly onto rolling deploys: send SIGTERM, wait, start the new
 version. The only tuning point is the process manager's kill escalation
 (`TimeoutStopSec` above) relative to your longest task. One caveat for the
-upgrade from 1.1.0, in the changelog under this release's migration note: a
+upgrade from 1.1.0, in the changelog under the 1.2.0 migration note: a
 settings schedule first seen while both versions are running can be anchored
 twice, and its second tick does not fire.
 

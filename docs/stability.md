@@ -111,8 +111,8 @@ process that shares a database before anything writes the new status. The
 release notes name the value, say how it reads through `django.tasks`, and
 give the upgrade and rollback steps.
 
-Pin accordingly: `django-ox~=1.2.0` accepts patch releases only;
-`django-ox~=1.2` accepts the current major line.
+Pin accordingly: `django-ox~=1.3.0` accepts patch releases only;
+`django-ox~=1.3` accepts the current major line.
 
 ## Deprecation policy
 

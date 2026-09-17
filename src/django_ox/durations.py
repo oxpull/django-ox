@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import re
 from datetime import timedelta
 
@@ -43,8 +44,15 @@ def parse_seconds(value: str) -> float:
     text = value.strip()
     try:
         seconds = _whole_seconds(text)
-        return float(text) if seconds is None else float(seconds)
+        parsed = float(text) if seconds is None else float(seconds)
     except (ValueError, OverflowError):
         raise argparse.ArgumentTypeError(
             f"invalid duration {value!r}; {_FORMS}"
         ) from None
+    # float() takes nan, inf and anything that rounds to inf. Every
+    # comparison with nan is false, and nothing is ever over inf. A
+    # threshold given either way could never be exceeded, so the check it
+    # sets could not fail. A check that cannot fail is worse than no check.
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError(f"invalid duration {value!r}; {_FORMS}")
+    return parsed

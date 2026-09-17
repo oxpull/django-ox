@@ -93,19 +93,27 @@ flag to the checks, and most do not. `showmigrations`, `sqlmigrate`,
 `SILENCED_SYSTEM_CHECKS` does not help either. The connection raises before
 there is a check message to silence.
 
-A database router fixes the commands that name no alias, `runserver` among
-them. Django skips an alias whose `allow_migrate` returns false for the
-model. A router that keeps django-ox's tables on one alias therefore stops
-those checks touching the others.
+A database router is what fixes the commands that name no alias, `runserver`
+among them. How far it fixes them depends on the engine. Django skips an
+alias whose `allow_migrate` returns false for the model. A router that keeps
+django-ox's tables on one alias therefore stops those checks reading the
+others for django-ox's models. Other apps' models are still checked on every
+alias. On SQLite nothing but a `JSONField` column opens a connection, so the
+router is enough where django-ox holds the only ones. On MySQL every field
+check reaches the server, so `contenttypes` ends the command whatever the
+router says. There the router has to send every app to one alias.
 
-The router does not cover an alias you name. `manage.py check --database
-<alias>` runs Django's backend checks for that alias, and no router is read
-on that path. On MySQL those checks ask the server for its `sql_mode`, which
-opens the connection. An unreachable alias named that way ends the command,
-router or no router. It's the same read behind the `mysql.W002` warning under
-Changed. On SQLite and PostgreSQL the backend checks open nothing, so naming
-an unreachable alias is harmless there. Pass `--database` only for aliases
-the machine can reach.
+A router does not cover Django's backend checks for an alias you name.
+`manage.py check --database <alias>` runs them for that alias, and no router
+is read on that path. On MySQL those checks ask the server for its
+`sql_mode`, which opens the connection. An unreachable alias named that way
+ends the command, router or no router. It's the same read behind the
+`mysql.W002` warning under Changed. On PostgreSQL those checks open nothing,
+so naming an unreachable alias costs nothing there. On SQLite they open
+nothing either. The `JSONField` check below does, so an unreachable SQLite
+alias still ends the command. It passes only behind a router that keeps
+django-ox's tables off that alias. Pass `--database` only for aliases the
+machine can reach.
 
 Two field checks reach a connection. On SQLite, Django asks the alias
 whether it supports `JSONField`, and the answer comes from a query. On

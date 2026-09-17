@@ -330,6 +330,13 @@ question from a constant, so a PostgreSQL alias is unaffected.
   that `OxTask` writes to. Under a router that sends `OxTask` to another
   database, each UPDATE committed by itself. An error part-way could leave
   some rows moved. Present since 0.3.0.
+- The lease documentation put the renewal margin at two consecutive missed
+  renewals. It is one. The renewal loop waits `LOCK_TIMEOUT / 3` after each
+  renewal rather than firing on a fixed schedule, so every round costs the
+  wait plus the UPDATE that renews. Three rounds therefore always come to
+  more than the lease, and a second miss in a row leaves the lease expired
+  and the task reclaimable. Nothing in the worker changes. Size
+  `LOCK_TIMEOUT` for one missed renewal.
 - A stop signal could leave an idle `ox_worker` hung instead of draining.
   It stayed hung until a second signal or the process manager ended it,
   or for good when it was a worker process whose supervisor had been

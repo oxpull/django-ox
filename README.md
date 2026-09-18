@@ -13,9 +13,10 @@ Django ships the Tasks API but no production backend: the built-in
 `ImmediateBackend` and `DummyBackend` are for development and testing only.
 django-ox stores background tasks in the database you already run and executes
 them with a worker process. There is no broker to provision, secure, upgrade or
-back up, and because `enqueue()` is an INSERT on your default connection, a
-task enqueued inside `transaction.atomic()` commits or rolls back with your
-data. No `transaction.on_commit()` needed.
+back up, and `enqueue()` is an INSERT on the database that holds `OxTask`,
+your default one unless you route it elsewhere. A task enqueued inside
+`transaction.atomic()` on that database commits or rolls back with your data.
+No `transaction.on_commit()` needed.
 Comparing backends? See [Choosing a task backend](https://oxpull.com/django-ox/choosing/).
 
 ## Install
@@ -184,6 +185,7 @@ python manage.py ox_worker
 | `--processes` | `1` | Worker processes under one supervisor. Each is a full worker with its own connections, reaper and `--concurrency` thread pool; a process that dies is restarted. POSIX only. |
 | `--interval` | `1.0` | Polling interval in seconds when idle. |
 | `--lock-timeout` | backend `LOCK_TIMEOUT` | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |
+| `--database` | the alias `OxTask` writes to | Database alias to run against. Every `--processes` child is given the same one. It is not checked against the router. |
 
 On SIGTERM or SIGINT the worker stops claiming, finishes in-flight tasks, then
 exits. A second signal forces an immediate exit. With `--processes` above 1,
@@ -206,6 +208,7 @@ python manage.py ox_prune --older-than 7d
 | `--include-failed` | off | Also delete FAILED and LOST rows. By default they are kept: they hold the per-attempt tracebacks and can be retried. |
 | `--batch-size` | `1000` | Rows per DELETE statement, so pruning a large table never takes a long lock or builds a giant IN clause. |
 | `--dry-run` | off | Report how many rows would be deleted without deleting any. |
+| `--database` | the alias `OxTask` writes to | Database alias to prune. The rows it reads and the rows it deletes are on that one alias. |
 
 Only SUCCESSFUL and DISCARDED rows (and, with `--include-failed`, FAILED and
 LOST rows) past the cutoff are deleted. READY, WAITING and RUNNING rows are
@@ -232,6 +235,7 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. |
 | `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this long. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
+| `--database` | the alias `OxTask` writes to | Database alias to check. The figures come from that alias, so the check reports the queue your workers are running. |
 
 Mounting `path("ox/", include("django_ox.urls"))` exposes `GET /ox/metrics`,
 the same numbers as Prometheus gauges; the view has no authentication of its
@@ -344,10 +348,10 @@ django-ox keeps all its own tables on one database, the one your router
 sends `OxTask` to. `django_ox.E008` reports a router that splits them.
 Under a router that sends reads to a replica, django-ox reads its own rows
 on the alias it writes them to. The admin has no way out of that: every
-page reads the primary, and no setting changes it. `ox_prune`, `ox_health`
-and `ox_worker` take `--database` to name the alias to work on. That flag
-is not checked against the router, and nothing warns, so leave it unset
-unless you mean it. See
+page reads the primary, and no setting changes it. `ox_worker`, `ox_prune`,
+`ox_health` and `ox_import_beat_schedules` take `--database` to name the
+alias to work on. That flag is not checked against the router, and nothing
+warns, so leave it unset unless you mean it. See
 [Read replicas](https://oxpull.com/django-ox/configuration/#read-replicas).
 
 Batches, unique tasks, rate limiting and workflows are in

@@ -646,7 +646,7 @@ All three run the full worker suite in CI. Guidance:
   stepping past locked rows, so throughput stops scaling with processes well
   before it would on PostgreSQL.
 
-The queue lives in your default database, inside your existing backup and
+The queue lives in your own database, inside your existing backup and
 migration story. That is the point: one system of record, one thing to
 operate.
 

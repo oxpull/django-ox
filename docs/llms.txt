@@ -144,8 +144,8 @@ Operational facts to get right:
 - Every django-ox table lives on the database your router sends `OxTask` to,
   and `django_ox.E008` reports a router that splits them. Under a router that
   sends reads to a replica, django-ox reads its own rows on the alias it
-  writes them to. `ox_prune`, `ox_health` and `ox_worker` take `--database`
-  to name the alias to work on.
+  writes them to. `ox_worker`, `ox_prune`, `ox_health` and
+  `ox_import_beat_schedules` take `--database` to name the alias to work on.
 - For tests, point `TASKS` at
   `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend` on Django 6.0+; on Django 5.2 LTS

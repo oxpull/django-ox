@@ -25,8 +25,11 @@ own.
 
 ## Transactional enqueue
 
-The queue lives in your database, so enqueueing a task is a single INSERT
-on your default connection. That gives you a guarantee a broker cannot offer: **the task and your data commit or roll back together.**
+The queue lives in your database, so enqueueing a task is a single INSERT on
+the database that holds `OxTask`, your default one unless you route it
+elsewhere. Enqueue inside a transaction on that database and you get a
+guarantee a broker cannot offer: **the task and your data commit or roll back
+together.**
 
 ```python
 from django.db import transaction

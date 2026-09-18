@@ -112,7 +112,8 @@ of the period you have paid for. The full terms are stated at purchase.
 ## Waitlist
 
 If Pro would earn its keep in your deployment, say which of the features
-above matters most to you. That ordering decides what gets built next.
-Join the waitlist below, or write to support@oxpull.com.
+above you would turn on first and what your queue looks like. That shapes the
+docs and examples we write next. Join the waitlist below, or write to
+support@oxpull.com.
 
 [Join the Pro waitlist](https://oxpull.com/#waitlist){ .md-button }

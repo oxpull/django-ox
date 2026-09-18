@@ -79,7 +79,7 @@ send_confirmation.enqueue(order_id=42)
 
 | Celery | django-ox |
 | --- | --- |
-| Broker URL (Redis, RabbitMQ) | none. The queue is a table on your default database. |
+| Broker URL (Redis, RabbitMQ) | none. The queue is a table on your own database, the one your router sends `OxTask` to. |
 | `celery -A proj worker` | `manage.py ox_worker` |
 | `celery -A proj beat` | nothing to run. Schedules go in `TASKS` and every worker dispatches them. See [Recurring tasks](recurring-tasks.md). |
 | `.delay(...)`, `.apply_async(...)` | `.enqueue(...)` |

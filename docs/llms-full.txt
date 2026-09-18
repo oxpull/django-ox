@@ -32,8 +32,11 @@ own.
 
 ## Transactional enqueue
 
-The queue lives in your database, so enqueueing a task is a single INSERT
-on your default connection. That gives you a guarantee a broker cannot offer: **the task and your data commit or roll back together.**
+The queue lives in your database, so enqueueing a task is a single INSERT on
+the database that holds `OxTask`, your default one unless you route it
+elsewhere. Enqueue inside a transaction on that database and you get a
+guarantee a broker cannot offer: **the task and your data commit or roll back
+together.**
 
 ```python
 from django.db import transaction
@@ -1545,7 +1548,7 @@ send_confirmation.enqueue(order_id=42)
 
 | Celery | django-ox |
 | --- | --- |
-| Broker URL (Redis, RabbitMQ) | none. The queue is a table on your default database. |
+| Broker URL (Redis, RabbitMQ) | none. The queue is a table on your own database, the one your router sends `OxTask` to. |
 | `celery -A proj worker` | `manage.py ox_worker` |
 | `celery -A proj beat` | nothing to run. Schedules go in `TASKS` and every worker dispatches them. See [Recurring tasks](recurring-tasks.md). |
 | `.delay(...)`, `.apply_async(...)` | `.enqueue(...)` |
@@ -2426,7 +2429,7 @@ All three run the full worker suite in CI. Guidance:
   stepping past locked rows, so throughput stops scaling with processes well
   before it would on PostgreSQL.
 
-The queue lives in your default database, inside your existing backup and
+The queue lives in your own database, inside your existing backup and
 migration story. That is the point: one system of record, one thing to
 operate.
 
@@ -3434,8 +3437,9 @@ of the period you have paid for. The full terms are stated at purchase.
 ## Waitlist
 
 If Pro would earn its keep in your deployment, say which of the features
-above matters most to you. That ordering decides what gets built next.
-Join the waitlist below, or write to support@oxpull.com.
+above you would turn on first and what your queue looks like. That shapes the
+docs and examples we write next. Join the waitlist below, or write to
+support@oxpull.com.
 
 [Join the Pro waitlist](https://oxpull.com/#waitlist){ .md-button }
 
@@ -3564,9 +3568,10 @@ TASKS = {
 - Tasks run only while `ox_worker` is running. It is a separate process.
 - SIGTERM and SIGINT both drain and exit 0; a second signal forces an
   immediate exit with code 130.
-- `enqueue()` is one INSERT on the default connection. Inside
-  `transaction.atomic()` the task is visible to workers only after commit and
-  is gone on rollback. Do not add `transaction.on_commit()` around it.
+- `enqueue()` is one INSERT on the database the router sends `OxTask` to,
+  `default` unless you wrote a router. Inside `transaction.atomic()` on that
+  database the task is visible to workers only after commit and is gone on
+  rollback. Do not add `transaction.on_commit()` around it.
 - Many calls of one task go through `django_ox.bulk.enqueue_many(task,
   [(args, kwargs), ...])`: one INSERT per 1,000 rows, one transaction, results
   in input order. Set queue, priority and `run_after` once with `.using(...)`.

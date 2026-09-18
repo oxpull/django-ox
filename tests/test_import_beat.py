@@ -219,3 +219,20 @@ def test_a_name_holding_a_quote_still_emits_runnable_code(beat_tables):
     assert calls, "the command printed no calls to check"
     for line in calls:
         compile(line, "<generated>", "eval")
+
+
+def test_a_database_it_cannot_reach_is_a_sentence(monkeypatch):
+    """
+    This command prints code for a person to read and paste. A driver
+    traceback in the middle of that is nothing they can act on, and its
+    three siblings report the same failure in one line.
+    """
+    from django.db import OperationalError, connections
+
+    def refuse(*args, **kwargs):
+        raise OperationalError("could not connect to server")
+
+    monkeypatch.setattr(connections["default"].introspection, "table_names", refuse)
+    with pytest.raises(CommandError) as caught:
+        call_command("ox_import_beat_schedules")
+    assert "Database unreachable: could not connect to server" in str(caught.value)

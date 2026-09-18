@@ -28,8 +28,11 @@ export names this page does not list; those names are not public.
 - **The system check IDs**, the `django_ox.E0xx` identifiers, which
   you may list in `SILENCED_SYSTEM_CHECKS`. The
   IDs are stable; the messages are not.
-- **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy or when an
-  argument value is rejected. Argparse errors, such as an unknown flag, exit 2.
+- **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy. A value
+  the command itself rejects exits 1 as well, such as `--max-age 0` or a
+  `--database` alias that isn't in `DATABASES`. A value argparse rejects
+  exits 2, such as `--max-age nonsense` or `--format bogus`, and so does an
+  unknown flag.
 - **The claim filter hooks** `Worker.claim_filter_q()` and
   `Worker.claim_filter_sql()`, and where their result is applied: the
   fragment is conjoined to the conditions the candidate select filters on,
@@ -41,11 +44,12 @@ export names this page does not list; those names are not public.
   enforces the deadline with, so the two can differ by the size of a clock
   correction. `remaining()` is the one the watchdog agrees with.
 - **The metrics module** `django_ox.stats`: `queue_stats`, `ready_count`,
-  `oldest_ready_age`, `throughput`, `failure_rate`, `last_claim_age`, the
-  `QueueStats` dataclass, and `DEFAULT_WINDOW`, the trailing window the
-  rate functions default to.
+  `oldest_ready_age`, `throughput`, `failure_rate`, `last_claim_age`,
+  `waiting_counts`, the `QueueStats` dataclass, and `DEFAULT_WINDOW`, the
+  trailing window the rate functions default to.
 - **The Prometheus surface**: `django_ox.metrics.render_prometheus`,
-  `render_openmetrics` and `collector`, the view `django_ox.views.metrics`,
+  `render_openmetrics` and `collector`, the view `django_ox.views.metrics`
+  with the `using` argument it takes from the URLconf,
   the `django_ox.urls` module with its `metrics` route name, and the metric
   names and label names listed on the [Monitoring](monitoring.md#prometheus)
   page. `METRIC_NAMES` is that list in code; `CONTENT_TYPE_PROMETHEUS` and
@@ -101,8 +105,17 @@ django-ox follows [Semantic Versioning](https://semver.org/):
 - **Minor releases add, they do not break.** Patch releases are bug fixes
   only.
 
-Pin accordingly: `django-ox~=1.2.0` accepts patch releases only;
-`django-ox~=1.2` accepts the current major line.
+A minor release may add a status value. A process still on the previous
+minor release can't read a task in the new status. `get_result()` and
+`refresh()` raise `ValueError` on it. The admin shows its status as `-` and
+has no filter for it. Bulk discards skip it, and `queue_stats()`, the
+`django_ox_tasks` gauge and `ox_health` don't count it. Upgrade every
+process that shares a database before anything writes the new status. The
+release notes name the value, say how it reads through `django.tasks`, and
+give the upgrade and rollback steps.
+
+Pin accordingly: `django-ox~=1.3.0` accepts patch releases only;
+`django-ox~=1.3` accepts the current major line.
 
 ## Deprecation policy
 
@@ -135,6 +148,34 @@ corners; these are the supported combinations.
 Django 6.0 and later ship the Tasks framework in core. The Django 5.2 legs
 install the `django-tasks` backport and run the whole suite against it, which
 is what `django-ox[backport]` pulls in.
+
+Django 6.1 changed which databases the system checks run against. A command
+that runs the full checks and does not name a database now checks every alias
+in `DATABASES`. Checking a SQLite or MySQL alias opens a connection and runs
+one query. The cost grows with the number of aliases, and every such command
+pays it. An alias that cannot be reached ends the command. Each django-ox
+command names the alias it checks, so none of them opens another one.
+`ox_prune`, `ox_health` and `ox_import_beat_schedules` name the alias they
+work on and pass it to the checks. `ox_worker` passes an empty list, so no
+alias is checked at all and a worker starts while its database is down and
+waits for it. What that costs: the system checks that need a database don't
+run for `ox_worker`. A SQLite build without JSON support fails
+`fields.E180`. `manage.py check --database <alias>` reports it, and so does
+every other django-ox command; each exits non-zero. A worker on that alias
+starts and runs tasks anyway, because SQLite stores those columns as text,
+and it logs nothing. On MySQL, Django's column-type checks emit warnings, so
+`check` still exits 0. The case an operator actually hits is a database with
+no django-ox tables. `check --database <alias>` does not report that: it
+exits 0 and reports no issues. `migrate --check --database <alias>` is what
+exits non-zero, and it prints nothing at all. The worker logs
+`worker_poll_failed` on every pass. A check that cannot fail is worse than
+no check at all. Run `migrate --check` for the alias before you start a
+worker on it. A configuration error still stops a worker at startup, because
+those checks don't need a database. For the rest,
+pass `--skip-checks`, or `--database` to `manage.py check`. Django 6.0 is
+unaffected, and so is an alias on PostgreSQL. The [changelog](changelog.md)
+has the mechanism, what a router does and does not fix, and why `--database`
+alone is not enough on a command that does not pass it on.
 
 The support floor tracks Django's own: when a Python or Django version
 reaches end of life upstream, a later django-ox minor release may drop it,

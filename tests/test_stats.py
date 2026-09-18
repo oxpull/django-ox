@@ -73,6 +73,73 @@ class TestQueueStats:
             ),
         ]
 
+    def test_queue_stats_keeps_its_1_2_0_fields(self):
+        """
+        Code written against 1.2.0 unpacks a row, converts it with astuple()
+        or compares two readings. A waiting task changes none of that.
+        """
+        from dataclasses import asdict, astuple, fields
+
+        fields_in_1_2_0 = (
+            "queue_name",
+            "ready",
+            "running",
+            "failed",
+            "successful",
+            "lost",
+            "discarded",
+        )
+        make_task(OxTask.Status.READY)
+        make_task(OxTask.Status.LOST)
+        before = stats.queue_stats()
+        make_task(OxTask.Status.WAITING)
+        (row,) = stats.queue_stats()
+
+        assert tuple(field.name for field in fields(stats.QueueStats)) == (
+            fields_in_1_2_0
+        )
+        queue_name, ready, running, failed, successful, lost, discarded = astuple(row)
+        assert (queue_name, ready, running, failed, successful, lost, discarded) == (
+            "default",
+            1,
+            0,
+            0,
+            0,
+            1,
+            0,
+        )
+        assert asdict(row) == dict(zip(fields_in_1_2_0, astuple(row), strict=True))
+        assert [row] == before
+        assert row == stats.QueueStats("default", 1, 0, 0, 0, 1)
+
+    def test_waiting_is_counted_apart_and_is_not_backlog(self):
+        make_task(OxTask.Status.WAITING, enqueued_minutes_ago=600)
+        make_task(OxTask.Status.WAITING, enqueued_minutes_ago=600)
+        make_task(OxTask.Status.WAITING, queue="emails")
+        make_task(OxTask.Status.READY, enqueued_minutes_ago=1)
+
+        empty = {"running": 0, "failed": 0, "successful": 0, "lost": 0}
+        assert stats.queue_stats() == [
+            stats.QueueStats(queue_name="default", ready=1, discarded=0, **empty),
+            stats.QueueStats(queue_name="emails", ready=0, discarded=0, **empty),
+        ]
+        assert stats.waiting_counts() == {"default": 2, "emails": 1}
+        assert stats.ready_count() == 1
+        assert stats.ready_count("emails") == 0
+        assert stats.oldest_ready_age() < timedelta(minutes=5)
+        assert stats.oldest_ready_age("emails") is None
+        assert stats.throughput() == 0
+        assert stats.failure_rate() is None
+        assert stats.last_claim_age() is None
+
+    def test_waiting_counts_leave_out_queues_with_none(self):
+        assert stats.waiting_counts() == {}
+        make_task(OxTask.Status.READY, queue="emails")
+        make_task(OxTask.Status.DISCARDED)
+        assert stats.waiting_counts() == {}
+        make_task(OxTask.Status.WAITING, queue="emails")
+        assert stats.waiting_counts() == {"emails": 1}
+
 
 @pytest.mark.django_db
 class TestReadyCount:

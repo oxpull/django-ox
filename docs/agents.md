@@ -172,14 +172,14 @@ TASKS = {
   boundary stale. Retiming a stored schedule reschedules it from the moment of
   the change, and re-enabling a paused one does not replay what it missed.
 - `ox_prune --older-than 7d` deletes finished rows; FAILED rows stay unless
-  `--include-failed`. READY and RUNNING rows are never deleted.
+  `--include-failed`. READY, WAITING and RUNNING rows are never deleted.
 - `path("ox/", include("django_ox.urls"))` mounts `GET /ox/metrics`, the
   queue stats as Prometheus gauges. It has no authentication of its own;
   wrap it with `login_required` or restrict it by network.
 - Run `migrate` before rolling workers, not from the worker.
 - `django_ox.actions.retry(result_id)` requeues a FAILED or LOST task for
   one more attempt. `django_ox.actions.discard(result_id)` closes a READY,
-  FAILED or LOST task without running it. Neither touches a RUNNING task.
+  WAITING, FAILED or LOST task without running it. Neither touches a RUNNING task.
   With `django.contrib.admin` installed, the task table appears in the admin
   with the same two actions.
 - A particular running task cannot be interrupted on demand; `TASK_TIMEOUT`

@@ -166,3 +166,120 @@ class TestEnqueueManyCommitsOnOneConnection:
 
         enqueue_many(tasks.add, [((1, 2), {}), ((3, 4), {})])
         assert OxTask.objects.using(ALT).count() == 2
+
+
+@pytest.mark.django_db(databases=["default", ALT])
+class TestBulkActionsCommitOnOneConnection:
+    """
+    retry_many and discard_many promise one transaction for the whole call,
+    and they lock each chunk before its UPDATE. An unpinned atomic() wraps the
+    default connection while the statements route themselves, so under a
+    router neither held: each UPDATE committed alone, and a locking read would
+    run outside any transaction.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _router(self, settings):
+        settings.DATABASE_ROUTERS = [_PrimaryAndReplica()]
+
+    @pytest.mark.parametrize("name", ["retry_many", "discard_many"])
+    def test_the_transaction_is_opened_on_the_write_alias(self, name, monkeypatch):
+        from django.db import transaction as tx
+        from django.utils import timezone
+
+        from django_ox import actions
+        from django_ox.models import OxTask
+
+        row = OxTask.objects.using(ALT).create(
+            task_path="tests.tasks.add",
+            backend_name="default",
+            enqueued_at=timezone.now(),
+            status=OxTask.Status.FAILED,
+        )
+        seen = []
+        real = tx.atomic
+
+        def spy(using=None, **kwargs):
+            seen.append(using)
+            return real(using=using, **kwargs)
+
+        monkeypatch.setattr("django_ox.actions.transaction.atomic", spy)
+        assert getattr(actions, name)([row.pk]) == (1, 0)
+
+        assert seen == [ALT], f"opened on {seen!r}, not on the write alias"
+        assert OxTask.objects.using(ALT).get(pk=row.pk).status != OxTask.Status.FAILED
+
+
+@pytest.mark.django_db(databases=["default", ALT], transaction=True)
+class TestBulkActionsRetryOnTheWriteDatabase:
+    """
+    A bulk call runs again after a deadlock only when it opened its own
+    transaction. Under a router that is a question about the database OxTask
+    writes to. A transaction open on another database belongs to something
+    else, and one open on the write database belongs to the caller.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _router(self, settings):
+        settings.DATABASE_ROUTERS = [_PrimaryAndReplica()]
+
+    def failed_row(self):
+        from django.utils import timezone
+
+        from django_ox.models import OxTask
+
+        return OxTask.objects.using(ALT).create(
+            task_path="tests.tasks.add",
+            backend_name="default",
+            enqueued_at=timezone.now(),
+            status=OxTask.Status.FAILED,
+        )
+
+    @pytest.mark.parametrize("name", ["retry_many", "discard_many"])
+    def test_a_transaction_on_another_database_does_not_stop_a_retry(self, name):
+        from django.db import transaction
+
+        from django_ox import actions
+        from django_ox.models import OxTask
+
+        from .contention import failing, simulated
+
+        row = self.failed_row()
+        with (
+            failing(
+                "UPDATE",
+                lambda: simulated("mysql-deadlock"),
+                lambda n: n == 1,
+                using=ALT,
+            ) as updates,
+            transaction.atomic(using="default"),
+        ):
+            assert getattr(actions, name)([row.pk]) == (1, 0)
+
+        assert len(updates) == 2
+        assert OxTask.objects.using(ALT).get(pk=row.pk).status != OxTask.Status.FAILED
+
+    @pytest.mark.parametrize("name", ["retry_many", "discard_many"])
+    def test_a_callers_transaction_on_the_write_database_gets_no_retry(self, name):
+        from django.db import OperationalError, transaction
+
+        from django_ox import actions
+        from django_ox.models import OxTask
+
+        from .contention import failing, simulated
+
+        row = self.failed_row()
+        with (
+            failing(
+                "UPDATE",
+                lambda: simulated("mysql-deadlock"),
+                lambda n: n == 1,
+                using=ALT,
+            ) as updates,
+            pytest.raises(OperationalError),
+            transaction.atomic(using=ALT),
+        ):
+            getattr(actions, name)([row.pk])
+
+        assert len(updates) == 1
+        assert OxTask.objects.using(ALT).get(pk=row.pk).status == OxTask.Status.FAILED

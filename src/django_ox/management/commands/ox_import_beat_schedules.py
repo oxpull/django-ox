@@ -13,10 +13,11 @@ from datetime import datetime
 from typing import Any
 
 from django.conf import settings
-from django.core.management.base import BaseCommand, CommandError
-from django.db import connections, router
+from django.core.management.base import CommandError
+from django.db import DatabaseError, connections, router
 
 from ...models import OxSchedule
+from .._database import DatabaseCommand
 
 # django-celery-beat's tables are read with raw SQL rather than through a
 # model, because this package does not depend on it and cannot import one.
@@ -36,22 +37,32 @@ PERIOD_SECONDS = {
 }
 
 
-class Command(BaseCommand):
+class Command(DatabaseCommand):
     help = (
         "Print django-ox equivalents for the schedules in a django-celery-beat table."
     )
+    database_help = "Database alias holding the django-celery-beat tables."
 
-    def add_arguments(self, parser: Any) -> None:
-        parser.add_argument(
-            "--database",
-            default=None,
-            help="Database alias holding the django-celery-beat tables.",
-        )
+    def default_database(self) -> str:
+        # db_for_read, not db_for_write: this command reads a table
+        # django-ox does not own and writes nothing anywhere. A replica that
+        # is behind on somebody else's schedule table still prints the same
+        # suggestion, so there is nothing here to pin to the primary.
+        return router.db_for_read(OxSchedule)
 
     def handle(self, *args: Any, **options: Any) -> None:
-        alias = options["database"] or router.db_for_read(OxSchedule)
+        alias = self.database(options)
         connection = connections[alias]
-        if BEAT_TABLE not in connection.introspection.table_names():
+        # Reading someone else's table starts by asking which tables are
+        # there, so this is where a database that is not there is found.
+        # One line, the way the missing-table case below is: this command
+        # prints code for a person to read, and a driver traceback in the
+        # middle of that is nothing they can act on.
+        try:
+            tables = connection.introspection.table_names()
+        except DatabaseError as exc:
+            raise CommandError(f"Database unreachable: {exc}") from exc
+        if BEAT_TABLE not in tables:
             raise CommandError(
                 f"No {BEAT_TABLE} table on database {alias!r}. Point --database "
                 "at the one holding your django-celery-beat schedules."

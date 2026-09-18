@@ -33,7 +33,7 @@ from django.utils import timezone
 from . import registry
 from .compat import normalize_json
 from .cron import CronExpression
-from .models import OxSchedule, OxScheduleChange
+from .models import OxSchedule, OxScheduleChange, validate_against
 from .schedules import STORED_KEY_PREFIX, lock_contention
 
 logger = logging.getLogger("django_ox")
@@ -285,13 +285,17 @@ def create_schedule(*, user: Any = None, **fields: Any) -> OxSchedule:
     now = timezone.now()
     fields.setdefault("start_time", now)
     schedule = OxSchedule(created_at=now, updated_at=now, **fields)
-    schedule.full_clean(
-        exclude=["boundary_for", "boundary_generation", "created_at", "updated_at"]
-    )
+    # Once, before the first statement, and the validation below reads it
+    # too: a name checked against one database and written to another is
+    # not checked at all.
+    alias = schedule_db_alias()
+    with validate_against(alias):
+        schedule.full_clean(
+            exclude=["boundary_for", "boundary_generation", "created_at", "updated_at"]
+        )
     # After the clean, so the digest is over the values that will be stored.
     schedule.boundary_for = boundary_digest(schedule)
     check_permission(schedule, user)
-    alias = schedule_db_alias()
     with transaction.atomic(using=alias):
         schedule.save(using=alias)
         _touch_change_row(alias)
@@ -367,16 +371,26 @@ def update_schedule(
             # increment is computed from cannot move under it.
             current.boundary_generation = F("boundary_generation") + 1
         current.updated_at = now
-        current.full_clean(
-            exclude=["boundary_for", "boundary_generation", "created_at", "updated_at"]
-        )
+        with validate_against(alias):
+            current.full_clean(
+                exclude=[
+                    "boundary_for",
+                    "boundary_generation",
+                    "created_at",
+                    "updated_at",
+                ]
+            )
         # After the clean, so the digest is over the values that will be stored.
         current.boundary_for = boundary_digest(current)
         check_permission(current, user)
         current.save(using=alias)
         _touch_change_row(alias)
-    # The caller's instance is the one they will read from next.
-    schedule.refresh_from_db()
+    # The caller's instance is the one they will read from next. Read back
+    # from the alias this call wrote to: unqualified it follows
+    # db_for_read, and a replica that is behind either hands the caller the
+    # values it has just replaced or, for a row younger than its snapshot,
+    # raises DoesNotExist on a write that succeeded.
+    schedule.refresh_from_db(using=alias)
     return schedule
 
 

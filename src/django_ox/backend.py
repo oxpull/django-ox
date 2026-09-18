@@ -148,8 +148,13 @@ class OxBackend(BaseTaskBackend):
         from .models import OxTask
         from .results import task_result_from_db
 
+        # Read on the alias the row was written to. Under a router that
+        # sends reads to a replica, a result asked for just after enqueue
+        # would be one the replica has not got yet, and the caller would be
+        # told its task does not exist.
+        alias = router.db_for_write(OxTask)
         try:
-            db_task = OxTask.objects.get(id=result_id)
+            db_task = OxTask.objects.using(alias).get(id=result_id)
         except (OxTask.DoesNotExist, ValidationError, ValueError) as exc:
             raise TaskResultDoesNotExist(result_id) from exc
         return task_result_from_db(db_task)

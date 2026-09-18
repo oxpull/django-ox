@@ -32,10 +32,13 @@ Operational facts to get right:
 - Priority and deferral are Django API: `task.using(priority=N)` with N from
   -100 to 100, higher first, and `task.using(run_after=...)` with a timedelta
   or datetime.
-- `enqueue()` is a single INSERT on the connection the task table uses. Inside
-  `transaction.atomic()` the task becomes visible to workers only when the
-  transaction commits and disappears on rollback. Do not wrap enqueue in
-  `transaction.on_commit()`; it is not needed.
+- `enqueue()` is a single INSERT on the database the router sends `OxTask` to,
+  `default` unless you wrote a router. The commit is joint only when the
+  `transaction.atomic()` is opened on that database, because a bare
+  `atomic()` opens on `default`, and only for the rows the caller writes
+  there. Given both, the task and those rows commit or roll back together.
+  Do not wrap enqueue in `transaction.on_commit()`; it is not needed. Rows
+  written on another connection are a second transaction.
 - `django_ox.bulk.enqueue_many(task, [(args, kwargs), ...])` enqueues one task
   many times in one INSERT per 1,000 rows, inside one transaction, and returns
   the `TaskResult` list in input order. Queue, priority and `run_after` are set
@@ -144,8 +147,12 @@ Operational facts to get right:
 - Every django-ox table lives on the database your router sends `OxTask` to,
   and `django_ox.E008` reports a router that splits them. Under a router that
   sends reads to a replica, django-ox reads its own rows on the alias it
-  writes them to. `ox_worker`, `ox_prune`, `ox_health` and
-  `ox_import_beat_schedules` take `--database` to name the alias to work on.
+  writes them to. `ox_worker`, `ox_prune` and `ox_health` take `--database` to
+  name the alias django-ox works on, defaulting to the alias the router sends
+  `OxTask` writes to; it is not checked against the router, and nothing warns.
+  `ox_import_beat_schedules` spells the flag the same way and means something
+  else: the alias holding your django-celery-beat tables, defaulting to the
+  alias `OxSchedule` reads from.
 - For tests, point `TASKS` at
   `django.tasks.backends.immediate.ImmediateBackend` or
   `django.tasks.backends.dummy.DummyBackend` on Django 6.0+; on Django 5.2 LTS

@@ -120,9 +120,13 @@ TASKS = {
 - SIGTERM and SIGINT both drain and exit 0; a second signal forces an
   immediate exit with code 130.
 - `enqueue()` is one INSERT on the database the router sends `OxTask` to,
-  `default` unless you wrote a router. Inside `transaction.atomic()` on that
-  database the task is visible to workers only after commit and is gone on
-  rollback. Do not add `transaction.on_commit()` around it.
+  `default` unless you wrote a router. Two things make the commit joint: a
+  `transaction.atomic()` opened on that database, because a bare `atomic()`
+  opens on `default`; and the caller's own rows written there too. With both,
+  the task and those rows commit or roll back together, and the task is
+  visible to workers only after commit. Do not add `transaction.on_commit()`
+  around it. Rows written on another connection give two transactions, not
+  one.
 - Many calls of one task go through `django_ox.bulk.enqueue_many(task,
   [(args, kwargs), ...])`: one INSERT per 1,000 rows, one transaction, results
   in input order. Set queue, priority and `run_after` once with `.using(...)`.

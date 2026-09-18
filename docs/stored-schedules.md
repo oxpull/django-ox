@@ -329,7 +329,8 @@ The shape is familiar. The differences that will surprise you:
 `manage.py ox_import_beat_schedules` reads your existing table and prints the
 registry entries and `create_schedule` calls it would take. It writes nothing:
 retiming production is a decision, so you read the output, edit it and apply it
-yourself.
+yourself. `--database` names the alias holding the `django_celery_beat`
+tables, not django-ox's; it defaults to the alias `OxSchedule` reads from.
 
 The interval difference is the one to watch. `every=timedelta(minutes=90)` fires
 at 00:00, 01:30, 03:00 and so on, whatever time you created it. Celery would

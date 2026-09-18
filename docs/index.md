@@ -28,8 +28,8 @@ own.
 The queue lives in your database, so enqueueing a task is a single INSERT on
 the database that holds `OxTask`, your default one unless you route it
 elsewhere. Enqueue inside a transaction on that database and you get a
-guarantee a broker cannot offer: **the task and your data commit or roll back
-together.**
+guarantee a broker cannot offer: **the task and every other row you write
+there commit or roll back together.**
 
 ```python
 from django.db import transaction
@@ -46,9 +46,10 @@ the transaction then rolls back, a worker races to process an order that
 does not exist. The standard workaround is wrapping every enqueue in
 `transaction.on_commit()`, and remembering to, everywhere, forever. With
 django-ox there is nothing to remember: a task enqueued inside
-`transaction.atomic()` becomes visible to workers only when the
-transaction commits, and disappears on rollback. There is no window where
-business data exists without its task, or a task without its data.
+`transaction.atomic()` on that database becomes visible to workers only
+when the transaction commits, and disappears on rollback. There is no
+window where business data written there exists without its task, or a
+task without its data.
 
 Execution is at-least-once. Workers claim tasks atomically (`SKIP LOCKED`
 on databases that support it, with a single-statement fast path on

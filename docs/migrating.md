@@ -79,7 +79,7 @@ send_confirmation.enqueue(order_id=42)
 
 | Celery | django-ox |
 | --- | --- |
-| Broker URL (Redis, RabbitMQ) | none. The queue is a table on your own database, the one your router sends `OxTask` to. |
+| Broker URL (Redis, RabbitMQ) | none. The queue is a table in your own database, your default one unless you route `OxTask` elsewhere. |
 | `celery -A proj worker` | `manage.py ox_worker` |
 | `celery -A proj beat` | nothing to run. Schedules go in `TASKS` and every worker dispatches them. See [Recurring tasks](recurring-tasks.md). |
 | `.delay(...)`, `.apply_async(...)` | `.enqueue(...)` |
@@ -93,7 +93,8 @@ One difference in behaviour to read before you switch. With a broker,
 rolls back, a worker can pick up an order that no longer exists. The usual fix
 is to wrap every call in `transaction.on_commit()`.
 
-Here the enqueue is an `INSERT` on your own connection. It commits or rolls back
+Here the enqueue is an `INSERT` on the database that holds `OxTask`, your
+default one. Open the transaction there and the task commits or rolls back
 with the row it belongs to, so there is nothing to wrap.
 
 Queues, priorities and `run_after` map directly. Celery's chains,
@@ -193,9 +194,10 @@ settings change and a drain, run in the same order as above with the roles
 reversed.
 
 One behaviour does not travel, and it needs deciding on the way in
-rather than on the way out. Enqueueing inside `transaction.atomic()` ties the
-task to that transaction, so it disappears on rollback. A broker-based backend
-cannot do this: the enqueue leaves your process the moment you call it. Code
+rather than on the way out. Enqueueing inside `transaction.atomic()` on the
+database that holds `OxTask` ties the task to that transaction, so it
+disappears on rollback. A broker-based backend cannot do this: the enqueue
+leaves your process the moment you call it. Code
 that depends on a rollback removing a task will behave differently once the
 queue lives in a broker, and it will do so quietly.
 

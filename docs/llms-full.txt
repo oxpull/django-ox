@@ -35,8 +35,8 @@ own.
 The queue lives in your database, so enqueueing a task is a single INSERT on
 the database that holds `OxTask`, your default one unless you route it
 elsewhere. Enqueue inside a transaction on that database and you get a
-guarantee a broker cannot offer: **the task and your data commit or roll back
-together.**
+guarantee a broker cannot offer: **the task and every other row you write
+there commit or roll back together.**
 
 ```python
 from django.db import transaction
@@ -53,9 +53,10 @@ the transaction then rolls back, a worker races to process an order that
 does not exist. The standard workaround is wrapping every enqueue in
 `transaction.on_commit()`, and remembering to, everywhere, forever. With
 django-ox there is nothing to remember: a task enqueued inside
-`transaction.atomic()` becomes visible to workers only when the
-transaction commits, and disappears on rollback. There is no window where
-business data exists without its task, or a task without its data.
+`transaction.atomic()` on that database becomes visible to workers only
+when the transaction commits, and disappears on rollback. There is no
+window where business data written there exists without its task, or a
+task without its data.
 
 Execution is at-least-once. Workers claim tasks atomically (`SKIP LOCKED`
 on databases that support it, with a single-statement fast path on
@@ -1124,7 +1125,8 @@ The shape is familiar. The differences that will surprise you:
 `manage.py ox_import_beat_schedules` reads your existing table and prints the
 registry entries and `create_schedule` calls it would take. It writes nothing:
 retiming production is a decision, so you read the output, edit it and apply it
-yourself.
+yourself. `--database` names the alias holding the `django_celery_beat`
+tables, not django-ox's; it defaults to the alias `OxSchedule` reads from.
 
 The interval difference is the one to watch. `every=timedelta(minutes=90)` fires
 at 00:00, 01:30, 03:00 and so on, whatever time you created it. Celery would
@@ -1219,9 +1221,9 @@ def register(request):
 ```
 
 No `transaction.on_commit()` here. The enqueue is an `INSERT` on the same
-connection, so the task becomes visible to workers only when the transaction
-commits. If `create_user` is rolled back further up, the email task disappears
-with it.
+database as the `User` row, your default one, so the task becomes visible to
+workers only when the transaction commits. If `create_user` is rolled back
+further up, the email task disappears with it.
 
 Pass the id, not the object. Arguments are stored as JSON, and a stale copy of a
 model is a bug waiting to happen.
@@ -1352,8 +1354,9 @@ queue the backend does not accept, a task bound to another backend, or an
 argument that will not serialise to JSON raises with nothing inserted. The
 rows go in one `INSERT` per 1,000 (SQLite caps the variables a statement can
 bind) inside one transaction, so a call of 5,000 commits all 5,000 or none,
-and inside your own `transaction.atomic()` it commits or rolls back with
-the rest of your work, as `enqueue()` does.
+and inside a `transaction.atomic()` opened on the database that holds
+`OxTask` it commits or rolls back with the rest of the work you write there,
+as `enqueue()` does.
 
 This is a bulk insert and nothing more. Grouping the
 tasks, reading their progress as one number and firing a callback when the
@@ -1548,7 +1551,7 @@ send_confirmation.enqueue(order_id=42)
 
 | Celery | django-ox |
 | --- | --- |
-| Broker URL (Redis, RabbitMQ) | none. The queue is a table on your own database, the one your router sends `OxTask` to. |
+| Broker URL (Redis, RabbitMQ) | none. The queue is a table in your own database, your default one unless you route `OxTask` elsewhere. |
 | `celery -A proj worker` | `manage.py ox_worker` |
 | `celery -A proj beat` | nothing to run. Schedules go in `TASKS` and every worker dispatches them. See [Recurring tasks](recurring-tasks.md). |
 | `.delay(...)`, `.apply_async(...)` | `.enqueue(...)` |
@@ -1562,7 +1565,8 @@ One difference in behaviour to read before you switch. With a broker,
 rolls back, a worker can pick up an order that no longer exists. The usual fix
 is to wrap every call in `transaction.on_commit()`.
 
-Here the enqueue is an `INSERT` on your own connection. It commits or rolls back
+Here the enqueue is an `INSERT` on the database that holds `OxTask`, your
+default one. Open the transaction there and the task commits or rolls back
 with the row it belongs to, so there is nothing to wrap.
 
 Queues, priorities and `run_after` map directly. Celery's chains,
@@ -1662,9 +1666,10 @@ settings change and a drain, run in the same order as above with the roles
 reversed.
 
 One behaviour does not travel, and it needs deciding on the way in
-rather than on the way out. Enqueueing inside `transaction.atomic()` ties the
-task to that transaction, so it disappears on rollback. A broker-based backend
-cannot do this: the enqueue leaves your process the moment you call it. Code
+rather than on the way out. Enqueueing inside `transaction.atomic()` on the
+database that holds `OxTask` ties the task to that transaction, so it
+disappears on rollback. A broker-based backend cannot do this: the enqueue
+leaves your process the moment you call it. Code
 that depends on a rollback removing a task will behave differently once the
 queue lives in a broker, and it will do so quietly.
 
@@ -1699,7 +1704,7 @@ fewer service. The last section says where django-ox is not the right fit.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `django.tasks` backend | Yes, native | Yes, native [^tdb-readme] | No. Issue #870 closed 2025-11-14 [^huey-870] | No. Issue #10062 closed 2026-02-03 [^celery-10062] | Pull request #315 open since 2026-02-04, last updated 2026-05-15 [^q2-315] | Not documented [^dq-guide] | Not documented; has its own Django integration [^proc-index] |
 | Broker needed | None. The queue is a table in your database | None. Django ORM [^tdb-readme] | Redis, SQLite, PostgreSQL, file or memory storage [^huey-guide] | RabbitMQ, Redis or SQS (stable); Zookeeper, Kafka, Pub/Sub (experimental). SQL databases are result backends only [^celery-brokers]. Issue #5149, PostgreSQL as a broker, open since 2018-10-25 with 95 upvotes [^celery-5149] | Redis (default), IronMQ, SQS, MongoDB or Django ORM [^q2-brokers] | RabbitMQ or Redis [^dq-guide] | None. PostgreSQL is the queue [^proc-index] |
-| Transactional enqueue | Yes. Enqueue is an INSERT on your connection; it commits or rolls back with your data | Not documented [^tdb-readme] | Not documented [^huey-guide] | No. Django's own docs name a background task as the case for `on_commit()` [^dj-oncommit] | Not documented [^q2-brokers] | No. Enqueue is a broker send [^dq-guide] | Not documented [^proc-django] |
+| Transactional enqueue | Yes. Enqueue is one INSERT on your default database; a task written inside `atomic()` commits or rolls back with the rows beside it | Not documented [^tdb-readme] | Not documented [^huey-guide] | No. Django's own docs name a background task as the case for `on_commit()` [^dj-oncommit] | Not documented [^q2-brokers] | No. Enqueue is a broker send [^dq-guide] | Not documented [^proc-django] |
 | Retries and backoff | Exponential backoff, `MAX_ATTEMPTS`, `BACKOFF_INITIAL`, `BACKOFF_MAX`; every attempt's traceback kept | No retry option in the README or the worker flags [^tdb-readme] [^tdb-worker] | `retries`, `retry_delay`, `retry_backoff` [^huey-guide] | `autoretry_for`, `retry_backoff`, `retry_backoff_max` (default 600 s), `retry_jitter` [^celery-tasks] | `max_attempts` (default 0, meaning unlimited) and a `retry` interval; backoff not documented [^q2-configure] | Exponential backoff; `max_retries` default 20, `min_backoff` 15 s, `max_backoff` 7 days [^dq-guide] | Retry strategy per task [^proc-index] |
 | Recurring schedules | Cron or a fixed interval in settings, or rows created and edited in the Django admin, limited to the tasks the code exposes; every worker dispatches, no scheduler process. See [Schedules in the database](stored-schedules.md) | None. Issue #259 open since 2026-08-10 [^tasks-259] | `periodic_task(crontab(...))` [^huey-guide] | `celery beat`, a separate process; "ensure only a single scheduler is running" [^celery-beat]. With `django-celery-beat` the schedules are rows that "can be managed from the Django Admin interface", and the field naming the task has no list to choose from [^beat-admin] | `Schedule` model, editable in admin; cron via croniter [^q2-schedules] | None built in; APScheduler recommended [^dq-cookbook] | `@app.periodic` [^proc-index] |
 | Priorities | -100 to 100 | Yes [^tdb-backend] | Yes; on Redis needs 5.0+ and `PriorityRedisHuey` [^huey-guide] | 0 to 255 on RabbitMQ and Redis [^celery-calling] | Not documented [^q2-configure] | Per actor; lower number runs first [^dq-guide] | Yes [^proc-index] |
@@ -3569,9 +3574,13 @@ TASKS = {
 - SIGTERM and SIGINT both drain and exit 0; a second signal forces an
   immediate exit with code 130.
 - `enqueue()` is one INSERT on the database the router sends `OxTask` to,
-  `default` unless you wrote a router. Inside `transaction.atomic()` on that
-  database the task is visible to workers only after commit and is gone on
-  rollback. Do not add `transaction.on_commit()` around it.
+  `default` unless you wrote a router. Two things make the commit joint: a
+  `transaction.atomic()` opened on that database, because a bare `atomic()`
+  opens on `default`; and the caller's own rows written there too. With both,
+  the task and those rows commit or roll back together, and the task is
+  visible to workers only after commit. Do not add `transaction.on_commit()`
+  around it. Rows written on another connection give two transactions, not
+  one.
 - Many calls of one task go through `django_ox.bulk.enqueue_many(task,
   [(args, kwargs), ...])`: one INSERT per 1,000 rows, one transaction, results
   in input order. Set queue, priority and `run_after` once with `.using(...)`.

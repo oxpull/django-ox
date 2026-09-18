@@ -13,10 +13,10 @@ Django ships the Tasks API but no production backend: the built-in
 `ImmediateBackend` and `DummyBackend` are for development and testing only.
 django-ox stores background tasks in the database you already run and executes
 them with a worker process. There is no broker to provision, secure, upgrade or
-back up, and `enqueue()` is an INSERT on the database that holds `OxTask`,
-your default one unless you route it elsewhere. A task enqueued inside
-`transaction.atomic()` on that database commits or rolls back with your data.
-No `transaction.on_commit()` needed.
+back up, and `enqueue()` is one INSERT on the database that holds `OxTask`,
+your default one unless you route it elsewhere. Open `transaction.atomic()`
+on that database and the task commits or rolls back with every other row you
+write there. No `transaction.on_commit()` needed.
 Comparing backends? See [Choosing a task backend](https://oxpull.com/django-ox/choosing/).
 
 ## Install
@@ -70,10 +70,11 @@ the queue is a table.
 
 ## Transactional enqueue
 
-`enqueue()` is a single INSERT on the connection the task table uses, so it
-participates in the caller's open transaction. A task enqueued inside
-`transaction.atomic()` becomes visible to workers only when the transaction
-commits, and disappears on rollback. There is no window where business data
+`enqueue()` is a single INSERT on the database that holds `OxTask`, your
+default one unless a router sends it elsewhere. Open `transaction.atomic()`
+on that database and the task becomes visible to workers only when the
+transaction commits, and disappears on rollback. Rows you write to that
+database in the same block go with it. There is no window where business data
 exists without its task, or a task without its data, and no
 `transaction.on_commit()` boilerplate. Execution is at-least-once: workers
 claim tasks with `SELECT ... FOR UPDATE SKIP LOCKED` on databases that support
@@ -126,7 +127,7 @@ each carrying a link and the date it was read on the
 | --- | --- | --- | --- | --- |
 | `django.tasks` backend | **Yes**, native | **Yes**, native | **No** | **No** |
 | Broker to run | **None.** The queue is a table in the database you already run | **None.** Django ORM | RabbitMQ, Redis or SQS | Redis, SQLite, PostgreSQL, file or memory |
-| Transactional enqueue | **Yes.** A task enqueued in `atomic()` commits or rolls back with your data | Not claimed | **No.** Django's own docs name this as the case for `on_commit()` | Not claimed |
+| Transactional enqueue | **Yes.** Enqueue is one INSERT on your default database; a task written inside `atomic()` commits or rolls back with the rows beside it | Not claimed | **No.** Django's own docs name this as the case for `on_commit()` | Not claimed |
 | Worker killed mid-task | **Retried.** The lease expires and the task goes back on the queue | **Stuck.** The task stays `PROCESSING`, never retried and never failed. Open since 2024-06-11 | **Lost** when the child process is killed, even with `acks_late` | **Lost.** "will not be retried automatically" |
 | Retries and backoff | **Exponential**, keeping every attempt's traceback | **None** | Yes | Yes |
 | Recurring schedules | **Cron or a fixed interval, and no scheduler process.** Editable in the Django admin, limited to the tasks your code exposes | **None** | `celery beat`, a separate process you must run exactly one of | Yes |
@@ -348,10 +349,12 @@ django-ox keeps all its own tables on one database, the one your router
 sends `OxTask` to. `django_ox.E008` reports a router that splits them.
 Under a router that sends reads to a replica, django-ox reads its own rows
 on the alias it writes them to. The admin has no way out of that: every
-page reads the primary, and no setting changes it. `ox_worker`, `ox_prune`,
-`ox_health` and `ox_import_beat_schedules` take `--database` to name the
-alias to work on. That flag is not checked against the router, and nothing
-warns, so leave it unset unless you mean it. See
+page reads the primary, and no setting changes it. `ox_worker`, `ox_prune`
+and `ox_health` take `--database` to name the alias django-ox works on. It
+defaults to the alias the router sends `OxTask` writes to, `default` unless
+you wrote a router. The flag is not checked against the router: a worker
+pointed at another alias works there and nothing warns, so leave it unset
+unless you mean it. See
 [Read replicas](https://oxpull.com/django-ox/configuration/#read-replicas).
 
 Batches, unique tasks, rate limiting and workflows are in

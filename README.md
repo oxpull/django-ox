@@ -343,8 +343,11 @@ bounded with `TASK_TIMEOUT`).
 django-ox keeps all its own tables on one database, the one your router
 sends `OxTask` to. `django_ox.E008` reports a router that splits them.
 Under a router that sends reads to a replica, django-ox reads its own rows
-on the alias it writes them to. `ox_prune`, `ox_health` and `ox_worker`
-take `--database` to name the alias to work on. See
+on the alias it writes them to. The admin has no way out of that: every
+page reads the primary, and no setting changes it. `ox_prune`, `ox_health`
+and `ox_worker` take `--database` to name the alias to work on. That flag
+is not checked against the router, and nothing warns, so leave it unset
+unless you mean it. See
 [Read replicas](https://oxpull.com/django-ox/configuration/#read-replicas).
 
 Batches, unique tasks, rate limiting and workflows are in

@@ -71,6 +71,7 @@ def test_command_passes_flags_to_worker(recorded_worker):
         "lock_timeout": 60.0,
         "worker_index": None,
         "parent_pid": None,
+        "db_alias": "default",
     }
 
 
@@ -148,8 +149,10 @@ def test_worker_args_carry_every_flag_but_processes():
         "verbosity": 1,
         "processes": 3,
     }
-    assert ox_worker.worker_args(options) == [
+    assert ox_worker.worker_args(options, "default") == [
         "--backend",
+        "default",
+        "--database",
         "default",
         "--concurrency",
         "4",
@@ -184,7 +187,7 @@ def test_worker_args_forward_djangos_global_flags():
         "no_color": True,
         "force_color": False,
     }
-    args = ox_worker.worker_args(options)
+    args = ox_worker.worker_args(options, "default")
     assert args[-3:] == ["--skip-checks", "--traceback", "--no-color"]
     assert "--force-color" not in args
 
@@ -202,7 +205,7 @@ def test_worker_args_forward_settings_and_pythonpath(tmp_path, monkeypatch):
         "settings": "myproj.settings",
         "pythonpath": "src",
     }
-    args = ox_worker.worker_args(options)
+    args = ox_worker.worker_args(options, "default")
     assert args[-4:] == [
         "--settings",
         "myproj.settings",

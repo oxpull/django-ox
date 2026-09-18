@@ -2,11 +2,12 @@ import json
 from datetime import timedelta
 from typing import Any, NoReturn
 
-from django.core.management.base import BaseCommand, CommandError, CommandParser
+from django.core.management.base import CommandError, CommandParser
 from django.db import DatabaseError
 
 from django_ox import stats
 from django_ox.durations import parse_seconds
+from django_ox.management._database import DatabaseCommand
 
 
 def _seconds(value: timedelta | None) -> str:
@@ -17,7 +18,7 @@ def _total_seconds(value: timedelta | None) -> float | None:
     return None if value is None else value.total_seconds()
 
 
-class Command(BaseCommand):
+class Command(DatabaseCommand):
     help = (
         "Check queue health. Exits 0 when every enabled check passes, "
         "non-zero with a one-line reason otherwise. With no flags, only "
@@ -25,6 +26,7 @@ class Command(BaseCommand):
     )
 
     def add_arguments(self, parser: CommandParser) -> None:
+        super().add_arguments(parser)
         parser.add_argument(
             "--format",
             choices=["text", "json"],
@@ -55,9 +57,9 @@ class Command(BaseCommand):
             type=parse_seconds,
             default=None,
             help=(
-                "Fail when the oldest task waiting to run has waited longer "
-                "than this since becoming eligible. Accepts 7d, 24h, 90m, 45s, "
-                "or a plain number of seconds (default: no age check)."
+                "Fail when a READY task has been eligible to run for longer "
+                "than this. Accepts 7d, 24h, 90m, 45s, or a plain number of "
+                "seconds (default: no age check)."
             ),
         )
         parser.add_argument(
@@ -74,6 +76,28 @@ class Command(BaseCommand):
             ),
         )
 
+    #: Set once an object has been printed, so a failure before handle()
+    #: is reported and one inside it is not reported twice.
+    _reported = False
+
+    def execute(self, *args: Any, **options: Any) -> Any:
+        """
+        Report a failure before `handle()` in the format that was asked for.
+
+        The system checks run first, and scoping them to one alias is what
+        opens the connection, so a database that is down ends the command
+        there. Without this, `--format json` against one prints nothing on
+        stdout, where it is documented to print an object with the figures
+        null and the reason in `problems`. A healthcheck reads that object,
+        and a healthcheck is what this flag is for.
+        """
+        try:
+            return super().execute(*args, **options)
+        except CommandError as exc:
+            if options.get("format") == "json" and not self._reported:
+                self._write_json(options.get("queue"), None, None, None, [str(exc)])
+            raise
+
     def handle(self, *args: Any, **options: Any) -> None:
         max_backlog: int | None = options["max_backlog"]
         max_age: float | None = options["max_age"]
@@ -86,6 +110,14 @@ class Command(BaseCommand):
                 self._write_json(queue, None, None, None, [reason])
             raise CommandError(reason)
 
+        # Once: the three figures below are three readings of one queue, so
+        # they come from one alias rather than one each. Reported the way
+        # the other bad arguments are, so --format json still gets an object.
+        try:
+            alias = self.database(options)
+        except CommandError as exc:
+            _invalid(str(exc))
+
         if max_backlog is not None and max_backlog < 0:
             _invalid("--max-backlog must be zero or a positive integer.")
         if max_age is not None and max_age <= 0:
@@ -94,9 +126,9 @@ class Command(BaseCommand):
             _invalid("--worker-timeout must be a positive number of seconds.")
 
         try:
-            backlog = stats.ready_count(queue)
-            oldest = stats.oldest_ready_age(queue)
-            claim_age = stats.last_claim_age(queue)
+            backlog = stats.ready_count(queue, using=alias)
+            oldest = stats.oldest_ready_age(queue, using=alias)
+            claim_age = stats.last_claim_age(queue, using=alias)
         except DatabaseError as exc:
             reason = f"Database unreachable: {exc}"
             if as_json:
@@ -112,7 +144,7 @@ class Command(BaseCommand):
             and oldest.total_seconds() > max_age
         ):
             problems.append(
-                f"oldest waiting task is {_seconds(oldest)} old, "
+                f"oldest ready task is {_seconds(oldest)} old, "
                 f"over --max-age {max_age:g}s"
             )
         if worker_timeout is not None:
@@ -147,6 +179,7 @@ class Command(BaseCommand):
         claim_age: timedelta | None,
         problems: list[str],
     ) -> None:
+        self._reported = True
         self.stdout.write(
             json.dumps(
                 {

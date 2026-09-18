@@ -10,9 +10,10 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from django.core.management.base import BaseCommand, CommandError, CommandParser
+from django.core.management.base import CommandError, CommandParser
 
 from django_ox.compat import DEFAULT_TASK_BACKEND_ALIAS
+from django_ox.management._database import DatabaseCommand
 from django_ox.supervisor import STOP_SIGNALS, SUPERVISOR_PID_ENV, Supervisor
 from django_ox.timeouts import RECYCLE_EXIT_CODE
 from django_ox.worker import Worker, worker_class
@@ -20,10 +21,18 @@ from django_ox.worker import Worker, worker_class
 logger = logging.getLogger("django_ox")
 
 
-class Command(BaseCommand):
+class Command(DatabaseCommand):
     help = "Run a django-ox worker that executes tasks from the database queue."
 
+    # A worker outlives the database it works on. The poll that cannot
+    # reach it logs and waits, so a restart costs a pass rather than the
+    # process, and that is worth more here than a startup check: an exit
+    # would hand a restarting worker straight back to the same unreachable
+    # database, and a process manager gives up after a few of those.
+    checks_the_database = False
+
     def add_arguments(self, parser: CommandParser) -> None:
+        super().add_arguments(parser)
         parser.add_argument(
             "--backend",
             default=DEFAULT_TASK_BACKEND_ALIAS,
@@ -81,6 +90,9 @@ class Command(BaseCommand):
         supervisor_pid = os.environ.pop(SUPERVISOR_PID_ENV, None)
         if options["processes"] < 1:
             raise CommandError("--processes must be at least 1.")
+        # Before the supervisor branch, so a bad alias is reported by the
+        # parent rather than by every child it starts.
+        alias = self.database(options)
         if options["verbosity"] > 0 and not logger.handlers:
             handler = logging.StreamHandler(self.stderr)
             handler.setFormatter(
@@ -99,7 +111,7 @@ class Command(BaseCommand):
                 )
             supervisor = Supervisor(
                 processes=options["processes"],
-                worker_args=worker_args(options),
+                worker_args=worker_args(options, alias),
             )
             for signum in STOP_SIGNALS:
                 signal.signal(signum, supervisor.handle_signal)
@@ -131,6 +143,7 @@ class Command(BaseCommand):
             lock_timeout=options["lock_timeout"],
             worker_index=options["worker_index"],
             parent_pid=parent_pid,
+            db_alias=alias,
         )
 
         retire_signal_thread = install_stop_handlers(worker)
@@ -252,11 +265,16 @@ def _die_with_parent() -> None:
         return
 
 
-def worker_args(options: dict[str, Any]) -> list[str]:
+def worker_args(options: dict[str, Any], alias: str) -> list[str]:
     """The flags a child process needs to be this worker, minus --processes."""
     args = [
         "--backend",
         options["backend"],
+        # Named rather than left to each child to resolve: one router that
+        # answers differently in two processes would split the fleet across
+        # two databases without saying so.
+        "--database",
+        alias,
         "--concurrency",
         str(options["concurrency"]),
         "--interval",

@@ -8,9 +8,10 @@ from django.contrib.auth.models import Permission, User
 from django.urls import reverse
 from django.utils import timezone
 
+from django_ox import _waiting
 from django_ox.models import OxTask
 
-from .tasks import STATE, add, fail_always
+from .tasks import STATE, add, echo, fail_always
 
 
 @pytest.fixture
@@ -187,3 +188,41 @@ class TestActions:
         assert len(updates) == 20
         assert len(ctx) < 60
         assert OxTask.objects.filter(status=OxTask.Status.DISCARDED).count() == 10000
+
+
+@pytest.mark.django_db
+class TestWaitingRows:
+    def test_waiting_is_filtered_displayed_skipped_by_retry_and_discarded(
+        self, admin_client
+    ):
+        held = _waiting.enqueue(add, [1, 2], {}, using="default")
+        echo.enqueue("ready")
+
+        body = admin_client.get(reverse(CHANGELIST)).content.decode()
+        assert '<td class="field-status">Waiting</td>' in body
+        assert "?status__exact=WAITING" in body
+
+        response = admin_client.get(reverse(CHANGELIST), {"status__exact": "WAITING"})
+        body = response.content.decode()
+        assert "tests.tasks.add" in body
+        assert "tests.tasks.echo" not in body
+
+        response = admin_client.post(
+            reverse(CHANGELIST),
+            {"action": "retry_selected", "_selected_action": [held.id]},
+            follow=True,
+        )
+        messages = [str(m) for m in response.context["messages"]]
+        assert "Retried 0 task(s)." in messages
+        assert "Skipped 1 task(s) whose status did not allow it." in messages
+        assert OxTask.objects.get(pk=held.id).status == OxTask.Status.WAITING
+
+        response = admin_client.post(
+            reverse(CHANGELIST),
+            {"action": "discard_selected", "_selected_action": [held.id]},
+            follow=True,
+        )
+        messages = [str(m) for m in response.context["messages"]]
+        assert "Discarded 1 task(s)." in messages
+        assert not any(message.startswith("Skipped") for message in messages)
+        assert OxTask.objects.get(pk=held.id).status == OxTask.Status.DISCARDED

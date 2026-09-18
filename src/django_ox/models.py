@@ -1,15 +1,18 @@
 import uuid
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
-from django.db import models
+from django.db import models, router
 
 
 class OxTask(models.Model):
     """
     A queued task and its result record.
 
-    Rows double as the durable queue and the result store. Four of the six
+    Rows double as the durable queue and the result store. Four of the seven
     status values mirror django.tasks.TaskResultStatus, so conversion is a
-    plain value cast; LOST and DISCARDED are django-ox's own and are
+    plain value cast; LOST, DISCARDED and WAITING are django-ox's own and are
     translated at the boundary by django_ox.results.
     """
 
@@ -26,12 +29,17 @@ class OxTask(models.Model):
         # pending, so completion counting terminates; see results.py for
         # what callers of django.tasks see.
         LOST = "LOST"
-        # Written only by django_ox.actions.discard, on a READY, FAILED or
-        # LOST row. An operator closed the task without running it: a
-        # READY row never runs, a FAILED or LOST row is not retried.
-        # Terminal, never claimed, never written by a worker. Its previous
-        # attempts keep their records.
+        # Written by django_ox.actions.discard on a READY, WAITING, FAILED or
+        # LOST row, and by django_ox._waiting, which django-ox itself never
+        # calls, when a package built on django-ox cancels a task that has
+        # not run. Settled: never claimed and never written by a worker. The
+        # row does not run or retry unless django_ox._waiting revives it to
+        # WAITING. Its previous attempts keep their records.
         DISCARDED = "DISCARDED"
+        # Written only by django_ox._waiting, which django-ox itself never
+        # calls. Never claimed, reaped or pruned. Appended after DISCARDED so
+        # the existing members keep their order.
+        WAITING = "WAITING"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
@@ -161,6 +169,54 @@ class OxScheduleTick(models.Model):
         return f"{self.schedule_name} @ {self.scheduled_for:%Y-%m-%d %H:%M}"
 
 
+#: The alias the validation running in this thread reads, while one runs.
+_validating_on: ContextVar[str | None] = ContextVar(
+    "django_ox_validating_on", default=None
+)
+
+
+@contextmanager
+def validate_against(alias: str) -> Iterator[None]:
+    """
+    Validate a schedule against `alias` for the length of this block.
+
+    An operation resolves its alias once and writes every statement to it.
+    Validation is the one part it cannot hand the alias to directly:
+    `full_clean()` takes no alias, and the uniqueness query Django builds
+    underneath it names none, so it follows `db_for_read` to wherever the
+    router sends reads. This is how the operation's own alias reaches it.
+
+    A context variable rather than an argument, because the frame in
+    between is Django's. It is per thread and per task, so a worker
+    validating on one connection cannot move another's.
+    """
+    token = _validating_on.set(alias)
+    try:
+        yield
+    finally:
+        _validating_on.reset(token)
+
+
+class OxScheduleManager(models.Manager["OxSchedule"]):
+    """
+    The default manager, which answers a validation's alias while one runs.
+
+    Django's uniqueness check builds its query from
+    `_default_manager.filter(...)`, which names no alias. This is the seam
+    that lets `validate_against` reach it without reimplementing the check
+    itself, and it changes nothing outside a validation: with no alias set
+    the queryset is the ordinary one, and an explicit `.using()` or
+    `db_manager()` still wins.
+    """
+
+    def get_queryset(self) -> models.QuerySet["OxSchedule"]:
+        queryset = super().get_queryset()
+        alias = _validating_on.get()
+        if alias is None or self._db is not None:
+            return queryset
+        return queryset.using(alias)
+
+
 class OxSchedule(models.Model):
     """
     A recurring schedule stored as a row, so it can be changed without a
@@ -233,6 +289,8 @@ class OxSchedule(models.Model):
     created_at = models.DateTimeField()
     updated_at = models.DateTimeField()
 
+    objects = OxScheduleManager()
+
     class Meta:
         constraints = [
             models.CheckConstraint(
@@ -255,6 +313,26 @@ class OxSchedule(models.Model):
         from .stored import validate_schedule
 
         validate_schedule(self)
+
+    def validate_unique(self, exclude: Collection[str] | None = None) -> None:
+        """
+        Check the name against the database this row is written to.
+
+        Django's uniqueness query names no alias, so under a router that
+        sends reads to a replica it asks the replica whether the name is
+        taken. A replica that is behind does not hold the name yet, the
+        check passes, and the INSERT on the primary raises IntegrityError:
+        through the admin that is a server error where the person should
+        have been told the name is already in use.
+
+        The unique index stays and the error path stays. Validation cannot
+        win a race against an insert that commits between the check and
+        the write, wherever it reads; what asking the right database buys
+        is that the ordinary duplicate is a field error again.
+        """
+        alias = _validating_on.get() or router.db_for_write(type(self))
+        with validate_against(alias):
+            super().validate_unique(exclude=exclude)
 
 
 class OxScheduleChange(models.Model):

@@ -56,10 +56,20 @@ def public_status(db_status: str) -> TaskResultStatus:
     """
     Translate a stored status into one of django.tasks' four values.
 
-    Four of the six map straight across. LOST has no counterpart: it says
+    Four of the seven map straight across. LOST has no counterpart: it says
     the worker holding the task stopped reporting and nobody observed the
-    outcome. DISCARDED has none either: an operator closed the task without
-    running it. Both map to FAILED, and is_finished is true for both.
+    outcome. DISCARDED has none either: the task was closed without running.
+    Both map to FAILED, and is_finished is true for both.
+
+    WAITING has no counterpart either. The task has not run, and no worker
+    will claim it until something outside the worker releases it. It maps to
+    READY, so is_finished is false. The mapping loses a distinction: through
+    django.tasks, READY means not finished, not that a worker can take the
+    task now. The row's own status keeps the difference.
+
+    Any other value raises ValueError, as the cast always has. A reader that
+    does not know a status cannot tell whether the task finished, and READY
+    would keep a loop polling a task that already has.
 
     LOST maps to FAILED because READY and RUNNING are instructions to come back
     later, and nothing is coming: the attempts are spent, no worker will
@@ -78,6 +88,8 @@ def public_status(db_status: str) -> TaskResultStatus:
 
     if db_status in (OxTask.Status.LOST, OxTask.Status.DISCARDED):
         return TaskResultStatus.FAILED
+    if db_status == OxTask.Status.WAITING:
+        return TaskResultStatus.READY
     return TaskResultStatus(db_status)
 
 

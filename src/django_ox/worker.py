@@ -484,6 +484,7 @@ class Worker:
         parent_pid: int | None = None,
         task_timeout: float | None = None,
         task_timeout_grace: float | None = None,
+        db_alias: str | None = None,
     ) -> None:
         backend = task_backends[backend_alias]
         if not isinstance(backend, OxBackend):
@@ -533,9 +534,11 @@ class Worker:
             if recycle_drain_budget is not None
             else self.lock_timeout
         )
-        # A third of the timeout leaves room for two consecutive renewals to
-        # be missed (a slow query, a blip, one skipped scheduling slot)
-        # before the reaper is entitled to conclude anything.
+        # A third of the timeout leaves room for one missed renewal (a slow
+        # query, a blip, one skipped scheduling slot) and no more. The loop
+        # waits this interval after each renewal rather than firing on a
+        # fixed schedule, so a round costs the wait plus the UPDATE and three
+        # of them always exceed the lease.
         self.renew_interval: float = (
             renew_interval
             if renew_interval is not None
@@ -599,7 +602,12 @@ class Worker:
             f"{socket.gethostname()[:40]}-{os.getpid()}-{get_random_string(8)}{suffix}"
         )
         self._stop = Event()
-        self._db_alias = router.db_for_write(OxTask)
+        # Resolved once, here, and every statement this worker runs goes to
+        # it. ox_worker --database sets it; otherwise it is the alias the
+        # router sends OxTask writes to.
+        self._db_alias = (
+            db_alias if db_alias is not None else router.db_for_write(OxTask)
+        )
         # (pk, lease_epoch) of every execution running right now, added and
         # removed by execute(). Renewal reads it rather than renewing
         # everything stamped with this worker_id, so a row whose execution
@@ -866,7 +874,15 @@ class Worker:
                 # mirrored onto the instance from here; re-read the row so
                 # the instance and the row agree. The PostgreSQL path gets
                 # this for free from RETURNING *.
-                candidate.refresh_from_db()
+                #
+                # On the alias the claim was written to, and the alias is
+                # what makes this a read of the row it just claimed.
+                # Unqualified, it follows db_for_read: under a router that
+                # splits reads from writes the worker is handed the row as
+                # it stood before the claim, runs the task holding a lease
+                # the row no longer has, and its own finish write is fenced
+                # out. This branch is every claim on MySQL and MariaDB.
+                candidate.refresh_from_db(using=self._db_alias)
                 return candidate
         # Optimistic compare-and-set. attempts and lease_epoch double as
         # version counters: if another worker claimed (and possibly

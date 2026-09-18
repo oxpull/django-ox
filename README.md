@@ -351,10 +351,10 @@ Under a router that sends reads to a replica, django-ox reads its own rows
 on the alias it writes them to. The admin has no way out of that: every
 page reads the primary, and no setting changes it. `ox_worker`, `ox_prune`
 and `ox_health` take `--database` to name the alias django-ox works on. It
-defaults to the alias the router sends `OxTask` writes to, `default` unless
-you wrote a router. The flag is not checked against the router: a worker
-pointed at another alias works there and nothing warns, so leave it unset
-unless you mean it. See
+defaults to the alias `OxTask` writes to, `default` unless you wrote a
+router. The flag is not checked against the router: a worker pointed at
+another alias works there and nothing warns, so leave it unset unless you
+mean it. See
 [Read replicas](https://oxpull.com/django-ox/configuration/#read-replicas).
 
 Batches, unique tasks, rate limiting and workflows are in

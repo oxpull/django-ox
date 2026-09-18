@@ -73,7 +73,13 @@ include = [
     "/CHANGELOG.md",
     "/pyproject.toml",
 ]
-exclude = ["**/__pycache__", "**/*.pyc", "/.gitignore"]
+exclude = ["**/__pycache__", "**/*.pyc"]
+
+# Hatchling force-includes the repository's .gitignore in every sdist, and a
+# forced include is not subject to `exclude`. hatch_build.py drops it.
+# hatch_build.py itself ships, so an unpacked sdist still builds.
+[tool.hatch.build.targets.sdist.hooks.custom]
+path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/django_ox"]

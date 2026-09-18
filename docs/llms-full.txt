@@ -3928,6 +3928,9 @@ question from a constant, so a PostgreSQL alias is unaffected.
 - A worker ended by a second stop signal exits with code 130 without
   logging `second signal received; forcing exit.` first; the
   `--processes` supervisor still logs its own line.
+- The source distribution no longer carries the repository's `.gitignore`. It
+  carries the package, the licence, the README, the changelog and the files
+  that build it.
 
 ### Fixed
 

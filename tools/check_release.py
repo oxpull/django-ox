@@ -23,9 +23,10 @@ The built archives (`check_dist`), which the source tree cannot show:
      one is invisible until somebody upgrades and their table lacks a column,
      and no test that imports from the source tree can see it.
   8. Both carry the licence and the worker module.
+  9. The sdist carries no VCS ignore file.
 
 The documentation site (`check_docs`), which publishes on its own schedule:
-  9. The changelog has nothing unreleased. The site is one unversioned site
+ 10. The changelog has nothing unreleased. The site is one unversioned site
      deployed by hand, so a deploy from a tree ahead of PyPI would describe
      behaviour nobody can install.
 
@@ -55,6 +56,14 @@ EXPECTED_URL_KEYS = {"Homepage", "Documentation", "Repository", "Changelog", "Is
 # fail here rather than ship. oxpull.com is the canonical site;
 # oxpull.github.io stays because it still serves and redirects.
 ALLOWED_HOSTS = {"github.com", "oxpull.com", "oxpull.github.io", "pypi.org"}
+
+# .gitignore names the directories the repository keeps to itself, and the
+# sdist is published. Hatchling force-includes VCS ignore files in every sdist
+# and a forced include is not subject to `exclude`, so the target declared an
+# exclusion that did nothing and earlier releases shipped the file. The build
+# hook in hatch_build.py drops them; this reads the archive rather than
+# trusting the configuration.
+VCS_IGNORE_FILES = (".gitignore", ".hgignore")
 
 
 def fail(message: str) -> str:
@@ -226,6 +235,20 @@ def _archive_members(path: Path) -> list[str] | None:
         return None
 
 
+def check_sdist_ignore_files(path: Path, members: list[str]) -> list[str]:
+    """No VCS ignore file is in the sdist."""
+    return [
+        fail(
+            f"{path.name} carries {name.rsplit('/', 1)[-1]}. That names "
+            "directories the repository keeps to itself, and the sdist is "
+            "published. The sdist build hook in hatch_build.py is what drops "
+            "it; `exclude` cannot."
+        )
+        for name in sorted(members)
+        if name.rsplit("/", 1)[-1] in VCS_IGNORE_FILES
+    ]
+
+
 def check_dist(
     dist: Path, version: str, migrations: set[str] | None = None
 ) -> tuple[list[str], list[str]]:
@@ -291,6 +314,12 @@ def check_dist(
                         "expects, and nothing before install can see that."
                     )
                 )
+
+            if kind == "sdist":
+                ignore_problems = check_sdist_ignore_files(path, members)
+                problems.extend(ignore_problems)
+                if not ignore_problems:
+                    notes.append(f"{path.name}: carries no VCS ignore file")
 
     return problems, notes
 

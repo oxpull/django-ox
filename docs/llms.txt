@@ -166,6 +166,11 @@ Operational facts to get right:
 
 - [Home](https://oxpull.com/django-ox/): install, quickstart, transactional
   enqueue, scope.
+- [Background tasks, step by step](https://oxpull.com/django-ox/background-tasks/):
+  Django background tasks from an empty project to a running worker, on
+  Django 5.2 and 6.0: install, a task enqueued from a view inside
+  `transaction.atomic()`, the worker's output, the admin page, a retry, a
+  recurring task, production notes. Every command shown with its output.
 - [Configuration](https://oxpull.com/django-ox/configuration/): the `TASKS`
   entry, every `OPTIONS` key, `ox_worker`, `ox_prune` and `ox_health` flags,
   system checks.

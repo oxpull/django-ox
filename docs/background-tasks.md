@@ -22,8 +22,6 @@ A project called `myproject` with one app, `accounts`:
 - The Django admin page that lists every task with its attempts and
   tracebacks.
 
-Plan on twenty minutes.
-
 ## Prerequisites
 
 - Python 3.12 or later.

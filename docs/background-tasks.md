@@ -1,26 +1,16 @@
-# Django background tasks, step by step: django-ox on Django 5.2 and 6.0
+# Django background tasks, step by step
 
-Build a Django project that saves a user and queues their welcome email in
-the same database transaction, then sends it from a background worker. It
-uses Django's Tasks framework (`django.tasks`) with django-ox as the backend.
-The queue is a table in the database your project already has, the worker is
-a management command, and there is no Redis, RabbitMQ or Celery to install.
+Send a welcome email without running Redis or RabbitMQ. This guide uses django-ox to queue Django tasks in your existing database and run them with a worker. If a worker dies, its unfinished tasks return to the queue.
 
-Every command and every block of output below was run as written, on
-Django 6.0 with SQLite. Where Django 5.2 LTS differs, the guide says so.
+You will save a user and enqueue their welcome email inside the same `transaction.atomic()` block. Both rows commit, or neither does. No task is left behind for a signup that rolled back.
+
+Every command and output block below was run as written on Django 6.0 with SQLite. The guide calls out the changes for Django 5.2 LTS. django-ox also supports Django 6.1 and requires Python 3.12+.
 
 ## What you will build
 
-A project called `myproject` with one app, `accounts`:
+A project called `myproject` with an `accounts` app. Its `register` view creates a user and queues their welcome email in one database transaction. A background worker sends the email, printed to its terminal for this walk-through.
 
-- A `register` view that creates a user and enqueues a welcome email inside
-  one database transaction.
-- A worker that sends the email. In this walk-through the email prints to
-  the worker's terminal.
-- A task that fails on its first attempt and succeeds on the retry.
-- A recurring task that runs every minute, standing in for a nightly report.
-- The Django admin page that lists every task with its attempts and
-  tracebacks.
+Then you will watch a failed task succeed on retry, schedule a task to run every minute as a stand-in for a nightly report, and inspect the tasks, attempts and tracebacks in Django admin.
 
 ## Prerequisites
 

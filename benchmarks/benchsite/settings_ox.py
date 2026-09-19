@@ -28,11 +28,17 @@ TASKS = {
     }
 }
 
+# Capped at WARNING on the handler as well as the loggers, so a worker that
+# raises a logger's level at its default verbosity still writes no per-task
+# INFO lines. "django.tasks" is the framework's own logger (its signal
+# receivers log one line per task start and finish). Same shape as
+# settings_tasksdb.py.
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
-    "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "handlers": {"console": {"class": "logging.StreamHandler", "level": "WARNING"}},
     "loggers": {
+        "django.tasks": {"handlers": ["console"], "level": "WARNING"},
         "django_ox": {"handlers": ["console"], "level": "WARNING"},
     },
 }

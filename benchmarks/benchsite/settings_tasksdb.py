@@ -1,6 +1,6 @@
 """Benchmark settings: django-tasks-db backend on PostgreSQL 16 (container ox-bench).
 
-Configured per the django-tasks-db 0.12.0 README (its packaged METADATA):
+Configured per the django-tasks-db 0.13.0 README (its packaged METADATA):
 INSTALLED_APPS gets "django_tasks_db", TASKS points at
 "django_tasks_db.DatabaseBackend". Everything else is left at defaults.
 """
@@ -31,12 +31,18 @@ TASKS = {
     }
 }
 
+# Capped at WARNING on the handler as well as the loggers. db_worker sets
+# both "django.tasks" (the core framework logger since 0.13.0; "django_tasks"
+# was the backport's) and "django_tasks_db" to INFO at its default
+# verbosity, which overrides a cap on the logger alone; the handler cap
+# keeps the framework's per-task lines out of the worker logs. Same shape
+# as settings_ox.py.
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
-    "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "handlers": {"console": {"class": "logging.StreamHandler", "level": "WARNING"}},
     "loggers": {
-        "django_tasks": {"handlers": ["console"], "level": "WARNING"},
+        "django.tasks": {"handlers": ["console"], "level": "WARNING"},
         "django_tasks_db": {"handlers": ["console"], "level": "WARNING"},
     },
 }

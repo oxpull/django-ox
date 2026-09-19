@@ -1,9 +1,8 @@
 # Pro
 
-django-ox is free, open source (BSD 3-Clause), and stays that way. The
-durable queue, transactional enqueue, retries, reaper, graceful drain,
-priorities, deferred tasks, recurring tasks and pruning are the free tier,
-permanently. Nothing that works today moves behind the paid tier.
+django-ox is free and open source (BSD 3-Clause). The durable queue,
+transactional enqueue, retries, reaper, graceful drain, priorities, deferred
+tasks, recurring tasks and pruning are in the free package.
 
 **Oxpull Pro** is a paid add-on for four problems that show up once a queue
 is carrying real volume. All four are built and tested. <https://oxpull.com/> has the details.
@@ -103,17 +102,18 @@ lapses, what is deployed keeps running.
 
 ## Pricing
 
-Planned at **$399 per year, per company**, flat. One licence to cover a whole
-organisation and every environment, with a seven-day money-back period. The
-term is 12 months and renews for successive 12-month terms unless you cancel.
-Cancel by writing to support@oxpull.com. Cancellation takes effect at the end
-of the period you have paid for. The full terms are stated at purchase.
+**$399 per year, per company**, excluding VAT where it applies. One licence
+covers a whole organisation and every environment. The term is 12 months and
+renews for successive 12-month terms unless you cancel. Cancel by writing to
+support@oxpull.com. Cancellation takes effect at the end of the period you
+have paid for. The full terms are stated at purchase.
 
-## Waitlist
+## Ordering
 
-If Pro would earn its keep in your deployment, say which of the features
-above you would turn on first and what your queue looks like. That shapes the
-docs and examples we write next. Join the waitlist below, or write to
-support@oxpull.com.
+Order at [oxpull.com](https://oxpull.com/#order) with your company name, a
+contact name, an email address, the billing address and, if you have one, a
+VAT ID for the invoice. The invoice goes out within two business days. When it
+is paid, the credentials for the private package index arrive by email, and
+install is `pip install`. Questions to support@oxpull.com.
 
-[Join the Pro waitlist](https://oxpull.com/#waitlist){ .md-button }
+[Order Pro](https://oxpull.com/#order){ .md-button }

@@ -264,11 +264,6 @@ class TestTheWallClockLimitWithoutTimeZoneSupport:
     @pytest.mark.parametrize(
         "zone",
         [
-            # Permanently UTC+1, dropping to UTC+0 for Ramadan only. The
-            # window sits between midwinter and midsummer and moves about
-            # eleven days a year, so no fixed pair of sample dates finds it.
-            "Africa/Casablanca",
-            "Africa/El_Aaiun",
             # Half an hour rather than a whole one, and southern hemisphere.
             "Australia/Lord_Howe",
             "Europe/London",

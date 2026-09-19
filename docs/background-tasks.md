@@ -125,7 +125,9 @@ A task is a function with the `@task` decorator. Put it in a module called
 # accounts/tasks.py
 from django.contrib.auth.models import User
 from django.core.mail import send_mail
-from django.tasks import task  # Django 6.0+. On Django 5.2: from django_tasks import task
+
+# Django 6.0+. On Django 5.2: from django_tasks import task
+from django.tasks import task
 
 
 @task
@@ -213,7 +215,7 @@ from django.contrib import admin
 from django.urls import include, path
 
 urlpatterns = [
-    path('admin/', admin.site.urls),
+    path("admin/", admin.site.urls),
     path("", include("accounts.urls")),
 ]
 ```
@@ -271,7 +273,6 @@ Watch that happen. In the shell from Step 2:
 ...         raise RuntimeError("something after the enqueue failed")
 ... except RuntimeError:
 ...     pass
-...
 >>> User.objects.filter(username="carol").exists()
 False
 >>> OxTask.objects.count()

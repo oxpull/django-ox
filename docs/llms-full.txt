@@ -213,11 +213,11 @@ BSD 3-Clause.
 
 # Django background tasks, step by step: django-ox on Django 5.2 and 6.0
 
-This guide takes you from an empty Django project to background tasks
-running in a worker, using Django's Tasks framework (`django.tasks`) with
-django-ox as the backend. You will not install Redis, RabbitMQ or Celery.
-The queue is a table in the database your project already has, and the
-worker is a management command.
+Build a Django project that saves a user and queues their welcome email in
+the same database transaction, then sends it from a background worker. It
+uses Django's Tasks framework (`django.tasks`) with django-ox as the backend.
+The queue is a table in the database your project already has, the worker is
+a management command, and there is no Redis, RabbitMQ or Celery to install.
 
 Every command and every block of output below was run as written, on
 Django 6.0 with SQLite. Where Django 5.2 LTS differs, the guide says so.

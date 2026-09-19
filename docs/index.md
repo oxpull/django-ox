@@ -1,14 +1,19 @@
-# django-ox
+# Django tasks in your database
 
-A database-backed worker backend for Django's Tasks framework
-(`django.tasks`), on Django 5.2 LTS and later.
+Stop running Redis to send an email. django-ox runs Django tasks in your existing database. A worker process executes them; if it dies, unfinished tasks return to the queue.
 
-Django ships the Tasks API but no production backend: the built-in
-`ImmediateBackend` runs tasks inline and `DummyBackend` runs nothing.
-django-ox stores background tasks in the database you already run and executes
-them with a worker process. You get a durable queue with retries, priorities,
-scheduling and a result store, and no broker to provision, secure, upgrade or
-back up.
+Enqueue inside `transaction.atomic()` on the same database as your models, and the task commits or rolls back with your data. Failures retry with exponential backoff. Inspect attempts and tracebacks in Django admin, or edit a recurring schedule without deploying a scheduler.
+
+Use `django.tasks` on Django 6.0 or 6.1, or the `django-tasks` backport on Django 5.2 LTS. Python 3.12+ is required. Execution is at-least-once: write tasks that tolerate repeated execution.
+
+The step-by-step guide takes you from `pip install django-ox` to a working queue, a welcome email, and a retry you can watch.
+
+## Start here
+
+- [Step-by-step guide](background-tasks.md): install django-ox and run your first tasks.
+- [Why django-ox](why-django-ox.md): choose a backend for your application.
+- [Benchmarks](benchmarks.md): see the worker-kill tests and queue measurements.
+- [Use cases](use-cases.md): find the setup for the job you need done.
 
 ## One fewer service to run
 

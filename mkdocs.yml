@@ -57,6 +57,8 @@ nav:
   - Schedules in the database: stored-schedules.md
   - Common patterns: patterns.md
   - Migrating: migrating.md
+  - Why django-ox: why-django-ox.md
+  - Use cases: use-cases.md
   - Choosing a backend: choosing.md
   - Production: production.md
   - Monitoring: monitoring.md

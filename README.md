@@ -5,27 +5,13 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/django-ox)](https://pypi.org/project/django-ox/)
 [![License](https://img.shields.io/pypi/l/django-ox)](https://github.com/oxpull/django-ox/blob/main/LICENSE)
 
-A database-backed worker backend for Django's Tasks framework (`django.tasks`), on Django 5.2 LTS and later.
+# Django tasks in your database
 
-Documentation: <https://oxpull.com/django-ox/>
+Stop running Redis to send an email. django-ox runs Django's Tasks framework in your existing database, where a dead worker doesn't mean lost tasks. Run a worker process, not a separate broker.
 
-Django ships the Tasks API but no production backend: the built-in
-`ImmediateBackend` and `DummyBackend` are for development and testing only.
-django-ox stores background tasks in the database you already run and executes
-them with a worker process. There is no broker to provision, secure, upgrade or
-back up, and `enqueue()` is one INSERT on the database that holds `OxTask`,
-your default one unless you route it elsewhere. Open `transaction.atomic()`
-on that database and the task commits or rolls back with every other row you
-write there. No `transaction.on_commit()` needed.
-Comparing backends? See [Choosing a task backend](https://oxpull.com/django-ox/choosing/).
+Supports Django 5.2 LTS through the `django-tasks` backport, and Django 6.0 / 6.1 through core `django.tasks`. Requires Python 3.12+.
 
 ## Install
-
-Requires Python 3.12+ and Django 5.2+. Django 6.0 and later ship the Tasks
-framework in core. On Django 5.2 LTS it comes from the `django-tasks`
-backport, so install the `backport` extra there. **Your import path depends on the Django version**: on Django 6.0+ you write `from django.tasks import task`, and on
-Django 5.2 you write `from django_tasks import task`. django-ox itself
-handles both.
 
 ```
 pip install django-ox
@@ -52,10 +38,29 @@ python manage.py migrate django_ox
 python manage.py ox_worker
 ```
 
-Tasks are plain `django.tasks` tasks; django-ox adds nothing to learn on the
-producer side. The worker is a separate process, and tasks run only while one
-is running. Every option and flag is on the
-[Configuration](https://oxpull.com/django-ox/configuration/) page.
+On Django 6.0+, use `from django.tasks import task`. On Django 5.2 LTS, use `from django_tasks import task`.
+
+**[Follow the step-by-step guide](https://oxpull.com/django-ox/background-tasks/)** to build a working queue.
+
+## Keep the work when a worker dies
+
+Workers claim tasks with `SELECT ... FOR UPDATE SKIP LOCKED` on PostgreSQL and MySQL 8+, or an atomic compare-and-set UPDATE on SQLite. A reaper returns unfinished tasks to the queue when their worker dies. Failed tasks retry with exponential backoff up to `MAX_ATTEMPTS`, with every attempt's traceback kept.
+
+Execution is at-least-once: make tasks safe to repeat.
+
+Enqueue inside `transaction.atomic()` on the database holding `OxTask`, and the task commits or rolls back with your application data. No `transaction.on_commit()` needed.
+
+Inspect attempts in Django admin, then retry or discard tasks there. Edit recurring schedules in admin or declare them in settings; workers dispatch them without a scheduler process.
+
+For deployment probes, `ox_health` turns queue thresholds into an exit code, with `--format json` for structured output. Monitor through `django_ox.stats` or `/ox/metrics`, and clear finished rows with `ox_prune`. Use `--database` on `ox_worker`, `ox_prune` and `ox_health` to select the database alias.
+
+In the [published benchmarks](https://oxpull.com/django-ox/benchmarks/), 2,000 of 2,000 tasks finished after 20 worker kills per trial, queue drain was up to 20% faster than django-tasks-db, and enqueueing 10,000 tasks took 0.71 s.
+
+992 test functions, with CI covering Python 3.12 to 3.14, Django 5.2 to 6.1, PostgreSQL, MySQL and SQLite. Open source under the BSD 3-Clause licence.
+
+Need to coordinate work across tasks? [Oxpull Pro](https://oxpull.com/) adds batches, unique tasks, rate limiting and workflows.
+
+Documentation: <https://oxpull.com/django-ox/>
 
 ## One fewer service to run
 
@@ -103,14 +108,14 @@ each carrying a link and the date it was read on the
 
 | | django-ox | django-tasks-db | Celery | huey |
 | --- | --- | --- | --- | --- |
-| `django.tasks` backend | **Yes**, native | **Yes**, native | **No** | **No** |
+| `django.tasks` backend | **Yes**, native | **Yes**, native | **No** | **Yes**, in `huey.contrib.djhuey` |
 | Broker to run | **None.** The queue is a table in the database you already run | **None.** Django ORM | RabbitMQ, Redis or SQS | Redis, SQLite, PostgreSQL, file or memory |
 | Transactional enqueue | **Yes.** Enqueue is one INSERT on your default database; a task written inside `atomic()` commits or rolls back with the rows beside it | Not claimed | **No.** Django's own docs name this as the case for `on_commit()` | Not claimed |
 | Worker killed mid-task | **Retried.** The lease expires and the task goes back on the queue | **Stuck.** The task stays `PROCESSING`, never retried and never failed. Open since 2024-06-11 | **Lost** when the child process is killed, even with `acks_late` | **Lost.** "will not be retried automatically" |
 | Retries and backoff | **Exponential**, keeping every attempt's traceback | **None** | Yes | Yes |
 | Recurring schedules | **Cron or a fixed interval, and no scheduler process.** Editable in the Django admin, limited to the tasks your code exposes | **None** | `celery beat`, a separate process you must run exactly one of | Yes |
 
-The full version has three more backends, a footnote and a date on every cell,
+The full version has six more backends, a footnote and a date on every cell,
 and a [section on when django-ox is the wrong choice](https://oxpull.com/django-ox/choosing/#when-not-to-use-django-ox).
 
 ## Configuration

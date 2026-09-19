@@ -182,9 +182,17 @@ Operational facts to get right:
   queue routing, idempotent tasks, testing without a worker.
 - [Migrating](https://oxpull.com/django-ox/migrating/): from another
   `django.tasks` backend, from Celery, from huey, and migrating away.
+- [Why django-ox](https://oxpull.com/django-ox/why-django-ox/): the
+  requirements django-ox fits, how it differs from django-tasks-db, Celery
+  and huey, when not to choose it, and the maintainer's answers to six
+  evaluation questions.
+- [Use cases](https://oxpull.com/django-ox/use-cases/): five situations with
+  a sketch and a limit each: a dead worker's RUNNING rows, no broker, enqueue
+  inside a transaction, recurring tasks, and one paid Oxpull Pro case.
 - [Choosing a backend](https://oxpull.com/django-ox/choosing/): sourced
   comparison with django-tasks-db, huey, Celery, django-q2, dramatiq and
-  procrastinate, and when not to use django-ox.
+  procrastinate, then with steady-queue, dj-queue and django-database-task,
+  and when not to use django-ox.
 - [Production](https://oxpull.com/django-ox/production/): systemd units,
   containers, graceful shutdown, scaling out, the lease and the reaper,
   PostgreSQL, MySQL or SQLite, pruning on a timer.

@@ -317,7 +317,7 @@ python manage.py ox_worker
 It picks up both waiting tasks straight away:
 
 ```
-2026-09-19 07:55:55,442 INFO django_ox Worker MacBookPro.lan-23168-zYPsu058 starting: queues=['default'] concurrency=1 poll=1.0s schedules=0
+2026-09-19 07:55:55,442 INFO django_ox Worker myhost-23168-zYPsu058 starting: queues=['default'] concurrency=1 poll=1.0s schedules=0
 Task id=9cb98ba6-46e0-46a7-8394-1046fa2ff1fd path=accounts.tasks.send_welcome_email state=RUNNING
 Subject: Welcome
 From: webmaster@localhost
@@ -379,8 +379,8 @@ you already hold a result object.
 Stop the worker with Ctrl-C:
 
 ```
-2026-09-19 07:56:28,812 INFO django_ox Worker MacBookPro.lan-23168-zYPsu058 received SIGINT; draining in-flight tasks. Signal again to force exit.
-2026-09-19 07:56:28,813 INFO django_ox Worker MacBookPro.lan-23168-zYPsu058 stopped
+2026-09-19 07:56:28,812 INFO django_ox Worker myhost-23168-zYPsu058 received SIGINT; draining in-flight tasks. Signal again to force exit.
+2026-09-19 07:56:28,813 INFO django_ox Worker myhost-23168-zYPsu058 stopped
 ```
 
 It stops claiming, finishes whatever is in flight, and exits 0. SIGTERM
@@ -565,7 +565,7 @@ the worker. The startup line now says `schedules=1`, and at the next minute
 boundary the schedule fires:
 
 ```
-2026-09-19 07:59:12,044 INFO django_ox Worker MacBookPro.lan-23929-gJ7A6QmA starting: queues=['default'] concurrency=1 poll=1.0s schedules=1
+2026-09-19 07:59:12,044 INFO django_ox Worker myhost-23929-gJ7A6QmA starting: queues=['default'] concurrency=1 poll=1.0s schedules=1
 2026-09-19 08:00:00,399 INFO django_ox Dispatched schedule signup-report tick 2026-09-19T08:00:00+00:00 (task id=fe1388c3-bb4a-4f11-9e21-85449a4d50e0)
 Task id=fe1388c3-bb4a-4f11-9e21-85449a4d50e0 path=accounts.tasks.signup_report state=RUNNING
 2026-09-19 08:00:00,403 INFO django_ox Task id=fe1388c3-bb4a-4f11-9e21-85449a4d50e0 path=accounts.tasks.signup_report succeeded in 0ms
@@ -599,8 +599,8 @@ in the admin without a deploy.
 
     ```
     2026-09-19 08:00:39,114 INFO django_ox Supervisor 24325 starting 2 worker process(es)
-    2026-09-19 08:00:39,299 INFO django_ox Worker MacBookPro.lan-24327-glmGVHgP-0 starting: queues=['default'] concurrency=4 poll=1.0s schedules=1
-    2026-09-19 08:00:39,299 INFO django_ox Worker MacBookPro.lan-24328-d7O05mDr-1 starting: queues=['default'] concurrency=4 poll=1.0s schedules=1
+    2026-09-19 08:00:39,299 INFO django_ox Worker myhost-24327-glmGVHgP-0 starting: queues=['default'] concurrency=4 poll=1.0s schedules=1
+    2026-09-19 08:00:39,299 INFO django_ox Worker myhost-24328-d7O05mDr-1 starting: queues=['default'] concurrency=4 poll=1.0s schedules=1
     ```
 
     That is eight tasks at once. `--concurrency` is a thread pool, which

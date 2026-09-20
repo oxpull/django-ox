@@ -34,7 +34,7 @@ from django.db.models import (
     Subquery,
     Value,
 )
-from django.db.models.functions import Cast, Concat
+from django.db.models.functions import Concat
 from django.http import HttpRequest
 from django.utils import timezone
 from django.utils.html import format_html, format_html_join
@@ -439,11 +439,16 @@ class OxScheduleAdmin(_ScheduleAdmin):
         the schedules' database, so the inlined lookup reads the alias the
         ticks are written to without naming it a second time.
         """
+        # Keep the pk numeric. On MySQL, casting it to char gives the key
+        # implicit coercibility, which can conflict with schedule_name's
+        # collation. The prefix plus a numeric pk produces a coercible
+        # key, so the column's collation wins.
         ticks = (
             OxScheduleTick.objects.filter(
                 schedule_name=Concat(
                     Value(STORED_KEY_PREFIX),
-                    Cast(OuterRef("pk"), output_field=CharField()),
+                    OuterRef("pk"),
+                    output_field=CharField(),
                 )
             )
             .order_by("-scheduled_for")
@@ -483,15 +488,8 @@ class OxScheduleAdmin(_ScheduleAdmin):
 
     @admin.display(description="Last tick")
     def last_tick(self, obj: OxSchedule) -> str:
-        # The newest tick arrives on the row from get_queryset's
-        # last_tick_at annotation, in the query the page already runs. The
-        # alias reasoning moved there with it: django_ox.E008 refuses a
-        # router that puts the tick rows on another database than the
-        # schedules, so the annotation reads what the old per-row lookup
-        # read, without a query per row. Unqualified, this one column
-        # would follow db_for_read while every other column on the row
-        # came from the primary, and the page would disagree with itself
-        # about when the schedule last ran.
+        # get_queryset() supplies the newest tick, on the schedules'
+        # database. The alias reasoning lives there with it.
         tick = cast("datetime | None", getattr(obj, "last_tick_at", None))
         return "never" if tick is None else f"{tick:%Y-%m-%d %H:%M}"
 

@@ -34,14 +34,25 @@ def public_flags(command_name: str) -> set[str]:
     }
 
 
+#: The flag in a table row's first cell, read loosely on purpose. A row that
+#: documents the flag with its value (`--format json`), pads its columns to
+#: line them up, emphasises the cell or names a short alias beside the long
+#: one still documents the flag. Matching one exact spelling would turn a
+#: correct future table red over a row the reader can see sitting there.
+#: `[^|]*?` cannot cross a pipe, so this stays inside the first cell.
+FLAG_CELL = re.compile(r"^[ \t]*\|[^|]*?`(--[\w-]+)", re.MULTILINE)
+
+
 def documented_flags(command_name: str) -> set[str]:
     match = re.search(
-        rf"^## {re.escape(command_name)}\n(?P<section>.*?)(?=^## |\Z)",
+        rf"^## {re.escape(command_name)}[ \t]*$(?P<section>.*?)(?=^## |\Z)",
         DOC.read_text(),
         flags=re.MULTILINE | re.DOTALL,
     )
-    assert match is not None, f"no configuration section for {command_name}"
-    return set(re.findall(r"^\| `(--[a-z][a-z-]*)` \|", match["section"], re.MULTILINE))
+    assert match is not None, (
+        f"no configuration section for {command_name} in {DOC.name}"
+    )
+    return set(FLAG_CELL.findall(match["section"]))
 
 
 @pytest.mark.parametrize("command_name", ["ox_worker", "ox_prune", "ox_health"])
@@ -56,7 +67,7 @@ def test_every_public_command_flag_is_documented(command_name):
     )
     missing = sorted(parser_flags - table_flags)
     assert not missing, (
-        f"{command_name} flags missing from its configuration table: {missing}"
+        f"{command_name} flags missing from its {DOC.name} table: {missing}"
     )
 
 

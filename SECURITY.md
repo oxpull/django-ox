@@ -89,7 +89,7 @@ string formatting.
 
 | Version | Supported |
 | ------- | --------- |
-| 1.1.x   | yes       |
+| 1.3.x   | yes       |
 | older   | no        |
 
 ## Reporting a vulnerability

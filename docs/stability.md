@@ -102,8 +102,9 @@ django-ox follows [Semantic Versioning](https://semver.org/):
 - **Breaking changes to any public surface above require a major version.**
   They are called out in the changelog under a `Changed` or `Removed`
   heading, with the migration step.
-- **Minor releases add, they do not break.** Patch releases are bug fixes
-  only.
+- **Minor releases add, they do not break.** Patch releases fix bugs or update
+  documentation and package metadata; they add no features and change no
+  behaviour beyond bug fixes.
 
 A minor release may add a status value. A process still on the previous
 minor release can't read a task in the new status. `get_result()` and
@@ -114,7 +115,7 @@ process that shares a database before anything writes the new status. The
 release notes name the value, say how it reads through `django.tasks`, and
 give the upgrade and rollback steps.
 
-Pin accordingly: `django-ox~=1.3.0` accepts patch releases only;
+Pin accordingly: `django-ox~=1.3.1` accepts patch releases only;
 `django-ox~=1.3` accepts the current major line.
 
 ## Deprecation policy

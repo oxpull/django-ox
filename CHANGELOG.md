@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-09-20
+
+No code change since 1.3.0 except the version constant.
+No migration. Upgrade is optional.
+
+### Changed
+
+- Update the README and package summary on PyPI.
+
+### Documentation
+
+- Add the background tasks guide, "Why django-ox", and "Use cases".
+- Update the benchmarks page with measurements against
+  django-tasks-db 0.13.0 and recovery after worker death.
+- Update the comparison page and correct the huey entry.
+- Document how to order Oxpull Pro.
+
 ## [1.3.0] - 2026-09-17
 
 **One migration ships with this release.** `0008_waiting` adds a status
@@ -1140,6 +1157,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[1.3.1]: https://github.com/oxpull/django-ox/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/oxpull/django-ox/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/oxpull/django-ox/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/oxpull/django-ox/compare/v1.0.0...v1.1.0

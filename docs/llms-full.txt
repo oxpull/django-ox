@@ -4076,8 +4076,9 @@ django-ox follows [Semantic Versioning](https://semver.org/):
 - **Breaking changes to any public surface above require a major version.**
   They are called out in the changelog under a `Changed` or `Removed`
   heading, with the migration step.
-- **Minor releases add, they do not break.** Patch releases are bug fixes
-  only.
+- **Minor releases add, they do not break.** Patch releases fix bugs or update
+  documentation and package metadata; they add no features and change no
+  behaviour beyond bug fixes.
 
 A minor release may add a status value. A process still on the previous
 minor release can't read a task in the new status. `get_result()` and
@@ -4088,7 +4089,7 @@ process that shares a database before anything writes the new status. The
 release notes name the value, say how it reads through `django.tasks`, and
 give the upgrade and rollback steps.
 
-Pin accordingly: `django-ox~=1.3.0` accepts patch releases only;
+Pin accordingly: `django-ox~=1.3.1` accepts patch releases only;
 `django-ox~=1.3` accepts the current major line.
 
 ## Deprecation policy
@@ -4547,6 +4548,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.3.1] - 2026-09-20
+
+No code change since 1.3.0 except the version constant.
+No migration. Upgrade is optional.
+
+### Changed
+
+- Update the README and package summary on PyPI.
+
+### Documentation
+
+- Add the background tasks guide, "Why django-ox", and "Use cases".
+- Update the benchmarks page with measurements against
+  django-tasks-db 0.13.0 and recovery after worker death.
+- Update the comparison page and correct the huey entry.
+- Document how to order Oxpull Pro.
 
 ## [1.3.0] - 2026-09-17
 
@@ -5683,6 +5701,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[1.3.1]: https://github.com/oxpull/django-ox/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/oxpull/django-ox/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/oxpull/django-ox/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/oxpull/django-ox/compare/v1.0.0...v1.1.0

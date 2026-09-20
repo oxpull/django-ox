@@ -8,9 +8,9 @@ from django.core.exceptions import PermissionDenied
 from django.urls import reverse
 from django.utils import timezone
 
-from django_ox.models import OxSchedule, OxTask
+from django_ox.models import OxSchedule, OxScheduleTick, OxTask
 from django_ox.registry import ScheduleKind, register
-from django_ox.schedules import schedule_source_from_options
+from django_ox.schedules import STORED_KEY_PREFIX, schedule_source_from_options
 from django_ox.stored import create_schedule, update_schedule
 
 from . import sources, tasks
@@ -1106,3 +1106,54 @@ class TestDeletingThroughTheAdminTellsTheWorkers:
         assert response.status_code == 302
         assert not OxSchedule.objects.exists()
         assert OxScheduleChange.objects.get(id=1).changed_at > before
+
+
+class TestTheLastTickColumnReadsItsRow:
+    """
+    The Last tick column used to look the newest tick up once per listed
+    schedule. The page already has the schedules, so the column now reads
+    an annotation get_queryset adds, and the page's statement count does
+    not move with the number of rows.
+    """
+
+    def _tick(self, row):
+        at = timezone.now() - timedelta(hours=1)
+        OxScheduleTick.objects.create(
+            schedule_name=f"{STORED_KEY_PREFIX}{row.pk}",
+            scheduled_for=at,
+            created_at=at,
+        )
+        return at
+
+    def test_the_newest_tick_is_shown_and_a_row_without_ticks_says_never(
+        self, client, admin_user
+    ):
+        ran = a_schedule(name="ran")
+        a_schedule(name="quiet")
+        at = self._tick(ran)
+        client.force_login(admin_user)
+        body = client.get(
+            reverse("admin:django_ox_oxschedule_changelist")
+        ).content.decode()
+        assert f"{at:%Y-%m-%d %H:%M}" in body
+        # The cell itself, not the word: the page can also carry the
+        # warning about schedules that are "stored and never dispatched".
+        assert ">never<" in body
+
+    def test_the_column_stops_costing_a_query_per_row(self, client, admin_user):
+        for i in range(3):
+            self._tick(a_schedule(name=f"s{i:03d}"))
+        client.force_login(admin_user)
+
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as few:
+            client.get(reverse("admin:django_ox_oxschedule_changelist"))
+        for i in range(30, 60):
+            self._tick(a_schedule(name=f"s{i:03d}"))
+        with CaptureQueriesContext(connection) as many:
+            client.get(reverse("admin:django_ox_oxschedule_changelist"))
+        assert len(many.captured_queries) == len(few.captured_queries), (
+            "the Last tick column still spends a query per listed schedule"
+        )

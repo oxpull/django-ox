@@ -26,7 +26,15 @@ from django.conf import settings
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied
 from django.db import router, transaction
-from django.db.models import QuerySet
+from django.db.models import (
+    CharField,
+    DateTimeField,
+    OuterRef,
+    QuerySet,
+    Subquery,
+    Value,
+)
+from django.db.models.functions import Cast, Concat
 from django.http import HttpRequest
 from django.utils import timezone
 from django.utils.html import format_html, format_html_join
@@ -38,6 +46,8 @@ from .models import OxSchedule, OxScheduleTick, OxTask
 from .schedules import STORED_KEY_PREFIX
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     _ModelAdmin = admin.ModelAdmin[OxTask]
     _ScheduleAdmin = admin.ModelAdmin[OxSchedule]
     _ScheduleForm = forms.ModelForm[OxSchedule]
@@ -419,8 +429,32 @@ class OxScheduleAdmin(_ScheduleAdmin):
         the count `delete_selected` takes before it deletes. Unpinned, the
         redirect after an add lands on "doesn't exist" for a row that was
         just written, and the delete action removes nothing and says nothing.
+
+        The `last_tick_at` annotation serves the Last tick column, which
+        used to spend one query per row on a lookup the page already had
+        the schedules for. The tick key is the prefix plus the schedule's
+        primary key, so the subquery rebuilds the key in SQL, correlated on
+        the outer row. It is compiled into the query this method returns,
+        and django_ox.E008 refuses a router that writes ticks anywhere but
+        the schedules' database, so the inlined lookup reads the alias the
+        ticks are written to without naming it a second time.
         """
-        return super().get_queryset(request).using(stored.schedule_db_alias())
+        ticks = (
+            OxScheduleTick.objects.filter(
+                schedule_name=Concat(
+                    Value(STORED_KEY_PREFIX),
+                    Cast(OuterRef("pk"), output_field=CharField()),
+                )
+            )
+            .order_by("-scheduled_for")
+            .values("scheduled_for")[:1]
+        )
+        return (
+            super()
+            .get_queryset(request)
+            .using(stored.schedule_db_alias())
+            .annotate(last_tick_at=Subquery(ticks, output_field=DateTimeField()))
+        )
 
     def get_form(
         self,
@@ -449,19 +483,16 @@ class OxScheduleAdmin(_ScheduleAdmin):
 
     @admin.display(description="Last tick")
     def last_tick(self, obj: OxSchedule) -> str:
-        # The alias the tick rows are written to, which is the one the rest
-        # of this page is read from: django_ox.E008 refuses a router that
-        # puts the two tables on different databases. Unqualified, this one
-        # column would follow db_for_read while every other column on the
-        # row came from the primary, and the page would disagree with
-        # itself about when the schedule last ran.
-        tick = (
-            OxScheduleTick.objects.using(router.db_for_write(OxScheduleTick))
-            .filter(schedule_name=f"{STORED_KEY_PREFIX}{obj.pk}")
-            .order_by("-scheduled_for")
-            .values_list("scheduled_for", flat=True)
-            .first()
-        )
+        # The newest tick arrives on the row from get_queryset's
+        # last_tick_at annotation, in the query the page already runs. The
+        # alias reasoning moved there with it: django_ox.E008 refuses a
+        # router that puts the tick rows on another database than the
+        # schedules, so the annotation reads what the old per-row lookup
+        # read, without a query per row. Unqualified, this one column
+        # would follow db_for_read while every other column on the row
+        # came from the primary, and the page would disagree with itself
+        # about when the schedule last ran.
+        tick = cast("datetime | None", getattr(obj, "last_tick_at", None))
         return "never" if tick is None else f"{tick:%Y-%m-%d %H:%M}"
 
     def save_model(

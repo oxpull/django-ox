@@ -73,42 +73,55 @@ def text(path: Path) -> str:
 
 
 @pytest.fixture
-def add_alias(monkeypatch):
+def add_alias():
     """
     Add a database alias to the loaded settings, as a copy of the default
-    one with the given keys replaced. Closes and forgets this thread's
-    wrapper for it and any pool built for it afterwards.
+    one with the given keys replaced. Afterwards closes and forgets this
+    thread's wrapper for it and any pool built for it, and takes the alias
+    out of the settings.
+
+    It takes the alias out itself, rather than through monkeypatch, which
+    an autouse fixture sets up first and so tears down last. A test case
+    that pytest-django tears down while the alias is still configured
+    makes a wrapper for it on this thread, and that wrapper would be the
+    one the next test got for the alias. Requested after unguarded_db, as
+    here, it is torn down before that test case.
     """
-    added = []
 
     def add(**overrides):
         conf = {**copy.deepcopy(connections.settings["default"]), **overrides}
-        monkeypatch.setitem(connections.settings, ALIAS, conf)
-        added.append(ALIAS)
+        connections.settings[ALIAS] = conf
         return conf
 
     yield add
-    for alias in added:
-        for wrapper in connections.all(initialized_only=True):
-            if wrapper.alias == alias:
-                wrapper.close()
-                del connections[alias]
-        pools = getattr(connections.create_connection(alias), "_connection_pools", {})
-        if alias in pools:
-            pools.pop(alias).close()
+    if ALIAS not in connections.settings:
+        return
+    for wrapper in connections.all(initialized_only=True):
+        if wrapper.alias == ALIAS:
+            wrapper.close()
+            del connections[ALIAS]
+    pools = getattr(connections.create_connection(ALIAS), "_connection_pools", {})
+    if ALIAS in pools:
+        pools.pop(ALIAS).close()
+    del connections.settings[ALIAS]
 
 
 @pytest.fixture
-def unguarded_db(django_db_setup, django_db_blocker):
+def unguarded_db(transactional_db, django_db_blocker):
     """
-    The test database without pytest-django's test case around it. That test
-    case refuses every thread's connection to an alias it was not given at
-    setup, which an alias added by the test cannot be. Rows commit as they
-    are written, so the tasks table is emptied afterwards.
+    The test database as a transactional test has it, set up for the run and
+    flushed afterwards, with its test case's guard lifted. The guard refuses
+    every thread's connection to an alias the test case was not given at
+    setup, which an alias added by the test cannot be. It works by patching
+    ensure_connection, and unblock() puts the real method back until the
+    test ends.
+
+    Asking for transactional_db rather than for the database setup alone is
+    what gets the database created when no other test in the run needs it,
+    as when this test is selected by itself.
     """
     with django_db_blocker.unblock():
         yield
-        OxTask.objects.all().delete()
 
 
 def pooled_project(tmp_path: Path, *, pool: object) -> Path:

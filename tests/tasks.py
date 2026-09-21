@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from pathlib import Path
 
 from django.db import transaction
 
@@ -241,3 +242,42 @@ async def async_catch_timeout(seconds):
 def failing_with_long_traceback():
     """A failure whose traceback is far larger than the row it lands in."""
     raise ValueError("x" * 200_000)
+
+
+def _mark(log_path, line):
+    with Path(log_path).open("a") as log:
+        log.write(f"{line}\n")
+
+
+@task
+def query_and_hold(log_path, release_path):
+    """
+    One ORM query, which takes this thread's connection, then keep it until
+    release_path exists. Appends START, HELD and END to log_path, so a test in
+    another process can see when the connection is taken and count how many
+    times the body ran. Lets go after a minute regardless, so a test that
+    fails before releasing it does not leave a worker holding on.
+    """
+    _mark(log_path, "START")
+    OxTask.objects.count()
+    _mark(log_path, "HELD")
+    deadline = time.monotonic() + 60
+    while not Path(release_path).exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    _mark(log_path, "END")
+    return "released"
+
+
+@task
+def query_then_sleep(log_path, seconds):
+    """
+    One ORM query, then one sleep that TaskTimeout cannot interrupt: it lands
+    at the next line of Python, and time.sleep() does not return to Python
+    until it is over. The thread keeps its connection throughout.
+    """
+    _mark(log_path, "START")
+    OxTask.objects.count()
+    _mark(log_path, "HELD")
+    time.sleep(seconds)
+    _mark(log_path, "END")
+    return "done"

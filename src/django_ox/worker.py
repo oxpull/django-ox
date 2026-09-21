@@ -9,9 +9,9 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from inspect import iscoroutinefunction
@@ -419,6 +419,52 @@ def _lease_expiry(seconds: float) -> Any:
             now + timedelta(seconds=seconds), output_field=DateTimeField()
         )
     return now + timedelta(seconds=seconds)
+
+
+@contextmanager
+def _outside_the_pool(alias: str) -> Iterator[None]:
+    """
+    Give the calling thread a connection to `alias` of its own for the
+    block, outside Django's PostgreSQL connection pool when that is on.
+
+    The pool is one per process and every thread draws from it. A task
+    holds its thread's connection from its first query to the end of the
+    attempt, so once the task threads and the poll loop have taken the
+    whole pool, the renewal thread waits out the pool timeout on every
+    tick: the leases it keeps expire under running work, the reaper
+    requeues the rows, and bodies that already ran run again. The
+    watchdog's stuck-attempt write waits the same way and holds the
+    recycle back. Neither may queue behind the work it protects.
+
+    The wrapper is a new one, built from the alias's settings with only
+    "pool" taken out of OPTIONS, so the rest of the project's connection
+    settings still apply. The settings are copied rather than edited,
+    because every other wrapper for the alias reads the same dictionary,
+    and the pool itself is never touched. Whatever the thread had for the
+    alias before is put back afterwards, however the block ends.
+
+    Anything other than PostgreSQL with the pool on runs the block on the
+    thread's ordinary connection.
+    """
+    options = connections.settings.get(alias, {}).get("OPTIONS", {})
+    own = connections.create_connection(alias) if options.get("pool") else None
+    if own is None or own.vendor != "postgresql":
+        yield
+        return
+    own.settings_dict = {
+        **own.settings_dict,
+        "OPTIONS": {name: value for name, value in options.items() if name != "pool"},
+    }
+    before = [c for c in connections.all(initialized_only=True) if c.alias == alias]
+    connections[alias] = own
+    try:
+        yield
+    finally:
+        if before:
+            connections[alias] = before[0]
+        else:
+            del connections[alias]
+        own.close()
 
 
 class Worker:
@@ -969,38 +1015,39 @@ class Worker:
 
     def _renewal_loop(self, stop: Event) -> None:
         """Renew until stopped. Runs on its own thread, and its own connection."""
-        try:
-            while not stop.wait(self.renew_interval):
-                try:
-                    self.renew_leases()
-                except Exception:
-                    # A missed renewal is survivable by design: the interval
-                    # is a third of the timeout. Drop the connection so the
-                    # next tick reconnects, and keep going, because giving
-                    # up here would silently expire every live lease.
-                    #
-                    # Every exception, not a chosen class. Nothing restarts
-                    # this thread and nothing checks it is alive, and a
-                    # renewal loop that stops lets every in-flight lease
-                    # expire. `django.db.InterfaceError` sits beside
-                    # `DatabaseError` under `django.db.Error`, so a dropped
-                    # connection, the likeliest failure here, has to be
-                    # caught too. The consequence of guessing wrong is
-                    # severe and silent, which is exactly when a guess
-                    # should not be made.
-                    logger.warning(
-                        "Lease renewal failed for worker %s; retrying in %.1fs",
-                        self.worker_id,
-                        self.renew_interval,
-                        exc_info=True,
-                        extra={
-                            "event": "lease_renew_failed",
-                            "worker_id": self.worker_id,
-                        },
-                    )
-                    connections.close_all()
-        finally:
-            connections.close_all()
+        with _outside_the_pool(self._db_alias):
+            try:
+                while not stop.wait(self.renew_interval):
+                    try:
+                        self.renew_leases()
+                    except Exception:
+                        # A missed renewal is survivable by design: the interval
+                        # is a third of the timeout. Drop the connection so the
+                        # next tick reconnects, and keep going, because giving
+                        # up here would silently expire every live lease.
+                        #
+                        # Every exception, not a chosen class. Nothing restarts
+                        # this thread and nothing checks it is alive, and a
+                        # renewal loop that stops lets every in-flight lease
+                        # expire. `django.db.InterfaceError` sits beside
+                        # `DatabaseError` under `django.db.Error`, so a dropped
+                        # connection, the likeliest failure here, has to be
+                        # caught too. The consequence of guessing wrong is
+                        # severe and silent, which is exactly when a guess
+                        # should not be made.
+                        logger.warning(
+                            "Lease renewal failed for worker %s; retrying in %.1fs",
+                            self.worker_id,
+                            self.renew_interval,
+                            exc_info=True,
+                            extra={
+                                "event": "lease_renew_failed",
+                                "worker_id": self.worker_id,
+                            },
+                        )
+                        connections.close_all()
+            finally:
+                connections.close_all()
 
     # -- execution ---------------------------------------------------------
 
@@ -1514,43 +1561,44 @@ class Worker:
         this worker has under a timeout; it exits when idle and is started
         again by the next attempt that needs it.
         """
-        try:
-            while True:
-                with self._watch_lock:
-                    if not self._watches:
-                        self._watch_cv.wait(WATCHDOG_IDLE)
+        with _outside_the_pool(self._db_alias):
+            try:
+                while True:
+                    with self._watch_lock:
                         if not self._watches:
-                            self._watchdog = None
-                            return
-                    due = min(
-                        watch.grace_at if watch.fired else watch.deadline
-                        for watch in self._watches.values()
-                    )
-                    remaining = due - time.monotonic()
-                    if remaining > 0:
-                        self._watch_cv.wait(min(remaining, WATCHDOG_MAX_WAIT))
-                    stuck = self._fire_due()
-                for watch in stuck:
-                    try:
-                        self._handle_stuck(watch)
-                    except Exception:
-                        # This thread is the whole of the timeout backstop and
-                        # nothing restarts it mid-attempt, so a failure on one
-                        # watch must not end it for the others. _fire_due has
-                        # already taken this watch out of the table, so the
-                        # loop carries on rather than retrying a watch whose
-                        # grace has passed.
-                        logger.exception(
-                            "Worker %s could not record a stuck attempt; the "
-                            "timeout backstop continues for the others",
-                            self.worker_id,
-                            extra={
-                                "event": "watchdog_error",
-                                "worker_id": self.worker_id,
-                            },
+                            self._watch_cv.wait(WATCHDOG_IDLE)
+                            if not self._watches:
+                                self._watchdog = None
+                                return
+                        due = min(
+                            watch.grace_at if watch.fired else watch.deadline
+                            for watch in self._watches.values()
                         )
-        finally:
-            connections.close_all()
+                        remaining = due - time.monotonic()
+                        if remaining > 0:
+                            self._watch_cv.wait(min(remaining, WATCHDOG_MAX_WAIT))
+                        stuck = self._fire_due()
+                    for watch in stuck:
+                        try:
+                            self._handle_stuck(watch)
+                        except Exception:
+                            # This thread is the whole of the timeout backstop and
+                            # nothing restarts it mid-attempt, so a failure on one
+                            # watch must not end it for the others. _fire_due has
+                            # already taken this watch out of the table, so the
+                            # loop carries on rather than retrying a watch whose
+                            # grace has passed.
+                            logger.exception(
+                                "Worker %s could not record a stuck attempt; the "
+                                "timeout backstop continues for the others",
+                                self.worker_id,
+                                extra={
+                                    "event": "watchdog_error",
+                                    "worker_id": self.worker_id,
+                                },
+                            )
+            finally:
+                connections.close_all()
 
     def _fire_due(self) -> list[_Watch]:
         """

@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 from django.conf import settings
-from django.db import connection, connections
+from django.db import DEFAULT_DB_ALIAS, connection, connections
 from django.db.models.functions import Now
 
 from django_ox.models import OxTask
@@ -50,6 +50,13 @@ with_psycopg_pool = pytest.mark.skipif(
 # Building a PostgreSQL wrapper imports the driver; nothing here connects.
 needs_psycopg = pytest.mark.skipif(
     importlib.util.find_spec("psycopg") is None, reason="needs psycopg"
+)
+
+# A control for the unpooled case has nothing to show when the run's own
+# database is pooled: the worker it starts is then pooled as well.
+without_a_pool = pytest.mark.skipif(
+    bool(connections.settings[DEFAULT_DB_ALIAS].get("OPTIONS", {}).get("pool")),
+    reason="a no-pool control, and this run's default database is pooled",
 )
 
 
@@ -474,6 +481,7 @@ def test_the_poll_loop_keeps_its_connection_and_hooks_while_renewal_leaves_the_p
 
 
 @pytest.mark.django_db(transaction=True)
+@without_a_pool
 def test_without_a_pool_every_thread_keeps_the_connection_it_had(caplog):
     worker = Worker(concurrency=8, poll_interval=0.05, renew_interval=0.05)
     alias = worker._db_alias

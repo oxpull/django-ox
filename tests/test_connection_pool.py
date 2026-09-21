@@ -675,3 +675,4 @@ class TestTheStartupWarning:
         assert "outcome writes" in message
         assert "retried" in message
         assert ("timeout watchdog" in message) is (task_timeout is not None)
+        assert message.endswith(" per worker process."), message

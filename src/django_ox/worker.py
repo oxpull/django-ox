@@ -2688,7 +2688,7 @@ class Worker:
             "%d, one for each task thread and one for the poll loop. Task "
             "queries and outcome writes can wait for a connection, time out and "
             "be retried. Set max_size in OPTIONS['pool'] to at least %d. %s per "
-            "worker process",
+            "worker process.",
             self.worker_id,
             self._db_alias,
             max_size,

@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Coroutine, Iterator
+from collections.abc import Callable, Coroutine, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -421,6 +421,25 @@ def _lease_expiry(seconds: float) -> Any:
     return now + timedelta(seconds=seconds)
 
 
+def _pool_options(alias: str) -> Mapping[str, Any] | None:
+    """
+    The psycopg_pool arguments Django opens `alias`'s connection pool with,
+    or None when it opens none.
+
+    Django pools on any true OPTIONS["pool"]: True for psycopg_pool's
+    defaults, a non-empty mapping for the arguments themselves, and any
+    other true value it refuses when it connects. _outside_the_pool and the
+    startup warning both read the pool through this, so they cannot
+    disagree about whether there is one. Each checks for PostgreSQL itself.
+    """
+    pool = connections.settings.get(alias, {}).get("OPTIONS", {}).get("pool")
+    if pool is True:
+        return {}
+    if isinstance(pool, Mapping) and pool:
+        return pool
+    return None
+
+
 @contextmanager
 def _outside_the_pool(alias: str) -> Iterator[None]:
     """
@@ -443,14 +462,15 @@ def _outside_the_pool(alias: str) -> Iterator[None]:
     and the pool itself is never touched. Whatever the thread had for the
     alias before is put back afterwards, however the block ends.
 
-    Anything other than PostgreSQL with the pool on runs the block on the
-    thread's ordinary connection.
+    Anything other than PostgreSQL with a pool _pool_options recognises
+    runs the block on the thread's ordinary connection.
     """
-    options = connections.settings.get(alias, {}).get("OPTIONS", {})
-    own = connections.create_connection(alias) if options.get("pool") else None
+    pooled = _pool_options(alias) is not None
+    own = connections.create_connection(alias) if pooled else None
     if own is None or own.vendor != "postgresql":
         yield
         return
+    options = connections.settings[alias]["OPTIONS"]
     own.settings_dict = {
         **own.settings_dict,
         "OPTIONS": {name: value for name, value in options.items() if name != "pool"},
@@ -2659,16 +2679,11 @@ class Worker:
         not other aliases, connections tasks open themselves or the server's
         own limit.
         """
-        options = connections.settings.get(self._db_alias, {}).get("OPTIONS", {})
-        pool = options.get("pool")
-        if not pool or connections[self._db_alias].vendor != "postgresql":
+        pool = _pool_options(self._db_alias)
+        if pool is None or connections[self._db_alias].vendor != "postgresql":
             return
-        # True is psycopg_pool's defaults. It reads a missing max_size as
-        # min_size, and min_size defaults to 4.
-        pool = {} if pool is True else pool
-        if not isinstance(pool, dict):
-            # Not a pool Django can open; its own error says so at connect.
-            return
+        # psycopg_pool reads a missing max_size as min_size, and min_size
+        # defaults to 4.
         max_size = pool.get("max_size")
         if max_size is None:
             max_size = pool.get("min_size", 4)

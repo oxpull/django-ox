@@ -19,7 +19,9 @@ import signal
 import subprocess
 import sys
 import threading
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 from django.conf import settings
@@ -463,9 +465,20 @@ class TestTheScopeOutsideThePool:
             (POSTGRESQL, {}),
             (POSTGRESQL, {"pool": {}}),
             (POSTGRESQL, {"pool": False}),
+            (POSTGRESQL, {"pool": "not-a-mapping"}),
+            (POSTGRESQL, {"pool": 1}),
+            (POSTGRESQL, {"pool": ["max_size"]}),
             (SQLITE, {"pool": True}),
         ],
-        ids=["no-pool", "empty-pool", "pool-false", "not-postgresql"],
+        ids=[
+            "no-pool",
+            "empty-pool",
+            "pool-false",
+            "pool-string",
+            "pool-number",
+            "pool-list",
+            "not-postgresql",
+        ],
     )
     @needs_psycopg
     def test_without_a_postgresql_pool_the_thread_keeps_its_wrapper(
@@ -477,6 +490,43 @@ class TestTheScopeOutsideThePool:
             assert connections[ALIAS] is before
         assert connections[ALIAS] is before
         assert before.settings_dict is conf
+
+
+POOL_VALUES = [
+    True,
+    {"max_size": 2},
+    MappingProxyType({"max_size": 2}),
+    {},
+    False,
+    None,
+    0,
+    1,
+    "not-a-mapping",
+    ["max_size"],
+]
+
+
+@pytest.mark.parametrize("pool", POOL_VALUES, ids=repr)
+@needs_psycopg
+def test_the_scope_leaves_the_pool_on_exactly_the_values_the_warning_reads(
+    add_alias, caplog, pool
+):
+    """
+    Django pools on True and on a non-empty mapping of psycopg_pool's
+    arguments, and refuses any other true value when it connects. Renewal
+    leaves the pool, and the warning checks its size, on the same values:
+    never one without the other. Concurrency 50 is past every size here.
+    """
+    add_alias(ENGINE=POSTGRESQL, OPTIONS={"pool": pool})
+    before = connections[ALIAS]
+    with _outside_the_pool(ALIAS):
+        left = connections[ALIAS] is not before
+    worker = Worker(concurrency=50, db_alias=ALIAS)
+    with caplog.at_level(logging.WARNING, logger="django_ox"):
+        worker._warn_if_the_connection_pool_is_short()
+    warned = bool(events(caplog, "connection_pool_too_small"))
+    assert left is warned
+    assert left is (pool is True or (isinstance(pool, Mapping) and bool(pool)))
 
 
 @on_postgresql

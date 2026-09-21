@@ -247,6 +247,77 @@ def test_renewal_keeps_the_leases_while_the_task_threads_hold_the_pool(tmp_path)
 @pytest.mark.skipif(os.name != "posix", reason="stops the worker with SIGTERM")
 @on_postgresql
 @with_psycopg_pool
+def test_an_undersized_pool_can_time_out_a_task_but_not_the_lease_renewal(tmp_path):
+    """
+    A pool of 2 on --concurrency 2, one short of the size the worker warns
+    for. The poll loop holds one connection and the first task takes the
+    other and keeps it, so the second task's query waits for the pool, times
+    out and is retried. Below that size, retries like that are allowed.
+
+    The first task's lease has to be renewed all the same. Drawing from the
+    pool, the renewal queues behind the second task and times out with it,
+    the lease expires under the running body and the reaper takes the row
+    back.
+    """
+    first_log = tmp_path / "first.log"
+    second_log = tmp_path / "second.log"
+    release = tmp_path / "release"
+    project = pooled_project(
+        tmp_path, pool={"min_size": 1, "max_size": 2, "timeout": 2.0}
+    )
+    log = tmp_path / "worker.log"
+    proc = start_worker(project, log, "--concurrency", "2", "--lock-timeout", "4")
+    try:
+        first = query_and_hold.enqueue(str(first_log), str(release))
+        # The poll loop and the first task have the whole pool.
+        assert wait_for(lambda: "HELD" in lines(first_log), timeout=60), text(log)
+        query_and_hold.enqueue(str(second_log), str(release))
+        assert wait_for(lambda: "START" in lines(second_log), timeout=60), text(log)
+        expiry = OxTask.objects.get(id=first.id).lease_expires_at
+
+        def renewed_while_a_task_timed_out_or_reclaimed():
+            row = OxTask.objects.annotate(db_now=Now()).get(id=first.id)
+            if row.attempts > 1 or row.status != OxTask.Status.RUNNING:
+                return True
+            return (
+                "couldn't get a connection" in text(log)
+                and row.db_now > expiry
+                and row.lease_expires_at > expiry
+            )
+
+        # Only a renewal lets the first lease outlive the expiry it had when
+        # the second task began waiting for the pool.
+        assert wait_for(
+            renewed_while_a_task_timed_out_or_reclaimed, timeout=60, interval=0.1
+        ), text(log)
+        held = OxTask.objects.get(id=first.id)
+        assert (held.status, held.attempts) == (OxTask.Status.RUNNING, 1), text(log)
+        release.touch()
+        assert wait_for(
+            lambda: OxTask.objects.get(id=first.id).status in TERMINAL,
+            timeout=60,
+            interval=0.1,
+        ), text(log)
+    finally:
+        release.touch()
+        stop(proc)
+
+    worker_log = text(log)
+    done = OxTask.objects.get(id=first.id)
+    assert (done.status, done.attempts) == (OxTask.Status.SUCCESSFUL, 1), worker_log
+    assert lines(first_log).count("START") == 1, worker_log
+    assert "Lease renewal failed" not in worker_log
+    assert "lost its lease" not in worker_log
+    # The second task's thread waited for the pool and timed out.
+    assert "couldn't get a connection" in worker_log
+    assert worker_log.count("connection pool for database") == 1, worker_log
+    assert "holds at most 2 connections" in worker_log
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.skipif(os.name != "posix", reason="stops the worker with SIGTERM")
+@on_postgresql
+@with_psycopg_pool
 def test_the_watchdog_records_a_stuck_attempt_while_the_task_threads_hold_the_pool(
     tmp_path,
 ):

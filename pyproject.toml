@@ -62,7 +62,7 @@ dev = [
     "ruff>=0.14",
     "mypy>=1.16",
     "django-stubs>=6.0",
-    "psycopg[binary]>=3.2",
+    "psycopg[binary,pool]>=3.2",
 ]
 
 [tool.hatch.build.targets.sdist]

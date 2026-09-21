@@ -231,6 +231,8 @@ def test_renewal_keeps_the_leases_while_the_task_threads_hold_the_pool(tmp_path)
     assert "Lease renewal failed" not in worker_log
     assert "lost its lease" not in worker_log
     assert "couldn't get a connection" not in worker_log
+    # max_size 3 is concurrency + 1: enough, so nothing to warn about.
+    assert "connection pool for database" not in worker_log
     assert proc.returncode == 0, worker_log
 
 
@@ -293,6 +295,31 @@ def test_the_watchdog_records_a_stuck_attempt_while_the_task_threads_hold_the_po
     assert len(recorded.errors) == 1, worker_log
     assert "did not stop" in recorded.errors[-1]["traceback"]
     assert OxTask.objects.get(id=holder.id).status == OxTask.Status.SUCCESSFUL
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.skipif(os.name != "posix", reason="stops the worker with SIGTERM")
+@on_postgresql
+@with_psycopg_pool
+def test_a_worker_whose_pool_is_too_small_says_so_once_at_startup(tmp_path):
+    """
+    The real command, with the pool at Django's default of 4 and concurrency
+    4: one short of a connection per task thread and one for the poll loop.
+    """
+    project = pooled_project(tmp_path, pool=True)
+    log = tmp_path / "worker.log"
+    proc = start_worker(project, log, "--concurrency", "4")
+    try:
+        assert wait_for(
+            lambda: "connection pool for database" in text(log), timeout=60
+        ), text(log)
+    finally:
+        stop(proc)
+    worker_log = text(log)
+    assert worker_log.count("connection pool for database") == 1, worker_log
+    assert "holds at most 4 connections" in worker_log
+    assert "at least 5" in worker_log
+    assert proc.returncode == 0, worker_log
 
 
 class TestTheScopeOutsideThePool:
@@ -474,3 +501,85 @@ def test_without_a_pool_every_thread_keeps_the_connection_it_had(caplog):
     assert renewals
     assert all(renewals)
     assert events(caplog, "worker_started")
+    assert not events(caplog, "connection_pool_too_small")
+
+
+class TestTheStartupWarning:
+    @pytest.mark.parametrize(
+        ("engine", "pool", "concurrency", "warns"),
+        [
+            (POSTGRESQL, True, 3, False),
+            (POSTGRESQL, True, 4, True),
+            (POSTGRESQL, {"max_size": 6}, 5, False),
+            (POSTGRESQL, {"max_size": 6}, 6, True),
+            (POSTGRESQL, {"min_size": 3}, 2, False),
+            (POSTGRESQL, {"min_size": 3}, 3, True),
+            (POSTGRESQL, {"min_size": 3, "max_size": None}, 3, True),
+            (POSTGRESQL, {"timeout": 5.0}, 4, True),
+            (POSTGRESQL, None, 50, False),
+            (POSTGRESQL, {}, 50, False),
+            (POSTGRESQL, "not-a-mapping", 50, False),
+            (SQLITE, True, 50, False),
+        ],
+        ids=[
+            "true-at-bound",
+            "true-over",
+            "max-size-at-bound",
+            "max-size-over",
+            "min-size-only-at-bound",
+            "min-size-only-over",
+            "max-size-none",
+            "neither-size",
+            "pool-absent",
+            "pool-empty",
+            "pool-invalid",
+            "not-postgresql",
+        ],
+    )
+    @needs_psycopg
+    def test_it_warns_below_one_connection_per_task_thread_and_one_for_the_poll_loop(
+        self, add_alias, caplog, engine, pool, concurrency, warns
+    ):
+        add_alias(ENGINE=engine, OPTIONS={} if pool is None else {"pool": pool})
+        worker = Worker(concurrency=concurrency, db_alias=ALIAS)
+        with caplog.at_level(logging.WARNING, logger="django_ox"):
+            worker._warn_if_the_connection_pool_is_short()
+        assert bool(events(caplog, "connection_pool_too_small")) is warns
+
+    @pytest.mark.parametrize(("max_size", "warns"), [(1, True), (2, False)])
+    @needs_psycopg
+    def test_a_task_timeout_does_not_raise_the_bound(
+        self, add_alias, caplog, max_size, warns
+    ):
+        # The watchdog connects outside the pool, so it needs no slot in it.
+        add_alias(ENGINE=POSTGRESQL, OPTIONS={"pool": {"max_size": max_size}})
+        worker = Worker(concurrency=1, db_alias=ALIAS, task_timeout=5)
+        assert worker.timeouts.enabled
+        with caplog.at_level(logging.WARNING, logger="django_ox"):
+            worker._warn_if_the_connection_pool_is_short()
+        assert bool(events(caplog, "connection_pool_too_small")) is warns
+
+    @pytest.mark.parametrize(("task_timeout", "unpooled"), [(None, 1), (5, 2)])
+    @needs_psycopg
+    def test_it_names_the_database_the_sizes_and_what_can_still_fail(
+        self, add_alias, caplog, task_timeout, unpooled
+    ):
+        add_alias(ENGINE=POSTGRESQL, OPTIONS={"pool": True})
+        worker = Worker(concurrency=8, db_alias=ALIAS, task_timeout=task_timeout)
+        with caplog.at_level(logging.WARNING, logger="django_ox"):
+            worker._warn_if_the_connection_pool_is_short()
+        (record,) = events(caplog, "connection_pool_too_small")
+        assert record.levelno == logging.WARNING
+        assert record.worker_id == worker.worker_id
+        assert record.database == ALIAS
+        assert record.concurrency == 8
+        assert record.max_size == 4
+        assert record.recommended_max_size == 9
+        assert record.unpooled_connections == unpooled
+        message = record.getMessage()
+        assert f"{ALIAS!r}" in message
+        assert "at most 4 connections" in message
+        assert "at least 9" in message
+        assert "outcome writes" in message
+        assert "retried" in message
+        assert ("timeout watchdog" in message) is (task_timeout is not None)

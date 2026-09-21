@@ -2644,6 +2644,69 @@ class Worker:
 
     # -- lifecycle ---------------------------------------------------------
 
+    def _warn_if_the_connection_pool_is_short(self) -> None:
+        """
+        Say so at startup when Django's PostgreSQL connection pool for this
+        worker's database cannot give every task thread and the poll loop a
+        connection at the same time.
+
+        Each task thread holds a connection for the whole of its attempt and
+        the poll loop holds one for the life of the process; the renewal and
+        watchdog threads connect outside the pool and are not counted. Below
+        that, task queries and outcome writes wait for a connection, time
+        out and are retried. A warning rather than a refusal, because such
+        configurations ran before and still run. It counts this alias alone,
+        not other aliases, connections tasks open themselves or the server's
+        own limit.
+        """
+        options = connections.settings.get(self._db_alias, {}).get("OPTIONS", {})
+        pool = options.get("pool")
+        if not pool or connections[self._db_alias].vendor != "postgresql":
+            return
+        # True is psycopg_pool's defaults. It reads a missing max_size as
+        # min_size, and min_size defaults to 4.
+        pool = {} if pool is True else pool
+        if not isinstance(pool, dict):
+            # Not a pool Django can open; its own error says so at connect.
+            return
+        max_size = pool.get("max_size") or pool.get("min_size", 4)
+        needed = self.concurrency + 1
+        if max_size >= needed:
+            return
+        if self.timeouts.enabled:
+            unpooled = 2
+            outside = (
+                "Lease renewal and the timeout watchdog connect outside the "
+                "pool, which adds up to 2 connections"
+            )
+        else:
+            unpooled = 1
+            outside = "Lease renewal connects outside the pool, which adds 1 connection"
+        logger.warning(
+            "Worker %s: Django's connection pool for database %r holds at most "
+            "%d connections, fewer than the %d this worker needs at concurrency "
+            "%d, one for each task thread and one for the poll loop. Task "
+            "queries and outcome writes can wait for a connection, time out and "
+            "be retried. Set max_size in OPTIONS['pool'] to at least %d. %s per "
+            "worker process",
+            self.worker_id,
+            self._db_alias,
+            max_size,
+            needed,
+            self.concurrency,
+            needed,
+            outside,
+            extra={
+                "event": "connection_pool_too_small",
+                "worker_id": self.worker_id,
+                "database": self._db_alias,
+                "concurrency": self.concurrency,
+                "max_size": max_size,
+                "recommended_max_size": needed,
+                "unpooled_connections": unpooled,
+            },
+        )
+
     def run_once(self) -> bool:
         """
         Claim and execute a single task inline. Returns True if one ran.
@@ -2722,6 +2785,7 @@ class Worker:
                 "concurrency": self.concurrency,
             },
         )
+        self._warn_if_the_connection_pool_is_short()
         in_flight: set[Future[None]] = set()
         last_reap = 0.0
         last_dispatch = 0.0

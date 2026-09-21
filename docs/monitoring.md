@@ -265,6 +265,7 @@ The message text is not part of the contract. The keys are.
 | Event | Level | When |
 | --- | --- | --- |
 | `worker_started` | INFO | The run loop starts. |
+| `connection_pool_too_small` | WARNING | Once per worker, at startup: the worker's database uses Django's PostgreSQL connection pool, and its `max_size` is below the worker's concurrency plus one. |
 | `task_claimed` | DEBUG | A task was claimed from the queue. |
 | `task_started` | DEBUG | Execution of an attempt begins. |
 | `task_succeeded` | INFO | The task reached SUCCESSFUL. |

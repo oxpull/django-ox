@@ -2669,7 +2669,15 @@ class Worker:
         if not isinstance(pool, dict):
             # Not a pool Django can open; its own error says so at connect.
             return
-        max_size = pool.get("max_size") or pool.get("min_size", 4)
+        max_size = pool.get("max_size")
+        if max_size is None:
+            max_size = pool.get("min_size", 4)
+        if not isinstance(max_size, int) or isinstance(max_size, bool) or max_size < 1:
+            # Only a whole number of connections is compared. psycopg_pool
+            # itself refuses None, a string or a size below 1 when Django
+            # opens the pool, and this warning must never be what stops the
+            # worker.
+            return
         needed = self.concurrency + 1
         if max_size >= needed:
             return

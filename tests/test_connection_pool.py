@@ -638,6 +638,31 @@ class TestTheStartupWarning:
             worker._warn_if_the_connection_pool_is_short()
         assert bool(events(caplog, "connection_pool_too_small")) is warns
 
+    @pytest.mark.parametrize(
+        "pool",
+        [
+            {"min_size": None},
+            {"max_size": "10"},
+            {"min_size": "3"},
+            {"max_size": 2.5},
+            {"max_size": 0},
+            {"max_size": -1},
+        ],
+        ids=repr,
+    )
+    @needs_psycopg
+    def test_a_size_that_is_not_a_count_of_connections_is_passed_over_quietly(
+        self, add_alias, caplog, pool
+    ):
+        # Every one of these would warn at concurrency 50 if it were read as
+        # a size. psycopg_pool refuses most of them when Django opens the
+        # pool; the warning is not the place to fail.
+        add_alias(ENGINE=POSTGRESQL, OPTIONS={"pool": pool})
+        worker = Worker(concurrency=50, db_alias=ALIAS)
+        with caplog.at_level(logging.WARNING, logger="django_ox"):
+            worker._warn_if_the_connection_pool_is_short()
+        assert not events(caplog, "connection_pool_too_small")
+
     @pytest.mark.parametrize(("max_size", "warns"), [(1, True), (2, False)])
     @needs_psycopg
     def test_a_task_timeout_does_not_raise_the_bound(

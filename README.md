@@ -129,7 +129,7 @@ TASKS = {
         "QUEUES": ["default", "emails"],  # [] allows any queue name
         "OPTIONS": {
             "MAX_ATTEMPTS": 3,  # claims per task before FAILED
-            "LOCK_TIMEOUT": 300,  # seconds before a dead worker's task is reclaimed
+            "LOCK_TIMEOUT": 300,  # seconds a worker may stop renewing its lease
             "BACKOFF_INITIAL": 5,  # first retry delay, seconds; doubles per attempt
             "BACKOFF_MAX": 600,  # retry delay ceiling, seconds
         },

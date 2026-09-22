@@ -14,7 +14,7 @@ import time
 import uuid
 from collections.abc import Callable, Coroutine, Generator, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from contextlib import closing, contextmanager, suppress
+from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from inspect import iscoroutinefunction
@@ -93,9 +93,23 @@ WATCHDOG_MAX_WAIT = 3600.0
 # its interval, and a shorter connect_timeout in OPTIONS shortens both.
 OWN_CONNECTION_DEADLINE = 5.0
 
+# How long they wait for a connection from Django's pool instead, when their
+# own cannot be had in time. A connection the pool has spare is handed over
+# at once; waiting any longer would queue them behind the task threads, which
+# is the starvation their own connection is there to avoid.
+POOL_FALLBACK_WAIT = 0.1
+
+# psycopg_pool refuses a checkout whose timeout is zero or less before it
+# looks for an idle connection, so no checkout asks for less than this.
+POOL_SHORTEST_WAIT = 0.001
+
 # libpq reads a connect_timeout below this as this, and psycopg does too
 # from 3.2.
 LIBPQ_MIN_CONNECT_TIMEOUT = 2
+
+# While lease renewal can get no connection at all, it says so at most this
+# often, with the number of renewals missed since it last did.
+MISSED_RENEWAL_REPORT_INTERVAL = 30.0
 
 
 def _load_async_exc_injector() -> Callable[[int], None] | None:
@@ -452,6 +466,11 @@ def _pool_options(alias: str) -> Mapping[str, Any] | None:
     return None
 
 
+def _reason(exc: BaseException) -> str:
+    """An exception as one line of a log message."""
+    return " ".join(str(exc).split()) or type(exc).__name__
+
+
 def _positive_seconds(value: Any) -> float | None:
     """A connect_timeout from OPTIONS as positive seconds, or None for none."""
     try:
@@ -549,10 +568,28 @@ class _Driver:
         return _connection_by_deadline().connect(*args, **kwargs)
 
 
+class _Checkout:
+    """
+    Django's pool for `alias` as one wrapper sees it: a checkout waits at
+    most `wait` seconds, where Django's own waits the pool's timeout.
+    """
+
+    def __init__(self, pool: Any, wait: float) -> None:
+        self._pool = pool
+        self._wait = wait
+
+    def open(self) -> None:
+        self._pool.open()
+
+    def getconn(self) -> Any:
+        return self._pool.getconn(timeout=self._wait)
+
+
 class _OwnConnection:
     """
     A connection of the calling thread's own to a pooled PostgreSQL alias,
-    outside Django's pool, opened by a deadline.
+    outside Django's pool, opened by a deadline; and, for when it cannot
+    be, a connection from the pool for the length of one block.
 
     `wrapper` is a new wrapper for the alias, built from its settings with
     "pool" taken out of OPTIONS, so the rest of the project's connection
@@ -605,6 +642,33 @@ class _OwnConnection:
                 self.wrapper.close()
             raise
 
+    @contextmanager
+    def borrowed(self, wait: float) -> Iterator[None]:
+        """
+        Run the block on a connection from the alias's pool, waiting at
+        most `wait` for it, and give it back as the block ends, whether it
+        returns or raises. Raises from the checkout when there is none.
+
+        Django's own wrapper checks out with the pool's timeout, 30 s
+        unless configured, which is the wait to be avoided. The block's
+        wrapper is a new one whose `pool` bounds the checkout: Django looks
+        its pool up in _connection_pools, and an instance attribute of that
+        name is found first. Everything else is Django's, from the checkout
+        and the setup of a pooled connection to giving it back on close.
+        The connection is never kept past the block, and is never a task
+        thread's.
+        """
+        before = connections[self.alias]
+        wrapper: Any = connections.create_connection(self.alias)
+        wrapper._connection_pools = {self.alias: _Checkout(wrapper.pool, wait)}
+        connections[self.alias] = wrapper
+        try:
+            wrapper.ensure_connection()
+            yield
+        finally:
+            connections[self.alias] = before
+            wrapper.close()
+
 
 @contextmanager
 def _outside_the_pool(
@@ -648,6 +712,127 @@ def _outside_the_pool(
         else:
             del connections[alias]
         own.wrapper.close()
+
+
+class _RenewalReport:
+    """
+    What lease renewal on a pooled PostgreSQL database logs about where its
+    connection came from: each change, once, rather than every renewal.
+
+    Renewal starts out on a connection of its own. The first renewal that
+    is not on it, whether the pool served it or nothing did, is a warning
+    naming why its own could not be had and what became of the pool.
+    Further renewals through the pool are debug lines. Renewals that got no
+    connection at all are a warning when they start and then a summary at
+    most every MISSED_RENEWAL_REPORT_INTERVAL seconds, with the number
+    missed since the last line. The first renewal back on its own
+    connection is an info line with the totals. `clock` is time.monotonic
+    outside tests.
+    """
+
+    def __init__(
+        self, worker_id: str, clock: Callable[[], float] = time.monotonic
+    ) -> None:
+        self.worker_id = worker_id
+        self.clock = clock
+        self.path = "own"
+        self.through_pool = 0
+        self.missed_total = 0
+        self.unreported = 0
+        self.reported_at = -math.inf
+
+    def own(self) -> None:
+        """A renewal on the thread's own connection."""
+        if self.path != "own":
+            logger.info(
+                "Worker %s renews its leases on its own connection again, "
+                "after %d renewals through the connection pool and %d missed",
+                self.worker_id,
+                self.through_pool,
+                self.missed_total,
+                extra={
+                    "event": "lease_renew_recovered",
+                    "worker_id": self.worker_id,
+                    "fallback_renewals": self.through_pool,
+                    "missed_renewals": self.missed_total,
+                },
+            )
+        self.path = "own"
+        self.through_pool = self.missed_total = self.unreported = 0
+
+    def pool(self, why: str) -> None:
+        """A renewal through the pool, because of `why`."""
+        self.through_pool += 1
+        if self.path == "own":
+            logger.warning(
+                "Worker %s could not get a connection of its own for lease "
+                "renewal (%s), and renewed through the connection pool "
+                "instead. It tries its own again at every renewal",
+                self.worker_id,
+                why,
+                extra={
+                    "event": "lease_renew_degraded",
+                    "worker_id": self.worker_id,
+                    "error": why,
+                    "fallback": "succeeded",
+                },
+            )
+        else:
+            logger.debug(
+                "Worker %s renewed its leases through the connection pool (%s)",
+                self.worker_id,
+                why,
+                extra={
+                    "event": "lease_renew_fallback",
+                    "worker_id": self.worker_id,
+                    "error": why,
+                },
+            )
+        self.path = "pool"
+
+    def missed(self, why: str, pool_why: str) -> None:
+        """No renewal: not on its own connection (`why`) nor the pool's."""
+        self.missed_total += 1
+        self.unreported += 1
+        now = self.clock()
+        was, self.path = self.path, "none"
+        if was == "own":
+            logger.warning(
+                "Worker %s could not get a connection of its own for lease "
+                "renewal (%s), nor one from the connection pool (%s), so this "
+                "renewal is missed. It tries both again at every renewal",
+                self.worker_id,
+                why,
+                pool_why,
+                extra={
+                    "event": "lease_renew_degraded",
+                    "worker_id": self.worker_id,
+                    "error": why,
+                    "fallback": "failed",
+                    "fallback_error": pool_why,
+                },
+            )
+        elif now - self.reported_at >= MISSED_RENEWAL_REPORT_INTERVAL:
+            logger.warning(
+                "Worker %s missed %d lease renewal(s) since it last said so: "
+                "no connection of its own (%s), and none from the connection "
+                "pool (%s)",
+                self.worker_id,
+                self.unreported,
+                why,
+                pool_why,
+                extra={
+                    "event": "lease_renew_missed",
+                    "worker_id": self.worker_id,
+                    "missed": self.unreported,
+                    "error": why,
+                    "fallback_error": pool_why,
+                },
+            )
+        else:
+            return
+        self.reported_at = now
+        self.unreported = 0
 
 
 class Worker:
@@ -1197,43 +1382,140 @@ class Worker:
         )
 
     def _renewal_loop(self, stop: Event) -> None:
-        """Renew until stopped. Runs on its own thread, and its own connection."""
+        """
+        Renew until stopped. Runs on its own thread, and on a pooled
+        PostgreSQL database on its own connection, as _renew_on says.
+        """
         # A tick waits no longer than the interval for its own connection,
         # so a stalled connect cannot hold renewal up past the next tick.
         budget = min(OWN_CONNECTION_DEADLINE, self.renew_interval)
-        with _outside_the_pool(self._db_alias, budget):
+        with _outside_the_pool(self._db_alias, budget) as own:
+            report = _RenewalReport(self.worker_id)
+            safe_until = time.monotonic() + self.lock_timeout
             try:
                 while not stop.wait(self.renew_interval):
-                    try:
-                        self.renew_leases()
-                    except Exception:
-                        # A missed renewal is survivable by design: the interval
-                        # is a third of the timeout. Drop the connection so the
-                        # next tick reconnects, and keep going, because giving
-                        # up here would silently expire every live lease.
-                        #
-                        # Every exception, not a chosen class. Nothing restarts
-                        # this thread and nothing checks it is alive, and a
-                        # renewal loop that stops lets every in-flight lease
-                        # expire. `django.db.InterfaceError` sits beside
-                        # `DatabaseError` under `django.db.Error`, so a dropped
-                        # connection, the likeliest failure here, has to be
-                        # caught too. The consequence of guessing wrong is
-                        # severe and silent, which is exactly when a guess
-                        # should not be made.
-                        logger.warning(
-                            "Lease renewal failed for worker %s; retrying in %.1fs",
-                            self.worker_id,
-                            self.renew_interval,
-                            exc_info=True,
-                            extra={
-                                "event": "lease_renew_failed",
-                                "worker_id": self.worker_id,
-                            },
-                        )
-                        connections.close_all()
+                    if own is None:
+                        self._renew_or_warn()
+                    else:
+                        safe_until = self._renew_on(own, report, safe_until)
             finally:
                 connections.close_all()
+
+    def _renew_or_warn(self) -> bool:
+        """
+        Renew on the thread's connection for the worker's alias. On failure,
+        say so, drop the connection and return False.
+        """
+        try:
+            self.renew_leases()
+        except Exception:
+            # A missed renewal is survivable by design: the interval is a
+            # third of the timeout. Drop the connection so the next tick
+            # reconnects, and keep going, because giving up here would
+            # silently expire every live lease.
+            #
+            # Every exception, not a chosen class. Nothing restarts this
+            # thread and nothing checks it is alive, and a renewal loop that
+            # stops lets every in-flight lease expire.
+            # `django.db.InterfaceError` sits beside `DatabaseError` under
+            # `django.db.Error`, so a dropped connection, the likeliest
+            # failure here, has to be caught too. The consequence of
+            # guessing wrong is severe and silent, which is exactly when a
+            # guess should not be made.
+            logger.warning(
+                "Lease renewal failed for worker %s; retrying in %.1fs",
+                self.worker_id,
+                self.renew_interval,
+                exc_info=True,
+                extra={
+                    "event": "lease_renew_failed",
+                    "worker_id": self.worker_id,
+                },
+            )
+            connections.close_all()
+            return False
+        return True
+
+    def _renew_on(
+        self, own: _OwnConnection, report: _RenewalReport, safe_until: float
+    ) -> float:
+        """
+        One renewal on a pooled PostgreSQL database. Returns the new
+        `safe_until`: the earliest a lease this worker holds can expire, on
+        time.monotonic(). A lease renewed or taken no earlier than the last
+        renewal that succeeded, or than the last tick with nothing to
+        renew, lasts lock_timeout from then.
+
+        The renewal runs on the thread's own connection when it is open or
+        can be opened by own.budget from the start of the tick. Otherwise it
+        runs on a connection from Django's pool, waited for at most
+        POOL_FALLBACK_WAIT and given back straight after: the connection
+        renewal used before it had one of its own, so a pool with one to
+        spare is no worse off than it was. Both happen: the server can have
+        no slot left for a connection of the worker's own, and new
+        connections can stall while those already open still flow. With
+        neither, the renewal is missed and the next tick tries again. A
+        tick takes no longer than the deadline and the wait together, so
+        ticks never overlap and nothing waits behind them.
+
+        With less of `safe_until` left than an attempt at its own
+        connection and the wait for the pool would take, the tick asks the
+        pool first, waiting no longer than is left, and tries its own
+        connection only when the pool has none. It still tries its own:
+        `safe_until` moves only when a renewal succeeds, so once one is
+        missed a pool with nothing to spare would otherwise be all any tick
+        tried again. A failed renewal statement is not a missing
+        connection: it is reported as _renew_or_warn says, and its
+        connection is dropped.
+        """
+        started = time.monotonic()
+        with self._in_flight_lock:
+            idle = not self._in_flight
+        if idle:
+            # Nothing to renew, so nothing is opened, and a lease taken from
+            # here on lasts lock_timeout from a later instant than this.
+            return started + self.lock_timeout
+        renewed = started + self.lock_timeout
+        if not own.is_open:
+            left = safe_until - started
+            hurry = left < own.budget + POOL_FALLBACK_WAIT
+            pool_why = ""
+            if hurry:
+                why = f"not tried first, {max(left, 0.0):.1f}s left on the leases"
+                pool_why = self._renew_borrowing(own, safe_until)
+                if not pool_why:
+                    report.pool(why)
+                    return renewed
+            try:
+                own.open(started + own.budget)
+            except Exception as exc:
+                why = _reason(exc)
+                if not hurry:
+                    pool_why = self._renew_borrowing(own, safe_until)
+                    if not pool_why:
+                        report.pool(why)
+                        return renewed
+                report.missed(why, pool_why)
+                return safe_until
+        if not self._renew_or_warn():
+            return safe_until
+        report.own()
+        return renewed
+
+    def _renew_borrowing(self, own: _OwnConnection, safe_until: float) -> str:
+        """
+        Renew on a connection from the pool, waited for at most
+        POOL_FALLBACK_WAIT and not past `safe_until`. Returns "" when the
+        renewal went through, or why it did not.
+        """
+        wait = min(POOL_FALLBACK_WAIT, safe_until - time.monotonic())
+        try:
+            with own.borrowed(max(wait, POOL_SHORTEST_WAIT)):
+                if self._renew_or_warn():
+                    return ""
+        except Exception as exc:
+            return _reason(exc)
+        return "the renewal statement failed"
 
     # -- execution ---------------------------------------------------------
 
@@ -1747,7 +2029,7 @@ class Worker:
         this worker has under a timeout; it exits when idle and is started
         again by the next attempt that needs it.
         """
-        with _outside_the_pool(self._db_alias):
+        with _outside_the_pool(self._db_alias) as own:
             try:
                 while True:
                     with self._watch_lock:
@@ -1766,7 +2048,8 @@ class Worker:
                         stuck = self._fire_due()
                     for watch in stuck:
                         try:
-                            self._handle_stuck(watch)
+                            with self._watchdog_connection(own):
+                                self._handle_stuck(watch)
                         except Exception:
                             # This thread is the whole of the timeout backstop and
                             # nothing restarts it mid-attempt, so a failure on one
@@ -1785,6 +2068,40 @@ class Worker:
                             )
             finally:
                 connections.close_all()
+
+    @contextmanager
+    def _watchdog_connection(self, own: _OwnConnection | None) -> Iterator[None]:
+        """
+        Put a connection under the block that records a stuck attempt: the
+        watchdog's own, opened by its deadline as renewal's is, or else one
+        from Django's pool, waited for at most POOL_FALLBACK_WAIT and given
+        back when the block ends. With neither, the block still runs and
+        its record fails at once, because the deadline that passed still
+        holds, so the recycle that follows is not held up.
+        """
+        with ExitStack() as scope:
+            if own is not None and not own.is_open:
+                try:
+                    own.open(time.monotonic() + own.budget)
+                except Exception as exc:
+                    try:
+                        scope.enter_context(own.borrowed(POOL_FALLBACK_WAIT))
+                    except Exception as pool_exc:
+                        logger.warning(
+                            "Worker %s's timeout watchdog has no connection to "
+                            "record a stuck attempt on: not its own (%s), and "
+                            "none from the connection pool (%s)",
+                            self.worker_id,
+                            _reason(exc),
+                            _reason(pool_exc),
+                            extra={
+                                "event": "watchdog_connection_unavailable",
+                                "worker_id": self.worker_id,
+                                "error": _reason(exc),
+                                "fallback_error": _reason(pool_exc),
+                            },
+                        )
+            yield
 
     def _fire_due(self) -> list[_Watch]:
         """

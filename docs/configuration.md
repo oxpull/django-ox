@@ -128,9 +128,10 @@ in `QUEUES` is covered by some worker.
 
 ### Tasks that run longer than the lock timeout
 
-A long task is not by itself a problem. A worker refreshes the lock on the
-tasks it is running every `LOCK_TIMEOUT / 3` seconds, so an hour-long task on
-a healthy worker keeps its lease for the hour.
+A long task is not by itself a problem. A worker schedules lock renewal for
+the tasks it is running every `LOCK_TIMEOUT / 3` seconds. An hour-long task
+keeps its lease while renewals continue to succeed; a live worker alone
+does not guarantee renewal.
 
 What `LOCK_TIMEOUT` bounds is how long a worker may stop refreshing before its
 work is handed to somebody else. Set it above the longest pause you are

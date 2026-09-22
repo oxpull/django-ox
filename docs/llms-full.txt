@@ -1022,9 +1022,10 @@ in `QUEUES` is covered by some worker.
 
 ### Tasks that run longer than the lock timeout
 
-A long task is not by itself a problem. A worker refreshes the lock on the
-tasks it is running every `LOCK_TIMEOUT / 3` seconds, so an hour-long task on
-a healthy worker keeps its lease for the hour.
+A long task is not by itself a problem. A worker schedules lock renewal for
+the tasks it is running every `LOCK_TIMEOUT / 3` seconds. An hour-long task
+keeps its lease while renewals continue to succeed; a live worker alone
+does not guarantee renewal.
 
 What `LOCK_TIMEOUT` bounds is how long a worker may stop refreshing before its
 work is handed to somebody else. Set it above the longest pause you are
@@ -3506,7 +3507,8 @@ to lapse. A worker can become unresponsive for longer than `LOCK_TIMEOUT`
 and then return. A live worker can also lose its lease when renewal cannot
 get a database connection: before 1.4.0, a Django PostgreSQL pool below
 `concurrency + 2` (`concurrency + 3` with task timeouts) could cause this;
-in 1.4.0, a failed private connect with no pooled spare can still do so.
+in 1.4.0, private connects that keep failing for about `LOCK_TIMEOUT`,
+with no pooled spare, can still do so.
 See [PostgreSQL pooling](#database-connections-and-postgresql-pooling).
 
 Raising `LOCK_TIMEOUT` gives delayed renewals more time, but does not fix
@@ -3615,8 +3617,8 @@ the row, not the function. These cases can cause overlap:
   the task to somebody else.
 - Renewal cannot get a connection for longer than `LOCK_TIMEOUT` while the
   body keeps running. Before 1.4.0, Django's PostgreSQL pool could starve
-  renewal; in 1.4.0, a failed private connect with no pooled spare can still
-  let the lease expire. See
+  renewal; in 1.4.0, private connects that keep failing for about
+  `LOCK_TIMEOUT`, with no pooled spare, can still let the lease expire. See
   [PostgreSQL pooling](#database-connections-and-postgresql-pooling).
 
 So the rule is the same one every at-least-once queue asks for, and it *is*
@@ -4001,9 +4003,9 @@ The message text is not part of the contract. The keys are.
 | `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. One record per task. A pass whose stuck set changed while it ran (a lease renewed, or one more lease expired) instead emits a single record carrying `count` and no `task_id`, because it cannot say which tasks the reclaim covered. |
 | `task_lease_lost` | WARNING | A worker finished an attempt whose lease had already been reclaimed, so its write was dropped and no result was signalled. |
 | `lease_renew_failed` | WARNING | A lease renewal statement failed. Outside Django's PostgreSQL pool, this also covers connection failures during renewal. The thread continues. The next tick is due within one renewal interval and starts immediately after an overrun. |
-| `lease_renew_degraded` | WARNING | On a pooled PostgreSQL database, renewal left its private connection path. The worker renewed through the pool or failed to renew through either path. `fallback` is `succeeded` or `failed`. Logged once on entering degraded renewal, not on every degraded tick. |
+| `lease_renew_degraded` | WARNING | On a pooled PostgreSQL database, renewal left its private connection path. The worker renewed through the pool or failed to renew through either path. `fallback` is `succeeded` or `failed`. Logged once on entering degraded renewal, not on every degraded tick. Alert on this event; `lease_renew_missed` can arrive after live work has already been reclaimed. |
 | `lease_renew_fallback` | DEBUG | On a pooled PostgreSQL database, a later renewal succeeded through the pool while renewal remained degraded. |
-| `lease_renew_missed` | WARNING | On a pooled PostgreSQL database, renewal missed a tick while degraded. Reports missed-renewal counts at most once per 30 seconds. `lease_renew_missed` means leases were not renewed on that tick. After two consecutive misses, the next tick lands at the lease boundary; the reaper can reclaim the task while its body is still running, allowing another run. A degraded warning with `fallback=failed` also means that tick did not renew leases and starts missed-tick reporting. One with `fallback=succeeded` does not. The window persists across recovery. |
+| `lease_renew_missed` | WARNING | On a pooled PostgreSQL database, renewal missed a tick while degraded. Reports missed-renewal counts at most once per 30 seconds. `lease_renew_missed` means leases were not renewed on that tick. After two consecutive misses, the next tick lands at the lease boundary; the reaper can reclaim the task while its body is still running, allowing another run. A degraded warning with `fallback=failed` also means that tick did not renew leases and starts missed-tick reporting. One with `fallback=succeeded` does not. The 30-second missed-renewal reporting window persists across recovery. |
 | `lease_renew_recovered` | INFO | On a pooled PostgreSQL database, renewal succeeded on its private connection again. Includes counts of successful fallback renewals and missed renewals during the degraded period. |
 | `schedule_dispatched` | INFO | A recurring tick enqueued its task. |
 | `schedule_tick_dropped` | WARNING | A tick was past its starting deadline and was not run. Carries `late_seconds`. Each worker reports a given tick once, not once per dispatch pass, so a schedule that stays droppable does not repeat the warning every second. |
@@ -4876,10 +4878,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `connection_pool_too_small` warns at WARNING level when the worker alias's
   effective pool maximum is below `concurrency + 1`. It runs once per
   `Worker.run()`. It does not resize the pool or refuse startup.
-- Pooled PostgreSQL renewal reports these [events](https://oxpull.com/django-ox/monitoring/):
+- Pooled PostgreSQL renewal reports these [events](https://oxpull.com/django-ox/monitoring/#log-events):
   - `lease_renew_degraded`: WARNING on entering degraded renewal.
     `fallback=succeeded` means renewal is using the pool; check server slots
     and connect stalls. `fallback=failed` means that tick did not renew leases.
+    Alert on this event; `lease_renew_missed` can arrive after live work has
+    already been reclaimed.
   - `lease_renew_fallback`: DEBUG for later successful pooled renewals.
   - `lease_renew_missed`: WARNING with missed counts, at most every 30 seconds.
     After two consecutive misses, the next tick lands at the lease boundary;

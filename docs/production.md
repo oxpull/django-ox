@@ -771,7 +771,8 @@ to lapse. A worker can become unresponsive for longer than `LOCK_TIMEOUT`
 and then return. A live worker can also lose its lease when renewal cannot
 get a database connection: before 1.4.0, a Django PostgreSQL pool below
 `concurrency + 2` (`concurrency + 3` with task timeouts) could cause this;
-in 1.4.0, a failed private connect with no pooled spare can still do so.
+in 1.4.0, private connects that keep failing for about `LOCK_TIMEOUT`,
+with no pooled spare, can still do so.
 See [PostgreSQL pooling](#database-connections-and-postgresql-pooling).
 
 Raising `LOCK_TIMEOUT` gives delayed renewals more time, but does not fix
@@ -880,8 +881,8 @@ the row, not the function. These cases can cause overlap:
   the task to somebody else.
 - Renewal cannot get a connection for longer than `LOCK_TIMEOUT` while the
   body keeps running. Before 1.4.0, Django's PostgreSQL pool could starve
-  renewal; in 1.4.0, a failed private connect with no pooled spare can still
-  let the lease expire. See
+  renewal; in 1.4.0, private connects that keep failing for about
+  `LOCK_TIMEOUT`, with no pooled spare, can still let the lease expire. See
   [PostgreSQL pooling](#database-connections-and-postgresql-pooling).
 
 So the rule is the same one every at-least-once queue asks for, and it *is*

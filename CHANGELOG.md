@@ -18,10 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `connection_pool_too_small` warns at WARNING level when the worker alias's
   effective pool maximum is below `concurrency + 1`. It runs once per
   `Worker.run()`. It does not resize the pool or refuse startup.
-- Pooled PostgreSQL renewal reports these [events](https://oxpull.com/django-ox/monitoring/):
+- Pooled PostgreSQL renewal reports these [events](https://oxpull.com/django-ox/monitoring/#log-events):
   - `lease_renew_degraded`: WARNING on entering degraded renewal.
     `fallback=succeeded` means renewal is using the pool; check server slots
     and connect stalls. `fallback=failed` means that tick did not renew leases.
+    Alert on this event; `lease_renew_missed` can arrive after live work has
+    already been reclaimed.
   - `lease_renew_fallback`: DEBUG for later successful pooled renewals.
   - `lease_renew_missed`: WARNING with missed counts, at most every 30 seconds.
     After two consecutive misses, the next tick lands at the lease boundary;

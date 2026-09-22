@@ -15,31 +15,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BACKOFF_MAX` are both explicitly set to valid numbers in `OPTIONS` and
   the initial delay is above the cap. Retries still run. As before,
   every retry waits `BACKOFF_MAX` in this configuration.
-- Add `connection_pool_too_small` at WARNING level when the worker alias's
+- `connection_pool_too_small` warns at WARNING level when the worker alias's
   effective pool maximum is below `concurrency + 1`. It runs once per
   `Worker.run()`. It does not resize the pool or refuse startup.
-- Add pooled PostgreSQL renewal events:
+- Pooled PostgreSQL renewal reports these [events](https://oxpull.com/django-ox/monitoring/):
   - `lease_renew_degraded`: WARNING on entering degraded renewal.
+    `fallback=succeeded` means renewal is using the pool; check server slots
+    and connect stalls. `fallback=failed` means that tick did not renew leases.
   - `lease_renew_fallback`: DEBUG for later successful pooled renewals.
   - `lease_renew_missed`: WARNING with missed counts, at most every 30 seconds.
+    After two consecutive misses, the next tick lands at the lease boundary;
+    reclaim and another run are possible.
   - `lease_renew_recovered`: INFO when private renewal resumes.
-- Add `watchdog_connection_unavailable` at WARNING level once per batch
-  when neither watchdog connection path is available. Every record in
-  that batch fails. Recycling proceeds.
+- `watchdog_connection_unavailable` warns at WARNING level once per watchdog
+  pass when neither connection path is available. A pass handles the stuck
+  attempts recorded together. Their outcomes go unrecorded; recycling proceeds.
 
 ### Fixed
 
-- Give pooled PostgreSQL renewal and watchdog work private connection
-  paths with local connect deadlines and short pool fallbacks.
-- Run at most one watchdog acquisition sequence per batch. Include
-  attempts whose grace expires during acquisition or recording.
-  Close or return the connection at batch end. Do not reconnect between
-  records. Stuck-attempt eligibility and recycling are unchanged.
-- Preserve one `renew_leases()` call on every idle pooled tick, including
-  custom overrides. The stock idle method opens no connection.
-  This corrects an unreleased intermediate; 1.3.1 did not have this defect.
-- Reject an expired private-connect deadline before host-name resolution.
-  This corrects an unreleased intermediate; 1.3.1 did not have this defect.
+- The watchdog runs at most one acquisition sequence per pass, including
+  attempts whose grace expires during acquisition or recording. It closes
+  or returns the connection at the end without reconnecting between records.
+  Stuck-attempt eligibility and recycling are unchanged.
 - Reject unknown `ox_worker --backend` aliases before starting workers, naming
   the invalid alias and listing configured choices. Ordinary invocation reports
   one error line; `--traceback` still shows the traceback.

@@ -249,6 +249,11 @@ that expects to be restarted itself, like the single worker.
 
 ### Database connections and PostgreSQL pooling
 
+The sizing below is for django-ox 1.4.0 and later. Before 1.4.0, give workers
+pools of at least `concurrency + 2`, or `concurrency + 3` with task timeouts,
+or disable their Django pool. Keep that budget until every old worker has
+stopped.
+
 Django's PostgreSQL connection pool has a separate budget for each worker
 process and database alias. Set the worker alias's `max_size` to at least
 `concurrency + 1`: one connection per task thread and one for the poll loop.
@@ -260,6 +265,13 @@ Each `--processes` child has its own pool. The supervisor opens no database
 connection.
 
 #### Budget server capacity
+
+With Django's PostgreSQL pool, 1.4.0 workers open renewal connections outside
+the pool, in addition to `max_size`. Task timeouts (`TASK_TIMEOUT` set, or any
+`TASK_TIMEOUTS` value not `None`) also run the timeout watchdog, which opens
+another connection outside the pool. Each worker process can hold up to
+`max_size + 1` server connections, or `max_size + 2` with task timeouts.
+Check PostgreSQL `max_connections` and role connection limits before upgrading.
 
 Lease renewal normally uses a private connection outside the pool. The stock
 worker opens it on the first renewal tick with work in flight. It reuses the
@@ -290,6 +302,12 @@ connections. Startup cannot see available server slots. Runtime degraded
 warnings report private-path failures that startup cannot detect.
 
 #### Configure the pool
+
+The `concurrency + 1` baseline below is for django-ox 1.4.0 and later.
+Before 1.4.0, workers need at least `concurrency + 2` pooled connections,
+or `concurrency + 3` with task timeouts. For the `--concurrency 4` example,
+that means `max_size` at least 6, or 7 with task timeouts, until every old
+worker has stopped.
 
 For the `--processes 2 --concurrency 4` examples, keep the worker command
 unchanged and set `max_size` to at least 5 on the worker's database alias.
@@ -431,7 +449,10 @@ The deadline is not an unconditional wall-clock bound. It does not interrupt
 synchronous DNS or cover Django's post-connect setup queries. It also does
 not bound renewal or stuck-attempt recording statements.
 
-Set `OPTIONS["connect_timeout"]` for other database connections too. The
+Nothing needs setting for renewal or the watchdog. To bound task and
+poll-loop connects, set `OPTIONS["connect_timeout"]` on the database alias.
+A positive value below 5 seconds also shortens private deadlines when it
+is below their existing budget. The
 private-path deadlines do not apply to task or poll-loop connections.
 Connection-establishment timeouts are separate from pool checkout timeouts
 and query timeouts.
@@ -493,12 +514,14 @@ every time the task changes hands. Three things follow from that number, and
 they belong together because they are what makes recovery
 safe.
 
-**The worker keeps its own lease alive.** While a task is executing, its
-worker refreshes the lock timestamp on the rows it is running, one statement
-per interval however many are in flight, and it keeps doing so through a
-graceful drain. So a task that takes an hour does not look abandoned after
-five minutes. The reaper reclaims work from workers that stopped reporting,
-not from tasks that are merely slow.
+**Renewal keeps the lease alive while it reaches the database on time.**
+While tasks execute, the worker refreshes their lock timestamps with one
+statement per interval, including during graceful drain. Slow tasks stay
+protected while those renewals succeed. If renewal is delayed or cannot get
+a connection for `LOCK_TIMEOUT`, the reaper can reclaim work from a live
+worker whose task bodies are still running. See
+[Tuning LOCK_TIMEOUT](#tuning-lock_timeout) and
+[PostgreSQL pooling](#database-connections-and-postgresql-pooling).
 
 **A finish write only lands while the lease still holds.** When a worker
 records success, failure or a retry, the UPDATE carries the lease number it
@@ -744,12 +767,16 @@ alternative, reporting it as still running forever, hangs every caller that
 waits on it.
 
 It takes two things at once: the task's attempts spent, and its lease allowed
-to lapse. Renewal holds the lease for as long as the worker is answering, so
-what reaches this state is a worker that went unresponsive for longer than
-`LOCK_TIMEOUT` and then came back, which is the case you asked the reaper to
-act on in the first place. If your callers cannot tolerate seeing it, raise
-`LOCK_TIMEOUT` until a merely slow worker is never reclaimed; the cost is that
-a genuinely dead one takes that much longer to notice.
+to lapse. A worker can become unresponsive for longer than `LOCK_TIMEOUT`
+and then return. A live worker can also lose its lease when renewal cannot
+get a database connection: before 1.4.0, a Django PostgreSQL pool below
+`concurrency + 2` (`concurrency + 3` with task timeouts) could cause this;
+in 1.4.0, a failed private connect with no pooled spare can still do so.
+See [PostgreSQL pooling](#database-connections-and-postgresql-pooling).
+
+Raising `LOCK_TIMEOUT` gives delayed renewals more time, but does not fix
+connection starvation and delays recovery from dead workers. See
+[Tuning LOCK_TIMEOUT](#tuning-lock_timeout).
 
 ### Attempts count claims
 
@@ -842,7 +869,7 @@ arithmetic, not timing: no pause is long enough to defeat it, which is why a
 reclaimed worker cannot corrupt the record of a task it no longer owns.
 
 **Two threads can run the same task body at the same time.** The lease fences
-the row, not the function. There are two ways to get there:
+the row, not the function. These cases can cause overlap:
 
 - A task outlives `TASK_TIMEOUT`. The worker asks the thread to stop, and after
   `TASK_TIMEOUT_GRACE` it publishes the retry and recycles. The old thread is
@@ -851,6 +878,11 @@ the row, not the function. There are two ways to get there:
 - A worker is partitioned from the database for longer than `LOCK_TIMEOUT`. It
   is still executing; the reaper cannot tell it apart from a dead one and gives
   the task to somebody else.
+- Renewal cannot get a connection for longer than `LOCK_TIMEOUT` while the
+  body keeps running. Before 1.4.0, Django's PostgreSQL pool could starve
+  renewal; in 1.4.0, a failed private connect with no pooled spare can still
+  let the lease expire. See
+  [PostgreSQL pooling](#database-connections-and-postgresql-pooling).
 
 So the rule is the same one every at-least-once queue asks for, and it *is*
 every at-least-once queue rather than a property of this one. Sidekiq's [reliability notes](https://github.com/sidekiq/sidekiq/wiki/Reliability)

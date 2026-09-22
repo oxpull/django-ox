@@ -850,12 +850,22 @@ class TestLeaseRenewalScope:
         reap_away(worker, claimed)
         assert worker.renew_leases() == 0
 
-    def test_renewal_loop_survives_a_database_error(self, worker, caplog):
+    @pytest.mark.parametrize("pooled", [False, True], ids=["default", "pool"])
+    def test_renewal_loop_survives_a_database_error(
+        self, worker, caplog, request, pooled
+    ):
         """
         Giving up on the first failed renewal would expire every live lease
         this worker holds, so the loop logs and carries on. Two consecutive
-        misses are already inside the timeout by design.
+        misses are already inside the timeout by design. The same on a
+        pooled PostgreSQL database, where renewal takes a path of its own.
         """
+        if pooled:
+            worker = Worker(
+                backoff_initial=0,
+                poll_interval=0.05,
+                db_alias=request.getfixturevalue("idle_pooled_alias"),
+            )
         caplog.set_level(logging.WARNING, logger="django_ox")
         worker.renew_interval = 0.02
         attempts = []

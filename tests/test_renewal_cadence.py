@@ -19,7 +19,7 @@ import time
 import uuid
 
 import pytest
-from django.db import OperationalError, connections
+from django.db import OperationalError
 
 import django_ox.worker as worker_module
 from django_ox.worker import Worker
@@ -38,7 +38,6 @@ WAITS = [2.0, 1.5, 0.0, 1.7]
 # ends, and is the new anchor: nothing is made up for the time it lost.
 STARTS = [2.0, 4.0, 6.1]
 
-POOLED = "cadence"
 UNPOOLED = "alt"
 
 needs_psycopg = pytest.mark.skipif(
@@ -89,28 +88,6 @@ def clock(monkeypatch):
     return made
 
 
-@pytest.fixture
-def pooled_alias():
-    """
-    A pooled PostgreSQL alias that nothing here connects through: it points
-    at a port nobody listens on, so a connection opened by mistake fails at
-    once instead of reaching a database. Forgotten afterwards.
-    """
-    connections.settings[POOLED] = {
-        **connections.settings["default"],
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": "oxtest",
-        "USER": "ox",
-        "PASSWORD": "ox",
-        "HOST": "127.0.0.1",
-        "PORT": "1",
-        "OPTIONS": {"pool": True},
-        "TEST": {},
-    }
-    yield POOLED
-    del connections.settings[POOLED]
-
-
 def spending(clock: Clock, starts: list[float]):
     """A call that notes when it started and moves the clock by the next cost."""
     costs = iter(COSTS)
@@ -146,9 +123,38 @@ def without_a_pool_failing(clock, starts, monkeypatch, request):
     return worker
 
 
+def pooled_worker(request):
+    alias = request.getfixturevalue("idle_pooled_alias")
+    return Worker(db_alias=alias, lock_timeout=LEASE, renew_interval=INTERVAL)
+
+
+def pooled_with_nothing_in_flight(clock, starts, monkeypatch, request):
+    """renew_leases() overridden, as a subclass may, and taking the cost."""
+    worker = pooled_worker(request)
+    spend = spending(clock, starts)
+
+    def renew():
+        spend()
+        return 0
+
+    worker.renew_leases = renew
+    return worker
+
+
+def pooled_with_nothing_in_flight_failing(clock, starts, monkeypatch, request):
+    worker = pooled_worker(request)
+    spend = spending(clock, starts)
+
+    def renew():
+        spend()
+        raise RuntimeError("an override that fails")
+
+    worker.renew_leases = renew
+    return worker
+
+
 def busy_worker(request):
-    alias = request.getfixturevalue("pooled_alias")
-    worker = Worker(db_alias=alias, lock_timeout=LEASE, renew_interval=INTERVAL)
+    worker = pooled_worker(request)
     worker._in_flight.add((uuid.uuid4(), 1))
     worker.renew_leases = lambda: 1
     return worker
@@ -187,6 +193,14 @@ def pooled_stalled_with_none_to_spare(clock, starts, monkeypatch, request):
 PATHS = [
     pytest.param(without_a_pool, id="no-pool"),
     pytest.param(without_a_pool_failing, id="no-pool-failing"),
+    pytest.param(
+        pooled_with_nothing_in_flight, id="pool-nothing-in-flight", marks=needs_psycopg
+    ),
+    pytest.param(
+        pooled_with_nothing_in_flight_failing,
+        id="pool-nothing-in-flight-failing",
+        marks=needs_psycopg,
+    ),
     pytest.param(
         pooled_on_its_own_connection, id="pool-own-connection", marks=needs_psycopg
     ),
@@ -258,16 +272,11 @@ class WaitsOnce(threading.Event):
         return super().wait(timeout)
 
 
-@pytest.mark.parametrize(
-    "alias",
-    [
-        pytest.param(UNPOOLED, id="no-pool"),
-        pytest.param(POOLED, id="pool", marks=needs_psycopg),
-    ],
-)
-def test_the_stop_ends_the_wait_after_a_renewal_at_once(alias, request, monkeypatch):
-    if alias == POOLED:
-        request.getfixturevalue("pooled_alias")
+@pytest.mark.parametrize("pooled", [False, True], ids=["no-pool", "pool"])
+def test_the_stop_ends_the_wait_after_a_renewal_at_once(pooled, request, monkeypatch):
+    alias = UNPOOLED
+    if pooled:
+        alias = request.getfixturevalue("idle_pooled_alias")
         monkeypatch.setattr(
             worker_module._OwnConnection, "open", lambda own, deadline: None
         )
@@ -284,3 +293,30 @@ def test_the_stop_ends_the_wait_after_a_renewal_at_once(alias, request, monkeypa
     assert not thread.is_alive(), "the stop did not end the wait"
     assert renewed == [1]
     assert 3590 < stop.asked[1] <= 3600
+
+
+class Overriding(Worker):
+    """A worker class whose renew_leases() does something of its own."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.renewed_at: list[float] = []
+
+    def renew_leases(self) -> int:
+        self.renewed_at.append(worker_module.time.monotonic())
+        return 0
+
+
+def test_an_idle_pooled_worker_calls_an_overriding_renew_leases_every_tick(
+    clock, idle_pooled_alias
+):
+    """
+    With nothing in flight on a pooled database the stock renew_leases()
+    has nothing to do and opens nothing, but a subclass that overrides it
+    is called once a tick, as it is without a pool.
+    """
+    worker = Overriding(
+        db_alias=idle_pooled_alias, lock_timeout=LEASE, renew_interval=INTERVAL
+    )
+    run_loop(worker, Stop(clock, ticks=3))
+    assert worker.renewed_at == pytest.approx([2.0, 4.0, 6.0])

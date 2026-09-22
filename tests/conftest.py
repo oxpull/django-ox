@@ -190,3 +190,33 @@ def task_state():
 def worker():
     """A worker with no backoff delay, suitable for inline run_once() tests."""
     return Worker(backoff_initial=0, poll_interval=0.05)
+
+
+IDLE_POOLED_ALIAS = "idle_pooled"
+
+
+@pytest.fixture
+def idle_pooled_alias():
+    """
+    A database alias pooled the way Django pools PostgreSQL, for a worker
+    whose renewal ticks have nothing in flight and so take the pooled path
+    without connecting. It points at a port nobody listens on, so a
+    connection opened by mistake fails at once instead of reaching a
+    database. Building its wrapper imports psycopg. Forgotten afterwards.
+    """
+    pytest.importorskip("psycopg")
+    from django.db import connections
+
+    connections.settings[IDLE_POOLED_ALIAS] = {
+        **connections.settings["default"],
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": "oxtest",
+        "USER": "ox",
+        "PASSWORD": "ox",
+        "HOST": "127.0.0.1",
+        "PORT": "1",
+        "OPTIONS": {"pool": True},
+        "TEST": {},
+    }
+    yield IDLE_POOLED_ALIAS
+    del connections.settings[IDLE_POOLED_ALIAS]

@@ -1629,16 +1629,56 @@ class TestARenewalTick:
             "lease_renew_recovered",
         ]
 
-    def test_a_tick_with_nothing_to_renew_opens_nothing(self, claimed):
+    def test_a_tick_with_nothing_to_renew_opens_nothing(self, claimed, monkeypatch):
+        """
+        renew_leases() is still called, and the stock one returns without a
+        query, so nothing is opened and nothing is asked of the pool.
+        """
         worker, _, pool = claimed
         worker._in_flight.clear()
+        renewed = []
+        stock = worker.renew_leases
+        monkeypatch.setattr(worker, "renew_leases", lambda: renewed.append(stock()))
         requests = pool.get_stats()["requests_num"]
         with _outside_the_pool(ALIAS, 2.0) as own:
             started = time.monotonic()
             safe_until = worker._renew_on(own, _RenewalReport(worker.worker_id), 0)
             assert not own.is_open
+        assert renewed == [0]
         assert safe_until >= started + worker.lock_timeout
         assert pool.get_stats()["requests_num"] == requests
+
+    def test_an_override_that_queries_with_nothing_in_flight_gets_a_connection(
+        self, claimed, blackhole, caplog
+    ):
+        """
+        A subclass's renew_leases() that queries on a tick with nothing in
+        flight connects by that tick's deadline, even after an earlier
+        tick's deadline passed without a connection.
+        """
+        worker, _, _ = claimed
+
+        def renew_leases():
+            with connections[ALIAS].cursor() as cursor:
+                cursor.execute("SELECT 1")
+            return 0
+
+        worker.renew_leases = renew_leases
+        report = _RenewalReport(worker.worker_id)
+        with (
+            caplog.at_level(logging.WARNING, logger="django_ox"),
+            _outside_the_pool(ALIAS, 0.3) as own,
+        ):
+            port = own.wrapper.settings_dict["PORT"]
+            own.wrapper.settings_dict["PORT"] = str(blackhole.port)
+            worker._renew_on(own, report, time.monotonic() + 30)
+            assert not own.is_open
+            own.wrapper.settings_dict["PORT"] = port
+            worker._in_flight.clear()
+            caplog.clear()
+            worker._renew_on(own, report, time.monotonic() + 30)
+            assert own.is_open
+        assert not events(caplog, "lease_renew_failed")
 
     def test_the_tick_after_its_connection_is_killed_reconnects(self, claimed, caplog):
         """A database restart, as the renewal connection sees one."""

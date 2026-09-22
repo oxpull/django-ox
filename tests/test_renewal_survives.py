@@ -11,6 +11,9 @@ permanent.
 `django.db.InterfaceError` is the case that matters: a connection dropped
 underneath the thread is the most likely thing to arrive here, and it does
 not inherit from `DatabaseError`. It sits beside it under `django.db.Error`.
+
+Each case runs on the default database and on a pooled PostgreSQL one,
+where renewal takes a path of its own, with nothing in flight.
 """
 
 import threading
@@ -21,6 +24,8 @@ from django.db import DatabaseError, Error, InterfaceError, OperationalError
 
 from django_ox.worker import Worker
 
+from .conftest import IDLE_POOLED_ALIAS
+
 pytestmark = pytest.mark.django_db
 
 
@@ -30,8 +35,8 @@ def test_interface_error_is_not_a_database_error():
     assert issubclass(InterfaceError, Error)
 
 
-@pytest.fixture
-def worker(settings):
+@pytest.fixture(params=["default", "pool"])
+def worker(settings, request):
     settings.TASKS = {
         "default": {
             "BACKEND": "django_ox.backend.OxBackend",
@@ -39,7 +44,10 @@ def worker(settings):
             "OPTIONS": {},
         }
     }
-    return Worker(backoff_initial=0, renew_interval=0.01)
+    alias = None
+    if request.param == "pool":
+        alias = request.getfixturevalue("idle_pooled_alias")
+    return Worker(backoff_initial=0, renew_interval=0.01, db_alias=alias)
 
 
 @pytest.mark.parametrize(
@@ -62,6 +70,14 @@ def test_the_thread_survives(worker, monkeypatch, failure):
         return 0
 
     monkeypatch.setattr(worker, "renew_leases", raise_once)
+    pooled_ticks = []
+    renew_on = worker._renew_on
+
+    def through_the_pool(*args):
+        pooled_ticks.append(1)
+        return renew_on(*args)
+
+    monkeypatch.setattr(worker, "_renew_on", through_the_pool)
     stop = threading.Event()
     thread = threading.Thread(target=worker._renewal_loop, args=(stop,), daemon=True)
     thread.start()
@@ -78,3 +94,5 @@ def test_the_thread_survives(worker, monkeypatch, failure):
     finally:
         stop.set()
         thread.join(timeout=2)
+    if worker._db_alias == IDLE_POOLED_ALIAS:
+        assert len(pooled_ticks) >= 3

@@ -2126,6 +2126,12 @@ class Worker:
         Record the attempts in `stuck` and recycle as _handle_stuck says,
         as one batch on one connection, which _watchdog_connection acquires
         for the first record and every other record in the batch reuses.
+
+        An attempt whose grace passes while the batch is acquiring its
+        connection or recording joins the batch. Attempts that go stuck
+        together, their graces milliseconds apart, would otherwise fall
+        into batches of their own, and each would wait out an acquisition
+        of its own before its recycle.
         """
         # This thread is the whole of the timeout backstop and nothing
         # restarts it mid-attempt, so a failure on one watch must not end it
@@ -2135,19 +2141,22 @@ class Worker:
         # whose grace has passed.
         try:
             with self._watchdog_connection(own):
-                for watch in stuck:
-                    try:
-                        self._handle_stuck(watch)
-                    except Exception:
-                        logger.exception(
-                            "Worker %s could not record a stuck attempt; the "
-                            "timeout backstop continues for the others",
-                            self.worker_id,
-                            extra={
-                                "event": "watchdog_error",
-                                "worker_id": self.worker_id,
-                            },
-                        )
+                while stuck:
+                    for watch in stuck:
+                        try:
+                            self._handle_stuck(watch)
+                        except Exception:
+                            logger.exception(
+                                "Worker %s could not record a stuck attempt; "
+                                "the timeout backstop continues for the others",
+                                self.worker_id,
+                                extra={
+                                    "event": "watchdog_error",
+                                    "worker_id": self.worker_id,
+                                },
+                            )
+                    with self._watch_lock:
+                        stuck = self._fire_due()
         except Exception:
             # Every record in the batch has run by now: only giving its
             # connection back failed.

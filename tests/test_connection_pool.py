@@ -1952,6 +1952,36 @@ class TestAWatchdogBatch:
         assert worker.recycling
         assert not events(caplog, "watchdog_error")
 
+    def test_an_attempt_that_goes_stuck_while_the_batch_waits_joins_it(
+        self, stuck_batch, emptied, blackhole, caplog, monkeypatch
+    ):
+        """
+        The first attempt's grace has passed and the second's passes 0.3 s
+        later, while the watchdog is still waiting for a connection to
+        record the first on. The second joins that batch, so both cost one
+        deadline. In a batch of its own, it waited out another.
+        """
+        worker, watches, pool = stuck_batch
+        emptied(pool)
+        conf = connections.settings[ALIAS]
+        conf["PORT"] = str(blackhole.port)
+        conf["OPTIONS"] = {**conf["OPTIONS"], "connect_timeout": 1}
+        monkeypatch.setattr(worker_module, "WATCHDOG_IDLE", 0.05)
+        first, second = watches[:2]
+        second.grace_at = time.monotonic() + 0.3
+        worker._watches.update({first.ident: first, second.ident: second})
+        thread = threading.Thread(target=worker._watchdog_loop, daemon=True)
+        with caplog.at_level(logging.WARNING, logger="django_ox"):
+            started = time.monotonic()
+            thread.start()
+            thread.join(timeout=30)
+            elapsed = time.monotonic() - started
+        assert not thread.is_alive()
+        assert len(blackhole.held) == 1
+        assert len(events(caplog, "watchdog_connection_unavailable")) == 1
+        assert worker._stuck == {w.ident: w.attempt for w in (first, second)}
+        assert 0.95 <= elapsed < 1.1 + 0.9, elapsed
+
     def test_its_own_connection_opens_once_for_every_record_and_closes_after(
         self, stuck_batch, emptied, proxy
     ):

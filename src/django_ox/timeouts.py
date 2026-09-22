@@ -171,9 +171,12 @@ def lease_timing_problems(
     The comparison is a warning because retries still run: every wait is
     `BACKOFF_MAX`.
 
-    `renew_interval > lock_timeout` would be the other pair worth refusing,
-    and it cannot be configured: the renewal interval is derived from the
-    lock timeout rather than read from options.
+    This check does not validate the renewal interval. Its default,
+    max(lock_timeout / 3, 0.1) seconds, exceeds lock_timeout below 0.1 seconds.
+    Backend OPTIONS does not configure the interval. The Worker constructor
+    accepts a renew_interval override, including values greater than lock_timeout.
+    Ticks are scheduled start-to-start. An overrun starts the next tick
+    immediately, with no overlap or catch-up ticks.
     """
     problems: list[str] = []
     warnings: list[str] = []

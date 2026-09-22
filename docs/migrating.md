@@ -44,7 +44,25 @@ Run `python manage.py migrate django_ox` to create the table.
 | Worker | `manage.py db_worker` | `manage.py ox_worker` |
 | Clean up finished rows | `manage.py prune_db_task_results` | `manage.py ox_prune --older-than 7d` |
 
-Nothing else moves. Same decorator, same `.enqueue()`, same result API.
+The decorator, `.enqueue()`, and result API stay the same. Worker options
+and queue selection differ.
+
+Of `db_worker`'s worker-specific options, only `--backend` and `--interval`
+carry over unchanged.
+
+- Replace `--queue-name` with `--queues`.
+- Remove `--batch`, `--max-tasks`, `--reload`, `--no-reload`,
+  `--exclude-queues`, `--worker-id`, and `--no-startup-delay`.
+  `ox_worker` rejects these options as unrecognized arguments.
+- `ox_worker` does not support exit-when-idle or task-count limits.
+- `ox_worker` does not autoreload. Without `--batch`, `db_worker` enables
+  autoreload by default when `settings.DEBUG` is true.
+- `db_worker` runs only the `default` queue unless configured otherwise.
+  `ox_worker` runs every configured queue unless `--queues` selects queues.
+  Use `--queues default` to preserve the old default.
+
+Do not use `--queues '*'` to select all queues. `*` is treated as a literal
+queue name, not a wildcard. Omit `--queues` to run every configured queue.
 
 ## From Celery
 

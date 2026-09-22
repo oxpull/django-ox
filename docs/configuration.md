@@ -50,17 +50,42 @@ retry. Add options when you have a reason to.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `MAX_ATTEMPTS` | `3` | Claims a task gets before it is marked FAILED. The count is claims rather than invocations: it goes up in the statement that hands the task to a worker, before the function is reached. That is what keeps retries bounded when a worker dies mid-run, and it is what lets a task that loses its worker between the claim and the call use an attempt without running. See [Attempts count claims](production.md#attempts-count-claims). |
-| `LOCK_TIMEOUT` | `300` | Seconds a RUNNING task's lock may go unrefreshed before the reaper takes the task back. A worker refreshes the lock every `LOCK_TIMEOUT / 3` seconds while it is executing, so this is a limit on how long a worker may be unresponsive, not on how long a task may run. |
+| `LOCK_TIMEOUT` | `300` | Seconds a RUNNING task's lock may go unrefreshed before the reaper takes the task back. |
 | `BACKOFF_INITIAL` | `5` | Delay in seconds before the first retry. |
 | `BACKOFF_MAX` | `600` | Ceiling on the retry delay, in seconds. |
 | `TASK_TIMEOUT` | `None` | Seconds one attempt may run. `None` means no limit. At the deadline the worker raises `django_ox.exceptions.TaskTimeout` inside the task, on the task's own thread, and records the attempt as failed: retried on the usual backoff, or FAILED when attempts are spent. An async task is cancelled at the deadline instead. A sync task on a thread a coverage tool or debugger is watching is left alone, and `TASK_TIMEOUT_GRACE` is the whole enforcement for it. See [Task timeouts](production.md#task-timeouts). |
-| `TASK_TIMEOUTS` | `{}` | Per-queue timeouts, `{"queue name": seconds}`. A queue in the mapping uses its own value instead of `TASK_TIMEOUT`; `None` as a value exempts that queue. Every key must be a queue named in `QUEUES`, unless `QUEUES` is `[]`. Per queue rather than per task because `django.tasks` gives a task no field a backend could read a timeout from, and a queue is its unit of routing. |
+| `TASK_TIMEOUTS` | `{}` | Per-queue timeouts, `{"queue name": seconds}`. A queue in the mapping uses its own value instead of `TASK_TIMEOUT`; `None` as a value exempts that queue. Every key must be a queue named in `QUEUES`, unless `QUEUES` is `[]`. Timeouts are configured per queue, not per task. `OxBackend` uses the stock `Task`, which has no timeout field. Django 6.1 and the django-tasks 0.12 backport accept custom task fields through `@task(**kwargs)` and a backend's custom `task_class`. `OxBackend` does not define a custom `task_class`. `Task.using()` overrides only priority, queue name, run-after time, and backend. |
 | `TASK_TIMEOUT_GRACE` | `30` | Seconds a timed-out attempt gets to stop. A thread still running after that is treated as stuck, which usually means it is in a call that never returns to Python, where the exception cannot land: the worker records the attempt as failed, stops claiming, drains its other tasks and exits with code 75 so its supervisor restarts it. A task that catches `TaskTimeout` has the same deadline to return or raise, and so does a task on a watched thread, where nothing was raised at all. |
 | `WORKER_CLASS` | unset | Dotted path of a `django_ox.worker.Worker` subclass for `ox_worker` to run, on every process it starts. See [Stability](stability.md). |
 | `SCHEDULES` | `{}` | Recurring task definitions. Documented on the [Recurring tasks](recurring-tasks.md) page. |
 | `SCHEDULE_SOURCE` | settings | Dotted path to the class a worker asks for its active schedules. Set it to `django_ox.stored.DatabaseScheduleSource` to read them from the database. See [Schedules in the database](stored-schedules.md). |
 | `SCHEDULE_RECONCILE_INTERVAL` | `60.0` | Seconds between full reads of the stored schedules, whether or not anything is known to have changed. The backstop for a row written without `django_ox.stored`. |
 | `SCHEDULABLE_TASKS` | `{}` | Tasks a stored schedule may name, as `{key: dotted path}` or `{key: {"task": ..., "form": ..., "permission": ...}}`. The alternative to the `@schedulable` decorator. |
+
+By default, a worker refreshes leases at an interval of
+`max(LOCK_TIMEOUT / 3, 0.1)` seconds while executing tasks. `LOCK_TIMEOUT`
+limits how long a worker can be unresponsive, not how long a task can run.
+The `Worker` constructor's `renew_interval` argument overrides this interval.
+
+Renewal ticks are scheduled from the start of the previous tick. After an
+overrun, the next tick starts immediately and becomes the new anchor.
+Ticks do not overlap or catch up missed slots. This intentionally changes
+pooled and unpooled workers from a full-interval wait after each tick.
+
+With Django's PostgreSQL pool, private renewal connection attempts use a
+deadline of `min(5 seconds, renew_interval)`, shortened by a smaller positive
+database `OPTIONS["connect_timeout"]`. Pool fallback waits at most 100 ms.
+
+One private-connect deadline covers all hosts. Synchronous DNS can exceed
+it. The deadline does not cover Django's post-connect setup queries or
+renewal statements. It is not a deadline for the whole tick. See
+[Database connections and PostgreSQL pooling](production.md#database-connections-and-postgresql-pooling)
+for capacity requirements and timeout limits.
+
+An idle pooled tick calls `renew_leases()` once without first opening a
+private connection. The stock method returns 0 and opens no connection.
+Custom `WORKER_CLASS` overrides retain their idle calls. An override that
+queries can acquire a connection under the tick's connect deadline.
 
 The retry delay after attempt *n* fails is
 `BACKOFF_INITIAL * 2 ** (n - 1)`, capped at `BACKOFF_MAX`. With the

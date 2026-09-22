@@ -5,16 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.0] - 2026-09-23
+
+If you use Django's PostgreSQL pool, check PostgreSQL `max_connections`
+and role connection limits before upgrading. 1.4.0 workers open renewal
+connections outside the pool, in addition to `max_size`. Task timeouts (`TASK_TIMEOUT` set, or any
+`TASK_TIMEOUTS` value not `None`) also run the timeout watchdog, which opens
+another connection outside the pool. Each worker process can hold up to
+`max_size + 1` server connections, or `max_size + 2` with task timeouts.
+
+No migration. For `oxpull` installations, use `oxpull==1.4.0`,
+which pins `django-ox==1.4.0`.
+
+### PostgreSQL pool correction
+
+This release fixes lease-renewal starvation affecting 0.2.0 through 1.3.1.
+The watchdog path is affected from 0.3.0.
+
+The defect affects workers using `DATABASES[alias]["OPTIONS"]["pool"]`
+whose effective `max_size` per process is below `concurrency + 2`, or
+`concurrency + 3` with task timeouts. `"pool": True` means `max_size` 4:
+concurrency 3 or more is affected, or 2 or more with task timeouts.
+Unpooled PostgreSQL, MySQL, and SQLite were not affected.
+
+Leases can expire while task bodies still run. The reaper can reclaim that
+work and start another attempt. Bodies can run again, and tasks can end as
+FAILED or LOST. The defect was reproduced on 1.3.1. Earlier versions were
+identified by code inspection.
+
+To investigate past impact on pooled PostgreSQL, look in the 1.3.1 logs
+for the message text "Reclaimed stuck task" and "lost its lease"
+(`task_reclaimed` and `task_lease_lost` in structured logs). Where
+structured fields are available, check whether the reclaimed task's
+`held_by` names a worker that was still running; `worker_id` on
+`task_reclaimed` names the reaper. The message "Lease renewal failed"
+(`lease_renew_failed` in structured logs) with a pool-timeout traceback
+containing "couldn't get a connection after N sec" confirms the cause.
+Plain-text handlers may omit structured fields, so zero hits for the
+structured-log keys do not rule out past impact.
+
+These events have no fixed order. With leases well above the pool's
+30-second wait, such as the 300-second default, `lease_renew_failed`
+comes first. With shorter leases, `task_reclaimed` comes first.
+With very short leases, `lease_renew_failed` may not appear at all.
+
+Affected tasks can end SUCCESSFUL after two or three body runs, or end
+FAILED or LOST. `queue_stats()` returns counts per queue and status, not
+rows; LOST counts alone miss most affected tasks and do not establish
+the cause.
+
+When opening a private connection fails, renewal and the watchdog try the
+pool with a checkout wait capped at 100 ms, then return borrowed connections.
+When no private renewal connection is open and lease time is short, renewal
+tries the pool first.
+
+For 1.4.0, use at least `concurrency + 1` pooled connections per worker
+process for task threads and polling, plus the outside-pool server budget
+above. Include every process, alias, other client, and reserved slot.
+Pool fallback needs a spare pooled connection. It adds resilience, not
+capacity. Add and budget a pooled spare if fallback must work under full load.
+
+Give old workers pools of at least `concurrency + 2`, or `concurrency + 3`
+with task timeouts, before rollout, or disable their Django pool.
+Keep that budget until every old worker has stopped. This is also the
+workaround if you cannot upgrade yet.
+
+See [Database connections and PostgreSQL pooling](https://oxpull.com/django-ox/production/#database-connections-and-postgresql-pooling).
 
 ### Added
 
-- `ox_prune --format json` prints the prune counts as one JSON object,
-  for scripts that would otherwise parse the two report lines.
-- `manage.py check` warns with `django_ox.W003` when `BACKOFF_INITIAL` and
-  `BACKOFF_MAX` are both explicitly set to valid numbers in `OPTIONS` and
-  the initial delay is above the cap. Retries still run. As before,
-  every retry waits `BACKOFF_MAX` in this configuration.
+- `ox_prune --format json` prints prune counts as one JSON object.
+- `manage.py check` emits `django_ox.W003` when `BACKOFF_INITIAL` and
+  `BACKOFF_MAX` are both explicitly set to valid numbers and the initial
+  delay exceeds the cap. Retries still run and wait `BACKOFF_MAX`.
 - `connection_pool_too_small` warns at WARNING level when the worker alias's
   effective pool maximum is below `concurrency + 1`. It runs once per
   `Worker.run()`. It does not resize the pool or refuse startup.
@@ -33,6 +96,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass when neither connection path is available. A pass handles the stuck
   attempts recorded together. Their outcomes go unrecorded; recycling proceeds.
 
+### Changed
+
+- Renewal ticks are scheduled start-to-start on every path, including unpooled
+  workers. An overrun starts the next tick immediately and resets the anchor.
+  Ticks do not overlap or catch up missed slots. Idle ticks still call
+  `renew_leases()` once, including custom overrides; the stock idle method
+  opens no connection.
+- On pooled PostgreSQL, connection-acquisition failures use the new events
+  instead of `lease_renew_failed`. Update alerts that relied on that event
+  alone. Renewal statement failures still use `lease_renew_failed`.
+  Unpooled failure reporting is unchanged.
+- `watchdog_error` also reports failures while closing or returning a
+  watchdog pass's connection, except that a database error while closing the
+  private connection is suppressed without that event.
+- The schedule admin's **Last tick** column uses a subquery instead of a
+  query per row. A 100-row page runs 5 statements instead of 105.
+  The displayed value and database alias are unchanged.
+
 ### Fixed
 
 - With pooled PostgreSQL, lease renewal and the watchdog use private
@@ -44,15 +125,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attempts whose grace expires during acquisition or recording. It closes
   or returns the connection at the end without reconnecting between records.
   Stuck-attempt eligibility and recycling are unchanged.
-- Reject unknown `ox_worker --backend` aliases before starting workers, naming
-  the invalid alias and listing configured choices. Ordinary invocation reports
-  one error line; `--traceback` still shows the traceback.
+- Unknown `ox_worker --backend` aliases are rejected before workers start.
+  The error names the invalid alias and configured choices. Ordinary
+  invocation reports one error line; `--traceback` retains the traceback.
 
-### Changed
+### Limits
 
-- The schedule admin's **Last tick** column uses a subquery instead of a
-  separate query for each row. A 100-row page runs 5 statements instead of
-  105. The displayed value and database alias are unchanged.
+Nothing needs setting for renewal or the watchdog. The private renewal
+connect budget is the minimum of 5 seconds, the renewal interval, and a
+positive `OPTIONS["connect_timeout"]`. The watchdog uses 5 seconds or a
+smaller positive configured timeout. To bound task and poll-loop connects,
+set `OPTIONS["connect_timeout"]` on the database alias.
+
+One deadline covers all hosts. A stalled first host can leave later hosts
+untried. Synchronous DNS can exceed the deadline. Django's post-connect setup
+queries and renewal or recording statements are not bounded by it.
+These are not whole-tick or recycling deadlines.
+
+The startup warning checks only the worker alias, not available server slots.
+Runtime degraded warnings report private-path failures that startup cannot detect.
+
+Undersized pools can still cause task-query and outcome-write failures.
+After a PostgreSQL restart, tasks running at that moment can run again,
+including on 1.3.1; this release does not change that. Retries and reclaims
+can repeat side effects.
+
+Task, polling, task-thread outcome-write, and hook connection paths are unchanged.
+PgBouncer and third-party pools were not tested.
+
+### Documentation
+
+- The `db_worker` migration notes explain which options do not carry over,
+  how to select one queue with `--queues default`, and why omitting
+  `--queues` selects every configured queue.
+- Configuration docs clarify the renewal interval and per-queue timeouts.
 
 ## [1.3.1] - 2026-09-20
 
@@ -1073,7 +1179,9 @@ PostgreSQL and MySQL, and the suite covers all of them.
 - **Lease renewal.** A worker refreshes the lock on the tasks it is running,
   one statement per interval however many are in flight, and keeps doing so
   through a graceful drain. A long task on a healthy worker is no longer
-  reclaimed while it is still running. `LOCK_TIMEOUT` now bounds how long a
+  reclaimed while it is still running. [Editorial note added in 1.4.0:
+  releases 0.2.0 to 1.3.1 were still affected by renewal starvation. See the
+  1.4.0 entry for the fix.] `LOCK_TIMEOUT` now bounds how long a
   worker may go unresponsive, not how long a task may take. The renewal
   interval is `LOCK_TIMEOUT / 3`, overridable as `renew_interval` when
   embedding `Worker` directly.
@@ -1206,7 +1314,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
-[Unreleased]: https://github.com/oxpull/django-ox/compare/v1.3.1...HEAD
+[1.4.0]: https://github.com/oxpull/django-ox/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/oxpull/django-ox/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/oxpull/django-ox/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/oxpull/django-ox/compare/v1.1.0...v1.2.0

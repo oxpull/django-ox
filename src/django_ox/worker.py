@@ -564,24 +564,41 @@ class _Driver:
 
     def connect(self, *args: Any, **kwargs: Any) -> Any:
         owner = self._owner
-        _connect_deadline.at = min(owner.deadline, time.monotonic() + owner.budget)
+        deadline = min(owner.deadline, time.monotonic() + owner.budget)
+        if time.monotonic() >= deadline:
+            # Refused here, because _connect_by is reached only after psycopg
+            # has resolved the host names, and resolving one can block.
+            raise self._psycopg.errors.ConnectionTimeout("connection timeout expired")
+        _connect_deadline.at = deadline
         return _connection_by_deadline().connect(*args, **kwargs)
 
 
 class _Checkout:
     """
     Django's pool for `alias` as one wrapper sees it: a checkout waits at
-    most `wait` seconds, where Django's own waits the pool's timeout.
+    most `wait` seconds, where Django's own waits the pool's timeout. With
+    `once`, only the first checkout reaches the pool, and a reconnect after
+    that connection was given back fails at once.
     """
 
-    def __init__(self, pool: Any, wait: float) -> None:
+    def __init__(self, pool: Any, wait: float, *, once: bool = False) -> None:
         self._pool = pool
         self._wait = wait
+        self._once = once
+        self._taken = False
 
     def open(self) -> None:
         self._pool.open()
 
     def getconn(self) -> Any:
+        if self._once and self._taken:
+            import psycopg
+
+            raise psycopg.OperationalError(
+                "no reconnect: the one connection this block could take from "
+                "the pool was given back"
+            )
+        self._taken = True
         return self._pool.getconn(timeout=self._wait)
 
 
@@ -625,12 +642,20 @@ class _OwnConnection:
     def is_open(self) -> bool:
         return self.wrapper.connection is not None
 
+    def connect_by(self, deadline: float) -> None:
+        """
+        From now until the next call, any connection this opens gives up at
+        `deadline`, whether open() asks for it or Django reconnects by
+        itself. Once `deadline` has passed, every one fails at once.
+        """
+        self.deadline = deadline
+
     def open(self, deadline: float) -> None:
         """
         Open the connection unless it is open, giving up at `deadline`,
         which then holds for any reconnect until the next call.
         """
-        self.deadline = deadline
+        self.connect_by(deadline)
         if self.is_open:
             return
         try:
@@ -638,16 +663,24 @@ class _OwnConnection:
         except BaseException:
             # One that failed while Django was setting it up is not one to
             # reuse on the next attempt.
-            with suppress(Error):
-                self.wrapper.close()
+            self.close()
             raise
 
+    def close(self) -> None:
+        """Close the connection if it is open, quietly."""
+        with suppress(Error):
+            self.wrapper.close()
+
     @contextmanager
-    def borrowed(self, wait: float) -> Iterator[None]:
+    def borrowed(self, wait: float, *, reconnect: bool = True) -> Iterator[None]:
         """
         Run the block on a connection from the alias's pool, waiting at
         most `wait` for it, and give it back as the block ends, whether it
         returns or raises. Raises from the checkout when there is none.
+        Without `reconnect`, the block gets that one connection and no
+        other: once Django has given it back, as it can after the
+        connection stops working, a query that would check out another
+        fails at once.
 
         Django's own wrapper checks out with the pool's timeout, 30 s
         unless configured, which is the wait to be avoided. The block's
@@ -660,7 +693,8 @@ class _OwnConnection:
         """
         before = connections[self.alias]
         wrapper: Any = connections.create_connection(self.alias)
-        wrapper._connection_pools = {self.alias: _Checkout(wrapper.pool, wait)}
+        checkout = _Checkout(wrapper.pool, wait, once=not reconnect)
+        wrapper._connection_pools = {self.alias: checkout}
         connections[self.alias] = wrapper
         try:
             wrapper.ensure_connection()
@@ -2074,61 +2108,93 @@ class Worker:
                         if remaining > 0:
                             self._watch_cv.wait(min(remaining, WATCHDOG_MAX_WAIT))
                         stuck = self._fire_due()
-                    for watch in stuck:
-                        try:
-                            with self._watchdog_connection(own):
-                                self._handle_stuck(watch)
-                        except Exception:
-                            # This thread is the whole of the timeout backstop and
-                            # nothing restarts it mid-attempt, so a failure on one
-                            # watch must not end it for the others. _fire_due has
-                            # already taken this watch out of the table, so the
-                            # loop carries on rather than retrying a watch whose
-                            # grace has passed.
-                            logger.exception(
-                                "Worker %s could not record a stuck attempt; the "
-                                "timeout backstop continues for the others",
-                                self.worker_id,
-                                extra={
-                                    "event": "watchdog_error",
-                                    "worker_id": self.worker_id,
-                                },
-                            )
+                    if stuck:
+                        self._record_stuck(own, stuck)
             finally:
                 connections.close_all()
+
+    def _record_stuck(self, own: _OwnConnection | None, stuck: list[_Watch]) -> None:
+        """
+        Record the attempts in `stuck` and recycle as _handle_stuck says,
+        as one batch on one connection, which _watchdog_connection acquires
+        for the first record and every other record in the batch reuses.
+        """
+        # This thread is the whole of the timeout backstop and nothing
+        # restarts it mid-attempt, so a failure on one watch must not end it
+        # for the others, nor a failure to give the batch's connection back
+        # end it at all. _fire_due has already taken these watches out of
+        # the table, so the loop carries on rather than retrying a watch
+        # whose grace has passed.
+        try:
+            with self._watchdog_connection(own):
+                for watch in stuck:
+                    try:
+                        self._handle_stuck(watch)
+                    except Exception:
+                        logger.exception(
+                            "Worker %s could not record a stuck attempt; the "
+                            "timeout backstop continues for the others",
+                            self.worker_id,
+                            extra={
+                                "event": "watchdog_error",
+                                "worker_id": self.worker_id,
+                            },
+                        )
+        except Exception:
+            # Every record in the batch has run by now: only giving its
+            # connection back failed.
+            logger.exception(
+                "Worker %s could not give back the connection its timeout "
+                "watchdog recorded stuck attempts on; the timeout backstop "
+                "continues",
+                self.worker_id,
+                extra={"event": "watchdog_error", "worker_id": self.worker_id},
+            )
 
     @contextmanager
     def _watchdog_connection(self, own: _OwnConnection | None) -> Iterator[None]:
         """
-        Put a connection under the block that records a stuck attempt: the
+        Put one connection under a batch of stuck-attempt records: the
         watchdog's own, opened by its deadline as renewal's is, or else one
-        from Django's pool, waited for at most POOL_FALLBACK_WAIT and given
-        back when the block ends. With neither, the block still runs and
-        its record fails at once, because the deadline that passed still
-        holds, so the recycle that follows is not held up.
+        from Django's pool, waited for at most POOL_FALLBACK_WAIT. Either is
+        acquired once, and no record in the batch connects again: when
+        there is neither, or the one there is stops working part way, every
+        record after that fails at once, and each recycle still happens.
+        So the recycle is delayed by at most one bounded acquisition
+        sequence, whatever the batch's size, except that resolving a host
+        name is not bounded by the deadline. The connection is closed, or
+        given back to the pool, when the batch ends, however it ends; the
+        next batch acquires one again. Without a pool the batch runs on the
+        thread's ordinary connection, as Django opens it.
         """
+        if own is None:
+            yield
+            return
         with ExitStack() as scope:
-            if own is not None and not own.is_open:
+            scope.callback(own.close)
+            try:
+                own.open(time.monotonic() + own.budget)
+            except Exception as exc:
                 try:
-                    own.open(time.monotonic() + own.budget)
-                except Exception as exc:
-                    try:
-                        scope.enter_context(own.borrowed(POOL_FALLBACK_WAIT))
-                    except Exception as pool_exc:
-                        logger.warning(
-                            "Worker %s's timeout watchdog has no connection to "
-                            "record a stuck attempt on: not its own (%s), and "
-                            "none from the connection pool (%s)",
-                            self.worker_id,
-                            _reason(exc),
-                            _reason(pool_exc),
-                            extra={
-                                "event": "watchdog_connection_unavailable",
-                                "worker_id": self.worker_id,
-                                "error": _reason(exc),
-                                "fallback_error": _reason(pool_exc),
-                            },
-                        )
+                    scope.enter_context(
+                        own.borrowed(POOL_FALLBACK_WAIT, reconnect=False)
+                    )
+                except Exception as pool_exc:
+                    logger.warning(
+                        "Worker %s's timeout watchdog has no connection to "
+                        "record a stuck attempt on: not its own (%s), and "
+                        "none from the connection pool (%s)",
+                        self.worker_id,
+                        _reason(exc),
+                        _reason(pool_exc),
+                        extra={
+                            "event": "watchdog_connection_unavailable",
+                            "worker_id": self.worker_id,
+                            "error": _reason(exc),
+                            "fallback_error": _reason(pool_exc),
+                        },
+                    )
+            own.connect_by(-math.inf)
             yield
 
     def _fire_due(self) -> list[_Watch]:

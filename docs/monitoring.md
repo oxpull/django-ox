@@ -265,7 +265,7 @@ The message text is not part of the contract. The keys are.
 | Event | Level | When |
 | --- | --- | --- |
 | `worker_started` | INFO | The run loop starts. |
-| `connection_pool_too_small` | WARNING | Once per worker, at startup: the worker's database uses Django's PostgreSQL connection pool, and its `max_size` is below the worker's concurrency plus one. |
+| `connection_pool_too_small` | WARNING | Once per `Worker.run()`, after `worker_started` and before threads start: the worker alias's effective PostgreSQL pool maximum is below `concurrency + 1`. Each `--processes` child checks separately. The warning does not resize the pool, refuse startup, measure available server slots, or reserve fallback capacity. |
 | `task_claimed` | DEBUG | A task was claimed from the queue. |
 | `task_started` | DEBUG | Execution of an attempt begins. |
 | `task_succeeded` | INFO | The task reached SUCCESSFUL. |
@@ -277,11 +277,11 @@ The message text is not part of the contract. The keys are.
 | `task_failed` | ERROR | The task reached FAILED, out of attempts. |
 | `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. One record per task. A pass whose stuck set changed while it ran (a lease renewed, or one more lease expired) instead emits a single record carrying `count` and no `task_id`, because it cannot say which tasks the reclaim covered. |
 | `task_lease_lost` | WARNING | A worker finished an attempt whose lease had already been reclaimed, so its write was dropped and no result was signalled. |
-| `lease_renew_failed` | WARNING | A lease renewal statement failed. The worker keeps going and tries again on the next interval. |
-| `lease_renew_degraded` | WARNING | On a pooled PostgreSQL database, lease renewal could not get a connection of its own: the server refused one, or it did not open within the renewal deadline (5 s, the renewal interval or a shorter `connect_timeout`, whichever is least). The renewal went through a connection from the pool instead (`fallback` `succeeded`) or there was none to be had there either (`fallback` `failed`). Once each time renewal stops being on its own connection. |
-| `lease_renew_fallback` | DEBUG | A further renewal through the pool while renewal has no connection of its own. |
-| `lease_renew_missed` | WARNING | Renewal got no connection at all, neither its own nor one from the pool, after renewing through the pool; then at most every 30 s while it goes on, with `missed`. A lease expires when this lasts longer than the lease. |
-| `lease_renew_recovered` | INFO | Renewal is on a connection of its own again. |
+| `lease_renew_failed` | WARNING | A lease renewal statement failed. Outside Django's PostgreSQL pool, this also covers connection failures during renewal. The thread continues. The next tick is due within one renewal interval and starts immediately after an overrun. |
+| `lease_renew_degraded` | WARNING | On a pooled PostgreSQL database, renewal left its private connection path. The worker renewed through the pool or failed to renew through either path. `fallback` is `succeeded` or `failed`. Logged once on entering degraded renewal, not on every degraded tick. |
+| `lease_renew_fallback` | DEBUG | On a pooled PostgreSQL database, a later renewal succeeded through the pool while renewal remained degraded. |
+| `lease_renew_missed` | WARNING | On a pooled PostgreSQL database, renewal missed a tick while degraded. Reports missed-renewal counts at most once per 30 seconds. A degraded warning with `fallback=failed` also starts this reporting window. One with `fallback=succeeded` does not. The window persists across recovery. |
+| `lease_renew_recovered` | INFO | On a pooled PostgreSQL database, renewal succeeded on its private connection again. Includes counts of successful fallback renewals and missed renewals during the degraded period. |
 | `schedule_dispatched` | INFO | A recurring tick enqueued its task. |
 | `schedule_tick_dropped` | WARNING | A tick was past its starting deadline and was not run. Carries `late_seconds`. Each worker reports a given tick once, not once per dispatch pass, so a schedule that stays droppable does not repeat the warning every second. |
 | `schedule_row_skipped` | WARNING | A stored schedule could not be used: its task key is not registered, its arguments no longer validate, or its timing does not parse. The others in the same pass still run. Carries `reason`. |
@@ -294,9 +294,9 @@ The message text is not part of the contract. The keys are.
 | `schedule_boundary_heal_failed` | WARNING | That move failed and will be retried. |
 | `worker_error` | ERROR | The execution wrapper itself raised (an internal worker error, not a task failure). |
 | `worker_poll_failed` | WARNING | A database error ended one pass of the poll loop. The pass is abandoned and retried on the next one; the worker keeps running. A steady stream of it means the database is unreachable rather than slow. |
-| `watchdog_error` | ERROR | The timeout watchdog failed to handle one armed attempt. Every other attempt is unaffected and the thread keeps running. |
+| `watchdog_error` | ERROR | The timeout watchdog failed while handling an armed attempt or cleaning up a batch's connection. Cleanup includes closing a private connection or returning a borrowed connection. A database error while closing the private connection is suppressed without this event. The watchdog thread continues. |
 | `task_stuck_unrecorded` | WARNING | A timed-out attempt could not be recorded as failed. The worker recycles regardless, so the row is recovered by the reaper rather than by this write. |
-| `watchdog_connection_unavailable` | WARNING | On a pooled PostgreSQL database, the timeout watchdog could get neither a connection of its own nor one from the pool to record a stuck attempt on. The record fails, `task_stuck_unrecorded` follows, and the worker recycles regardless. |
+| `watchdog_connection_unavailable` | WARNING | On a pooled PostgreSQL database, the timeout watchdog could get neither a private connection nor one from the pool. Logged once per batch. Every record in the batch fails and logs `task_stuck_unrecorded`. The worker recycles regardless. This event has no time-based rate limit. |
 | `worker_drain_abandoned` | WARNING | A recycling worker stopped waiting on tasks that had not finished. Their leases expire and the reaper requeues them. Carries `pending`. |
 | `claim_filter_sql_missing` | WARNING | Once per worker: a subclass overrides `claim_filter_q()` without `claim_filter_sql()`, so the single-statement PostgreSQL claim is given up for the path that applies the hook. |
 | `worker_draining` | INFO | Shutdown began with tasks still in flight. |
@@ -309,6 +309,19 @@ The message text is not part of the contract. The keys are.
 | `supervisor_killed_workers` | ERROR | Worker processes still running five seconds after the second stop signal were sent SIGKILL. |
 | `supervisor_stopped` | INFO | Every worker process has exited. |
 | `worker_orphaned` | WARNING | A worker process found its supervisor gone and is draining. |
+
+The four renewal connection events and `watchdog_connection_unavailable`
+include `worker_id` and no traceback. They apply only to Django's
+PostgreSQL pool.
+
+On that path, connection-acquisition failures use the new events rather
+than `lease_renew_failed`. Update alerts that previously relied on
+`lease_renew_failed` alone. Renewal statement failures still use
+`lease_renew_failed`.
+
+Elsewhere, a failed connect during renewal still logs `lease_renew_failed`.
+A failed connect while recording a stuck attempt logs
+`task_stuck_unrecorded`.
 
 | Key | Present on | Meaning |
 | --- | --- | --- |
@@ -332,7 +345,12 @@ The message text is not part of the contract. The keys are.
 | `schedule_pk` | `schedule_row_skipped`, `schedule_lock_unavailable` for a stored schedule, `schedule_boundary_healed` | The stored schedule's row id. Absent for a settings-declared schedule, which has no row. |
 | `scheduled_for`, `late_seconds` | `schedule_tick_dropped` | The tick that was dropped, and how late it was when the deadline rejected it. |
 | `reason` | `schedule_row_skipped` | Why the row could not be used. |
-| `queues`, `concurrency` | `worker_started` | The worker's configuration. |
+| `queues` | `worker_started` | The worker's queues. |
+| `concurrency` | `worker_started`, `connection_pool_too_small` | The worker's task-thread concurrency, set by `--concurrency`. |
+| `database` | `connection_pool_too_small` | The worker's database alias: `--database`, or the alias used to write `OxTask`. |
+| `max_size` | `connection_pool_too_small` | The effective pool maximum. `pool=True` means 4. For a non-empty mapping, use `max_size`; if absent or `None`, use `min_size`, defaulting to 4. The sizing check skips values that are not an `int` of at least 1. It excludes booleans and floats such as `10.0`. |
+| `recommended_max_size` | `connection_pool_too_small` | `concurrency + 1`: one pooled connection per task thread and one for the poll loop. This does not reserve fallback capacity or validate the server budget. |
+| `unpooled_connections` | `connection_pool_too_small` | Additional private-connection budget per worker process, not a count of open connections. 2 if `TASK_TIMEOUT` is set or any `TASK_TIMEOUTS` value is not `None`; otherwise 1. |
 | `pending` | `worker_draining` | In-flight tasks at shutdown. |
 | `processes` | `supervisor_started` | Worker processes the supervisor runs. |
 | `worker_index`, `exit_code` | `worker_process_restarted`, `worker_process_recycled`, `supervisor_restart_cap` | Which slot exited and how. A negative code is the signal that killed it. |
@@ -342,11 +360,12 @@ The message text is not part of the contract. The keys are.
 | `worker_indexes` | `supervisor_killed_workers` | The slots that were killed. |
 | `parent_pid` | `worker_orphaned` | The supervisor pid the worker was started under. |
 | `exit_code` | `supervisor_stopped` | The code the supervisor exits with. |
-| `error` | `lease_renew_degraded`, `lease_renew_fallback`, `lease_renew_missed`, `watchdog_connection_unavailable` | Why no connection of its own could be had. |
-| `fallback` | `lease_renew_degraded` | `succeeded` or `failed`: whether a connection from the pool was had instead. |
-| `fallback_error` | `lease_renew_degraded` with `fallback` `failed`, `lease_renew_missed`, `watchdog_connection_unavailable` | Why none could be had from the pool either. |
-| `missed` | `lease_renew_missed` | Renewals missed since the last `lease_renew_degraded` or `lease_renew_missed` record. |
-| `fallback_renewals`, `missed_renewals` | `lease_renew_recovered` | Renewals through the pool, and renewals missed, while renewal had no connection of its own. |
+| `error` | `lease_renew_degraded`, `lease_renew_fallback`, `lease_renew_missed`, `watchdog_connection_unavailable` | The private-connection failure reason. When the pool serves a pool-first renewal tick, this instead says the private connection was not tried first and gives the remaining lease time. |
+| `fallback` | `lease_renew_degraded` | `succeeded` if pooled renewal succeeded; `failed` if fallback did not renew the leases. |
+| `fallback_error` | `lease_renew_degraded`, `lease_renew_missed`, `watchdog_connection_unavailable` | The fallback failure reason. On `lease_renew_degraded`, present when `fallback` is `failed`. A borrowed renewal statement failure is reported as "the renewal statement failed". |
+| `missed` | `lease_renew_missed` | Missed renewal ticks since the last `lease_renew_degraded` or `lease_renew_missed` record, or since recovery if more recent. |
+| `fallback_renewals` | `lease_renew_recovered` | Successful pooled renewals during the degraded period. |
+| `missed_renewals` | `lease_renew_recovered` | Missed renewal ticks during the degraded period. |
 
 `task_claimed` and `task_started` are DEBUG because they fire once per
 attempt; run `ox_worker -v 2` (or set the logger to DEBUG) when you want

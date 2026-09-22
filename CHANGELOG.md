@@ -15,9 +15,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BACKOFF_MAX` are both explicitly set to valid numbers in `OPTIONS` and
   the initial delay is above the cap. Retries still run. As before,
   every retry waits `BACKOFF_MAX` in this configuration.
+- Add `connection_pool_too_small` at WARNING level when the worker alias's
+  effective pool maximum is below `concurrency + 1`. It runs once per
+  `Worker.run()`. It does not resize the pool or refuse startup.
+- Add pooled PostgreSQL renewal events:
+  - `lease_renew_degraded`: WARNING on entering degraded renewal.
+  - `lease_renew_fallback`: DEBUG for later successful pooled renewals.
+  - `lease_renew_missed`: WARNING with missed counts, at most every 30 seconds.
+  - `lease_renew_recovered`: INFO when private renewal resumes.
+- Add `watchdog_connection_unavailable` at WARNING level once per batch
+  when neither watchdog connection path is available. Every record in
+  that batch fails. Recycling proceeds.
 
 ### Fixed
 
+- Give pooled PostgreSQL renewal and watchdog work private connection
+  paths with local connect deadlines and short pool fallbacks.
+- Run at most one watchdog acquisition sequence per batch. Include
+  attempts whose grace expires during acquisition or recording.
+  Close or return the connection at batch end. Do not reconnect between
+  records. Stuck-attempt eligibility and recycling are unchanged.
+- Preserve one `renew_leases()` call on every idle pooled tick, including
+  custom overrides. The stock idle method opens no connection.
+  This corrects an unreleased intermediate; 1.3.1 did not have this defect.
+- Reject an expired private-connect deadline before host-name resolution.
+  This corrects an unreleased intermediate; 1.3.1 did not have this defect.
 - Reject unknown `ox_worker --backend` aliases before starting workers, naming
   the invalid alias and listing configured choices. Ordinary invocation reports
   one error line; `--traceback` still shows the traceback.

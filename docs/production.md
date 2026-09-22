@@ -247,6 +247,244 @@ is per slot:
 does not replace a process manager: the supervisor is a foreground process
 that expects to be restarted itself, like the single worker.
 
+### Database connections and PostgreSQL pooling
+
+Django's PostgreSQL connection pool has a separate budget for each worker
+process and database alias. Set the worker alias's `max_size` to at least
+`concurrency + 1`: one connection per task thread and one for the poll loop.
+
+This is a task-thread and poll-loop baseline, not a deployment safety check.
+It does not reserve a pooled connection for renewal fallback.
+
+Each `--processes` child has its own pool. The supervisor opens no database
+connection.
+
+#### Budget server capacity
+
+Lease renewal normally uses a private connection outside the pool. The stock
+worker opens it on the first renewal tick with work in flight. It reuses the
+connection until shutdown or a renewal failure closes it.
+
+With task timeouts enabled, the watchdog normally uses a second private
+connection to record stuck attempts. It closes that connection at the end
+of the batch. A borrowed connection is returned instead. The watchdog thread
+exits after one second with nothing to watch.
+
+Budget for the pool maximum plus one private connection per worker process,
+or plus two with task timeouts. Keep this private-connection capacity
+available. Pool fallback provides resilience, not free capacity.
+
+Calculate the server budget across all worker processes and database
+aliases. Include web processes, other services, administrative clients,
+connections opened by tasks, and other database clients. Account for
+PostgreSQL's reserved slots and role connection limits. Reserved slots
+that the worker's role cannot use are not worker capacity.
+
+For example, two worker processes with `max_size=5` need capacity for up to
+12 worker connections, or 14 with task timeouts. These totals exclude all
+other clients and unusable reserved slots. A separate database alias needs
+its own budget, even when it connects to the same PostgreSQL server.
+
+A pool size of `concurrency + 1` does not prove that the deployment has enough
+connections. Startup cannot see available server slots. Runtime degraded
+warnings report private-path failures that startup cannot detect.
+
+#### Configure the pool
+
+For the `--processes 2 --concurrency 4` examples, keep the worker command
+unchanged and set `max_size` to at least 5 on the worker's database alias.
+For example, if the worker uses `default`:
+
+```python
+DATABASES["default"]["CONN_MAX_AGE"] = 0
+DATABASES["default"].setdefault("OPTIONS", {})["pool"] = {
+    "min_size": 4,
+    "max_size": 5,
+}
+```
+
+Django requires `CONN_MAX_AGE = 0` when using its PostgreSQL pool.
+
+This example leaves no pooled spare when all four task threads and the poll
+loop hold connections. Allow additional pool capacity if fallback must work
+under that load. Include that capacity in the server budget too.
+
+`"pool": True` uses an effective maximum of 4. For a non-empty pool mapping,
+the startup check reads `max_size`. If it is absent or `None`, it reads
+`min_size`, defaulting to 4. An empty mapping does not enable pooling.
+
+The `--concurrency 4` examples warn with `"pool": True`. The
+`--concurrency 8` example needs at least 9 pooled connections for its task
+threads and poll loop.
+
+#### Renewal deadline and pool fallback
+
+When renewal needs a private connection, its connection-establishment
+deadline is the smallest of:
+
+- 5 seconds.
+- The worker's renewal interval.
+- A positive `OPTIONS["connect_timeout"]`, if configured.
+
+The default renewal interval is `max(LOCK_TIMEOUT / 3, 0.1)` seconds. With
+the default lease, the private-connect budget is 5 seconds. With
+`--lock-timeout 6`, it is 2 seconds.
+
+This deadline limits connection establishment, subject to the DNS exception
+below. It does not bound Django's post-connect setup queries or renewal
+statements.
+
+If the private connection cannot be opened, renewal tries to borrow a
+connection from the pool for that tick. The checkout wait is at most 100 ms.
+The connection is returned after the tick, including on failure. It never
+becomes the renewal thread's private connection.
+
+When no private connection is open and little lease time remains, renewal
+tries the pool first. If that fallback does not renew the leases, it still
+tries its private connection. A successful pool-first renewal does not try
+the private path on that tick.
+
+An already-open private connection is reused. A failed renewal statement
+logs `lease_renew_failed`. A statement failure on the private connection
+closes it and does not trigger a pool fallback on that tick.
+
+Every idle tick calls `renew_leases()` once without first opening a private
+connection. The stock method returns 0 and opens no connection when idle.
+Custom `WORKER_CLASS` overrides retain their idle-tick calls. An override
+that queries can acquire a connection under the tick's connect deadline.
+
+Each tick is scheduled from the start of the previous tick. Ticks do not
+overlap. After an overrun, the next tick starts immediately and becomes the
+new scheduling anchor. Missed scheduling slots do not produce catch-up
+ticks. Waiting remains interruptible by shutdown.
+
+This intentionally changes the cadence for unpooled workers too. A tick no
+longer adds a full renewal interval after its work finishes. At leases of
+15 seconds or less, persistent connection stalls can therefore produce
+back-to-back connection attempts.
+
+The connect budget does not bound the whole tick. A tick that spends its
+full interval opening a connection can then spend up to another 100 ms
+waiting for pool fallback. DNS, setup queries, statements, and scheduling
+delays can extend it further.
+
+Fallback requires an available pooled connection. If every task thread and
+the poll loop hold a connection in a pool of `concurrency + 1`, there is
+nothing to borrow. Private-connect failures and pool exhaustion can still
+leave leases unrenewed.
+
+#### Watchdog connections
+
+The timeout watchdog tries its private connection first. Its connect budget
+is 5 seconds, shortened by a smaller positive `OPTIONS["connect_timeout"]`.
+The renewal interval does not cap the watchdog's budget.
+
+If that connection cannot be opened, the watchdog tries the pool with a
+checkout wait of at most 100 ms.
+
+The watchdog runs at most one acquisition sequence per batch. A batch also
+includes attempts whose grace expires while the watchdog is acquiring the
+connection or recording attempts. This does not change which attempts
+qualify as stuck or how the worker recycles.
+
+Connection acquisition delays recycling by at most one bounded acquisition
+sequence per batch, subject to the DNS and post-connect setup limits below.
+The watchdog does not repeat that sequence for each stuck attempt. It does
+not reconnect between records if the batch's connection breaks.
+
+This is not a deadline for recycling. Recording statements are not bounded
+by the connection deadline.
+
+The watchdog closes its private connection or returns its borrowed connection
+at the end of the batch. Cleanup failures log `watchdog_error`, except that
+a database error while closing the private connection is suppressed without
+that event. The watchdog thread continues.
+
+If neither path supplies a connection, the watchdog logs
+`watchdog_connection_unavailable` once for the batch. Every record in that
+batch fails and logs `task_stuck_unrecorded`. Recycling proceeds regardless.
+
+#### Connection timeout limits
+
+One private-connection deadline covers all hosts in a multi-host `HOST`.
+A stalled first host can consume the whole budget, leaving a healthy later
+host untried.
+
+While the first host keeps blackholing new connections, renewal remains
+degraded on every tick. This does not mean a WARNING is logged on every tick.
+With no spare connection in the pool, renewals fail and the leases expire.
+
+Raw psycopg 3.2 and later use separate timeouts for connection attempts and
+can proceed to a later host after a timeout. Raw psycopg 3.1 also stops at a
+stalled first host. Do not rely on a later host being tried within the
+worker's shared deadline.
+
+Synchronous DNS resolution can block beyond the deadline on every supported
+version. On psycopg 3.2 and later, tests confirm that an expired deadline
+prevents the socket connection after resolution returns. On psycopg 3.1,
+code inspection shows that libpq resolves the name and starts the socket
+connection in the same first step; the socket is then closed at the
+deadline. This behavior was not tested on 3.1.8. A deadline that has already
+passed is rejected before another host-name lookup starts.
+
+The deadline is not an unconditional wall-clock bound. It does not interrupt
+synchronous DNS or cover Django's post-connect setup queries. It also does
+not bound renewal or stuck-attempt recording statements.
+
+Set `OPTIONS["connect_timeout"]` for other database connections too. The
+private-path deadlines do not apply to task or poll-loop connections.
+Connection-establishment timeouts are separate from pool checkout timeouts
+and query timeouts.
+
+Do not rely on `PGCONNECT_TIMEOUT`. Psycopg 3.1.8 and 3.1.12 ignore it. The
+private renewal and watchdog paths use an explicit connection timeout and
+their own deadline.
+
+#### Startup warning and failure limits
+
+The worker emits `connection_pool_too_small` at WARNING level when the
+effective pool maximum is below `concurrency + 1`. It checks the worker's
+database alias once per `Worker.run()`, after `worker_started` and before
+threads start. Each `--processes` child performs its own check.
+
+The warning does not resize the pool or refuse startup. It does not inspect
+other aliases, connections opened by tasks, or available server slots.
+
+The check accepts only an `int` of at least 1, excluding booleans. Other
+values receive no sizing warning. This includes whole-valued floats such
+as `10.0`, which psycopg_pool accepts. Pool validation remains separate.
+
+An undersized pool can still cause task-query and task-thread outcome-write
+timeouts. Retries can exhaust `MAX_ATTEMPTS`. Failed outcome writes can leave
+attempts for the reaper to reclaim after the task body has finished.
+
+Renewal resilience is not exactly-once execution. It does not fix
+outcome-write failures after a database restart. A body can run again even
+when renewal recovers without losing its lease. Repeated execution can
+repeat side effects.
+
+#### Rolling upgrades
+
+While workers older than 1.4.0 still run, give their pools at least
+`concurrency + 2` connections, or `concurrency + 3` with task timeouts enabled.
+Alternatively, disable Django's pool for those workers. Keep the old-worker
+capacity for the whole rollout. Include both old and new workers in the
+server-wide connection budget.
+
+Old workers remain vulnerable to renewal starvation. A new worker's reaper
+can reclaim work whose old worker could not renew its lease. Upgrading a
+neighboring worker does not protect the old worker.
+
+#### Scope
+
+The private-connection and fallback handling applies only to Django's
+PostgreSQL pool. Connection handling for unpooled PostgreSQL, MySQL, and
+SQLite is unchanged. The start-to-start renewal cadence applies to all
+workers.
+
+Unpooled renewal and watchdog connects do not gain these local deadlines.
+PgBouncer and third-party pools have not been tested.
+
 ## The lease
 
 A worker that claims a task takes a lease on it: the row records who holds
@@ -544,16 +782,21 @@ Two consequences:
 ### Tuning LOCK_TIMEOUT
 
 Set `LOCK_TIMEOUT` above the longest gap you expect between a worker's lease
-renewals, not above your longest task. Renewal runs every `LOCK_TIMEOUT / 3`
-seconds, which covers one missed renewal. The next one still lands while the
-lease is valid. Two misses in a row do not fit. The loop waits that interval
-after each renewal, not on a fixed schedule. Every round therefore costs the
-wait plus the UPDATE. Three rounds always come to more than the lease. A
-second miss in a row leaves the lease expired and the task reclaimable. The
-value is really a statement about how long a worker may be unresponsive
-before you want its work handed to somebody else: too low and a paused or
-overloaded worker loses tasks it was going to finish, too high and recovery
-after a real crash is slow.
+renewals, not above your longest task. The default renewal interval is
+`max(LOCK_TIMEOUT / 3, 0.1)` seconds. Unless the 0.1-second floor applies,
+three intervals equal the lease. With otherwise timely renewals, one missed
+tick leaves another tick before expiry. After two misses in a row, the next
+tick falls at the lease boundary, not safely before it. There is no renewal
+margin at that boundary.
+
+Renewal is scheduled from the start of the previous tick on every path.
+This intentionally changes unpooled workers too. An overrun starts the next
+tick immediately and makes it the new anchor. Ticks do not overlap or catch
+up missed slots. Slow queries, connection work, and scheduling delays still
+consume lease time. `LOCK_TIMEOUT` therefore sets how long a worker can be
+unresponsive before its work becomes reclaimable. A value that is too low
+lets paused or overloaded workers lose work they would finish. A value that
+is too high delays recovery after a crash.
 
 Watch for `task_lease_lost` in the logs. It records an attempt whose result
 was discarded because the lease had already been reclaimed, and a steady

@@ -16,16 +16,19 @@ import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
 from types import MappingProxyType
 
 import pytest
 from django.conf import settings
-from django.db import DEFAULT_DB_ALIAS, connection, connections
+from django.db import DEFAULT_DB_ALIAS, OperationalError, connection, connections
 from django.db.models.functions import Now
 
 from django_ox.models import OxTask
@@ -151,6 +154,92 @@ def pooled_project(tmp_path: Path, *, pool: object) -> Path:
         "DATABASES['default'] = {**_db, 'CONN_MAX_AGE': 0, 'OPTIONS': _options}\n"
     )
     return project
+
+
+def refused_port() -> int:
+    """A local port nothing listens on, so a connection to it is refused."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class Proxy:
+    """
+    A TCP proxy on a local port in front of `upstream`. In "forward" mode a
+    new connection is passed through; in "hold" mode it is accepted and
+    never answered, while connections already passed through keep flowing,
+    which is how a stall of new connections looks from the client. With no
+    upstream every connection is held. `forwarded` counts the connections
+    passed through and `held` keeps the ones held, so a test can see each
+    was closed by the client.
+    """
+
+    def __init__(self, upstream: tuple[str, int] | None = None) -> None:
+        self.upstream = upstream
+        self.mode = "forward" if upstream else "hold"
+        self.forwarded = 0
+        self.held: list[socket.socket] = []
+        self._sockets: list[socket.socket] = []
+        self.server = socket.create_server(("127.0.0.1", 0))
+        self.port = self.server.getsockname()[1]
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self) -> None:
+        while True:
+            try:
+                client, _ = self.server.accept()
+            except OSError:
+                return
+            if self.mode == "hold" or self.upstream is None:
+                self.held.append(client)
+                continue
+            try:
+                upstream = socket.create_connection(self.upstream)
+            except OSError:
+                client.close()
+                continue
+            self._sockets += [client, upstream]
+            self.forwarded += 1
+            for source, sink in ((client, upstream), (upstream, client)):
+                threading.Thread(
+                    target=self._pump, args=(source, sink), daemon=True
+                ).start()
+
+    @staticmethod
+    def _pump(source: socket.socket, sink: socket.socket) -> None:
+        with suppress(OSError):
+            while data := source.recv(65536):
+                sink.sendall(data)
+        with suppress(OSError):
+            sink.shutdown(socket.SHUT_WR)
+
+    def closed_by_the_client(self) -> int:
+        """How many held connections the client has since closed."""
+        closed = 0
+        for sock in self.held:
+            sock.settimeout(0)
+            try:
+                while sock.recv(65536):
+                    pass
+            except BlockingIOError:
+                continue
+            except ConnectionResetError:
+                pass
+            closed += 1
+        return closed
+
+    def close(self) -> None:
+        self.server.close()
+        for sock in self.held + self._sockets:
+            sock.close()
+
+
+@pytest.fixture
+def blackhole():
+    """A local port that accepts connections and never answers them."""
+    made = Proxy()
+    yield made
+    made.close()
 
 
 def start_worker(
@@ -751,3 +840,141 @@ class TestTheStartupWarning:
         assert "retried" in message
         assert ("timeout watchdog" in message) is (task_timeout is not None)
         assert message.endswith(" per worker process."), message
+
+
+def deadline_alias(add_alias, *, budget_options=None, **overrides):
+    """
+    A pooled PostgreSQL alias with `overrides`, for tests that only ever
+    reach the port they give it. It names a database of its own, because
+    this run's may be SQLite's, whose NAME PostgreSQL's settings refuse.
+    """
+    options = {"pool": True, **(budget_options or {})}
+    return add_alias(
+        ENGINE=POSTGRESQL,
+        NAME="oxtest",
+        USER="ox",
+        PASSWORD="ox",
+        OPTIONS=options,
+        **overrides,
+    )
+
+
+def timed(call):
+    started = time.monotonic()
+    try:
+        call()
+    except Exception as exc:
+        return time.monotonic() - started, exc
+    return time.monotonic() - started, None
+
+
+@pytest.fixture
+def connecting(django_db_blocker):
+    """
+    Connecting allowed, to ports that are not a database: pytest-django
+    refuses every connection outside a database test, and these need none.
+    """
+    with django_db_blocker.unblock():
+        yield
+
+
+@pytest.mark.usefixtures("connecting")
+class TestOpeningItsOwnConnectionByADeadline:
+    """
+    _OwnConnection.open against a port that accepts and never answers, and
+    one that refuses. psycopg alone would wait connect_timeout for every
+    step before 3.2, for every host from 3.2, and 130 s by default.
+    """
+
+    @pytest.mark.parametrize(
+        ("budget", "configured", "deadline", "guard"),
+        [
+            (0.5, None, 0.5, 2),
+            (0.5, 30, 0.5, 2),
+            (3.0, 1, 1.0, 2),
+            (1.5, "0", 1.5, 2),
+            (0.8, "not-a-number", 0.8, 2),
+        ],
+        ids=["none", "larger", "smaller", "zero", "invalid"],
+    )
+    @needs_psycopg
+    def test_it_gives_up_at_the_deadline_whatever_connect_timeout_says(
+        self, add_alias, blackhole, budget, configured, deadline, guard
+    ):
+        extra = {} if configured is None else {"connect_timeout": configured}
+        deadline_alias(
+            add_alias, budget_options=extra, HOST="127.0.0.1", PORT=str(blackhole.port)
+        )
+        with _outside_the_pool(ALIAS, budget) as own:
+            assert own.budget == deadline
+            # libpq's own bound, whole seconds and at least 2: the 2 s floor
+            # does not hold the connection past a shorter deadline.
+            assert own.wrapper.settings_dict["OPTIONS"]["connect_timeout"] == guard
+            elapsed, exc = timed(lambda: own.open(time.monotonic() + own.budget))
+        assert isinstance(exc, OperationalError), exc
+        assert "timeout expired" in str(exc)
+        assert deadline - 0.05 <= elapsed < deadline + 0.5, elapsed
+        assert not own.is_open
+
+    @needs_psycopg
+    def test_one_deadline_covers_every_host(self, add_alias, blackhole):
+        second = Proxy()
+        try:
+            deadline_alias(
+                add_alias,
+                HOST="127.0.0.1,127.0.0.1,127.0.0.1",
+                PORT=f"{blackhole.port},{second.port},{blackhole.port}",
+            )
+            with _outside_the_pool(ALIAS, 1.0) as own:
+                elapsed, exc = timed(lambda: own.open(time.monotonic() + 1.0))
+        finally:
+            second.close()
+        assert isinstance(exc, OperationalError), exc
+        # psycopg from 3.2 gives each of the three hosts connect_timeout,
+        # at least 2 s: six seconds without the deadline.
+        assert 0.95 <= elapsed < 1.5, elapsed
+
+    @needs_psycopg
+    def test_a_refused_connection_fails_at_once(self, add_alias):
+        deadline_alias(add_alias, HOST="127.0.0.1", PORT=str(refused_port()))
+        with _outside_the_pool(ALIAS, 5.0) as own:
+            elapsed, exc = timed(lambda: own.open(time.monotonic() + 5.0))
+        assert isinstance(exc, OperationalError), exc
+        assert elapsed < 1.0, elapsed
+
+    @needs_psycopg
+    def test_what_it_gave_up_on_is_closed_and_no_thread_is_left(
+        self, add_alias, blackhole
+    ):
+        deadline_alias(add_alias, HOST="127.0.0.1", PORT=str(blackhole.port))
+        threads = threading.active_count()
+        with _outside_the_pool(ALIAS, 0.1) as own:
+            for _ in range(10):
+                with pytest.raises(OperationalError):
+                    own.open(time.monotonic() + 0.1)
+        assert len(blackhole.held) == 10
+        assert wait_for(lambda: blackhole.closed_by_the_client() == 10)
+        assert threading.active_count() == threads
+
+    @needs_psycopg
+    def test_a_connection_django_opens_by_itself_keeps_to_the_budget(
+        self, add_alias, blackhole
+    ):
+        deadline_alias(add_alias, HOST="127.0.0.1", PORT=str(blackhole.port))
+        with _outside_the_pool(ALIAS, 0.5) as own:
+            elapsed, exc = timed(connections[ALIAS].ensure_connection)
+        assert own is not None
+        assert isinstance(exc, OperationalError), exc
+        assert 0.45 <= elapsed < 1.0, elapsed
+
+    @needs_psycopg
+    def test_a_deadline_that_passed_holds_until_the_next_open(
+        self, add_alias, blackhole
+    ):
+        deadline_alias(add_alias, HOST="127.0.0.1", PORT=str(blackhole.port))
+        with _outside_the_pool(ALIAS, 0.3) as own:
+            with pytest.raises(OperationalError):
+                own.open(time.monotonic() + 0.3)
+            elapsed, exc = timed(connections[ALIAS].ensure_connection)
+        assert isinstance(exc, OperationalError), exc
+        assert elapsed < 0.1, elapsed

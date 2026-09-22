@@ -456,7 +456,7 @@ def test_an_undersized_pool_can_time_out_a_task_but_not_the_lease_renewal(tmp_pa
     # The second task's thread waited for the pool and timed out.
     assert "couldn't get a connection" in worker_log
     assert worker_log.count("connection pool for database") == 1, worker_log
-    assert "holds at most 2 connections" in worker_log
+    assert "has a connection limit of 2." in worker_log
 
 
 @pytest.mark.django_db(transaction=True)
@@ -596,7 +596,7 @@ def test_a_worker_whose_pool_is_too_small_says_so_once_at_startup(tmp_path):
         stop(proc)
     worker_log = text(log)
     assert worker_log.count("connection pool for database") == 1, worker_log
-    assert "holds at most 4 connections" in worker_log
+    assert "has a connection limit of 4." in worker_log
     assert "at least 5" in worker_log
     assert proc.returncode == 0, worker_log
 
@@ -1234,7 +1234,7 @@ class TestTheStartupWarning:
         assert record.unpooled_connections == unpooled
         message = record.getMessage()
         assert f"{ALIAS!r}" in message
-        assert "at most 4 connections" in message
+        assert "has a connection limit of 4." in message
         assert "at least 9" in message
         assert "outcome writes" in message
         assert "retried" in message

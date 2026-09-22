@@ -3306,7 +3306,7 @@ class Worker:
             )
         logger.warning(
             "Worker %s: Django's PostgreSQL connection pool for database %r "
-            "holds at most %d connections. Allow at least %d pooled connections "
+            "has a connection limit of %d. Allow at least %d pooled connections "
             "at concurrency %d: one per task thread and one for the poll loop. "
             "Task queries and outcome writes can time out waiting for a connection. "
             "Tasks can be retried and repeat side effects. "

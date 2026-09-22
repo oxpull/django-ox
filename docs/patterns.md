@@ -187,6 +187,9 @@ python manage.py ox_worker --queues emails --concurrency 4
 python manage.py ox_worker --queues reports --concurrency 1
 ```
 
+With Django's PostgreSQL pool, size each worker's pool for its concurrency:
+[pool sizing](production.md#database-connections-and-postgresql-pooling).
+
 Priority runs from -100 to 100, higher first, and applies within a queue rather
 than across queues. List every queue you use in the backend's `QUEUES`, or set
 `QUEUES: []` to accept any name.

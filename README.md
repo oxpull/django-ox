@@ -165,8 +165,8 @@ python manage.py ox_worker
 | --- | --- | --- |
 | `--backend` | `default` | Backend alias from the `TASKS` setting. |
 | `--queues` | all configured queues | Comma-separated queue names to process. |
-| `--concurrency` | `1` | Tasks executed concurrently (thread pool). |
-| `--processes` | `1` | Worker processes under one supervisor. Each is a full worker with its own connections, reaper and `--concurrency` thread pool; a process that dies is restarted. POSIX only. |
+| `--concurrency` | `1` | Tasks executed concurrently (thread pool). With Django's PostgreSQL pool, check [pool sizing](docs/production.md#database-connections-and-postgresql-pooling). |
+| `--processes` | `1` | Worker processes under one supervisor. Each is a full worker with its own connections, reaper and `--concurrency` thread pool; budget database connections per process. A process that dies is restarted. POSIX only. |
 | `--interval` | `1.0` | Polling interval in seconds when idle. |
 | `--lock-timeout` | backend `LOCK_TIMEOUT` | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |
 | `--database` | the alias `OxTask` writes to | Database alias to run against. Every `--processes` child is given the same one. It is not checked against the router. |

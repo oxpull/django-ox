@@ -592,8 +592,12 @@ in the admin without a deploy.
     2026-09-19 08:00:39,299 INFO django_ox Worker myhost-24328-d7O05mDr-1 starting: queues=['default'] concurrency=4 poll=1.0s schedules=1
     ```
 
-    That is eight tasks at once. `--concurrency` is a thread pool, which
-    suits email, HTTP and ORM work. For CPU-bound tasks run
+    That is eight tasks at once. With Django's PostgreSQL pool, budget
+    connections per process; see
+    [pool sizing](production.md#database-connections-and-postgresql-pooling).
+
+    `--concurrency` is a thread pool, which suits email, HTTP and ORM work.
+    For CPU-bound tasks run
     `--processes N --concurrency 1`. A worker process that dies is
     restarted by the supervisor. Give the process manager a stop grace
     period longer than your slowest task, so a drain finishes before it

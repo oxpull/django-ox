@@ -50,7 +50,10 @@ def build_report(account_id):
 build_report.enqueue(account_id=42)
 ```
 
-`enqueue()` writes a task row. Run `python manage.py ox_worker --concurrency 4` to execute the work.
+`enqueue()` writes a task row. Run
+`python manage.py ox_worker --concurrency 4` to execute the work.
+With Django's PostgreSQL pool, check
+[pool sizing](production.md#database-connections-and-postgresql-pooling).
 
 Failed tasks retry with exponential backoff up to `MAX_ATTEMPTS`. When a job needs attention, open Django admin to inspect each attempt's traceback. You supervise a worker process, but there is no second datastore to provision or monitor. The queue uses your database's capacity.
 

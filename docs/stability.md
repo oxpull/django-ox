@@ -25,9 +25,9 @@ export names this page does not list; those names are not public.
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   `128 + the signal number`, following the shell convention.
-- **The system check IDs**, the `django_ox.E0xx` identifiers, which
-  you may list in `SILENCED_SYSTEM_CHECKS`. The
-  IDs are stable; the messages are not.
+- **The system check IDs**, including the `django_ox.E0xx` and
+  `django_ox.W0xx` identifiers, which you may list in
+  `SILENCED_SYSTEM_CHECKS`. The IDs are stable; the messages are not.
 - **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy. A value
   the command itself rejects exits 1 as well, such as `--max-age 0` or a
   `--database` alias that isn't in `DATABASES`. A value argparse rejects

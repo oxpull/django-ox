@@ -1413,11 +1413,15 @@ class Worker:
         statement, so a row the reaper already took away or another worker
         already claimed is not renewed here.
 
-        This is the whole of the worker's side of the lease. It is why the
-        reaper reclaims work from workers that stopped rather than from
-        tasks that are merely slow, and it is deliberately blind to what
-        the task itself is doing: a wedged task on a live worker keeps its
-        lease, and recovering that is an operator's job, not the reaper's.
+        This is the whole of the worker's side of the lease. Renewal is
+        deliberately blind to what the task itself is doing: even a wedged
+        task keeps its lease while renewal reaches the database on time.
+        With Django's PostgreSQL pool, renewal needs a connection; 1.4.0
+        opens one outside the pool with a bounded deadline and a short
+        pooled fallback. A live worker can still lose its lease if renewal
+        cannot reach the database in time. Sizing LOCK_TIMEOUT alone does
+        not prevent a reclaim. Recovering a wedged task whose lease keeps
+        renewing is an operator's job, not the reaper's.
         """
         with self._in_flight_lock:
             pks = {pk for pk, _ in self._in_flight}
@@ -3338,10 +3342,13 @@ class Worker:
         """
         Claim and execute a single task inline. Returns True if one ran.
 
-        Renewed for the duration, the same as a task on the pool: a renewal
-        thread is started for this call and stopped before it returns, so a
-        task that outlives LOCK_TIMEOUT keeps its lease here as it would on
-        the pool.
+        Renewal is attempted for the duration, as for a task on the worker's
+        thread pool: a renewal thread is started for this call and stopped
+        before it returns. A task that outlives LOCK_TIMEOUT keeps its lease
+        only while renewal reaches the database on time. With Django's
+        PostgreSQL pool, renewal needs a connection; 1.4.0 opens one outside
+        the pool with a bounded deadline and a short pooled fallback.
+        Sizing LOCK_TIMEOUT alone does not prevent a reclaim.
         """
         db_task = self.claim_one()
         if db_task is None:

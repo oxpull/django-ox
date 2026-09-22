@@ -178,6 +178,8 @@ left to run it.
 3. **Deploy django-ox.** Run `migrate django_ox`, then switch `TASKS`.
 4. **Start `ox_worker`** and check it picks up work. `manage.py ox_health` will
    tell you, and the worker logs every claim to the `django_ox` logger.
+   Using Django's PostgreSQL pool? First check
+   [pool sizing](production.md#database-connections-and-postgresql-pooling).
 5. **Retire the old worker,** then its tables and broker.
 
 No drain window available? Run both. Old workers keep serving the old table

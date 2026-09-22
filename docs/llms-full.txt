@@ -814,8 +814,12 @@ in the admin without a deploy.
     2026-09-19 08:00:39,299 INFO django_ox Worker myhost-24328-d7O05mDr-1 starting: queues=['default'] concurrency=4 poll=1.0s schedules=1
     ```
 
-    That is eight tasks at once. `--concurrency` is a thread pool, which
-    suits email, HTTP and ORM work. For CPU-bound tasks run
+    That is eight tasks at once. With Django's PostgreSQL pool, budget
+    connections per process; see
+    [pool sizing](production.md#database-connections-and-postgresql-pooling).
+
+    `--concurrency` is a thread pool, which suits email, HTTP and ORM work.
+    For CPU-bound tasks run
     `--processes N --concurrency 1`. A worker process that dies is
     restarted by the supervisor. Give the process manager a stop grace
     period longer than your slowest task, so a drain finishes before it
@@ -2069,6 +2073,9 @@ python manage.py ox_worker --queues emails --concurrency 4
 python manage.py ox_worker --queues reports --concurrency 1
 ```
 
+With Django's PostgreSQL pool, size each worker's pool for its concurrency:
+[pool sizing](production.md#database-connections-and-postgresql-pooling).
+
 Priority runs from -100 to 100, higher first, and applies within a queue rather
 than across queues. List every queue you use in the backend's `QUEUES`, or set
 `QUEUES: []` to accept any name.
@@ -2338,6 +2345,8 @@ left to run it.
 3. **Deploy django-ox.** Run `migrate django_ox`, then switch `TASKS`.
 4. **Start `ox_worker`** and check it picks up work. `manage.py ox_health` will
    tell you, and the worker logs every claim to the `django_ox` logger.
+   Using Django's PostgreSQL pool? First check
+   [pool sizing](production.md#database-connections-and-postgresql-pooling).
 5. **Retire the old worker,** then its tables and broker.
 
 No drain window available? Run both. Old workers keep serving the old table
@@ -2506,7 +2515,10 @@ def build_report(account_id):
 build_report.enqueue(account_id=42)
 ```
 
-`enqueue()` writes a task row. Run `python manage.py ox_worker --concurrency 4` to execute the work.
+`enqueue()` writes a task row. Run
+`python manage.py ox_worker --concurrency 4` to execute the work.
+With Django's PostgreSQL pool, check
+[pool sizing](production.md#database-connections-and-postgresql-pooling).
 
 Failed tasks retry with exponential backoff up to `MAX_ATTEMPTS`. When a job needs attention, open Django admin to inspect each attempt's traceback. You supervise a worker process, but there is no second datastore to provision or monitor. The queue uses your database's capacity.
 
@@ -4318,9 +4330,9 @@ export names this page does not list; those names are not public.
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   `128 + the signal number`, following the shell convention.
-- **The system check IDs**, the `django_ox.E0xx` identifiers, which
-  you may list in `SILENCED_SYSTEM_CHECKS`. The
-  IDs are stable; the messages are not.
+- **The system check IDs**, including the `django_ox.E0xx` and
+  `django_ox.W0xx` identifiers, which you may list in
+  `SILENCED_SYSTEM_CHECKS`. The IDs are stable; the messages are not.
 - **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy. A value
   the command itself rejects exits 1 as well, such as `--max-age 0` or a
   `--database` alias that isn't in `DATABASES`. A value argparse rejects

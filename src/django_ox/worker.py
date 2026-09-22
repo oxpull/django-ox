@@ -1003,11 +1003,11 @@ class Worker:
             if recycle_drain_budget is not None
             else self.lock_timeout
         )
-        # A third of the timeout leaves room for one missed renewal (a slow
-        # query, a blip, one skipped scheduling slot) and no more. The loop
-        # waits this interval after each renewal rather than firing on a
-        # fixed schedule, so a round costs the wait plus the UPDATE and three
-        # of them always exceed the lease.
+        # Renewal ticks are scheduled start-to-start. Unless the 0.1 s
+        # floor applies, three default intervals equal the lease.
+        # One missed tick leaves another before expiry. After two misses,
+        # the next tick is at the lease boundary, with no renewal margin.
+        # An overrun starts the next tick immediately, without catch-up.
         self.renew_interval: float = (
             renew_interval
             if renew_interval is not None
@@ -1444,8 +1444,10 @@ class Worker:
         Runs on its own thread, and on a pooled PostgreSQL database on its
         own connection, as _renew_on says.
         """
-        # A tick waits no longer than the interval for its own connection,
-        # so a stalled connect cannot hold renewal up past the next tick.
+        # Cap private connection establishment at the renewal interval.
+        # Pool fallback can add up to 0.1 s. DNS can exceed the deadline.
+        # Setup queries and renewal statements are outside this budget.
+        # An overrun starts the next tick immediately.
         budget = min(OWN_CONNECTION_DEADLINE, self.renew_interval)
         with _outside_the_pool(self._db_alias, budget) as own:
             report = _RenewalReport(self.worker_id)
@@ -1485,7 +1487,7 @@ class Worker:
             # guessing wrong is severe and silent, which is exactly when a
             # guess should not be made.
             logger.warning(
-                "Lease renewal failed for worker %s; retrying in %.1fs",
+                "Lease renewal failed for worker %s; next retry due within %.1fs",
                 self.worker_id,
                 self.renew_interval,
                 exc_info=True,
@@ -3293,19 +3295,27 @@ class Worker:
         if self.timeouts.enabled:
             unpooled = 2
             outside = (
-                "Lease renewal and the timeout watchdog connect outside the "
-                "pool, which adds up to 2 connections"
+                "Lease renewal and the timeout watchdog normally use private "
+                "connections outside the pool; budget 2 additional connections"
             )
         else:
             unpooled = 1
-            outside = "Lease renewal connects outside the pool, which adds 1 connection"
+            outside = (
+                "Lease renewal normally uses a private connection outside the pool; "
+                "budget 1 additional connection"
+            )
         logger.warning(
-            "Worker %s: Django's connection pool for database %r holds at most "
-            "%d connections, fewer than the %d this worker needs at concurrency "
-            "%d, one for each task thread and one for the poll loop. Task "
-            "queries and outcome writes can wait for a connection, time out and "
-            "be retried. Set max_size in OPTIONS['pool'] to at least %d. %s per "
-            "worker process.",
+            "Worker %s: Django's PostgreSQL connection pool for database %r "
+            "holds at most %d connections. Allow at least %d pooled connections "
+            "at concurrency %d: one per task thread and one for the poll loop. "
+            "Task queries and outcome writes can time out waiting for a connection. "
+            "Tasks can be retried and repeat side effects. "
+            "Set max_size in OPTIONS['pool'] to at least %d for task-thread "
+            "and poll-loop capacity. This does not reserve fallback capacity "
+            "or prove that the server has enough slots. Budget all processes, "
+            "aliases, private connections and other clients. Account for reserved "
+            "slots and role limits. Pool fallback adds resilience, not capacity. "
+            "%s per worker process.",
             self.worker_id,
             self._db_alias,
             max_size,

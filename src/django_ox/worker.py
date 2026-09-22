@@ -714,6 +714,27 @@ def _outside_the_pool(
         own.wrapper.close()
 
 
+def _every(interval: float, stop: Event, tick: Callable[[], object]) -> None:
+    """
+    Call `tick` every `interval` seconds until `stop` is set, timed from the
+    start of one call to the start of the next. The first is due `interval`
+    after this is called.
+
+    Timed from the end instead, every tick would push the next one out by
+    its own length. A lease renewal that spends its whole connection
+    deadline, which below a 15 s lease is the interval itself, would put
+    the next attempt an interval after that, past a lease three intervals
+    long. A tick that runs past its interval is followed by the next one at
+    once, timed from its own start, so ticks never overlap and none is made
+    up for later. The wait between them is stop.wait, so setting `stop`
+    ends it at once.
+    """
+    started = time.monotonic()
+    while not stop.wait(max(0.0, started + interval - time.monotonic())):
+        started = time.monotonic()
+        tick()
+
+
 class _RenewalReport:
     """
     What lease renewal on a pooled PostgreSQL database logs about where its
@@ -1383,8 +1404,11 @@ class Worker:
 
     def _renewal_loop(self, stop: Event) -> None:
         """
-        Renew until stopped. Runs on its own thread, and on a pooled
-        PostgreSQL database on its own connection, as _renew_on says.
+        Renew every renew_interval until stopped, timed from the start of one
+        renewal to the start of the next, as _every says, with or without a
+        pool and whether a renewal succeeds, fails or has nothing to renew.
+        Runs on its own thread, and on a pooled PostgreSQL database on its
+        own connection, as _renew_on says.
         """
         # A tick waits no longer than the interval for its own connection,
         # so a stalled connect cannot hold renewal up past the next tick.
@@ -1392,12 +1416,16 @@ class Worker:
         with _outside_the_pool(self._db_alias, budget) as own:
             report = _RenewalReport(self.worker_id)
             safe_until = time.monotonic() + self.lock_timeout
+
+            def tick() -> None:
+                nonlocal safe_until
+                if own is None:
+                    self._renew_or_warn()
+                else:
+                    safe_until = self._renew_on(own, report, safe_until)
+
             try:
-                while not stop.wait(self.renew_interval):
-                    if own is None:
-                        self._renew_or_warn()
-                    else:
-                        safe_until = self._renew_on(own, report, safe_until)
+                _every(self.renew_interval, stop, tick)
             finally:
                 connections.close_all()
 

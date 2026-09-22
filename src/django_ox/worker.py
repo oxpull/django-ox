@@ -1,17 +1,20 @@
 import asyncio
 import copy
 import ctypes
+import functools
 import json
 import logging
+import math
 import os
+import selectors
 import socket
 import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Coroutine, Iterator, Mapping
+from collections.abc import Callable, Coroutine, Generator, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from contextlib import contextmanager, suppress
+from contextlib import closing, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from inspect import iscoroutinefunction
@@ -84,6 +87,15 @@ RECYCLE_DRAIN_POLL = 0.25
 # the platform's limit (about 49 days on Windows, and the end of time_t
 # elsewhere); a deadline years out is waited for in steps of this.
 WATCHDOG_MAX_WAIT = 3600.0
+
+# On a pooled PostgreSQL database, the longest lease renewal and the watchdog
+# wait to open a connection of their own. Renewal also waits no longer than
+# its interval, and a shorter connect_timeout in OPTIONS shortens both.
+OWN_CONNECTION_DEADLINE = 5.0
+
+# libpq reads a connect_timeout below this as this, and psycopg does too
+# from 3.2.
+LIBPQ_MIN_CONNECT_TIMEOUT = 2
 
 
 def _load_async_exc_injector() -> Callable[[int], None] | None:
@@ -440,11 +452,168 @@ def _pool_options(alias: str) -> Mapping[str, Any] | None:
     return None
 
 
+def _positive_seconds(value: Any) -> float | None:
+    """A connect_timeout from OPTIONS as positive seconds, or None for none."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+# The deadline _connection_by_deadline's connections open by, for the thread
+# that is opening one. Set by _Driver.connect() before every connect.
+_connect_deadline = threading.local()
+
+
+def _connect_by(deadline: float, gen: Generator[Any, Any, Any]) -> Any:
+    """
+    Run psycopg's connection generator `gen` to the end, waiting on its
+    socket here, and give up at `deadline`, on time.monotonic().
+
+    psycopg bounds a connection with connect_timeout, and neither way it
+    applies it is a deadline. Before 3.2 it is how long each step of the
+    handshake may wait, so a server that answers every step slowly takes a
+    multiple of it. From 3.2 it bounds each attempt, and there is one
+    attempt per host and per address a host name resolves to, so two
+    stalled hosts take twice as long. Waiting here, against one deadline
+    for every step of every attempt, is what makes it one. The generator is
+    closed however this ends, which finishes any connection it had started,
+    so nothing it opened outlives the deadline. Resolving a host name
+    blocks in the resolver and is not covered.
+    """
+    from psycopg.errors import ConnectionTimeout
+
+    try:
+        with closing(gen), selectors.DefaultSelector() as selector:
+            if time.monotonic() >= deadline:
+                raise ConnectionTimeout("connection timeout expired")
+            fileno, events = next(gen)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ConnectionTimeout("connection timeout expired")
+                selector.register(fileno, events)
+                ready = selector.select(remaining)
+                selector.unregister(fileno)
+                if ready:
+                    fileno, events = gen.send(ready[0][1])
+    except StopIteration as done:
+        return done.value
+
+
+@functools.cache
+def _connection_by_deadline() -> type[Any]:
+    """
+    psycopg's Connection, opening by the calling thread's _connect_deadline.
+
+    psycopg's connect() waits on the generator _connect_gen returns, one per
+    attempt, on every version this package supports. This one does the
+    waiting itself, through _connect_by, and hands psycopg's own wait a
+    generator that has already finished.
+    """
+    import psycopg
+
+    class ConnectionByDeadline(psycopg.Connection[Any]):
+        @classmethod
+        def _connect_gen(cls, conninfo: str = "", **kwargs: Any) -> Any:
+            conn = _connect_by(
+                _connect_deadline.at, super()._connect_gen(conninfo, **kwargs)
+            )
+            yield from ()
+            return conn
+
+    return ConnectionByDeadline
+
+
+class _Driver:
+    """
+    psycopg as one wrapper sees it: connect() opens by its owner's deadline,
+    or `budget` seconds from the call when the owner has none nearer.
+    Django reads the exception classes and the rest of the driver through
+    the same attribute, so everything else is psycopg's own.
+    """
+
+    def __init__(self, owner: "_OwnConnection") -> None:
+        import psycopg
+
+        self._psycopg = psycopg
+        self._owner = owner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._psycopg, name)
+
+    def connect(self, *args: Any, **kwargs: Any) -> Any:
+        owner = self._owner
+        _connect_deadline.at = min(owner.deadline, time.monotonic() + owner.budget)
+        return _connection_by_deadline().connect(*args, **kwargs)
+
+
+class _OwnConnection:
+    """
+    A connection of the calling thread's own to a pooled PostgreSQL alias,
+    outside Django's pool, opened by a deadline.
+
+    `wrapper` is a new wrapper for the alias, built from its settings with
+    "pool" taken out of OPTIONS, so the rest of the project's connection
+    settings still apply. The settings are copied rather than edited,
+    because every other wrapper for the alias reads the same dictionary.
+
+    The one setting changed is connect_timeout, and only in the copy. The
+    deadline is `budget` seconds, or a shorter positive connect_timeout
+    from OPTIONS; a longer one does not lengthen it. _Driver holds the
+    connection to that deadline. connect_timeout becomes the deadline
+    rounded up to whole seconds, and no less than libpq's minimum, so that
+    psycopg bounds each attempt by itself as well.
+    """
+
+    def __init__(self, wrapper: Any, budget: float) -> None:
+        options = {
+            name: value
+            for name, value in wrapper.settings_dict["OPTIONS"].items()
+            if name != "pool"
+        }
+        configured = _positive_seconds(options.get("connect_timeout"))
+        self.budget = budget if configured is None else min(budget, configured)
+        self.deadline = math.inf
+        options["connect_timeout"] = max(
+            LIBPQ_MIN_CONNECT_TIMEOUT, math.ceil(self.budget)
+        )
+        wrapper.settings_dict = {**wrapper.settings_dict, "OPTIONS": options}
+        wrapper.Database = _Driver(self)
+        self.alias: str = wrapper.alias
+        self.wrapper = wrapper
+
+    @property
+    def is_open(self) -> bool:
+        return self.wrapper.connection is not None
+
+    def open(self, deadline: float) -> None:
+        """
+        Open the connection unless it is open, giving up at `deadline`,
+        which then holds for any reconnect until the next call.
+        """
+        self.deadline = deadline
+        if self.is_open:
+            return
+        try:
+            self.wrapper.ensure_connection()
+        except BaseException:
+            # One that failed while Django was setting it up is not one to
+            # reuse on the next attempt.
+            with suppress(Error):
+                self.wrapper.close()
+            raise
+
+
 @contextmanager
-def _outside_the_pool(alias: str) -> Iterator[None]:
+def _outside_the_pool(
+    alias: str, budget: float = OWN_CONNECTION_DEADLINE
+) -> Iterator[_OwnConnection | None]:
     """
     Give the calling thread a connection to `alias` of its own for the
-    block, outside Django's PostgreSQL connection pool when that is on.
+    block, outside Django's PostgreSQL connection pool when that is on, and
+    yield it, or yield None when there is no such pool.
 
     The pool is one per process and every thread draws from it. A task
     holds its thread's connection from its first query to the end of the
@@ -455,36 +624,30 @@ def _outside_the_pool(alias: str) -> Iterator[None]:
     watchdog's stuck-attempt write waits the same way and holds the
     recycle back. Neither may queue behind the work it protects.
 
-    The wrapper is a new one, built from the alias's settings with only
-    "pool" taken out of OPTIONS, so the rest of the project's connection
-    settings still apply. The settings are copied rather than edited,
-    because every other wrapper for the alias reads the same dictionary,
-    and the pool itself is never touched. Whatever the thread had for the
-    alias before is put back afterwards, however the block ends.
+    _OwnConnection says how the connection is built and opened; `budget`
+    is its deadline. The pool itself is never touched. Whatever the thread
+    had for the alias before is put back afterwards, however the block
+    ends.
 
     Anything other than PostgreSQL with a pool _pool_options recognises
     runs the block on the thread's ordinary connection.
     """
     pooled = _pool_options(alias) is not None
-    own = connections.create_connection(alias) if pooled else None
-    if own is None or own.vendor != "postgresql":
-        yield
+    wrapper = connections.create_connection(alias) if pooled else None
+    if wrapper is None or wrapper.vendor != "postgresql":
+        yield None
         return
-    options = connections.settings[alias]["OPTIONS"]
-    own.settings_dict = {
-        **own.settings_dict,
-        "OPTIONS": {name: value for name, value in options.items() if name != "pool"},
-    }
+    own = _OwnConnection(wrapper, budget)
     before = [c for c in connections.all(initialized_only=True) if c.alias == alias]
-    connections[alias] = own
+    connections[alias] = own.wrapper
     try:
-        yield
+        yield own
     finally:
         if before:
             connections[alias] = before[0]
         else:
             del connections[alias]
-        own.close()
+        own.wrapper.close()
 
 
 class Worker:
@@ -1035,7 +1198,10 @@ class Worker:
 
     def _renewal_loop(self, stop: Event) -> None:
         """Renew until stopped. Runs on its own thread, and its own connection."""
-        with _outside_the_pool(self._db_alias):
+        # A tick waits no longer than the interval for its own connection,
+        # so a stalled connect cannot hold renewal up past the next tick.
+        budget = min(OWN_CONNECTION_DEADLINE, self.renew_interval)
+        with _outside_the_pool(self._db_alias, budget):
             try:
                 while not stop.wait(self.renew_interval):
                     try:

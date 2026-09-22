@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- With pooled PostgreSQL, lease renewal and the watchdog use private
+  connections outside Django's pool, so pool exhaustion alone does not
+  block them. If a private connection is unavailable, they fall back to
+  the pool. Private connections need server capacity; pooled fallback
+  still needs a spare pooled connection.
 - The watchdog runs at most one acquisition sequence per pass, including
   attempts whose grace expires during acquisition or recording. It closes
   or returns the connection at the end without reconnecting between records.

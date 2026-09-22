@@ -378,8 +378,8 @@ ticks. Waiting remains interruptible by shutdown.
 
 This intentionally changes the cadence for unpooled workers too. A tick no
 longer adds a full renewal interval after its work finishes. At leases of
-15 seconds or less, persistent connection stalls can therefore produce
-back-to-back connection attempts.
+15 seconds or less, persistent connection stalls can therefore leave no
+wait between renewal ticks, each of which may try both connection paths.
 
 The connect budget does not bound the whole tick. A tick that spends its
 full interval opening a connection can then spend up to another 100 ms
@@ -479,10 +479,10 @@ An undersized pool can still cause task-query and task-thread outcome-write
 timeouts. Retries can exhaust `MAX_ATTEMPTS`. Failed outcome writes can leave
 attempts for the reaper to reclaim after the task body has finished.
 
-Renewal resilience is not exactly-once execution. It does not fix
-outcome-write failures after a database restart. A body can run again even
-when renewal recovers without losing its lease. Repeated execution can
-repeat side effects.
+Renewal resilience is not exactly-once execution. Outcome writes can still
+fail after a database restart. A body can run again even when renewal
+recovers without losing its lease. Repeated execution can repeat side
+effects.
 
 #### Rolling upgrades
 

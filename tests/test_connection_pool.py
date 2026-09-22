@@ -33,7 +33,7 @@ from django.db.models.functions import Now
 
 from django_ox.models import OxTask
 from django_ox.timeouts import RECYCLE_EXIT_CODE
-from django_ox.worker import Worker, _outside_the_pool
+from django_ox.worker import Worker, _outside_the_pool, _RenewalReport
 
 from .conftest import start_worker_thread, wait_for
 from .tasks import query_and_hold, query_then_sleep, slow
@@ -129,12 +129,14 @@ def unguarded_db(transactional_db, django_db_blocker):
         yield
 
 
-def pooled_project(tmp_path: Path, *, pool: object) -> Path:
+def pooled_project(
+    tmp_path: Path, *, pool: object, database: Mapping[str, object] | None = None
+) -> Path:
     """
     A project whose settings are this suite's with the default database
-    pooled. This checkout's src goes first on the path, so the worker runs
-    the code under test even where an install elsewhere would win from the
-    project's directory.
+    pooled, and with the keys in `database` replaced. This checkout's src
+    goes first on the path, so the worker runs the code under test even
+    where an install elsewhere would win from the project's directory.
     """
     project = tmp_path / "proj"
     (project / "pooledproj").mkdir(parents=True)
@@ -151,7 +153,8 @@ def pooled_project(tmp_path: Path, *, pool: object) -> Path:
         f"from {settings.SETTINGS_MODULE} import *  # noqa: F403\n"
         "_db = DATABASES['default']\n"
         f"_options = {{**_db.get('OPTIONS', {{}}), 'pool': {pool!r}}}\n"
-        "DATABASES['default'] = {**_db, 'CONN_MAX_AGE': 0, 'OPTIONS': _options}\n"
+        "DATABASES['default'] = {**_db, 'CONN_MAX_AGE': 0, 'OPTIONS': _options, "
+        f"**{dict(database or {})!r}}}\n"
     )
     return project
 
@@ -232,6 +235,15 @@ class Proxy:
         self.server.close()
         for sock in self.held + self._sockets:
             sock.close()
+
+
+@pytest.fixture
+def proxy():
+    """A Proxy in front of the test database; closed afterwards."""
+    settings_dict = connection.settings_dict
+    made = Proxy((settings_dict["HOST"] or "127.0.0.1", int(settings_dict["PORT"])))
+    yield made
+    made.close()
 
 
 @pytest.fixture
@@ -501,6 +513,201 @@ def test_a_worker_whose_pool_is_too_small_says_so_once_at_startup(tmp_path):
     assert worker_log.count("connection pool for database") == 1, worker_log
     assert "holds at most 4 connections" in worker_log
     assert "at least 5" in worker_log
+    assert proc.returncode == 0, worker_log
+
+
+def renewed_or_reclaimed(ids):
+    """
+    A wait_for predicate: true once every lease in `ids` has outlived the
+    expiry it has now, which only a renewal allows, or once any row was
+    taken back instead.
+    """
+    expiry = dict(
+        OxTask.objects.filter(id__in=ids).values_list("id", "lease_expires_at")
+    )
+
+    def predicate():
+        rows = list(OxTask.objects.filter(id__in=ids).annotate(db_now=Now()))
+        if any(row.attempts > 1 or row.status != OxTask.Status.RUNNING for row in rows):
+            return True
+        return all(
+            row.db_now > expiry[row.id] and row.lease_expires_at > expiry[row.id]
+            for row in rows
+        )
+
+    return predicate
+
+
+def all_running_once(ids):
+    return all(
+        (row.status, row.attempts) == (OxTask.Status.RUNNING, 1)
+        for row in OxTask.objects.filter(id__in=ids)
+    )
+
+
+def none_left_running(ids):
+    return lambda: (
+        not OxTask.objects.filter(id__in=ids).exclude(status__in=TERMINAL).exists()
+    )
+
+
+@pytest.fixture
+def capped_role():
+    """
+    A login role for the worker with the rights it needs on the test
+    database, and a function that sets how many connections the server
+    lets it hold at once. The test process connects as a superuser, whose
+    connections PostgreSQL does not count against a limit, so only the
+    worker's do. Dropped afterwards.
+    """
+    role = f"ox_capped_{os.getpid()}_{threading.get_ident() % 10000}"
+    with connection.cursor() as cursor:
+        cursor.execute(f'CREATE ROLE "{role}" LOGIN PASSWORD %s', ["ox"])
+        cursor.execute(f'GRANT ALL ON ALL TABLES IN SCHEMA public TO "{role}"')
+        cursor.execute(f'GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO "{role}"')
+
+    def cap(limit):
+        with connection.cursor() as cursor:
+            cursor.execute(f'ALTER ROLE "{role}" CONNECTION LIMIT {int(limit)}')
+
+    def held():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE usename = %s", [role]
+            )
+            return cursor.fetchone()[0]
+
+    yield role, cap, held
+    with connection.cursor() as cursor:
+        cursor.execute(f'ALTER ROLE "{role}" NOLOGIN')
+        cursor.execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = %s",
+            [role],
+        )
+    wait_for(lambda: held() == 0, timeout=10)
+    with connection.cursor() as cursor:
+        cursor.execute(f'DROP OWNED BY "{role}"')
+        cursor.execute(f'DROP ROLE "{role}"')
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.skipif(os.name != "posix", reason="stops the worker with SIGTERM")
+@on_postgresql
+@with_psycopg_pool
+def test_renewal_borrows_from_the_pool_when_the_server_has_no_slot_left(
+    tmp_path, capped_role
+):
+    """
+    Two worker processes at --concurrency 2, each with Django's default pool
+    of 4, and a server that lets the worker hold exactly 8 connections. The
+    pools take all 8 as they open, so neither renewal thread can open one
+    of its own. Each pool has one to spare: the poll loop and two task
+    threads hold 3.
+
+    Renewal has to go through that spare connection for as long as the
+    server has no room, and go back to one of its own once it has. Asking
+    the server for a new connection and nothing else, it fails on every
+    tick, the leases expire under the running bodies and they run again.
+    """
+    role, cap, held = capped_role
+    cap(8)
+    bodies = tmp_path / "bodies.log"
+    release = tmp_path / "release"
+    project = pooled_project(
+        tmp_path, pool=True, database={"USER": role, "PASSWORD": "ox"}
+    )
+    log = tmp_path / "worker.log"
+    proc = start_worker(
+        project, log, "--processes", "2", "--concurrency", "2", "--lock-timeout", "6"
+    )
+    try:
+        # Both pools are full, and so is the server.
+        assert wait_for(lambda: held() == 8, timeout=60), text(log)
+        ids = [query_and_hold.enqueue(str(bodies), str(release)).id for _ in range(4)]
+        assert wait_for(lambda: lines(bodies).count("HELD") == 4, timeout=60), text(log)
+        assert wait_for(renewed_or_reclaimed(ids), timeout=60, interval=0.1), text(log)
+        assert all_running_once(ids), text(log)
+        cap(10)
+        assert wait_for(
+            lambda: text(log).count("on its own connection again") == 2, timeout=60
+        ), text(log)
+        release.touch()
+        assert wait_for(none_left_running(ids), timeout=60, interval=0.1), text(log)
+    finally:
+        release.touch()
+        stop(proc)
+
+    worker_log = text(log)
+    rows = {
+        str(row.id): (row.status, row.attempts)
+        for row in OxTask.objects.filter(id__in=ids)
+    }
+    assert rows == dict.fromkeys(map(str, ids), (OxTask.Status.SUCCESSFUL, 1))
+    assert lines(bodies).count("START") == 4, worker_log
+    assert "lost its lease" not in worker_log
+    assert "Lease renewal failed" not in worker_log
+    # Said once by each process, not once a tick.
+    assert worker_log.count("could not get a connection of its own") == 2, worker_log
+    assert "too many connections for role" in worker_log
+    assert "renewed through the connection pool instead" in worker_log
+    assert proc.returncode == 0, worker_log
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.skipif(os.name != "posix", reason="stops the worker with SIGTERM")
+@on_postgresql
+@with_psycopg_pool
+def test_renewal_borrows_from_the_pool_while_new_connections_stall(tmp_path, proxy):
+    """
+    One worker at --concurrency 2 with a pool of 4, all opened through a
+    proxy that then holds every new connection unanswered, while the ones
+    already open keep flowing. The poll loop and two task threads hold 3.
+
+    Renewal has to give up on a connection of its own by its deadline, two
+    seconds at this lease, and renew through the pool's spare one; and go
+    back to its own once connections open again. Waiting out psycopg's
+    connect_timeout instead, 130 s by default, the leases expire under the
+    running bodies and they run again. Whatever it gave up on it closed.
+    """
+    bodies = tmp_path / "bodies.log"
+    release = tmp_path / "release"
+    project = pooled_project(
+        tmp_path,
+        pool={"min_size": 4, "max_size": 4},
+        database={"HOST": "127.0.0.1", "PORT": str(proxy.port)},
+    )
+    log = tmp_path / "worker.log"
+    proc = start_worker(project, log, "--concurrency", "2", "--lock-timeout", "6")
+    try:
+        assert wait_for(lambda: proxy.forwarded >= 4, timeout=60), text(log)
+        proxy.mode = "hold"
+        ids = [query_and_hold.enqueue(str(bodies), str(release)).id for _ in range(2)]
+        assert wait_for(lambda: lines(bodies).count("HELD") == 2, timeout=60), text(log)
+        assert wait_for(renewed_or_reclaimed(ids), timeout=60, interval=0.1), text(log)
+        assert all_running_once(ids), text(log)
+        assert proxy.held, "renewal never asked for a connection of its own"
+        proxy.mode = "forward"
+        assert wait_for(
+            lambda: "on its own connection again" in text(log), timeout=60
+        ), text(log)
+        release.touch()
+        assert wait_for(none_left_running(ids), timeout=60, interval=0.1), text(log)
+    finally:
+        release.touch()
+        stop(proc)
+
+    worker_log = text(log)
+    rows = {
+        str(row.id): (row.status, row.attempts)
+        for row in OxTask.objects.filter(id__in=ids)
+    }
+    assert rows == dict.fromkeys(map(str, ids), (OxTask.Status.SUCCESSFUL, 1))
+    assert lines(bodies).count("START") == 2, worker_log
+    assert "lost its lease" not in worker_log
+    assert "Lease renewal failed" not in worker_log
+    assert worker_log.count("could not get a connection of its own") == 1, worker_log
+    assert "connection timeout expired" in worker_log
+    assert proxy.closed_by_the_client() == len(proxy.held)
     assert proc.returncode == 0, worker_log
 
 
@@ -978,3 +1185,377 @@ class TestOpeningItsOwnConnectionByADeadline:
             elapsed, exc = timed(connections[ALIAS].ensure_connection)
         assert isinstance(exc, OperationalError), exc
         assert elapsed < 0.1, elapsed
+
+
+@pytest.fixture
+def claimed(add_alias):
+    """
+    A worker on a pooled alias of the test database, a pool of at most 2,
+    and a task it has claimed and is running, as renewal sees it.
+    """
+    options = {**connections.settings["default"]["OPTIONS"]}
+    add_alias(OPTIONS={**options, "pool": {"min_size": 1, "max_size": 2}})
+    worker = Worker(db_alias=ALIAS, lock_timeout=30)
+    slow.enqueue(0)
+    task = worker.claim_one()
+    assert task is not None
+    worker._in_flight.add((task.pk, task.lease_epoch))
+    pool = connections[ALIAS].pool
+    # The claim's connection goes back, so the pool starts with none out.
+    connections[ALIAS].close()
+    return worker, task, pool
+
+
+def lease(task):
+    return OxTask.objects.get(pk=task.pk).lease_expires_at
+
+
+@pytest.fixture
+def emptied():
+    """Take every connection a pool has to give; give them back afterwards."""
+    taken = []
+
+    def empty(pool):
+        taken.extend((pool, pool.getconn()) for _ in range(pool.max_size))
+
+    yield empty
+    for pool, conn in taken:
+        pool.putconn(conn)
+
+
+@on_postgresql
+@with_psycopg_pool
+@pytest.mark.usefixtures("unguarded_db")
+class TestARenewalTick:
+    """Worker._renew_on, one tick at a time, against the test database."""
+
+    def test_its_own_connection_renews_while_the_pool_is_empty(
+        self, claimed, emptied, caplog
+    ):
+        worker, task, pool = claimed
+        emptied(pool)
+        requests = pool.get_stats()["requests_num"]
+        before = lease(task)
+        with (
+            caplog.at_level(logging.DEBUG, logger="django_ox"),
+            _outside_the_pool(ALIAS, 2.0) as own,
+        ):
+            elapsed, exc = timed(
+                lambda: worker._renew_on(
+                    own, _RenewalReport(worker.worker_id), time.monotonic() + 30
+                )
+            )
+            assert own.is_open
+        assert exc is None
+        assert lease(task) > before
+        assert elapsed < 1.0, elapsed
+        assert pool.get_stats()["requests_num"] == requests
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_a_refused_connection_of_its_own_borrows_one_and_gives_it_back(
+        self, claimed, caplog
+    ):
+        worker, task, pool = claimed
+        before = lease(task)
+        with (
+            caplog.at_level(logging.DEBUG, logger="django_ox"),
+            _outside_the_pool(ALIAS, 2.0) as own,
+        ):
+            own.wrapper.settings_dict["PORT"] = str(refused_port())
+            available = pool.get_stats()["pool_available"]
+            started = time.monotonic()
+            safe_until = worker._renew_on(
+                own, _RenewalReport(worker.worker_id), started + 30
+            )
+            assert connections[ALIAS] is own.wrapper
+            assert not own.is_open
+            assert pool.get_stats()["pool_available"] == available
+        assert lease(task) > before
+        assert safe_until >= started + worker.lock_timeout
+        (record,) = events(caplog, "lease_renew_degraded")
+        assert record.levelno == logging.WARNING
+        assert record.fallback == "succeeded"
+        assert "connection" in record.error
+        assert not events(caplog, "lease_renew_failed")
+
+    def test_a_stalled_connection_of_its_own_gives_up_by_the_deadline(
+        self, claimed, blackhole, caplog
+    ):
+        worker, task, _ = claimed
+        before = lease(task)
+        with (
+            caplog.at_level(logging.DEBUG, logger="django_ox"),
+            _outside_the_pool(ALIAS, 1.0) as own,
+        ):
+            own.wrapper.settings_dict["PORT"] = str(blackhole.port)
+            elapsed, exc = timed(
+                lambda: worker._renew_on(
+                    own, _RenewalReport(worker.worker_id), time.monotonic() + 30
+                )
+            )
+        assert exc is None
+        assert 0.95 <= elapsed < 1.5, elapsed
+        assert lease(task) > before
+        (record,) = events(caplog, "lease_renew_degraded")
+        assert "timeout expired" in record.error
+        assert wait_for(lambda: blackhole.closed_by_the_client() == 1)
+
+    def test_with_neither_the_renewal_is_missed_within_the_bound(
+        self, claimed, emptied, caplog
+    ):
+        worker, task, pool = claimed
+        before = lease(task)
+        with (
+            caplog.at_level(logging.DEBUG, logger="django_ox"),
+            _outside_the_pool(ALIAS, 2.0) as own,
+        ):
+            own.wrapper.settings_dict["PORT"] = str(refused_port())
+            emptied(pool)
+            elapsed, exc = timed(
+                lambda: worker._renew_on(own, _RenewalReport(worker.worker_id), 1e9)
+            )
+            assert connections[ALIAS] is own.wrapper
+        assert exc is None
+        assert elapsed < 0.1 + 0.4, elapsed
+        assert lease(task) == before
+        (record,) = events(caplog, "lease_renew_degraded")
+        assert record.fallback == "failed"
+        assert "couldn't get a connection after 0.10 sec" in record.fallback_error
+
+    def test_with_the_leases_about_to_expire_it_goes_to_the_pool_at_once(
+        self, claimed, blackhole, caplog
+    ):
+        worker, task, _ = claimed
+        before = lease(task)
+        with (
+            caplog.at_level(logging.DEBUG, logger="django_ox"),
+            _outside_the_pool(ALIAS, 1.0) as own,
+        ):
+            own.wrapper.settings_dict["PORT"] = str(blackhole.port)
+            elapsed, exc = timed(
+                lambda: worker._renew_on(
+                    own, _RenewalReport(worker.worker_id), time.monotonic() + 0.5
+                )
+            )
+        assert exc is None
+        assert elapsed < 0.5, elapsed
+        assert not blackhole.held
+        assert lease(task) > before
+        (record,) = events(caplog, "lease_renew_degraded")
+        assert record.error.startswith("not tried")
+
+    def test_after_a_missed_renewal_a_tick_with_little_left_still_tries_its_own(
+        self, claimed, emptied, blackhole, caplog
+    ):
+        """
+        A stall of new connections with nothing to spare in the pool misses
+        a renewal, and ends. The next tick, with less of the leases left
+        than its own deadline, asks the pool first and then opens its own.
+        Asking the pool alone, it would never try its own again while any
+        work was in flight, because nothing moves `safe_until` but a
+        renewal that succeeds.
+        """
+        worker, task, pool = claimed
+        emptied(pool)
+        report = _RenewalReport(worker.worker_id)
+        before = lease(task)
+        with (
+            caplog.at_level(logging.DEBUG, logger="django_ox"),
+            _outside_the_pool(ALIAS, 0.5) as own,
+        ):
+            port = own.wrapper.settings_dict["PORT"]
+            own.wrapper.settings_dict["PORT"] = str(blackhole.port)
+            first = time.monotonic() + 0.55
+            safe_until = worker._renew_on(own, report, first)
+            assert safe_until == first
+            assert lease(task) == before
+            own.wrapper.settings_dict["PORT"] = port
+            started = time.monotonic()
+            assert safe_until - started < own.budget
+            safe_until = worker._renew_on(own, report, safe_until)
+            assert own.is_open
+        assert lease(task) > before
+        assert safe_until >= started + worker.lock_timeout
+        assert [r.event for r in caplog.records if hasattr(r, "event")] == [
+            "lease_renew_degraded",
+            "lease_renew_recovered",
+        ]
+
+    def test_a_tick_with_nothing_to_renew_opens_nothing(self, claimed):
+        worker, _, pool = claimed
+        worker._in_flight.clear()
+        requests = pool.get_stats()["requests_num"]
+        with _outside_the_pool(ALIAS, 2.0) as own:
+            started = time.monotonic()
+            safe_until = worker._renew_on(own, _RenewalReport(worker.worker_id), 0)
+            assert not own.is_open
+        assert safe_until >= started + worker.lock_timeout
+        assert pool.get_stats()["requests_num"] == requests
+
+    def test_the_tick_after_its_connection_is_killed_reconnects(self, claimed, caplog):
+        """A database restart, as the renewal connection sees one."""
+        worker, task, _ = claimed
+        report = _RenewalReport(worker.worker_id)
+        with (
+            caplog.at_level(logging.DEBUG, logger="django_ox"),
+            _outside_the_pool(ALIAS, 2.0) as own,
+        ):
+            worker._renew_on(own, report, time.monotonic() + 30)
+            killed = own.wrapper.connection.info.backend_pid
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_terminate_backend(%s)", [killed])
+
+            def gone():
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT count(*) FROM pg_stat_activity WHERE pid = %s", [killed]
+                    )
+                    return cursor.fetchone()[0] == 0
+
+            assert wait_for(gone)
+            before = lease(task)
+            worker._renew_on(own, report, time.monotonic() + 30)
+            assert not own.is_open
+            assert lease(task) == before
+            worker._renew_on(own, report, time.monotonic() + 30)
+            assert own.is_open
+            assert own.wrapper.connection.info.backend_pid != killed
+        assert lease(task) > before
+        assert len(events(caplog, "lease_renew_failed")) == 1
+        assert not events(caplog, "lease_renew_degraded")
+
+
+@on_postgresql
+@with_psycopg_pool
+@pytest.mark.usefixtures("unguarded_db")
+class TestTheBorrowedConnection:
+    def test_it_goes_back_to_the_pool_when_the_block_returns(self, claimed):
+        _, _, pool = claimed
+        with _outside_the_pool(ALIAS) as own:
+            with own.borrowed(0.1):
+                borrowed = connections[ALIAS]
+                assert borrowed is not own.wrapper
+                with borrowed.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                out = pool.get_stats()["pool_available"]
+            assert connections[ALIAS] is own.wrapper
+            assert borrowed.connection is None
+        assert pool.get_stats()["pool_available"] == out + 1
+
+    def test_it_goes_back_to_the_pool_when_the_block_raises(self, claimed):
+        _, _, pool = claimed
+        with _outside_the_pool(ALIAS) as own:
+            with pytest.raises(RuntimeError, match="inside"), own.borrowed(0.1):
+                with connections[ALIAS].cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                out = pool.get_stats()["pool_available"]
+                raise RuntimeError("inside")
+            assert connections[ALIAS] is own.wrapper
+        assert pool.get_stats()["pool_available"] == out + 1
+
+    def test_an_empty_pool_is_waited_for_no_longer_than_asked(self, claimed, emptied):
+        _, _, pool = claimed
+        emptied(pool)
+        with _outside_the_pool(ALIAS) as own:
+            started = time.monotonic()
+            with (
+                pytest.raises(OperationalError, match="couldn't get a connection"),
+                own.borrowed(0.1),
+            ):
+                pytest.fail("the block ran without a connection")
+            elapsed = time.monotonic() - started
+            assert connections[ALIAS] is own.wrapper
+        assert elapsed < 0.5, elapsed
+
+
+@on_postgresql
+@with_psycopg_pool
+@pytest.mark.usefixtures("unguarded_db")
+class TestTheWatchdogConnection:
+    def test_it_borrows_when_it_cannot_open_its_own(self, claimed):
+        worker, _, pool = claimed
+        with _outside_the_pool(ALIAS) as own:
+            own.wrapper.settings_dict["PORT"] = str(refused_port())
+            with worker._watchdog_connection(own):
+                assert connections[ALIAS] is not own.wrapper
+                with connections[ALIAS].cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                out = pool.get_stats()["pool_available"]
+            assert connections[ALIAS] is own.wrapper
+        assert pool.get_stats()["pool_available"] == out + 1
+
+    def test_with_neither_it_says_so_and_the_record_fails_at_once(
+        self, claimed, emptied, caplog
+    ):
+        worker, _, pool = claimed
+        with (
+            caplog.at_level(logging.WARNING, logger="django_ox"),
+            _outside_the_pool(ALIAS) as own,
+        ):
+            own.wrapper.settings_dict["PORT"] = str(refused_port())
+            emptied(pool)
+            with worker._watchdog_connection(own):
+                assert connections[ALIAS] is own.wrapper
+                elapsed, exc = timed(connections[ALIAS].ensure_connection)
+        assert isinstance(exc, OperationalError), exc
+        assert elapsed < 0.1, elapsed
+        (record,) = events(caplog, "watchdog_connection_unavailable")
+        assert "couldn't get a connection" in record.fallback_error
+
+
+class TestTheRenewalReport:
+    """_RenewalReport on a clock the test moves."""
+
+    def test_each_change_is_said_once_and_missed_renewals_every_30_s(self, caplog):
+        now = [0.0]
+        report = _RenewalReport("w", clock=lambda: now[0])
+
+        def said(step):
+            caplog.clear()
+            step()
+            return [(r.levelname, r.event) for r in caplog.records]
+
+        with caplog.at_level(logging.DEBUG, logger="django_ox"):
+            assert said(report.own) == []
+            assert said(lambda: report.pool("refused")) == [
+                ("WARNING", "lease_renew_degraded")
+            ]
+            for _ in range(3):
+                assert said(lambda: report.pool("refused")) == [
+                    ("DEBUG", "lease_renew_fallback")
+                ]
+            assert said(lambda: report.missed("refused", "empty")) == [
+                ("WARNING", "lease_renew_missed")
+            ]
+            assert caplog.records[0].missed == 1
+            for second in (10.0, 20.0, 29.9):
+                now[0] = second
+                assert said(lambda: report.missed("refused", "empty")) == []
+            now[0] = 30.0
+            assert said(lambda: report.missed("refused", "empty")) == [
+                ("WARNING", "lease_renew_missed")
+            ]
+            assert caplog.records[0].missed == 4
+            now[0] = 31.0
+            assert said(lambda: report.pool("refused")) == [
+                ("DEBUG", "lease_renew_fallback")
+            ]
+            now[0] = 35.0
+            assert said(lambda: report.missed("refused", "empty")) == []
+            now[0] = 60.0
+            assert said(lambda: report.missed("refused", "empty")) == [
+                ("WARNING", "lease_renew_missed")
+            ]
+            assert caplog.records[0].missed == 2
+            assert said(report.own) == [("INFO", "lease_renew_recovered")]
+            assert caplog.records[0].fallback_renewals == 5
+            assert caplog.records[0].missed_renewals == 7
+            assert said(report.own) == []
+            # Straight from its own connection to none at all is the one
+            # warning, however recently the last summary was.
+            now[0] = 61.0
+            assert said(lambda: report.missed("refused", "empty")) == [
+                ("WARNING", "lease_renew_degraded")
+            ]
+            assert caplog.records[0].fallback == "failed"
+            assert caplog.records[0].fallback_error == "empty"

@@ -1412,6 +1412,41 @@ class TestOpeningItsOwnConnectionByADeadline:
         assert isinstance(exc, OperationalError), exc
         assert elapsed < 0.1, elapsed
 
+    @on_postgresql
+    @needs_psycopg
+    def test_a_stalled_first_host_spends_the_deadline_and_a_healthy_one_is_not_tried(
+        self, add_alias, blackhole, proxy
+    ):
+        """
+        A limit, not a guarantee. One deadline covers every host in turn,
+        so a first host that stalls spends all of it, and a healthy host
+        after it is never tried; psycopg alone from 3.2 gives each host
+        connect_timeout and would reach the second. Only a spare connection
+        in the pool covers this.
+        """
+        add_alias(
+            OPTIONS={"pool": True},
+            HOST="127.0.0.1,127.0.0.1",
+            PORT=f"{blackhole.port},{proxy.port}",
+        )
+        threads = threading.active_count()
+        with _outside_the_pool(ALIAS, 0.5) as own:
+            elapsed, exc = timed(lambda: own.open(time.monotonic() + 0.5))
+            assert not own.is_open
+        assert isinstance(exc, OperationalError), exc
+        assert "timeout expired" in str(exc)
+        assert 0.45 <= elapsed < 1.0, elapsed
+        assert proxy.forwarded == 0
+        assert len(blackhole.held) == 1
+        assert wait_for(lambda: blackhole.closed_by_the_client() == 1)
+        assert threading.active_count() == threads
+        # The second host is healthy: on its own it opens.
+        connections.settings[ALIAS].update(HOST="127.0.0.1", PORT=str(proxy.port))
+        with _outside_the_pool(ALIAS, 0.5) as own:
+            own.open(time.monotonic() + 0.5)
+            assert own.is_open
+        assert proxy.forwarded == 1
+
     @needs_psycopg
     @resolves_in_python
     def test_a_deadline_that_passed_refuses_before_resolving_the_host_name(

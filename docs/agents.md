@@ -71,6 +71,7 @@ OK: backlog=0 oldest_age=none last_claim_age=none
 
 `manage.py check` also runs the django-ox system checks, so a bad schedule
 or timeout option fails here, as `django_ox.E002` to `E005` and `E010`, before anything deploys.
+Review any `django_ox.W003` warning before deploying too.
 
 Start a worker in its own process, next to the web server, under the same
 supervisor:
@@ -137,8 +138,10 @@ TASKS = {
 - An attempt is consumed at claim time, so a worker dying mid-run uses one.
   Retry delay after attempt n is `BACKOFF_INITIAL * 2 ** (n - 1)`, capped at
   `BACKOFF_MAX`.
-- `LOCK_TIMEOUT` bounds an unresponsive worker, not task length. The lease is
-  renewed every `LOCK_TIMEOUT / 3` seconds while the task runs.
+- The worker schedules lease renewal every `LOCK_TIMEOUT / 3` seconds; task length is not bounded by `LOCK_TIMEOUT` while renewals succeed.
+  Renewal needs a database connection: if the worker cannot refresh its lease for `LOCK_TIMEOUT`, the reaper can hand the task to another worker even while it is alive.
+- With Django's PostgreSQL pool in 1.4.0, provide at least `concurrency + 1` pooled connections per worker process; add a spare pooled connection if fallback must work under full load.
+  Budget up to `max_size + 1` server connections per process (`max_size + 2` with task timeouts), including any added spare; account for all processes, aliases, other clients, and reserved slots.
 - The worker polls; `--interval` (default 1.0 s) is the idle sleep, so a task
   starts within one interval of its commit. There is no LISTEN/NOTIFY.
 - `TASK_TIMEOUT` bounds one attempt. At the deadline `TaskTimeout` is raised

@@ -662,7 +662,9 @@ Set per-queue values where one number does not fit:
 A queue in `TASK_TIMEOUTS` uses its own value; `None` there exempts the
 queue from the global limit. Every queue named there must be in `QUEUES`
 (`django_ox.E005` otherwise), unless `QUEUES` is `[]`. A timeout longer than
-`LOCK_TIMEOUT` is fine: the lease is renewed for as long as the task runs.
+`LOCK_TIMEOUT` is fine while lease renewals succeed. Renewal needs a database
+connection; a live worker that cannot get one can still lose its lease,
+allowing the reaper to hand the task to another worker.
 
 Timeouts use CPython's own facility for raising an exception in another
 thread, which every supported Python has. On an interpreter without it, the

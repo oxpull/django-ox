@@ -38,6 +38,8 @@ ExecStart=/srv/myproject/.venv/bin/python manage.py ox_worker --processes 2 --co
 Restart=always
 RestartSec=5
 
+# 1.4.0: PostgreSQL pool max_size >= 5 per worker (10 pooled slots here).
+
 # systemd sends SIGTERM on stop; the worker drains in-flight tasks and
 # exits 0. Give the drain at least as long as your longest task before
 # systemd escalates to SIGKILL. KillMode=mixed sends that SIGTERM to the
@@ -74,8 +76,11 @@ process count.
 ## Running in containers
 
 The worker is a foreground process that exits 0 on SIGTERM, so it needs no
-special entrypoint. The setting that matters is the grace period: give the
-runtime longer than your slowest task before it escalates to SIGKILL.
+special entrypoint. Give the runtime longer than your slowest task before
+it escalates to SIGKILL.
+
+For 1.4.0 PostgreSQL pools, set `max_size >= 5` per worker (10 slots here).
+See [pool sizing](#database-connections-and-postgresql-pooling).
 
 ```yaml
 services:

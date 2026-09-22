@@ -2493,6 +2493,10 @@ Both values are the defaults. Swap the app in `INSTALLED_APPS`, run
 `python manage.py migrate django_ox`, and start `python manage.py ox_worker`
 where you ran `db_worker`. Existing django-tasks-db rows need separate handling; changing the backend does not recover them.
 
+If using Django's PostgreSQL pool, check
+[pool sizing](production.md#database-connections-and-postgresql-pooling)
+before starting workers.
+
 Every django-ox worker runs a reaper. When a worker's lease expires, its unfinished task returns to READY for another attempt, subject to `MAX_ATTEMPTS`. No separate recovery script.
 
 At the default timeout, recovery takes up to about 330 seconds. Execution is at-least-once: the previous attempt may already have applied an effect, so make that effect safe to repeat.
@@ -2787,6 +2791,8 @@ ExecStart=/srv/myproject/.venv/bin/python manage.py ox_worker --processes 2 --co
 Restart=always
 RestartSec=5
 
+# 1.4.0: PostgreSQL pool max_size >= 5 per worker (10 pooled slots here).
+
 # systemd sends SIGTERM on stop; the worker drains in-flight tasks and
 # exits 0. Give the drain at least as long as your longest task before
 # systemd escalates to SIGKILL. KillMode=mixed sends that SIGTERM to the
@@ -2823,8 +2829,11 @@ process count.
 ## Running in containers
 
 The worker is a foreground process that exits 0 on SIGTERM, so it needs no
-special entrypoint. The setting that matters is the grace period: give the
-runtime longer than your slowest task before it escalates to SIGKILL.
+special entrypoint. Give the runtime longer than your slowest task before
+it escalates to SIGKILL.
+
+For 1.4.0 PostgreSQL pools, set `max_size >= 5` per worker (10 slots here).
+See [pool sizing](#database-connections-and-postgresql-pooling).
 
 ```yaml
 services:

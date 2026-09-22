@@ -917,9 +917,10 @@ class Worker:
       worker that was reaped off a row writes nothing instead of writing
       over whoever holds it now. It is fenced by arithmetic, not by timing,
       so no pause is long enough to defeat it.
-    - While a worker is executing, it refreshes locked_at on the rows it
-      holds, one statement per interval however many are in flight, so the
-      reaper only reclaims work from workers that actually went quiet.
+    - While a worker is executing, it attempts to refresh locked_at every
+      LOCK_TIMEOUT / 3 seconds, one statement covering every in-flight row.
+      The lease holds only while that statement reaches the database on
+      time; a running worker can still lose its lease.
 
     The lease's own timestamps come from the database (Now(), or
     STATEMENT_TIMESTAMP() in the raw claim) rather than from each process,
@@ -1686,9 +1687,10 @@ class Worker:
 
         Per-attempt bookkeeping (started_at, last_attempted_at, worker_ids)
         was already written by the claim UPDATE. The (pk, lease_epoch) pair
-        joins the renewal set for the duration, so this execution's lease is
-        kept alive while it runs and stops being kept alive the moment it
-        is not.
+        joins the renewal set for the duration, so renewal is attempted
+        while this execution runs. The lease holds only while renewal
+        reaches the database on time. The pair leaves the set when this
+        execution ends.
         """
         held = (db_task.pk, db_task.lease_epoch)
         ident = threading.get_ident()

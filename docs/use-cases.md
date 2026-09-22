@@ -28,6 +28,10 @@ Both values are the defaults. Swap the app in `INSTALLED_APPS`, run
 `python manage.py migrate django_ox`, and start `python manage.py ox_worker`
 where you ran `db_worker`. Existing django-tasks-db rows need separate handling; changing the backend does not recover them.
 
+If using Django's PostgreSQL pool, check
+[pool sizing](production.md#database-connections-and-postgresql-pooling)
+before starting workers.
+
 Every django-ox worker runs a reaper. When a worker's lease expires, its unfinished task returns to READY for another attempt, subject to `MAX_ATTEMPTS`. No separate recovery script.
 
 At the default timeout, recovery takes up to about 330 seconds. Execution is at-least-once: the previous attempt may already have applied an effect, so make that effect safe to repeat.

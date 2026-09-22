@@ -1508,13 +1508,15 @@ class Worker:
         renewal that succeeded, or than the last tick with nothing to
         renew, lasts lock_timeout from then.
 
-        The renewal runs on the thread's own connection when it is open or
-        can be opened by own.budget from the start of the tick. Otherwise it
-        runs on a connection from Django's pool, waited for at most
-        POOL_FALLBACK_WAIT and given back straight after: the connection
-        renewal used before it had one of its own, so a pool with one to
-        spare is no worse off than it was. Both happen: the server can have
-        no slot left for a connection of the worker's own, and new
+        With nothing in flight, renew_leases() is called without opening
+        the thread's own connection first, which for the stock method opens
+        nothing. Otherwise the renewal runs on the thread's own connection
+        when it is open or can be opened by own.budget from the start of the
+        tick, and failing that on a connection from Django's pool, waited
+        for at most POOL_FALLBACK_WAIT and given back straight after: the
+        connection renewal used before it had one of its own, so a pool with
+        one to spare is no worse off than it was. Both happen: the server
+        can have no slot left for a connection of the worker's own, and new
         connections can stall while those already open still flow. With
         neither, the renewal is missed and the next tick tries again. A
         tick takes no longer than the deadline and the wait together, so
@@ -1534,8 +1536,14 @@ class Worker:
         with self._in_flight_lock:
             idle = not self._in_flight
         if idle:
-            # Nothing to renew, so nothing is opened, and a lease taken from
-            # here on lasts lock_timeout from a later instant than this.
+            # Nothing to renew, so nothing is opened first. renew_leases() is
+            # still called once, as it is without a pool: the stock one
+            # returns without a query, and a subclass that overrides it is
+            # called every tick. A connection it opens keeps to this tick's
+            # deadline. A lease taken from here on lasts lock_timeout from a
+            # later instant than this.
+            own.connect_by(started + own.budget)
+            self._renew_or_warn()
             return started + self.lock_timeout
         renewed = started + self.lock_timeout
         if not own.is_open:

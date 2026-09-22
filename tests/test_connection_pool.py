@@ -711,6 +711,114 @@ def test_renewal_borrows_from_the_pool_while_new_connections_stall(tmp_path, pro
     assert proc.returncode == 0, worker_log
 
 
+@pytest.fixture
+def lapses(transactional_db):
+    """
+    A trigger on the task table that notes every write to a running row
+    made after its lease expired, and a function listing them as (task id,
+    seconds expired). A renewal that came too late is one, and so is the
+    reaper taking the row back. A lapsed lease is one any reaper was
+    entitled to take, whether or not one ran in time to, so this sees a
+    lapse however short. Dropped afterwards.
+    """
+    table = connection.ops.quote_name(OxTask._meta.db_table)
+    with connection.cursor() as cursor:
+        cursor.execute("CREATE TABLE lease_lapses (task_id uuid, expired_for float)")
+        cursor.execute(
+            "CREATE FUNCTION note_lease_lapse() RETURNS trigger LANGUAGE plpgsql AS $$"
+            " BEGIN"
+            "  IF OLD.status = 'RUNNING' AND OLD.lease_expires_at < now() THEN"
+            "   INSERT INTO lease_lapses VALUES"
+            "    (OLD.id, extract(epoch FROM now() - OLD.lease_expires_at));"
+            "  END IF;"
+            "  RETURN NEW;"
+            " END $$"
+        )
+        cursor.execute(
+            f"CREATE TRIGGER note_lease_lapse BEFORE UPDATE ON {table}"
+            " FOR EACH ROW EXECUTE FUNCTION note_lease_lapse()"
+        )
+
+    def noted():
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT task_id::text, expired_for FROM lease_lapses")
+            return cursor.fetchall()
+
+    yield noted
+    with connection.cursor() as cursor:
+        cursor.execute(f"DROP TRIGGER note_lease_lapse ON {table}")
+        cursor.execute("DROP FUNCTION note_lease_lapse()")
+        cursor.execute("DROP TABLE lease_lapses")
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.skipif(os.name != "posix", reason="stops the worker with SIGTERM")
+@on_postgresql
+@with_psycopg_pool
+def test_a_stall_that_ends_before_the_lease_does_costs_no_lease(
+    tmp_path, proxy, lapses
+):
+    """
+    One worker at --concurrency 2 with a 6 s lease and a pool of 3, all
+    opened through a proxy, and two tasks waiting before it starts, so they
+    are claimed as the renewal thread starts and the first renewal with
+    work to renew comes one 2 s interval later. The poll loop and the two
+    task threads hold the pool. Once both bodies have queried, the proxy
+    holds every new connection unanswered for 3.5 s.
+
+    That first renewal asks for a connection of its own during the stall
+    and gets none by its 2 s deadline, and the pool has none to spare, so it
+    is missed. The stall ends 2.5 s before the leases do. The next renewal
+    is due an interval after the missed one started, which has passed by
+    then, so it runs at once, finds connections opening again and renews.
+    Timed an interval after the missed one ended instead, it comes just
+    after the leases expired.
+    """
+    bodies = tmp_path / "bodies.log"
+    release = tmp_path / "release"
+    ids = [query_and_hold.enqueue(str(bodies), str(release)).id for _ in range(2)]
+    project = pooled_project(
+        tmp_path,
+        pool={"min_size": 3, "max_size": 3},
+        database={"HOST": "127.0.0.1", "PORT": str(proxy.port)},
+    )
+    log = tmp_path / "worker.log"
+    proc = start_worker(project, log, "--concurrency", "2", "--lock-timeout", "6")
+    try:
+        assert wait_for(lambda: lines(bodies).count("HELD") == 2, timeout=60), text(log)
+        proxy.mode = "hold"
+        outlived = renewed_or_reclaimed(ids)
+        time.sleep(3.5)
+        proxy.mode = "forward"
+        assert proxy.held, "renewal never asked for a connection during the stall"
+        assert wait_for(outlived, timeout=60, interval=0.1), text(log)
+        assert wait_for(
+            lambda: "on its own connection again" in text(log), timeout=60
+        ), text(log)
+        release.touch()
+        assert wait_for(none_left_running(ids), timeout=60, interval=0.1), text(log)
+    finally:
+        release.touch()
+        stop(proc)
+
+    worker_log = text(log)
+    assert lapses() == [], worker_log
+    rows = {
+        str(row.id): (row.status, row.attempts)
+        for row in OxTask.objects.filter(id__in=ids)
+    }
+    assert rows == dict.fromkeys(map(str, ids), (OxTask.Status.SUCCESSFUL, 1))
+    assert lines(bodies).count("START") == 2, worker_log
+    assert "lost its lease" not in worker_log
+    assert "Reclaimed" not in worker_log
+    # The one renewal the stall cost, said once.
+    assert worker_log.count("could not get a connection of its own") == 1, worker_log
+    assert "so this renewal is missed" in worker_log
+    assert len(proxy.held) == 1
+    assert proxy.closed_by_the_client() == 1
+    assert proc.returncode == 0, worker_log
+
+
 class TestTheScopeOutsideThePool:
     """_outside_the_pool, on an alias no test connects through."""
 

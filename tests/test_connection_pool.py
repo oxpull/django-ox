@@ -1449,6 +1449,44 @@ class TestOpeningItsOwnConnectionByADeadline:
 
     @needs_psycopg
     @resolves_in_python
+    def test_a_host_name_slow_to_resolve_holds_the_connection_past_its_deadline(
+        self, add_alias, blackhole, resolver
+    ):
+        """
+        A limit, not a guarantee: resolving a host name blocks, and the
+        deadline does not cover it, on every supported psycopg. From 3.2
+        psycopg resolves in Python before any attempt; before, libpq
+        resolves in C inside the first step, where no test can hold it.
+        The resolver here holds the name until the test lets it go. Once
+        it answers, the deadline has passed and no connection is started.
+        """
+        deadline_alias(add_alias, HOST=resolver.name, PORT=str(blackhole.port))
+        resolver.hold = True
+        outcome = {}
+
+        def connect():
+            with _outside_the_pool(ALIAS, 0.2) as own:
+                outcome["result"] = timed(lambda: own.open(time.monotonic() + 0.2))
+
+        thread = threading.Thread(target=connect, daemon=True)
+        thread.start()
+        assert resolver.entered.wait(timeout=10)
+        # Still resolving well past the deadline: it cannot have returned,
+        # because the resolver has not answered.
+        thread.join(timeout=0.2 + 0.5)
+        assert thread.is_alive()
+        resolver.release.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        elapsed, exc = outcome["result"]
+        assert isinstance(exc, OperationalError), exc
+        assert "timeout expired" in str(exc)
+        assert elapsed >= 0.2 + 0.5, elapsed
+        assert resolver.lookups == 1
+        assert not blackhole.held
+
+    @needs_psycopg
+    @resolves_in_python
     def test_a_deadline_that_passed_refuses_before_resolving_the_host_name(
         self, add_alias, blackhole, resolver
     ):

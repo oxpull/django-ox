@@ -11,6 +11,7 @@ follows from the order of events, not from how fast the machine is.
 """
 
 import copy
+import importlib.metadata
 import importlib.util
 import json
 import logging
@@ -30,10 +31,12 @@ import pytest
 from django.conf import settings
 from django.db import DEFAULT_DB_ALIAS, OperationalError, connection, connections
 from django.db.models.functions import Now
+from django.utils import timezone
 
+import django_ox.worker as worker_module
 from django_ox.models import OxTask
 from django_ox.timeouts import RECYCLE_EXIT_CODE
-from django_ox.worker import Worker, _outside_the_pool, _RenewalReport
+from django_ox.worker import Worker, _outside_the_pool, _RenewalReport, _Watch
 
 from .conftest import start_worker_thread, wait_for
 from .tasks import query_and_hold, query_then_sleep, slow
@@ -55,6 +58,18 @@ with_psycopg_pool = pytest.mark.skipif(
 # Building a PostgreSQL wrapper imports the driver; nothing here connects.
 needs_psycopg = pytest.mark.skipif(
     importlib.util.find_spec("psycopg") is None, reason="needs psycopg"
+)
+
+# From 3.2 psycopg resolves host names itself, through socket.getaddrinfo,
+# where a test can answer for one. Before, libpq resolves them in C.
+PSYCOPG = (
+    tuple(map(int, importlib.metadata.version("psycopg").split(".")[:2]))
+    if importlib.util.find_spec("psycopg") is not None
+    else (0, 0)
+)
+resolves_in_python = pytest.mark.skipif(
+    PSYCOPG < (3, 2),
+    reason="needs psycopg 3.2 or later, which resolves host names in Python",
 )
 
 # A control for the unpooled case has nothing to show when the run's own
@@ -174,13 +189,15 @@ class Proxy:
     which is how a stall of new connections looks from the client. With no
     upstream every connection is held. `forwarded` counts the connections
     passed through and `held` keeps the ones held, so a test can see each
-    was closed by the client.
+    was closed by the client; `ended` counts the connections passed through
+    that the client has since closed, and cut() breaks every one of them.
     """
 
     def __init__(self, upstream: tuple[str, int] | None = None) -> None:
         self.upstream = upstream
         self.mode = "forward" if upstream else "hold"
         self.forwarded = 0
+        self.ended = 0
         self.held: list[socket.socket] = []
         self._sockets: list[socket.socket] = []
         self.server = socket.create_server(("127.0.0.1", 0))
@@ -205,16 +222,28 @@ class Proxy:
             self.forwarded += 1
             for source, sink in ((client, upstream), (upstream, client)):
                 threading.Thread(
-                    target=self._pump, args=(source, sink), daemon=True
+                    target=self._pump,
+                    args=(source, sink),
+                    kwargs={"from_client": source is client},
+                    daemon=True,
                 ).start()
 
-    @staticmethod
-    def _pump(source: socket.socket, sink: socket.socket) -> None:
+    def _pump(
+        self, source: socket.socket, sink: socket.socket, *, from_client: bool
+    ) -> None:
         with suppress(OSError):
             while data := source.recv(65536):
                 sink.sendall(data)
+            if from_client:
+                self.ended += 1
         with suppress(OSError):
             sink.shutdown(socket.SHUT_WR)
+
+    def cut(self) -> None:
+        """Break every connection passed through, at both ends."""
+        for sock in self._sockets:
+            with suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
 
     def closed_by_the_client(self) -> int:
         """How many held connections the client has since closed."""
@@ -489,6 +518,62 @@ def test_the_watchdog_records_a_stuck_attempt_while_the_task_threads_hold_the_po
     assert len(recorded.errors) == 1, worker_log
     assert "did not stop" in recorded.errors[-1]["traceback"]
     assert OxTask.objects.get(id=holder.id).status == OxTask.Status.SUCCESSFUL
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.skipif(os.name != "posix", reason="stops the worker with SIGTERM")
+@on_postgresql
+@with_psycopg_pool
+def test_two_attempts_stuck_while_new_connections_stall_cost_one_deadline(
+    tmp_path, proxy
+):
+    """
+    One worker at --concurrency 2 with a pool of 3, all opened through a
+    proxy, and two tasks waiting before it starts that each take a
+    connection and then sleep through their timeout and grace. Once both
+    have queried, the proxy holds every new connection. The watchdog's own
+    connection cannot open, the pool has none to spare, and the deadline is
+    1 s through connect_timeout.
+
+    The watchdog tries for a connection once, for both stuck attempts, and
+    recycles for both. Opening one for each attempt, it waited a deadline
+    for each, and the exit waited with it.
+    """
+    bodies = tmp_path / "bodies.log"
+    ids = [query_then_sleep.enqueue(str(bodies), 60).id for _ in range(2)]
+    pool = {"min_size": 3, "max_size": 3}
+    project = pooled_project(
+        tmp_path,
+        pool=pool,
+        database={
+            "HOST": "127.0.0.1",
+            "PORT": str(proxy.port),
+            "OPTIONS": {"pool": pool, "connect_timeout": 1},
+        },
+    )
+    log = tmp_path / "worker.log"
+    proc = start_worker(
+        project,
+        log,
+        "--concurrency",
+        "2",
+        tasks_options={"TASK_TIMEOUTS": {"default": 0.5}, "TASK_TIMEOUT_GRACE": 0.5},
+    )
+    try:
+        assert wait_for(lambda: lines(bodies).count("HELD") == 2, timeout=60), text(log)
+        proxy.mode = "hold"
+        assert proc.wait(timeout=60) == RECYCLE_EXIT_CODE, text(log)
+    finally:
+        stop(proc)
+
+    worker_log = text(log)
+    assert worker_log.count("did not stop") == 2, worker_log
+    assert worker_log.count("timeout watchdog has no connection") == 1, worker_log
+    assert worker_log.count("could not record the stuck attempt") == 2, worker_log
+    assert len(proxy.held) == 1, worker_log
+    assert proxy.closed_by_the_client() == 1
+    rows = OxTask.objects.filter(id__in=ids)
+    assert all(row.status == OxTask.Status.RUNNING for row in rows)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1184,6 +1269,39 @@ def timed(call):
 
 
 @pytest.fixture
+def resolver(monkeypatch):
+    """
+    socket.getaddrinfo answering for one made-up host name with 127.0.0.1,
+    counting the lookups for it. While `hold` is true a lookup for it waits
+    until `release` is set, as a resolver that stalls does; the test's end
+    sets it. Every other name goes to the real resolver.
+    """
+
+    class Resolver:
+        name = "stalling-resolver.invalid"
+        lookups = 0
+        hold = False
+        entered = threading.Event()
+        release = threading.Event()
+
+    made = Resolver()
+    real = socket.getaddrinfo
+
+    def getaddrinfo(host, *args, **kwargs):
+        if host != made.name:
+            return real(host, *args, **kwargs)
+        made.lookups += 1
+        made.entered.set()
+        if made.hold:
+            made.release.wait(60)
+        return real("127.0.0.1", *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    yield made
+    made.release.set()
+
+
+@pytest.fixture
 def connecting(django_db_blocker):
     """
     Connecting allowed, to ports that are not a database: pytest-django
@@ -1293,6 +1411,28 @@ class TestOpeningItsOwnConnectionByADeadline:
             elapsed, exc = timed(connections[ALIAS].ensure_connection)
         assert isinstance(exc, OperationalError), exc
         assert elapsed < 0.1, elapsed
+
+    @needs_psycopg
+    @resolves_in_python
+    def test_a_deadline_that_passed_refuses_before_resolving_the_host_name(
+        self, add_alias, blackhole, resolver
+    ):
+        """
+        What keeps a watchdog batch from connecting again once its one
+        attempt failed: the reconnect Django makes by itself does not even
+        look the host name up, which the deadline would not bound.
+        """
+        deadline_alias(add_alias, HOST=resolver.name, PORT=str(blackhole.port))
+        with _outside_the_pool(ALIAS, 0.3) as own:
+            with pytest.raises(OperationalError):
+                own.open(time.monotonic() + 0.3)
+            assert resolver.lookups == 1
+            elapsed, exc = timed(connections[ALIAS].ensure_connection)
+        assert isinstance(exc, OperationalError), exc
+        assert "timeout expired" in str(exc)
+        assert elapsed < 0.1, elapsed
+        assert resolver.lookups == 1
+        assert len(blackhole.held) == 1
 
 
 @pytest.fixture
@@ -1609,6 +1749,210 @@ class TestTheWatchdogConnection:
         assert elapsed < 0.1, elapsed
         (record,) = events(caplog, "watchdog_connection_unavailable")
         assert "couldn't get a connection" in record.fallback_error
+
+
+@pytest.fixture
+def stuck_batch(add_alias):
+    """
+    A worker on a pooled alias of the test database with a pool of at most
+    2, three tasks it has claimed, and a watch for each, past its timeout
+    and its grace, on a thread still inside the attempt: three stuck
+    attempts for the watchdog to record in one batch. The claims'
+    connection goes back, so the pool starts with none out.
+    """
+    options = {**connections.settings["default"]["OPTIONS"]}
+    add_alias(OPTIONS={**options, "pool": {"min_size": 1, "max_size": 2}})
+    worker = Worker(db_alias=ALIAS, lock_timeout=30)
+    for _ in range(3):
+        slow.enqueue(0)
+    now = time.monotonic()
+    watches = []
+    for ident in range(1, 4):
+        task = worker.claim_one()
+        assert task is not None
+        attempt = (task.pk, task.lease_epoch)
+        worker._in_flight.add(attempt)
+        worker._running_on[ident] = attempt
+        watches.append(
+            _Watch(
+                ident=ident,
+                db_task=copy.copy(task),
+                attempt=attempt,
+                timeout=1.0,
+                started=now - 3,
+                deadline=now - 2,
+                deadline_at=timezone.now(),
+                injectable=False,
+                fired=True,
+                grace_at=now - 1,
+            )
+        )
+    pool = connections[ALIAS].pool
+    connections[ALIAS].close()
+    return worker, watches, pool
+
+
+def recorded(watch):
+    row = OxTask.objects.get(pk=watch.db_task.pk)
+    return any("did not stop" in error["traceback"] for error in row.errors)
+
+
+@on_postgresql
+@with_psycopg_pool
+@pytest.mark.usefixtures("unguarded_db")
+class TestAWatchdogBatch:
+    """
+    Several stuck attempts recorded together: one acquisition for the
+    batch, and every attempt recycled whatever became of it.
+    """
+
+    def test_new_connections_stalling_cost_the_batch_one_deadline_not_one_each(
+        self, stuck_batch, emptied, blackhole, caplog, monkeypatch
+    ):
+        """
+        The watchdog thread itself, with every watch due. Its own
+        connection stalls, the pool has none to spare, and the deadline is
+        1 s through connect_timeout. Opening one per stuck attempt, the
+        batch took 1.1 s for each of the three.
+        """
+        worker, watches, pool = stuck_batch
+        emptied(pool)
+        conf = connections.settings[ALIAS]
+        conf["PORT"] = str(blackhole.port)
+        conf["OPTIONS"] = {**conf["OPTIONS"], "connect_timeout": 1}
+        monkeypatch.setattr(worker_module, "WATCHDOG_IDLE", 0.05)
+        worker._watches.update((watch.ident, watch) for watch in watches)
+        thread = threading.Thread(target=worker._watchdog_loop, daemon=True)
+        with caplog.at_level(logging.WARNING, logger="django_ox"):
+            started = time.monotonic()
+            thread.start()
+            thread.join(timeout=30)
+            elapsed = time.monotonic() - started
+        assert not thread.is_alive()
+        assert 0.95 <= elapsed < 1.1 + 1.2, elapsed
+        assert len(blackhole.held) == 1
+        assert wait_for(lambda: blackhole.closed_by_the_client() == 1)
+        assert len(events(caplog, "watchdog_connection_unavailable")) == 1
+        # Every attempt is recycled although none could be recorded.
+        assert len(events(caplog, "task_stuck_unrecorded")) == 3
+        assert worker._stuck == {w.ident: w.attempt for w in watches}
+        assert worker.recycling
+        assert not events(caplog, "watchdog_error")
+
+    def test_its_own_connection_opens_once_for_every_record_and_closes_after(
+        self, stuck_batch, emptied, proxy
+    ):
+        worker, watches, pool = stuck_batch
+        emptied(pool)
+        with _outside_the_pool(ALIAS) as own:
+            own.wrapper.settings_dict["PORT"] = str(proxy.port)
+            worker._record_stuck(own, watches)
+            assert not own.is_open
+        assert proxy.forwarded == 1
+        assert wait_for(lambda: proxy.ended == 1)
+        assert all(map(recorded, watches))
+        assert worker._stuck == {w.ident: w.attempt for w in watches}
+
+    @pytest.mark.parametrize("given_back", [False, True], ids=["kept", "closed"])
+    def test_a_connection_that_stops_working_part_way_is_not_replaced(
+        self, stuck_batch, emptied, proxy, caplog, monkeypatch, given_back
+    ):
+        """
+        The first record lands; then the connection breaks, and Django
+        either keeps the broken connection or closes it. The records after
+        it fail at once rather than connect again, and each attempt is
+        still recycled.
+        """
+        worker, watches, pool = stuck_batch
+        emptied(pool)
+        handle = worker._handle_stuck
+
+        def then_break(watch):
+            handle(watch)
+            proxy.cut()
+            if given_back:
+                connections[ALIAS].close()
+
+        monkeypatch.setattr(worker, "_handle_stuck", then_break)
+        with (
+            caplog.at_level(logging.WARNING, logger="django_ox"),
+            _outside_the_pool(ALIAS) as own,
+        ):
+            own.wrapper.settings_dict["PORT"] = str(proxy.port)
+            elapsed, exc = timed(lambda: worker._record_stuck(own, watches))
+            assert not own.is_open
+        assert exc is None
+        assert elapsed < 1.0, elapsed
+        assert proxy.forwarded == 1
+        assert [recorded(w) for w in watches] == [True, False, False]
+        assert len(events(caplog, "task_stuck_unrecorded")) == 2
+        assert worker._stuck == {w.ident: w.attempt for w in watches}
+
+    def test_a_borrowed_connection_is_checked_out_once_and_given_back(
+        self, stuck_batch, caplog
+    ):
+        worker, watches, pool = stuck_batch
+        available = pool.get_stats()["pool_available"]
+        requests = pool.get_stats()["requests_num"]
+        with (
+            caplog.at_level(logging.WARNING, logger="django_ox"),
+            _outside_the_pool(ALIAS) as own,
+        ):
+            own.wrapper.settings_dict["PORT"] = str(refused_port())
+            worker._record_stuck(own, watches)
+            assert connections[ALIAS] is own.wrapper
+        assert all(map(recorded, watches))
+        assert pool.get_stats()["requests_num"] == requests + 1
+        assert pool.get_stats()["pool_available"] == available
+        assert not events(caplog, "watchdog_connection_unavailable")
+
+    def test_a_connection_that_cannot_be_given_back_does_not_end_the_backstop(
+        self, stuck_batch, caplog, monkeypatch
+    ):
+        worker, watches, _ = stuck_batch
+
+        def refuses(own):
+            raise RuntimeError("close failed")
+
+        monkeypatch.setattr(worker_module._OwnConnection, "close", refuses)
+        with (
+            caplog.at_level(logging.WARNING, logger="django_ox"),
+            _outside_the_pool(ALIAS) as own,
+        ):
+            worker._record_stuck(own, watches)
+        assert all(map(recorded, watches))
+        assert worker._stuck == {w.ident: w.attempt for w in watches}
+        (record,) = events(caplog, "watchdog_error")
+        assert "could not give back the connection" in record.getMessage()
+
+    @pytest.mark.parametrize("given_back", [False, True], ids=["kept", "returned"])
+    def test_a_borrowed_connection_that_stops_working_is_not_replaced(
+        self, stuck_batch, caplog, monkeypatch, given_back
+    ):
+        worker, watches, pool = stuck_batch
+        requests = pool.get_stats()["requests_num"]
+        handle = worker._handle_stuck
+
+        def then_break(watch):
+            handle(watch)
+            backend = connections[ALIAS].connection.info.backend_pid
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_terminate_backend(%s)", [backend])
+            if given_back:
+                connections[ALIAS].close()
+
+        monkeypatch.setattr(worker, "_handle_stuck", then_break)
+        with (
+            caplog.at_level(logging.WARNING, logger="django_ox"),
+            _outside_the_pool(ALIAS) as own,
+        ):
+            own.wrapper.settings_dict["PORT"] = str(refused_port())
+            worker._record_stuck(own, watches)
+            assert connections[ALIAS] is own.wrapper
+        assert [recorded(w) for w in watches] == [True, False, False]
+        assert pool.get_stats()["requests_num"] == requests + 1
+        assert len(events(caplog, "task_stuck_unrecorded")) == 2
+        assert worker._stuck == {w.ident: w.attempt for w in watches}
 
 
 class TestTheRenewalReport:

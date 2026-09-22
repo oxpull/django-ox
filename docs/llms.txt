@@ -66,13 +66,14 @@ Operational facts to get right:
   `BACKOFF_MAX`, no jitter.
 - `LOCK_TIMEOUT` bounds how long a worker may stop refreshing its lease
   before the reaper hands the task to another worker. The worker schedules
-  renewal every `LOCK_TIMEOUT / 3` seconds. A long task keeps its lease
-  while renewals continue to succeed; a live worker alone does not
-  guarantee renewal.
+  renewal every `LOCK_TIMEOUT / 3` seconds. An hour-long task keeps its
+  lease while renewals succeed. Renewal needs a database connection,
+  so a live worker that cannot get one can still lose the lease.
 - With Django's PostgreSQL pool in 1.4.0, use at least `concurrency + 1`
   pooled connections per worker process. Budget server connections outside
-  the pool too: up to `max_size + 1` per process, or `max_size + 2` with
-  task timeouts. Include all processes, aliases, other clients, and reserved
+  the pool too: each process can hold up to `max_size + 1` server connections
+  in total, or `max_size + 2` with task timeouts.
+  Include all processes, aliases, other clients, and reserved
   slots. Pool fallback needs a spare pooled connection; add and budget one
   if fallback must work under full load.
 - `TASK_TIMEOUT` (seconds, default None) bounds one attempt: at the deadline

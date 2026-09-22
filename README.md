@@ -56,7 +56,7 @@ For deployment probes, `ox_health` turns queue thresholds into an exit code, wit
 
 In the [published benchmarks](https://oxpull.com/django-ox/benchmarks/), 2,000 of 2,000 tasks finished after 20 worker kills per trial, queue drain was up to 20% faster than django-tasks-db, and enqueueing 10,000 tasks took 0.71 s.
 
-1086 test functions, with CI covering Python 3.12 to 3.14, Django 5.2 to 6.1, PostgreSQL, MySQL and SQLite. Open source under the BSD 3-Clause licence.
+1,086 test functions, with CI covering Python 3.12 to 3.14, Django 5.2 to 6.1, PostgreSQL, MySQL and SQLite. Open source under the BSD 3-Clause licence.
 
 Need to coordinate work across tasks? [Oxpull Pro](https://oxpull.com/) adds batches, unique tasks, rate limiting and workflows.
 

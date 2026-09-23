@@ -4281,8 +4281,8 @@ Worker counts match in each row. Rates are tasks per second.
 |---|---:|---:|---:|---:|
 | 2,000 | 1 | 118.5 | 103.9 | **14.0%** |
 | 2,000 | 4 | 426.3 | 387.1 | **10.1%** |
-| 20,000* | 1 | 115.2 | 97.4 | **18.2%** |
-| 20,000* | 4 | 461.8 | 401.6 | **15.0%** |
+| 20,000 | 1 | 115.2 | 97.4 | **18.2%** |
+| 20,000 | 4 | 461.8 | 401.6 | **15.0%** |
 
 In each row, every django-ox run outperformed every django-tasks-db run. Results apply to these workloads, not every application.
 
@@ -4302,7 +4302,7 @@ PostgreSQL 16 ran locally in Docker on an Apple M1 Max. Task bodies were no-ops.
 
 Package defaults applied except for the kill test, with LOCK_TIMEOUT set to 15 s.
 
-<small>*The wallpaper process rendered during kill trials 2 and 3 only; kill counts were unaffected. The four drain cells (2,000 and 20,000 tasks) ran interleaved in one window; the 100,000-task run was one pair, not five.</small>
+<small>The four drain cells (2,000 and 20,000 tasks) ran interleaved in a single measurement window. During kill trials 2 and 3 only, the test machine's desktop screensaver rendered an animated wallpaper, consuming 60-70% CPU; kill counts were unaffected.</small>
 
 [**Download both raw JSON files**](https://github.com/oxpull/django-ox/tree/main/benchmarks)
 

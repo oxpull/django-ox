@@ -91,7 +91,7 @@ limit, keeping the full traceback of every attempt.
 ## Measured
 
 [The benchmarks page](https://oxpull.com/django-ox/benchmarks/) compares
-django-ox with `django-tasks-db`, the other database backend for the Tasks
+django-ox with `django-tasks-db`, another database backend for the Tasks
 framework, on one machine with both arms on Django core `django.tasks` and
 PostgreSQL 16: backlog drain at two queue depths with matched worker
 processes, enqueue latency, bulk enqueue, worker death under repeated SIGKILL
@@ -165,7 +165,7 @@ python manage.py ox_worker
 | --- | --- | --- |
 | `--backend` | `default` | Backend alias from the `TASKS` setting. |
 | `--queues` | all configured queues | Comma-separated queue names to process. |
-| `--concurrency` | `1` | Tasks executed concurrently (thread pool). With Django's PostgreSQL pool, check [pool sizing](docs/production.md#database-connections-and-postgresql-pooling). |
+| `--concurrency` | `1` | Tasks executed concurrently (thread pool). With Django's PostgreSQL pool, check [pool sizing](https://oxpull.com/django-ox/production/#database-connections-and-postgresql-pooling). |
 | `--processes` | `1` | Worker processes under one supervisor. Each is a full worker with its own connections, reaper and `--concurrency` thread pool; budget database connections per process. A process that dies is restarted. POSIX only. |
 | `--interval` | `1.0` | Polling interval in seconds when idle. |
 | `--lock-timeout` | backend `LOCK_TIMEOUT` | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |

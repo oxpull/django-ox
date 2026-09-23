@@ -142,12 +142,12 @@ Operational facts to get right:
   Monitoring page.
 - Finished rows stay until pruned. `python manage.py ox_prune --older-than 7d`
   deletes SUCCESSFUL and DISCARDED rows past the cutoff; FAILED and LOST rows
-  are kept unless `--include-failed` is given. READY and RUNNING rows are
-  never deleted.
+  are kept unless `--include-failed` is given. READY, RUNNING and WAITING rows
+  are never deleted.
 - `django_ox.actions.retry(result_id)` puts a FAILED or LOST task back to
   READY for one more attempt; `django_ox.actions.discard(result_id)` closes a
-  READY, FAILED or LOST task without running it. Both return a bool, and
-  neither touches a RUNNING task. With `django.contrib.admin` installed the
+  READY, WAITING, FAILED or LOST task without running it. Both return a bool,
+  and neither touches a RUNNING task. With `django.contrib.admin` installed the
   task table is registered in the admin with the same two actions.
 - Run `migrate` before rolling workers, not from the worker process.
 - Out of scope in the core: interrupting one chosen running task on demand

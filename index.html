@@ -1070,8 +1070,12 @@ exponential backoff, and a reaper returns tasks whose worker died to the
 queue. Details in <a href="production/">Production</a>.</p>
 <h2 id="what-happens-when-a-worker-dies">What happens when a worker dies</h2>
 <p>A worker that claims a task takes a lease on it, and the attempt is counted at
-that moment. While the task runs, the worker renews the lease every
-<code>LOCK_TIMEOUT / 3</code> seconds, so a slow task on a live worker is never reclaimed.
+that moment. While the task runs, renewal is scheduled start-to-start every
+<code>max(LOCK_TIMEOUT / 3, 0.1)</code> seconds. A slow task is not reclaimed while renewal
+reaches the database on time. A live worker whose renewals are delayed or
+starved for <code>LOCK_TIMEOUT</code> can have its task reclaimed; see
+<a href="production/#tuning-lock_timeout">Tuning LOCK_TIMEOUT</a> and
+<a href="production/#database-connections-and-postgresql-pooling">PostgreSQL pooling</a>.
 If the worker is killed, the lease goes stale. After <code>LOCK_TIMEOUT</code> (default
 300 seconds) the reaper in any surviving worker takes the task back: to READY
 if attempts remain, or to LOST if they are spent. LOST reads as <code>FAILED</code>
@@ -1082,8 +1086,8 @@ coming back. The mechanics, and the one case to know about, are in
 <ul>
 <li>Transactional enqueue, as above. No <code>on_commit</code> boilerplate.</li>
 <li>Retries with exponential backoff and the full traceback of every attempt.</li>
-<li>A reaper that reclaims tasks from dead workers, and a lease that keeps it
-  away from live slow ones.</li>
+<li>A reaper that reclaims tasks after their leases expire, and a lease that
+  protects slow tasks while renewal reaches the database on time.</li>
 <li>Graceful drain on SIGTERM: in-flight tasks finish before the worker exits.</li>
 <li>Priorities (-100 to 100) and deferred tasks (<code>run_after</code>).</li>
 <li><a href="recurring-tasks/">Recurring tasks</a>: cron or fixed-interval schedules

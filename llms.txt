@@ -65,9 +65,17 @@ Operational facts to get right:
   delay after attempt n is `BACKOFF_INITIAL * 2 ** (n - 1)`, capped at
   `BACKOFF_MAX`, no jitter.
 - `LOCK_TIMEOUT` bounds how long a worker may stop refreshing its lease
-  before the reaper hands the task to another worker. The worker renews the
-  lease every `LOCK_TIMEOUT / 3` seconds, so a long task on a live worker
-  keeps running.
+  before the reaper hands the task to another worker. The worker schedules
+  renewal every `LOCK_TIMEOUT / 3` seconds. An hour-long task keeps its
+  lease while renewals succeed. Renewal needs a database connection,
+  so a live worker that cannot get one can still lose the lease.
+- With Django's PostgreSQL pool in 1.4.0, use at least `concurrency + 1`
+  pooled connections per worker process. Budget server connections outside
+  the pool too: each process can hold up to `max_size + 1` server connections
+  in total, or `max_size + 2` with task timeouts.
+  Include all processes, aliases, other clients, and reserved
+  slots. Pool fallback needs a spare pooled connection; add and budget one
+  if fallback must work under full load.
 - `TASK_TIMEOUT` (seconds, default None) bounds one attempt: at the deadline
   the worker raises `django_ox.exceptions.TaskTimeout` inside the task on its
   own thread (an async task is cancelled), and the attempt is recorded as
@@ -134,12 +142,12 @@ Operational facts to get right:
   Monitoring page.
 - Finished rows stay until pruned. `python manage.py ox_prune --older-than 7d`
   deletes SUCCESSFUL and DISCARDED rows past the cutoff; FAILED and LOST rows
-  are kept unless `--include-failed` is given. READY and RUNNING rows are
-  never deleted.
+  are kept unless `--include-failed` is given. READY, RUNNING and WAITING rows
+  are never deleted.
 - `django_ox.actions.retry(result_id)` puts a FAILED or LOST task back to
   READY for one more attempt; `django_ox.actions.discard(result_id)` closes a
-  READY, FAILED or LOST task without running it. Both return a bool, and
-  neither touches a RUNNING task. With `django.contrib.admin` installed the
+  READY, WAITING, FAILED or LOST task without running it. Both return a bool,
+  and neither touches a RUNNING task. With `django.contrib.admin` installed the
   task table is registered in the admin with the same two actions.
 - Run `migrate` before rolling workers, not from the worker process.
 - Out of scope in the core: interrupting one chosen running task on demand

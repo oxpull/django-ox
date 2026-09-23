@@ -969,9 +969,9 @@ export names this page does not list; those names are not public.</p>
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   <code>128 + the signal number</code>, following the shell convention.</li>
-<li><strong>The system check IDs</strong>, the <code>django_ox.E0xx</code> identifiers, which
-  you may list in <code>SILENCED_SYSTEM_CHECKS</code>. The
-  IDs are stable; the messages are not.</li>
+<li><strong>The system check IDs</strong>, including the <code>django_ox.E0xx</code> and
+  <code>django_ox.W0xx</code> identifiers, which you may list in
+  <code>SILENCED_SYSTEM_CHECKS</code>. The IDs are stable; the messages are not.</li>
 <li><strong><code>ox_health</code>'s exit codes</strong>: 0 when healthy, 1 when unhealthy. A value
   the command itself rejects exits 1 as well, such as <code>--max-age 0</code> or a
   <code>--database</code> alias that isn't in <code>DATABASES</code>. A value argparse rejects
@@ -1054,7 +1054,7 @@ has no filter for it. Bulk discards skip it, and <code>queue_stats()</code>, the
 process that shares a database before anything writes the new status. The
 release notes name the value, say how it reads through <code>django.tasks</code>, and
 give the upgrade and rollback steps.</p>
-<p>Pin accordingly: <code>django-ox~=1.3.1</code> accepts patch releases only;
+<p>Pin accordingly: <code>django-ox~=1.4.0</code> accepts patch releases only;
 <code>django-ox~=1.3</code> accepts the current major line.</p>
 <h2 id="deprecation-policy">Deprecation policy</h2>
 <p>When a public surface is going to be removed or changed incompatibly, and

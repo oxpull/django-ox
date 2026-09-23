@@ -984,7 +984,24 @@ part is where migrations go wrong.</p>
 </tr>
 </tbody>
 </table>
-<p>Nothing else moves. Same decorator, same <code>.enqueue()</code>, same result API.</p>
+<p>The decorator, <code>.enqueue()</code>, and result API stay the same. Worker options
+and queue selection differ.</p>
+<p>Of <code>db_worker</code>'s worker-specific options, only <code>--backend</code> and <code>--interval</code>
+carry over unchanged.</p>
+<ul>
+<li>Replace <code>--queue-name</code> with <code>--queues</code>.</li>
+<li>Remove <code>--batch</code>, <code>--max-tasks</code>, <code>--reload</code>, <code>--no-reload</code>,
+  <code>--exclude-queues</code>, <code>--worker-id</code>, and <code>--no-startup-delay</code>.
+  <code>ox_worker</code> rejects these options as unrecognized arguments.</li>
+<li><code>ox_worker</code> does not support exit-when-idle or task-count limits.</li>
+<li><code>ox_worker</code> does not autoreload. Without <code>--batch</code>, <code>db_worker</code> enables
+  autoreload by default when <code>settings.DEBUG</code> is true.</li>
+<li><code>db_worker</code> runs only the <code>default</code> queue unless configured otherwise.
+  <code>ox_worker</code> runs every configured queue unless <code>--queues</code> selects queues.
+  Use <code>--queues default</code> to preserve the old default.</li>
+</ul>
+<p>Do not use <code>--queues '*'</code> to select all queues. <code>*</code> is treated as a literal
+queue name, not a wildcard. Omit <code>--queues</code> to run every configured queue.</p>
 <h2 id="from-celery">From Celery</h2>
 <p>Celery needs a broker and its own workers. django-ox uses the database you
 already have, so there is no broker to run.</p>
@@ -1149,7 +1166,9 @@ left to run it.</p>
    too: a job due in six hours still counts.</li>
 <li><strong>Deploy django-ox.</strong> Run <code>migrate django_ox</code>, then switch <code>TASKS</code>.</li>
 <li><strong>Start <code>ox_worker</code></strong> and check it picks up work. <code>manage.py ox_health</code> will
-   tell you, and the worker logs every claim to the <code>django_ox</code> logger.</li>
+   tell you, and the worker logs every claim to the <code>django_ox</code> logger.
+   Using Django's PostgreSQL pool? First check
+   <a href="../production/#database-connections-and-postgresql-pooling">pool sizing</a>.</li>
 <li><strong>Retire the old worker,</strong> then its tables and broker.</li>
 </ol>
 <p>No drain window available? Run both. Old workers keep serving the old table

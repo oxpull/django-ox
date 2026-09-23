@@ -1405,6 +1405,11 @@ The message text is not part of the contract. The keys are.</p>
 <td>The run loop starts.</td>
 </tr>
 <tr>
+<td><code>connection_pool_too_small</code></td>
+<td>WARNING</td>
+<td>Once per <code>Worker.run()</code>, after <code>worker_started</code> and before threads start: the worker alias's effective PostgreSQL pool maximum is below <code>concurrency + 1</code>. Each <code>--processes</code> child checks separately. The warning does not resize the pool, refuse startup, measure available server slots, or reserve fallback capacity.</td>
+</tr>
+<tr>
 <td><code>task_claimed</code></td>
 <td>DEBUG</td>
 <td>A task was claimed from the queue.</td>
@@ -1462,7 +1467,27 @@ The message text is not part of the contract. The keys are.</p>
 <tr>
 <td><code>lease_renew_failed</code></td>
 <td>WARNING</td>
-<td>A lease renewal statement failed. The worker keeps going and tries again on the next interval.</td>
+<td>A lease renewal statement failed. Outside Django's PostgreSQL pool, this also covers connection failures during renewal. The thread continues. The next tick is due within one renewal interval and starts immediately after an overrun.</td>
+</tr>
+<tr>
+<td><code>lease_renew_degraded</code></td>
+<td>WARNING</td>
+<td>On a pooled PostgreSQL database, renewal left its private connection path. The worker renewed through the pool or failed to renew through either path. <code>fallback</code> is <code>succeeded</code> or <code>failed</code>. Logged once on entering degraded renewal, not on every degraded tick. Alert on this event; <code>lease_renew_missed</code> can arrive after live work has already been reclaimed.</td>
+</tr>
+<tr>
+<td><code>lease_renew_fallback</code></td>
+<td>DEBUG</td>
+<td>On a pooled PostgreSQL database, a later renewal succeeded through the pool while renewal remained degraded.</td>
+</tr>
+<tr>
+<td><code>lease_renew_missed</code></td>
+<td>WARNING</td>
+<td>On a pooled PostgreSQL database, renewal missed a tick while degraded. Reports missed-renewal counts at most once per 30 seconds. <code>lease_renew_missed</code> means leases were not renewed on that tick. After two consecutive misses, the next tick lands at the lease boundary; the reaper can reclaim the task while its body is still running, allowing another run. A degraded warning with <code>fallback=failed</code> also means that tick did not renew leases and starts missed-tick reporting. One with <code>fallback=succeeded</code> does not. The 30-second missed-renewal reporting window persists across recovery.</td>
+</tr>
+<tr>
+<td><code>lease_renew_recovered</code></td>
+<td>INFO</td>
+<td>On a pooled PostgreSQL database, renewal succeeded on its private connection again. Includes counts of successful fallback renewals and missed renewals during the degraded period.</td>
 </tr>
 <tr>
 <td><code>schedule_dispatched</code></td>
@@ -1527,12 +1552,17 @@ The message text is not part of the contract. The keys are.</p>
 <tr>
 <td><code>watchdog_error</code></td>
 <td>ERROR</td>
-<td>The timeout watchdog failed to handle one armed attempt. Every other attempt is unaffected and the thread keeps running.</td>
+<td>The timeout watchdog failed while handling an armed attempt or cleaning up a batch's connection. Cleanup includes closing a private connection or returning a borrowed connection. A database error while closing the private connection is suppressed without this event. The watchdog thread continues.</td>
 </tr>
 <tr>
 <td><code>task_stuck_unrecorded</code></td>
 <td>WARNING</td>
 <td>A timed-out attempt could not be recorded as failed. The worker recycles regardless, so the row is recovered by the reaper rather than by this write.</td>
+</tr>
+<tr>
+<td><code>watchdog_connection_unavailable</code></td>
+<td>WARNING</td>
+<td>On a pooled PostgreSQL database, the timeout watchdog could get neither a private connection nor one from the pool. Logged once per batch. Every record in the batch fails and logs <code>task_stuck_unrecorded</code>. The worker recycles regardless. This event has no time-based rate limit.</td>
 </tr>
 <tr>
 <td><code>worker_drain_abandoned</code></td>
@@ -1596,6 +1626,16 @@ The message text is not part of the contract. The keys are.</p>
 </tr>
 </tbody>
 </table>
+<p>The four renewal connection events and <code>watchdog_connection_unavailable</code>
+include <code>worker_id</code> and no traceback. They apply only to Django's
+PostgreSQL pool.</p>
+<p>On that path, connection-acquisition failures use the new events rather
+than <code>lease_renew_failed</code>. Update alerts that previously relied on
+<code>lease_renew_failed</code> alone. Renewal statement failures still use
+<code>lease_renew_failed</code>.</p>
+<p>Elsewhere, a failed connect during renewal still logs <code>lease_renew_failed</code>.
+A failed connect while recording a stuck attempt logs
+<code>task_stuck_unrecorded</code>.</p>
 <table>
 <thead>
 <tr>
@@ -1706,9 +1746,34 @@ The message text is not part of the contract. The keys are.</p>
 <td>Why the row could not be used.</td>
 </tr>
 <tr>
-<td><code>queues</code>, <code>concurrency</code></td>
+<td><code>queues</code></td>
 <td><code>worker_started</code></td>
-<td>The worker's configuration.</td>
+<td>The worker's queues.</td>
+</tr>
+<tr>
+<td><code>concurrency</code></td>
+<td><code>worker_started</code>, <code>connection_pool_too_small</code></td>
+<td>The worker's task-thread concurrency, set by <code>--concurrency</code>.</td>
+</tr>
+<tr>
+<td><code>database</code></td>
+<td><code>connection_pool_too_small</code></td>
+<td>The worker's database alias: <code>--database</code>, or the alias used to write <code>OxTask</code>.</td>
+</tr>
+<tr>
+<td><code>max_size</code></td>
+<td><code>connection_pool_too_small</code></td>
+<td>The effective pool maximum. <code>pool=True</code> means 4. For a non-empty mapping, use <code>max_size</code>; if absent or <code>None</code>, use <code>min_size</code>, defaulting to 4. The sizing check skips values that are not an <code>int</code> of at least 1. It excludes booleans and floats such as <code>10.0</code>.</td>
+</tr>
+<tr>
+<td><code>recommended_max_size</code></td>
+<td><code>connection_pool_too_small</code></td>
+<td><code>concurrency + 1</code>: one pooled connection per task thread and one for the poll loop. This does not reserve fallback capacity or validate the server budget.</td>
+</tr>
+<tr>
+<td><code>unpooled_connections</code></td>
+<td><code>connection_pool_too_small</code></td>
+<td>Additional private-connection budget per worker process, not a count of open connections. 2 if <code>TASK_TIMEOUT</code> is set or any <code>TASK_TIMEOUTS</code> value is not <code>None</code>; otherwise 1.</td>
 </tr>
 <tr>
 <td><code>pending</code></td>
@@ -1754,6 +1819,36 @@ The message text is not part of the contract. The keys are.</p>
 <td><code>exit_code</code></td>
 <td><code>supervisor_stopped</code></td>
 <td>The code the supervisor exits with.</td>
+</tr>
+<tr>
+<td><code>error</code></td>
+<td><code>lease_renew_degraded</code>, <code>lease_renew_fallback</code>, <code>lease_renew_missed</code>, <code>watchdog_connection_unavailable</code></td>
+<td>The private-connection failure reason. When the pool serves a pool-first renewal tick, this instead says the private connection was not tried first and gives the remaining lease time.</td>
+</tr>
+<tr>
+<td><code>fallback</code></td>
+<td><code>lease_renew_degraded</code></td>
+<td><code>succeeded</code> if pooled renewal succeeded; <code>failed</code> if fallback did not renew the leases.</td>
+</tr>
+<tr>
+<td><code>fallback_error</code></td>
+<td><code>lease_renew_degraded</code>, <code>lease_renew_missed</code>, <code>watchdog_connection_unavailable</code></td>
+<td>The fallback failure reason. On <code>lease_renew_degraded</code>, present when <code>fallback</code> is <code>failed</code>. A borrowed renewal statement failure is reported as "the renewal statement failed".</td>
+</tr>
+<tr>
+<td><code>missed</code></td>
+<td><code>lease_renew_missed</code></td>
+<td>Missed renewal ticks since the last <code>lease_renew_degraded</code> or <code>lease_renew_missed</code> record, or since recovery if more recent.</td>
+</tr>
+<tr>
+<td><code>fallback_renewals</code></td>
+<td><code>lease_renew_recovered</code></td>
+<td>Successful pooled renewals during the degraded period.</td>
+</tr>
+<tr>
+<td><code>missed_renewals</code></td>
+<td><code>lease_renew_recovered</code></td>
+<td>Missed renewal ticks during the degraded period.</td>
 </tr>
 </tbody>
 </table>

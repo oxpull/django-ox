@@ -1164,7 +1164,7 @@ retry. Add options when you have a reason to.</p>
 <tr>
 <td><code>LOCK_TIMEOUT</code></td>
 <td><code>300</code></td>
-<td>Seconds a RUNNING task's lock may go unrefreshed before the reaper takes the task back. A worker refreshes the lock every <code>LOCK_TIMEOUT / 3</code> seconds while it is executing, so this is a limit on how long a worker may be unresponsive, not on how long a task may run.</td>
+<td>Seconds a RUNNING task's lock may go unrefreshed before the reaper takes the task back.</td>
 </tr>
 <tr>
 <td><code>BACKOFF_INITIAL</code></td>
@@ -1184,7 +1184,7 @@ retry. Add options when you have a reason to.</p>
 <tr>
 <td><code>TASK_TIMEOUTS</code></td>
 <td><code>{}</code></td>
-<td>Per-queue timeouts, <code>{"queue name": seconds}</code>. A queue in the mapping uses its own value instead of <code>TASK_TIMEOUT</code>; <code>None</code> as a value exempts that queue. Every key must be a queue named in <code>QUEUES</code>, unless <code>QUEUES</code> is <code>[]</code>. Per queue rather than per task because <code>django.tasks</code> gives a task no field a backend could read a timeout from, and a queue is its unit of routing.</td>
+<td>Per-queue timeouts, <code>{"queue name": seconds}</code>. A queue in the mapping uses its own value instead of <code>TASK_TIMEOUT</code>; <code>None</code> as a value exempts that queue. Every key must be a queue named in <code>QUEUES</code>, unless <code>QUEUES</code> is <code>[]</code>. Timeouts are configured per queue, not per task. <code>OxBackend</code> uses the stock <code>Task</code>, which has no timeout field. Django 6.1 and the django-tasks 0.12 backport accept custom task fields through <code>@task(**kwargs)</code> and a backend's custom <code>task_class</code>. <code>OxBackend</code> does not define a custom <code>task_class</code>. <code>Task.using()</code> overrides only priority, queue name, run-after time, and backend.</td>
 </tr>
 <tr>
 <td><code>TASK_TIMEOUT_GRACE</code></td>
@@ -1218,6 +1218,26 @@ retry. Add options when you have a reason to.</p>
 </tr>
 </tbody>
 </table>
+<p>By default, a worker refreshes leases at an interval of
+<code>max(LOCK_TIMEOUT / 3, 0.1)</code> seconds while executing tasks. <code>LOCK_TIMEOUT</code>
+limits how long a worker can be unresponsive, not how long a task can run.
+The <code>Worker</code> constructor's <code>renew_interval</code> argument overrides this interval.</p>
+<p>Renewal ticks are scheduled from the start of the previous tick. After an
+overrun, the next tick starts immediately and becomes the new anchor.
+Ticks do not overlap or catch up missed slots. This intentionally changes
+pooled and unpooled workers from a full-interval wait after each tick.</p>
+<p>With Django's PostgreSQL pool, private renewal connection attempts use a
+deadline of <code>min(5 seconds, renew_interval)</code>, shortened by a smaller positive
+database <code>OPTIONS["connect_timeout"]</code>. Pool fallback waits at most 100 ms.</p>
+<p>One private-connect deadline covers all hosts. Synchronous DNS can exceed
+it. The deadline does not cover Django's post-connect setup queries or
+renewal statements. It is not a deadline for the whole tick. See
+<a href="../production/#database-connections-and-postgresql-pooling">Database connections and PostgreSQL pooling</a>
+for capacity requirements and timeout limits.</p>
+<p>An idle pooled tick calls <code>renew_leases()</code> once without first opening a
+private connection. The stock method returns 0 and opens no connection.
+Custom <code>WORKER_CLASS</code> overrides retain their idle calls. An override that
+queries can acquire a connection under the tick's connect deadline.</p>
 <p>The retry delay after attempt <em>n</em> fails is
 <code>BACKOFF_INITIAL * 2 ** (n - 1)</code>, capped at <code>BACKOFF_MAX</code>. With the
 defaults: 5 s, 10 s, 20 s, 40 s, and so on up to 600 s. There is no
@@ -1307,9 +1327,11 @@ other worker keeps short work moving at four at a time. A queue with no worker
 assigned to it accumulates tasks and never runs them, so make sure every queue
 in <code>QUEUES</code> is covered by some worker.</p>
 <h3 id="tasks-that-run-longer-than-the-lock-timeout">Tasks that run longer than the lock timeout</h3>
-<p>A long task is not by itself a problem. A worker refreshes the lock on the
-tasks it is running every <code>LOCK_TIMEOUT / 3</code> seconds, so an hour-long task on
-a healthy worker keeps its lease for the hour.</p>
+<p>A long task is not by itself a problem. A worker schedules lock renewal for
+the tasks it is running every <code>LOCK_TIMEOUT / 3</code> seconds. An hour-long task
+keeps its lease while renewals succeed. Renewal needs a database connection,
+so a live worker that cannot get one can still lose the lease; see
+<a href="../production/#database-connections-and-postgresql-pooling">PostgreSQL pooling</a>.</p>
 <p>What <code>LOCK_TIMEOUT</code> bounds is how long a worker may stop refreshing before its
 work is handed to somebody else. Set it above the longest pause you are
 willing to tolerate from a worker: a long garbage-collection pause, a
@@ -1363,6 +1385,11 @@ page):</p>
 <td><code>--dry-run</code></td>
 <td>off</td>
 <td>Report how many rows would be deleted without deleting any.</td>
+</tr>
+<tr>
+<td><code>--format</code></td>
+<td><code>text</code></td>
+<td><code>json</code> prints one object on stdout instead of the two report lines: <code>queue</code>, <code>cutoff</code>, <code>statuses</code>, <code>task_rows</code>, <code>tick_rows</code> and <code>dry_run</code>. <code>queue</code> is <code>null</code> when no <code>--queue</code> is given, <code>cutoff</code> is ISO 8601, and <code>statuses</code> is a list. On a database error during deletion, the object is printed too, with counts of rows already deleted in committed batches, before the same non-zero exit.</td>
 </tr>
 <tr>
 <td><code>--database</code></td>
@@ -1486,6 +1513,10 @@ alert are on the
   need not be the default.</li>
 <li><code>django_ox.E010</code>: <code>LOCK_TIMEOUT</code>, <code>BACKOFF_INITIAL</code> or <code>BACKOFF_MAX</code> is not a
   positive, finite number of seconds. The worker reads all three, so the check stops a bad value at deploy time.</li>
+<li><code>django_ox.W003</code>: <code>BACKOFF_INITIAL</code> and <code>BACKOFF_MAX</code> are both set to valid
+  numbers and the initial delay is above the cap. Every retry then waits
+  <code>BACKOFF_MAX</code>, so the configured first delay never takes effect. The
+  configuration still runs; lower the initial delay or raise the cap.</li>
 </ul>
 <p>The worker performs the same schedule and timeout validation at startup, so
 a bad deploy fails loudly rather than skipping dispatches.</p>

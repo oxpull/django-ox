@@ -976,6 +976,9 @@
 <p>Both values are the defaults. Swap the app in <code>INSTALLED_APPS</code>, run
 <code>python manage.py migrate django_ox</code>, and start <code>python manage.py ox_worker</code>
 where you ran <code>db_worker</code>. Existing django-tasks-db rows need separate handling; changing the backend does not recover them.</p>
+<p>If using Django's PostgreSQL pool, check
+<a href="../production/#database-connections-and-postgresql-pooling">pool sizing</a>
+before starting workers.</p>
 <p>Every django-ox worker runs a reaper. When a worker's lease expires, its unfinished task returns to READY for another attempt, subject to <code>MAX_ATTEMPTS</code>. No separate recovery script.</p>
 <p>At the default timeout, recovery takes up to about 330 seconds. Execution is at-least-once: the previous attempt may already have applied an effect, so make that effect safe to repeat.</p>
 <h2 id="run-django-background-jobs-without-redis-or-rabbitmq">Run Django background jobs without Redis or RabbitMQ</h2>
@@ -992,7 +995,10 @@ where you ran <code>db_worker</code>. Existing django-tasks-db rows need separat
 <span class="c1"># from a view, a signal handler or a command</span>
 <span class="n">build_report</span><span class="o">.</span><span class="n">enqueue</span><span class="p">(</span><span class="n">account_id</span><span class="o">=</span><span class="mi">42</span><span class="p">)</span>
 </code></pre></div>
-<p><code>enqueue()</code> writes a task row. Run <code>python manage.py ox_worker --concurrency 4</code> to execute the work.</p>
+<p><code>enqueue()</code> writes a task row. Run
+<code>python manage.py ox_worker --concurrency 4</code> to execute the work.
+With Django's PostgreSQL pool, check
+<a href="../production/#database-connections-and-postgresql-pooling">pool sizing</a>.</p>
 <p>Failed tasks retry with exponential backoff up to <code>MAX_ATTEMPTS</code>. When a job needs attention, open Django admin to inspect each attempt's traceback. You supervise a worker process, but there is no second datastore to provision or monitor. The queue uses your database's capacity.</p>
 <h2 id="enqueue-a-task-inside-transactionatomic">Enqueue a task inside transaction.atomic()</h2>
 <p>Save the user and queue their welcome email together. If signup rolls back, its email task should disappear too.</p>

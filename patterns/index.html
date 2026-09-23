@@ -1206,6 +1206,8 @@ report builds cannot delay password resets.</p>
 <div class="highlight"><pre><span></span><code>python manage.py ox_worker --queues emails --concurrency 4
 python manage.py ox_worker --queues reports --concurrency 1
 </code></pre></div>
+<p>With Django's PostgreSQL pool, size each worker's pool for its concurrency:
+<a href="../production/#database-connections-and-postgresql-pooling">pool sizing</a>.</p>
 <p>Priority runs from -100 to 100, higher first, and applies within a queue rather
 than across queues. List every queue you use in the backend's <code>QUEUES</code>, or set
 <code>QUEUES: []</code> to accept any name.</p>

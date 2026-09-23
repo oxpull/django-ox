@@ -955,7 +955,8 @@ comes from the <code>django-tasks</code> backport, so install the <code>backport
 OK: backlog=0 oldest_age=none last_claim_age=none
 </code></pre></div>
 <p><code>manage.py check</code> also runs the django-ox system checks, so a bad schedule
-or timeout option fails here, as <code>django_ox.E002</code> to <code>E005</code> and <code>E010</code>, before anything deploys.</p>
+or timeout option fails here, as <code>django_ox.E002</code> to <code>E005</code> and <code>E010</code>, before anything deploys.
+Review any <code>django_ox.W003</code> warning before deploying too.</p>
 <p>Start a worker in its own process, next to the web server, under the same
 supervisor:</p>
 <div class="highlight"><pre><span></span><code>python manage.py ox_worker
@@ -1015,8 +1016,10 @@ supervisor:</p>
 <li>An attempt is consumed at claim time, so a worker dying mid-run uses one.
   Retry delay after attempt n is <code>BACKOFF_INITIAL * 2 ** (n - 1)</code>, capped at
   <code>BACKOFF_MAX</code>.</li>
-<li><code>LOCK_TIMEOUT</code> bounds an unresponsive worker, not task length. The lease is
-  renewed every <code>LOCK_TIMEOUT / 3</code> seconds while the task runs.</li>
+<li>The worker schedules lease renewal every <code>LOCK_TIMEOUT / 3</code> seconds; task length is not bounded by <code>LOCK_TIMEOUT</code> while renewals succeed.
+  Renewal needs a database connection: if the worker cannot refresh its lease for <code>LOCK_TIMEOUT</code>, the reaper can hand the task to another worker even while it is alive.</li>
+<li>With Django's PostgreSQL pool in 1.4.0, provide at least <code>concurrency + 1</code> pooled connections per worker process; add a spare pooled connection if fallback must work under full load.
+  Budget up to <code>max_size + 1</code> server connections per process (<code>max_size + 2</code> with task timeouts), including any added spare; account for all processes, aliases, other clients, and reserved slots.</li>
 <li>The worker polls; <code>--interval</code> (default 1.0 s) is the idle sleep, so a task
   starts within one interval of its commit. There is no LISTEN/NOTIFY.</li>
 <li><code>TASK_TIMEOUT</code> bounds one attempt. At the deadline <code>TaskTimeout</code> is raised

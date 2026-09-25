@@ -52,6 +52,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Background tasks, step by step: background-tasks.md
+  - Wagtail background tasks: wagtail.md
   - Configuration: configuration.md
   - Recurring tasks: recurring-tasks.md
   - Schedules in the database: stored-schedules.md

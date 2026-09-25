@@ -471,23 +471,29 @@ Task id=0f68e1a7-17db-4f6f-87e5-6f05c6b3245e path=accounts.tasks.sync_to_crm sta
 Task id=0f68e1a7-17db-4f6f-87e5-6f05c6b3245e path=accounts.tasks.sync_to_crm state=SUCCESSFUL
 ```
 
-You did nothing to make this happen. A task that raises is retried with
-exponential backoff: three attempts by default, with the delay starting at
-five seconds and doubling each time, up to ten minutes. After the last
+This task needs no retry declaration. By default, a task that raises is
+retried with exponential backoff: three attempts, with the delay starting
+at five seconds and doubling each time, up to ten minutes. After the last
 failure the task is `FAILED` and stays in the table with the traceback of
 every attempt, where the admin's **Retry selected tasks** action can give
 it another go. In the admin, this task's detail page now shows `Attempt 1:
 builtins.ConnectionError` with its traceback under **Attempt errors**, and
 the return value beside it. `MAX_ATTEMPTS`, `BACKOFF_INITIAL` and
 `BACKOFF_MAX` on the [Configuration](configuration.md#options) page tune
-the envelope.
+the defaults.
+
+On Django 6.1 or Django 5.2 with django-tasks 0.12+, a task can instead
+declare its own `max_attempts`, `backoff` and `timeout`. The budget counts
+claims including the first; a backoff callback can choose a delay or stop
+retrying, and a timeout applies separately to each attempt. See
+[Per-task policy](configuration.md#per-task-policy).
 
 An attempt is counted when a worker claims the task, so a worker that dies
 mid-task uses one as well; after `LOCK_TIMEOUT` the reaper hands the task
-to another worker. Execution is at-least-once, so write tasks that are safe
-to run twice. [Common patterns](patterns.md#make-a-task-safe-to-run-twice)
-shows the shape, and [Production](production.md#the-reaper) has the
-mechanics.
+to another worker if its stored budget permits another claim. Execution
+is at-least-once, so write tasks that are safe to run twice.
+[Common patterns](patterns.md#make-a-task-safe-to-run-twice) shows the
+shape, and [Production](production.md#the-reaper) has the mechanics.
 
 ## Step 7: Add a recurring task, with no scheduler process
 

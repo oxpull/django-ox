@@ -91,17 +91,42 @@ export names this page does not list; those names are not public.
 - **The exceptions** `django_ox.exceptions.TaskAbandoned`, recorded against
   tasks whose worker stopped reporting with no attempts left (it records the
   lost lease, not a cause of failure), and `django_ox.exceptions.TaskTimeout`,
-  a `TimeoutError` raised inside a task that ran past its `TASK_TIMEOUT` and
-  recorded against the attempt.
+  a `TimeoutError` raised inside a sync task at its execution deadline and
+  recorded against a timed-out attempt. The timeout comes from the task's
+  own declaration, then its queue's `TASK_TIMEOUTS` entry, then
+  `TASK_TIMEOUT`. Async tasks are cancelled and their timeout is recorded
+  with `TaskTimeout`.
 - **The structured-log contract**: the event names and stable `extra` keys
-  documented on the [Monitoring](monitoring.md) page.
+  documented on the [Monitoring](monitoring.md) page. This includes the
+  policy events and keys, even though the declaration API is provisional.
+- **The test backends** `django_ox.testing.ImmediateBackend` and
+  `django_ox.testing.DummyBackend`. They accept policy declarations but do
+  not enforce retries, backoff or timeouts.
 - **The database schema** of `OxTask` and `OxScheduleTick`, evolved only
   through shipped migrations.
 - **`django_ox.__version__`.**
 
-The producer-side API is `django.tasks` itself (`@task`, `.enqueue()`,
-`get_result()`); django-ox adds nothing there and follows Django's
-contract.
+The producer-side API uses the Tasks framework's `@task`, `.enqueue()` and
+`get_result()`. Bare tasks follow that framework's contract. django-ox also
+accepts the provisional policy declarations below.
+
+### Provisional task policy
+
+`django_ox.tasks.PolicyTask` and `django_ox.tasks.BackoffCallback`, also
+available as `django_ox.PolicyTask` and `django_ox.BackoffCallback`, are
+public, provisional APIs. This includes the `max_attempts`, `backoff` and
+`timeout` fields accepted through `@task` by `OxBackend`, and their
+representation on `result.task`.
+
+This surface follows the names and two-argument callback in Django's open
+new-features proposals #142 and #144. It makes no promise of compatibility
+with whatever Django core eventually ships. `timedelta` callback returns
+are supported; timeout declarations use integer seconds. Retry scheduling
+updates `run_after`, rather than preserving its original value as proposal
+#142 suggests.
+
+See [Configuration](configuration.md#per-task-policy) for validation,
+framework support and precedence.
 
 ### Not public
 
@@ -115,6 +140,13 @@ with an underscore. The exact SQL a claim emits and the
 model's non-schema helper methods are not part of the contract.
 
 `django_ox.heartbeat` is also an implementation detail, not a public Python API. The documented heartbeat filenames, modification-time meaning, freshness rule and `ox_health` JSON fields are public contracts.
+
+In `django_ox.tasks`, only `PolicyTask` and `BackoffCallback` are public,
+with the provisional status above. `MAX_ATTEMPTS_LIMIT` and
+`validate_policy` are implementation details. In `django_ox.testing`, only
+`ImmediateBackend` and `DummyBackend` are public. Timeout implementation
+classes and methods, including `TaskTimeouts.enabled` and
+`TaskTimeouts.for_attempt()`, are not public.
 
 ## Versioning
 
@@ -171,6 +203,24 @@ Django 6.0 and later ship the Tasks framework in core. The Django 5.2 legs
 install the `django-tasks` backport and run the whole suite against it, which
 is what `django-ox[backport]` pulls in.
 
+Support for per-task policy declarations differs from support for the
+backend itself:
+
+| Declaration | Django 5.2 with django-tasks 0.12+ | Django 6.0 | Django 6.1 |
+| --- | --- | --- | --- |
+| Bare `@task` with django-ox | supported | supported | supported |
+| `@task(max_attempts=..., backoff=..., timeout=...)` with django-ox | supported | not supported | supported |
+
+The backport dependency already requires django-tasks 0.12 or later.
+On Django 6.0, policy keyword arguments raise `TypeError` when the module
+is imported, regardless of the configured backend. Bare `@task` still
+builds a `PolicyTask` under `OxBackend`, with all three policy fields set
+to `None`, so backend and queue defaults apply.
+
+The policy fields are provisional. See the
+[declaration reference](configuration.md#per-task-policy) for validation,
+precedence and typing guidance.
+
 Django 6.1 changed which databases the system checks run against. A command
 that runs the full checks and does not name a database now checks every alias
 in `DATABASES`. Checking a SQLite or MySQL alias opens a connection and runs
@@ -219,3 +269,29 @@ announced in the changelog. Databases: PostgreSQL, SQLite and MySQL 8 are
 tested in CI. MariaDB 10.6+ uses the same claim path, since Django's own
 floor guarantees `SELECT ... FOR UPDATE SKIP LOCKED` there, but it is not
 part of the tested matrix.
+
+## Paired policy acceptance
+
+The repository includes `tools/check-policy-pair` to check django-ox
+together with a matching Oxpull checkout. It is a release acceptance
+tool, not a worker command.
+
+```console
+tools/check-policy-pair --pro /path/to/oxpull --pro-python /path/to/paired-venv/bin/python
+```
+
+The tool checks that both suite environments import django-ox from the
+intended checkout, that Oxpull comes from its intended checkout, and
+that Oxpull's exact django-ox pin matches the imported version. It also
+checks the paired interpreter with `PYTHONPATH` cleared, as subprocess
+children see it, including settings-module loading.
+
+Suite failures and errors fail the gate. Skip reasons must be explained
+for the database, and expected failures must match the reviewed baseline.
+The tool accepts database-tagged Oxpull baselines through `--pro-skips`
+and `--pro-xfails`; `--record DIR` records observed skips and expected
+failures for review, not automatic acceptance.
+
+Exit status 0 means the selected gate passed, 1 means the gate failed,
+and 2 means environment validation failed before a suite ran. A pass
+covers the selected environments and suites, not every release check.

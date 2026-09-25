@@ -1,8 +1,10 @@
 # Common patterns
 
-Worked examples for the things people actually reach for. Every snippet uses the
-standard `django.tasks` API, so it works on any backend; the notes point out
-where django-ox behaves differently from a broker.
+Worked examples for common task workflows. Most use the standard
+`django.tasks` API; django-ox-specific features are identified where they
+appear. Per-task retry and timeout declarations require Django 6.1 or
+Django 5.2 with django-tasks 0.12+. The notes also point out where
+django-ox behaves differently from a broker.
 
 ## Send an email after signup
 
@@ -36,30 +38,76 @@ model is a bug waiting to happen.
 
 ## Retry a flaky third-party call
 
-Retries are automatic. Raise, and the worker schedules the next attempt with
-exponential backoff.
+Retries are automatic. Without a task override, raise and the worker
+schedules the next attempt with exponential backoff.
+
+On Django 6.1, or Django 5.2 with django-tasks 0.12+, declare a task's
+claim budget, backoff callback and timeout through `@task`:
+
+On Django 6.1 with django-stubs 6.1.1, mypy requires
+`# type: ignore[call-overload, untyped-decorator]` on this decorator under
+strict checking. That suppression makes the task's static type `Any` and
+loses argument checking. The Django 5.2 backport needs no ignore.
 
 ```python
-@task
+import httpx
+from django.tasks import task  # On Django 5.2: from django_tasks import task
+
+
+def crm_backoff(exception, task_result):
+    if isinstance(exception, httpx.TransportError):
+        return 10 * task_result.attempts
+    if isinstance(exception, httpx.HTTPStatusError):
+        if exception.response.status_code >= 500:
+            return 10 * task_result.attempts
+    return None
+
+
+@task(max_attempts=5, backoff=crm_backoff, timeout=30)
 def sync_to_crm(order_id):
     order = Order.objects.get(pk=order_id)
     response = httpx.post("https://crm.example.com/orders", json=order.payload)
-    response.raise_for_status()  # a 5xx raises, so the task retries
+    response.raise_for_status()
 ```
 
-Tune the envelope on the backend, not per task:
+This task gets up to five claims, including the first. The callback retries
+transport errors and HTTP 5xx responses, and stops retries for other errors
+by returning `None`. It receives the original exception and a failed-attempt
+snapshot whose `attempts` includes the current claim.
+
+The type-ignore comment works around django-stubs 6.1.1's decorator
+overloads, which do not accept these keyword arguments. Keep it scoped to
+the declaration when using those stubs. Django 6.0 supports bare `@task`,
+but rejects policy keyword arguments at import.
+
+Callbacks must be fast, synchronous and side-effect-free. They are not
+bounded by the task timeout. Return integer seconds or a `timedelta` for a
+delay, `0` for immediate eligibility, or `None` to stop retrying. Invalid
+returns and callback errors log `task_policy_error` and fall back to the
+worker's exponential backoff. See the
+[callback contract](production.md#backoff-callbacks).
+
+Backend defaults still apply to fields a task leaves as `None`:
 
 ```python
 "OPTIONS": {
     "MAX_ATTEMPTS": 5,
-    "BACKOFF_INITIAL": 10,   # seconds before the second attempt
-    "BACKOFF_MAX": 600,      # ceiling
+    "BACKOFF_INITIAL": 10,  # seconds before the second attempt
+    "BACKOFF_MAX": 600,  # ceiling for the worker's exponential backoff
 }
 ```
 
+The stored claim budget decides how many attempts remain. Backoff and
+timeout come from the worker's live task declaration on each attempt.
+`BACKOFF_MAX` does not cap a valid callback delay.
+
 Every attempt keeps its own traceback, so a task that failed four times shows
-all four. After `MAX_ATTEMPTS` the task is `FAILED` and stays in the table:
-`ox_prune` keeps failed rows unless you pass `--include-failed`.
+all four. After its attempts are spent, or its callback declines a retry,
+the task is `FAILED` and stays in the table: `ox_prune` keeps failed rows
+unless you pass `--include-failed`.
+
+These policy declarations are provisional. See
+[API stability](stability.md#provisional-task-policy).
 
 ## Answer a webhook fast
 
@@ -250,23 +298,35 @@ one, as above.
 
 ## Test without a worker
 
-Point the test settings at Django's own backends. No django-ox tables, no worker
-process.
+Point the test settings at django-ox's policy-aware test backends. No
+django-ox tables, no worker process. The paths are the same on every
+supported Django version.
 
 ```python
-# runs tasks inline, so an assertion right after enqueue sees the effect
-# On Django 5.2 LTS the path is django_tasks.backends.immediate.ImmediateBackend
-TASKS = {"default": {"BACKEND": "django.tasks.backends.immediate.ImmediateBackend"}}
+# Runs each task once on the caller's thread.
+TASKS = {"default": {"BACKEND": "django_ox.testing.ImmediateBackend"}}
 ```
 
 ```python
-# records tasks without running them, for asserting what was enqueued
-# On Django 5.2 LTS the path is django_tasks.backends.dummy.DummyBackend
-TASKS = {"default": {"BACKEND": "django.tasks.backends.dummy.DummyBackend"}}
+# Records tasks without running them, for asserting what was enqueued.
+TASKS = {"default": {"BACKEND": "django_ox.testing.DummyBackend"}}
 ```
+
+Both backends accept and validate `PolicyTask` fields. Neither retries,
+calls a backoff callback or enforces a timeout. Each backend instance logs
+a `task_policy_inert` warning on the first enqueue of each task path that
+explicitly declares policy. This is not a system-check warning.
+
+Use these paths instead of the framework's stock test backends when tasks
+declare policy. On fresh import, the stock backends reject the extra task
+fields. A task built under `OxBackend` before `override_settings` switches
+to stock Immediate can instead retain policy fields that the backend
+silently ignores. These test backends do not make policy declarations work
+on Django 6.0, whose decorator rejects the keyword arguments.
 
 Keep django-ox in the settings you use for integration tests, where the point is
-to exercise claiming and retries for real.
+to exercise claiming and retries for real. Test retry decisions, backoff
+delays and timeout enforcement against a real worker.
 
 ## Not in the core
 

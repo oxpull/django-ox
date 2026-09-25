@@ -69,6 +69,7 @@ from django_ox.compat import task_finished
 from django_ox.models import OxTask
 from django_ox.worker import Worker
 
+from . import policy_tasks
 from .conftest import start_worker_thread
 from .dead_connection_tasks import (
     end_every_other_session,
@@ -92,7 +93,7 @@ from .dead_connection_tasks import (
     survives_a_statement_error,
     works_offline_through_a_restart,
 )
-from .tasks import echo, fail_always
+from .tasks import STATE, echo, fail_always
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -916,11 +917,17 @@ def probes(monkeypatch):
     return asked
 
 
-@pytest.mark.parametrize("task", [echo, fail_always], ids=["success", "failure"])
+@pytest.mark.parametrize(
+    "task",
+    [echo, fail_always, policy_tasks.fails_and_describes],
+    ids=["success", "failure", "failure-asking-a-backoff"],
+)
 def test_an_ordinary_outcome_costs_no_statement(worker, monkeypatch, probes, task):
     """
     With no database error on the attempt, nothing is asked of any
-    connection: the outcome takes the statements it took before.
+    connection: the outcome takes the statements it took before. That holds
+    for a failure whose backoff is asked too, which checks before the
+    callback and again after it.
     """
     args = ("x",) if task is echo else ()
     task.enqueue(*args)
@@ -1281,6 +1288,68 @@ def test_a_second_write_after_the_row_changed_hands_writes_nothing(
         "task_succeeded",
     ) == [(logging.WARNING, "task_lease_lost")]
     assert finished_results == []
+
+
+@pytest.mark.parametrize(
+    ("task", "status"),
+    [
+        (policy_tasks.fails_and_waits_an_hour, OxTask.Status.READY),
+        (policy_tasks.fails_and_stops, OxTask.Status.FAILED),
+    ],
+    ids=["backoff-waits", "backoff-declines"],
+)
+def test_a_second_write_carries_the_backoffs_one_answer(
+    worker, monkeypatch, caplog, finished_results, task, status
+):
+    """
+    A task's own backoff answers, and the write of that answer finds the
+    connection gone. The second write carries the values the first did, the
+    callback's hour or its None included: the callback is asked once, the
+    row holds the task's one error, and the attempt reports its outcome
+    once.
+    """
+    real = Worker._write_outcome
+    written = []
+
+    def gone_then_writes(self, db_task, **fields):
+        written.append(fields)
+        if len(written) == 1:
+            connection_goes(monkeypatch)
+            raise OperationalError(GONE)
+        return real(self, db_task, **fields)
+
+    monkeypatch.setattr(Worker, "_write_outcome", gone_then_writes)
+    result = task.enqueue()
+    before = timezone.now()
+
+    with caplog.at_level(logging.INFO, logger="django_ox"):
+        assert worker.run_once()
+
+    # Asked once, before the first write, and its answer written twice.
+    assert len(STATE["notes"]) == 1
+    assert [fields["status"] for fields in written] == [status, status]
+    assert written[1] == written[0]
+    stored = OxTask.objects.get(id=result.id)
+    assert (stored.status, stored.attempts, stored.lease_epoch) == (status, 1, 1)
+    assert error_paths(stored) == [VALUE_ERROR]
+    reported = outcome_events(
+        caplog,
+        "task_outcome_unrecorded",
+        "task_outcome_reconnected",
+        "task_lease_lost",
+        "task_retrying",
+        "task_failed",
+    )
+    if status == OxTask.Status.READY:
+        assert 3590 < (stored.run_after - before).total_seconds() < 3700
+        expected = (logging.WARNING, "task_retrying")
+        assert finished_results == []
+    else:
+        assert stored.finished_at is not None
+        assert stored.run_after is None
+        expected = (logging.ERROR, "task_failed")
+        assert [r.status for r in finished_results] == ["FAILED"]
+    assert reported == [(logging.WARNING, "task_outcome_reconnected"), expected]
 
 
 # -- when the pool is swept -------------------------------------------------------

@@ -50,11 +50,12 @@ from datetime import timedelta
 from typing import Any
 
 from django.db import connections, router, transaction
-from django.db.models import F, QuerySet
+from django.db.models import F, Q, QuerySet
 from django.utils import timezone
 
 from . import _contention
 from .models import OxTask
+from .tasks import MAX_ATTEMPTS_LIMIT
 
 __all__ = [
     "DISCARDABLE_STATUSES",
@@ -78,6 +79,12 @@ DISCARDABLE_STATUSES = (
     OxTask.Status.LOST,
     OxTask.Status.WAITING,
 )
+
+# A retry grants attempts + 1 as the new budget, so a row whose count is
+# already at the column's ceiling cannot be granted one. The condition rides
+# in the same UPDATE as the status check: refused in the statement that would
+# have written the overflow, never after a read that could be stale.
+_RETRY_FITS = Q(attempts__lt=MAX_ATTEMPTS_LIMIT)
 
 
 def _rows() -> QuerySet[OxTask]:
@@ -117,22 +124,28 @@ def retry(result_id: str | uuid.UUID) -> bool:
     count, its worker_ids and its per-attempt errors, so the record still
     says what happened before the retry, and max_attempts moves up to
     attempts + 1 so the next claim is the one extra attempt this grants.
-    Claiming increments attempts, the same as any other claim. run_after is
-    cleared so the retry is eligible at once rather than after a backoff
-    written for a failure that has already been dealt with.
+    That is an operator's override, not the task's declared budget: the
+    task's max_attempts decided the row's first budget at enqueue and has no
+    say here. Claiming increments attempts, the same as any other claim.
+    run_after is cleared so the retry is eligible at once rather than after
+    a backoff written for a failure that has already been dealt with.
+
+    A row that has already used 32767 attempts, the most the column holds,
+    is refused and left exactly as it was: attempts + 1 does not fit.
     """
     pk = _pk(result_id)
     if pk is None:
         return False
     rows = _rows()
     row = (
-        rows.filter(pk=pk, status__in=RETRYABLE_STATUSES)
+        rows.filter(_RETRY_FITS, pk=pk, status__in=RETRYABLE_STATUSES)
         .values("lease_epoch", "attempts")
         .first()
     )
     if row is None:
         return False
     updated = rows.filter(
+        _RETRY_FITS,
         pk=pk,
         status__in=RETRYABLE_STATUSES,
         lease_epoch=row["lease_epoch"],
@@ -289,6 +302,7 @@ def _move_in_key_order(
     ids: list[uuid.UUID],
     statuses: tuple[OxTask.Status, ...],
     values: dict[str, Any],
+    condition: Q | None = None,
 ) -> int:
     """
     The _many forms' write. Returns how many rows moved.
@@ -296,8 +310,14 @@ def _move_in_key_order(
     The ids go in the database's key order, one chunk at a time. On a
     database with row locks a locking read of the chunk's ids comes first.
     The transaction is opened on `alias`, which is where every statement
-    below goes, the locking read included.
+    below goes, the locking read included. `condition`, when given, is one
+    more thing a row must satisfy to move, checked by the same UPDATE.
     """
+    where = (
+        Q(status__in=statuses)
+        if condition is None
+        else Q(status__in=statuses) & condition
+    )
     locking_read = connections[alias].features.has_select_for_update
     ordered = sorted(ids, key=_key_order(alias))
 
@@ -314,7 +334,7 @@ def _move_in_key_order(
                         .order_by("pk")
                         .values_list("pk", flat=True)
                     )
-                changed += chunk.filter(status__in=statuses).update(**values)
+                changed += chunk.filter(where).update(**values)
         return changed
 
     return _contention.run(alias, move)
@@ -337,7 +357,9 @@ def retry_many(
     matches nothing afterwards, and a concurrent retry or discard of the
     same row finds it already READY and matches zero rows. max_attempts
     becomes attempts + 1 from the row's own count, so the next claim is
-    the one extra attempt this grants. The whole call runs in one
+    the one extra attempt this grants. A row whose attempts are already at
+    32767, where attempts + 1 does not fit the column, is refused by the
+    same UPDATE and counted as skipped. The whole call runs in one
     transaction: an error part-way leaves every row as it was.
 
     The ids go in key order, and each chunk is locked before its UPDATE, as
@@ -360,6 +382,7 @@ def retry_many(
             "locked_at": None,
             "lease_expires_at": None,
         },
+        _RETRY_FITS,
     )
     return changed, len(ids) + malformed - changed
 

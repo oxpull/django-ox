@@ -22,6 +22,8 @@ __all__ = [
     "HAS_CORE_TASKS",
     "IMMEDIATE_BACKEND_PATH",
     "BaseTaskBackend",
+    "DummyBackend",
+    "ImmediateBackend",
     "InvalidTask",
     "Task",
     "TaskContext",
@@ -48,6 +50,8 @@ if TYPE_CHECKING:
         task_backends,
     )
     from django.tasks.backends.base import BaseTaskBackend
+    from django.tasks.backends.dummy import DummyBackend
+    from django.tasks.backends.immediate import ImmediateBackend
     from django.tasks.base import (
         Task,
         TaskContext,
@@ -80,6 +84,8 @@ else:
             task_backends,
         )
         from django.tasks.backends.base import BaseTaskBackend
+        from django.tasks.backends.dummy import DummyBackend
+        from django.tasks.backends.immediate import ImmediateBackend
         from django.tasks.base import (
             Task,
             TaskContext,
@@ -106,6 +112,8 @@ else:
                 task_backends,
             )
             from django_tasks.backends.base import BaseTaskBackend
+            from django_tasks.backends.dummy import DummyBackend
+            from django_tasks.backends.immediate import ImmediateBackend
             from django_tasks.base import (
                 Task,
                 TaskContext,

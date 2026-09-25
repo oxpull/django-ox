@@ -17,7 +17,8 @@ class TaskTimeout(TimeoutError):
     the attempt.
 
     The worker raises it on the task's own thread when the attempt's
-    TASK_TIMEOUT expires, so ``finally`` blocks run and an open
+    timeout expires (the task's own, else its queue's TASK_TIMEOUTS entry,
+    else TASK_TIMEOUT), so ``finally`` blocks run and an open
     ``transaction.atomic()`` rolls back on the way out. A task may catch it
     to clean up and then re-raise; a task that swallows it has its attempt
     recorded as whatever it goes on to do, provided it returns or raises

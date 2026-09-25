@@ -427,25 +427,29 @@ connection.
 
 #### Budget server capacity
 
-With Django's PostgreSQL pool, 1.4.0 workers open renewal connections outside
-the pool, in addition to `max_size`. Task timeouts (`TASK_TIMEOUT` set, or any
-`TASK_TIMEOUTS` value not `None`) also run the timeout watchdog, which opens
-another connection outside the pool. Each worker process can hold up to
-`max_size + 1` server connections, or `max_size + 2` with task timeouts.
+With Django's PostgreSQL pool, lease renewal uses a connection outside the
+pool, in addition to `max_size`. The timeout watchdog can use a second
+private connection whenever an attempt has a timeout. That timeout can
+come from the task declaration, not just `TASK_TIMEOUT` or `TASK_TIMEOUTS`.
+
+Budget up to `max_size + 2` server connections per worker process. This is
+a worst-case budget, not a count of open connections. A worker whose tasks
+never use a timeout needs only the baseline private connection, for
+`max_size + 1`. An absent timeout in `OPTIONS` alone does not establish that.
 Check PostgreSQL `max_connections` and role connection limits before upgrading.
 
 Lease renewal normally uses a private connection outside the pool. The stock
 worker opens it on the first renewal tick with work in flight. It reuses the
 connection until shutdown or a renewal failure closes it.
 
-With task timeouts enabled, the watchdog normally uses a second private
-connection to record stuck attempts. It closes that connection at the end
-of the batch. A borrowed connection is returned instead. The watchdog thread
-exits after one second with nothing to watch.
+For timed attempts, the watchdog normally uses a second private connection
+to record stuck attempts. It closes that connection at the end of the batch.
+A borrowed connection is returned instead. The watchdog thread exits after
+one second with nothing to watch.
 
-Budget for the pool maximum plus one private connection per worker process,
-or plus two with task timeouts. Keep this private-connection capacity
-available. Pool fallback provides resilience, not free capacity.
+Keep this private-connection capacity available. Pool fallback provides
+resilience, not free capacity. The startup pool-size warning budgets both
+private connections because it cannot rule out task-declared timeouts.
 
 Calculate the server budget across all worker processes and database
 aliases. Include web processes, other services, administrative clients,
@@ -453,10 +457,11 @@ connections opened by tasks, and other database clients. Account for
 PostgreSQL's reserved slots and role connection limits. Reserved slots
 that the worker's role cannot use are not worker capacity.
 
-For example, two worker processes with `max_size=5` need capacity for up to
-12 worker connections, or 14 with task timeouts. These totals exclude all
-other clients and unusable reserved slots. A separate database alias needs
-its own budget, even when it connects to the same PostgreSQL server.
+For example, two worker processes with `max_size=5` need a worst-case budget
+of 14 worker connections. If no task either worker runs has a timeout,
+12 suffice for the workers. These totals exclude all other clients and
+unusable reserved slots. A separate database alias needs its own budget,
+even when it connects to the same PostgreSQL server.
 
 A pool size of `concurrency + 1` does not prove that the deployment has enough
 connections. Startup cannot see available server slots. Runtime degraded
@@ -678,6 +683,63 @@ workers.
 Unpooled renewal and watchdog connects do not gain these local deadlines.
 PgBouncer and third-party pools have not been tested.
 
+### Rolling out per-task policy
+
+No database migration is required. The attempt-budget column already
+exists, but old and new workers do not execute the same live policy.
+
+Deploy the policy-capable django-ox release to every producer, worker
+and other process that imports task modules before adding declarations.
+Deploy the matching Oxpull release everywhere too if it is installed.
+Only then enable `max_attempts`, `backoff` and `timeout` declarations.
+
+| Mixed-fleet case | Behaviour |
+| --- | --- |
+| A new producer enqueues a row that an old worker claims | The old worker honours the stored budget if the task module imports there |
+| An old producer enqueues a row that a new worker claims | The new worker keeps the row's stored budget |
+| A new worker claims an old row | The task's current backoff and timeout apply |
+| A 1.4.0 worker imports an import-compatible task module | Per-task backoff and timeout are not enforced |
+| A 1.4.0 host imports an unguarded policy declaration | Import fails with `TypeError`, even on Django 6.1 or the supported backport |
+
+An import failure can prevent a web process or worker from starting if
+the module is loaded during application startup. If a 1.4.0 worker
+instead encounters it while claiming a task, the body never runs:
+the worker spends the stored budget on import failures.
+
+In the recorded 1.4.0 behaviour, a terminal non-`ImportError` import
+failure writes `FAILED`, then logs `worker_error` rather than
+`task_failed`, with no `task_finished` signal. The policy-capable
+release logs `task_failed` without importing again and also sends no
+`task_finished` signal when the attempt could not rebuild the task.
+
+If one source tree must import on both releases during deployment, a
+guarded declaration can bridge module imports:
+
+```python
+from django.tasks import task
+
+try:
+    import django_ox.tasks
+except ImportError:
+    policy = {}
+else:
+    policy = {"max_attempts": 5, "timeout": 60}
+
+
+@task(**policy)
+def sync_customer(customer_id): ...
+```
+
+On Django 5.2, import `task` from `django_tasks` instead. This guard
+detects the policy module, not framework keyword support: it does not
+make declarations work on Django 6.0. It also does not make an old
+worker enforce backoff or timeout. The all-hosts-first rollout remains
+the recommended order.
+
+For rollback, remove policy declarations, or make imports compatible,
+before returning hosts to 1.4.0. Stored budgets remain on queued rows,
+but old workers do not enforce the new backoff or timeout declarations.
+
 ## The lease
 
 A worker that claims a task takes a lease on it: the row records who holds
@@ -727,26 +789,36 @@ Django assumes of it anyway.
 
 ### Task timeouts
 
-`TASK_TIMEOUT` bounds how long one attempt may run. It is off by default.
-With it set, the worker raises `django_ox.exceptions.TaskTimeout` inside the
-task when the deadline passes:
+A timeout bounds one attempt. It is off by default. The task's `timeout`
+takes precedence over its queue's `TASK_TIMEOUTS` entry, then `TASK_TIMEOUT`.
+An explicit task timeout applies even on a queue exempted with `None`.
+A task declaration cannot disable an inherited limit.
 
-- **A sync task** gets the exception on its own thread, at the next line of
-  Python it executes. `finally` blocks run, an open `transaction.atomic()`
-  rolls back, and the thread returns to the pool. The worker then drops the
-  thread's database connections, since the exception may have landed inside
-  the driver with a statement in flight, and records the outcome on a fresh
-  one. The task may catch `TaskTimeout` to clean up and then re-raise it.
-  Inside the task the exception is bare: `str(exc)` is empty and
-  `exc.timeout` is `None`, and the worker fills both in when it records the
-  attempt. A task that catches it and returns is allowed, and the attempt
-  is recorded as whatever the task went on to do, provided it returns or
-  raises within `TASK_TIMEOUT_GRACE`; one still running then is treated as
-  a thread that did not stop, below. An exception raised while the task
-  unwinds from `TaskTimeout` (a cleanup that fails, say) is recorded as the
-  timeout, with that exception in the traceback. `raise ... from None`
-  breaks that chain, and the attempt is then recorded as the exception it
-  names, with no `task_timed_out` event.
+Per-task timeouts are positive whole seconds, at most 31557600000.
+They require Django 6.1, or Django 5.2 with django-tasks 0.12+.
+Every attempt gets a fresh full timeout and deadline. The worker reads the
+task declaration for each attempt, so deploying changed code changes the
+timeout for outstanding rows after worker deployment or restart.
+`TASK_TIMEOUT_GRACE` remains worker-wide.
+
+When an attempt's deadline passes:
+
+- **A sync task** gets `django_ox.exceptions.TaskTimeout` on its own thread,
+  at the next line of Python it executes. `finally` blocks run, an open
+  `transaction.atomic()` rolls back, and the thread returns to the pool.
+  The worker then drops the thread's database connections, since the
+  exception may have landed inside the driver with a statement in flight,
+  and records the outcome on a fresh one. The task may catch `TaskTimeout`
+  to clean up and then re-raise it. Inside the task the exception is bare:
+  `str(exc)` is empty and `exc.timeout` is `None`, and the worker fills both
+  in when it records the attempt. A task that catches it and returns is
+  allowed, and the attempt is recorded as whatever the task went on to do,
+  provided it returns or raises within `TASK_TIMEOUT_GRACE`; one still
+  running then is treated as a thread that did not stop, below. An exception
+  raised while the task unwinds from `TaskTimeout` (a cleanup that fails,
+  say) is recorded as the timeout, with that exception in the traceback.
+  `raise ... from None` breaks that chain, and the attempt is then recorded
+  as the exception it names, with no `task_timed_out` event.
 - **An async task** is cancelled inside its event loop at the deadline. The
   coroutine sees `asyncio.CancelledError` at the `await` it was on, as any
   cancelled coroutine does, and should let it propagate; the worker records
@@ -754,17 +826,21 @@ task when the deadline passes:
   never fires, because nothing can raise another class at a running
   coroutine's `await`.
 
-The attempt is recorded as failed with a `TaskTimeout` error that names the
-timeout. The attempt was consumed at claim time, so the retry rule is the
-ordinary one: back to READY on the backoff while attempts remain, FAILED
-when they are spent. The worker logs `task_timed_out` at WARNING, then the
-usual `task_retrying` or `task_failed`. `TaskTimeout` subclasses
-`TimeoutError`, so code written for one treats it as one.
+A recorded timeout carries a `TaskTimeout` error that names the timeout.
+The attempt was consumed at claim time. While attempts remain, the task's
+backoff callback decides whether and when to retry; without one, the worker
+uses exponential backoff. A callback returning `None`, or an exhausted
+budget, makes the task FAILED. The stuck-thread path does not call user
+callbacks and uses the worker's backoff. The worker logs `task_timed_out`
+at WARNING for a recorded in-thread timeout, then the usual `task_retrying`
+or `task_failed`. `TaskTimeout` subclasses `TimeoutError`, so code written
+for one treats it as one.
 
 A long loop can check the clock instead of being interrupted between two
 steps. `django_ox.deadline()` returns the attempt's deadline as a `datetime`,
 and `django_ox.remaining()` the seconds left; both return `None` when no
-timeout applies.
+timeout applies. They reflect task-declared timeouts even when `OPTIONS`
+sets none.
 
 ```python
 import django_ox
@@ -831,17 +907,22 @@ Set per-queue values where one number does not fit:
 },
 ```
 
-A queue in `TASK_TIMEOUTS` uses its own value; `None` there exempts the
-queue from the global limit. Every queue named there must be in `QUEUES`
-(`django_ox.E005` otherwise), unless `QUEUES` is `[]`. A timeout longer than
-`LOCK_TIMEOUT` is fine while lease renewals succeed. Renewal needs a database
-connection; a live worker that cannot get one can still lose its lease,
-allowing the reaper to hand the task to another worker.
+A queue in `TASK_TIMEOUTS` uses its own value instead of `TASK_TIMEOUT`;
+`None` there exempts tasks that declare no `timeout`. A task's explicit
+timeout takes precedence even on an exempt queue. Every queue named there
+must be in `QUEUES` (`django_ox.E005` otherwise), unless `QUEUES` is `[]`.
+
+A timeout longer than `LOCK_TIMEOUT` is fine while lease renewals succeed.
+The lock timeout controls the lease, not execution duration. Renewal needs
+a database connection; a live worker that cannot get one can still lose
+its lease, allowing the reaper to hand the task to another worker.
+An execution timeout is not process isolation or an exactly-once guarantee.
 
 Timeouts use CPython's own facility for raising an exception in another
-thread, which every supported Python has. On an interpreter without it, the
-worker logs `timeouts_backstop_only` once at startup and enforces timeouts
-by the grace backstop alone.
+thread, which every supported Python has. On an interpreter without it,
+the worker logs `timeouts_backstop_only` with `reason="interpreter"` once:
+at startup if `OPTIONS` configures a timeout, otherwise on the first attempt
+that arms one. It enforces sync-task timeouts by the grace backstop alone.
 
 **Under a coverage tool or a debugger.** A tool that watches a thread runs a
 callback between one bytecode and the next, and those callbacks hold locks
@@ -889,6 +970,90 @@ shape. To run an attempt unwatched, take the calling thread's trace hook off
 for the length of the call and put it back afterwards; a `sys.monitoring`
 tool cannot be taken off a single thread.
 
+## Backoff callbacks
+
+A task's `backoff` callback decides what to do after an ordinary failed
+attempt when the stored budget permits another claim. It receives the
+original exception and an in-memory `TaskResult` snapshot.
+
+The snapshot has:
+
+- `status=FAILED`;
+- `attempts` and `worker_ids` including the current claim;
+- the current task error appended last to `errors`;
+- `finished_at` set;
+- `task.max_attempts` set to the row's stored budget.
+
+This snapshot is input to the decision, not an intermediate database
+state. The row is written as `FAILED` only if the decision is terminal.
+
+### Return values and fallback
+
+| Callback result | Worker action |
+| --- | --- |
+| `None` | Stop retrying and record `FAILED`, with `task_failed` and `reason="backoff_declined"` |
+| `0` | Make the task eligible to retry immediately |
+| A non-bool integer or `timedelta` representing 0 to 31557600000 seconds | Schedule the retry after that delay |
+
+An invalid callback result or any callback failure in a worker thread,
+including a non-`Exception` `BaseException`, logs `task_policy_error` and
+uses the worker's exponential backoff. During inline execution in the
+caller's process, non-`Exception` failures are re-raised; ordinary
+exceptions still use fallback handling.
+
+A valid callback delay is not capped by `BACKOFF_MAX`. A `timedelta`
+may represent fractional seconds; a float returned directly is invalid.
+Negative delays, bools, strings, values above the limit and awaitables
+are also invalid. A returned coroutine is closed, not awaited.
+
+The fallback records the task's original exception, not the callback's
+exception. A raised callback exception is attached to the policy-error
+log with its traceback. Retry scheduling uses `run_after`.
+
+Setting the declaration's `backoff` field to `None` means inherit the
+worker policy. Returning `None` from a callback means stop retrying;
+these are different decisions.
+
+### Execution and failure boundaries
+
+The callback runs synchronously on the attempt's worker thread, before
+the outcome write, outside any django-ox transaction and without a row
+lock. It is not bounded by the attempt timeout or another callback
+timeout. Keep it fast and side-effect free. A hanging callback holds
+the attempt thread.
+
+Before the callback runs, failure cleanup checks connections on the
+attempt's own thread and closes those known to be unusable, outside
+active transaction blocks. Connection state is checked again before
+outcome persistence because callback code can itself leave a connection
+unusable. The outcome write uses the worker's database alias. This does
+not guarantee that an ongoing outage or a disconnect during the write
+can be recovered from.
+
+The callback runs for task exceptions, including an in-thread
+`TaskTimeout`, while claims remain. It also runs when pool execution
+handles `KeyboardInterrupt` or `SystemExit` as an attempt failure.
+It does not run:
+
+- after the stored attempt budget is exhausted;
+- in the reaper;
+- in the stuck-thread or watchdog failure path;
+- when the task cannot be imported or rebuilt.
+
+An import failure uses the stored budget and worker backoff. On its
+terminal claim, an attempt that never rebuilt the task records `FAILED`
+and logs `task_failed` with `reason="attempts_exhausted"`. It sends no
+`task_finished` signal and does not import the task again.
+
+With inline `run_once()`, a `KeyboardInterrupt` or `SystemExit` raised
+by the callback propagates to the caller. The row remains `RUNNING`
+for lease recovery, matching inline task-interrupt handling.
+
+A callback can still run after the attempt has lost its lease.
+The ownership check then drops its outcome write and logs
+`task_lease_lost`. A callback is not a safe place for external side
+effects, even if those effects appear to belong to a retry decision.
+
 ## The reaper
 
 Workers still die: OOM kills, node failures, `kill -9`. A dead worker stops
@@ -909,8 +1074,10 @@ happens next depends on whether the task has attempts left:
   one. It has watched a lock go quiet, and that is all it writes down.
 
 The attempt was already consumed when the task was claimed, so a
-crash-looping task cannot retry forever; it stops after `MAX_ATTEMPTS` like
-any other task.
+crash-looping task cannot retry forever. The reaper uses the row's stored
+`max_attempts`: the task's declared value, or the backend's `MAX_ATTEMPTS`,
+at enqueue time. It never imports tasks or calls backoff callbacks.
+Requeueing is immediate, without the worker's retry backoff.
 
 The reclaim is a compare-and-set on the lease number, so a reaper running
 late cannot stomp a task that finished or was already reclaimed.
@@ -955,8 +1122,9 @@ connection starvation and delays recovery from dead workers. See
 
 ### Attempts count claims
 
-`attempts` on a task row, the `attempt` key on every log record, and
-`MAX_ATTEMPTS` all count **claims**, not invocations. The number goes up in the
+`attempts` on a task row, the `attempt` key on every log record, a task's
+`max_attempts` and the backend's `MAX_ATTEMPTS` all count **claims**, not
+invocations. The budget includes the first claim. The count goes up in the
 same statement that hands the task to a worker, before the function is reached.
 
 That is deliberate and it is what makes the bound hold. A worker that is killed
@@ -965,10 +1133,26 @@ never move for it, and a task that reliably kills its worker would be retried
 without end, every reaper pass another start.
 
 The cost of the choice is the case at the other end. A task that loses its
-worker between the claim and the call has used an attempt without running, and
-a task that does so as many times as `MAX_ATTEMPTS` allows reaches a terminal
-state having never executed. The window is small: a worker claims only when it
-has a free thread and hands the task straight to it. It is not zero.
+worker between the claim and the call has used an attempt without running,
+and a task that exhausts its stored budget this way reaches a terminal
+state having never executed. The window is small: a worker claims only
+when it has a free thread and hands the task straight to it. It is not zero.
+
+At enqueue, a task's declared `max_attempts` takes precedence over the
+backend's `MAX_ATTEMPTS`, which defaults to 3. That value is stored on the
+row and decides the budget for workers and the reaper. Changing a
+declaration or backend default does not change existing rows.
+
+Every `TaskResult` django-ox builds from a row exposes that stored value as
+`result.task.max_attempts`. This applies to enqueue results, bulk enqueue
+results, `get_result()`, callback snapshots and signals. With the default
+backend budget, a task that declares nothing reports 3, not `None`.
+An operator retry sets the budget to `attempts + 1`, rather than restoring
+the task's declared budget. Legacy rows with a stored budget of 0 remain
+readable and report 0. `TaskResult.attempts` remains the claim count.
+
+`result.task.backoff` and `result.task.timeout` describe the live task
+declaration, not the policy used by an earlier attempt.
 
 Two consequences:
 

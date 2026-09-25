@@ -1215,7 +1215,9 @@ class TestTheStartupWarning:
             worker._warn_if_the_connection_pool_is_short()
         assert bool(events(caplog, "connection_pool_too_small")) is warns
 
-    @pytest.mark.parametrize(("task_timeout", "unpooled"), [(None, 1), (5, 2)])
+    # 2 with no timeout in the options too: a task can declare its own, and
+    # its attempt starts the watchdog, which connects outside the pool.
+    @pytest.mark.parametrize(("task_timeout", "unpooled"), [(None, 2), (5, 2)])
     @needs_psycopg
     def test_it_names_the_database_the_sizes_and_what_can_still_fail(
         self, add_alias, caplog, task_timeout, unpooled
@@ -1238,8 +1240,12 @@ class TestTheStartupWarning:
         assert "at least 9" in message
         assert "outcome writes" in message
         assert "retried" in message
-        assert ("timeout watchdog" in message) is (task_timeout is not None)
-        assert message.endswith(" per worker process."), message
+        assert "timeout watchdog" in message
+        # A worst case, and said to be one: a task may declare a timeout.
+        assert "a task can declare its own, so this assumes the worst case" in (message)
+        assert message.endswith(
+            "Budget 2 additional connections per worker process."
+        ), message
 
 
 def deadline_alias(add_alias, *, budget_options=None, **overrides):
@@ -1524,6 +1530,14 @@ def claimed(add_alias):
     pool = connections[ALIAS].pool
     # The claim's connection goes back, so the pool starts with none out.
     connections[ALIAS].close()
+    # The fixture claimed a task before the pool's first connection was ready,
+    # causing the pool to grow in the background. That connection could arrive
+    # between the test's two reads of pool_available. Wait until all pool
+    # connections are available before comparing counts. This is a precondition,
+    # not a retry of the comparison.
+    assert wait_for(
+        lambda: (stats := pool.get_stats())["pool_available"] == stats["pool_size"]
+    ), pool.get_stats()
     return worker, task, pool
 
 

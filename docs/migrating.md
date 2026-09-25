@@ -115,9 +115,19 @@ send_confirmation.enqueue(order_id=42)
 | `celery -A proj beat` | nothing to run. Schedules go in `TASKS` and every worker dispatches them. See [Recurring tasks](recurring-tasks.md). |
 | `.delay(...)`, `.apply_async(...)` | `.enqueue(...)` |
 | `apply_async(countdown=..., eta=...)` | `run_after` |
-| `autoretry_for`, `self.retry` | automatic. Tune with `MAX_ATTEMPTS`, `BACKOFF_INITIAL`, `BACKOFF_MAX`. |
+| `autoretry_for`, `self.retry` | automatic retries on task exceptions. Set backend defaults with `MAX_ATTEMPTS`, `BACKOFF_INITIAL` and `BACKOFF_MAX`, or declare per-task `max_attempts` and `backoff`. A callback can decline a retry for a particular exception. |
+| `soft_time_limit`, `time_limit` | not a one-to-one mapping. A task's `timeout` sets its attempt deadline; `TASK_TIMEOUT_GRACE` and worker recycling remain worker-wide. See [Task timeouts](production.md#task-timeouts). |
 | Result backend | the same table, read through the standard result API. |
 | Flower | the [stats API, `ox_health`, the Prometheus endpoint and the admin page](monitoring.md) |
+
+Per-task policy declarations require Django 6.1 or Django 5.2 with
+django-tasks 0.12+. They are not accepted by Django 6.0's `@task`
+decorator. See [Per-task policy](configuration.md#per-task-policy).
+
+In django-ox, `max_attempts` counts worker claims, including the first.
+A worker that dies after claiming a task consumes an attempt too. Choose
+the budget from that definition rather than copying a retry count from
+another task runner.
 
 One difference in behaviour to read before you switch. With a broker,
 `enqueue` leaves your process immediately. If the surrounding transaction then
@@ -194,8 +204,8 @@ the admin today, see [Schedules in the database](stored-schedules.md).
 | `manage.py run_huey` | `manage.py ox_worker` |
 | `@periodic_task(crontab(...))` | a `SCHEDULES` entry, same five-field cron syntax |
 | `.schedule(delay=...)` | `run_after` |
-| `retries`, `retry_delay` | `MAX_ATTEMPTS` and the backoff options |
-| `huey.immediate` in tests | Django's `ImmediateBackend` or `DummyBackend` |
+| `retries`, `retry_delay` | Backend defaults in `MAX_ATTEMPTS` and the backoff options, or per-task `max_attempts` and `backoff`. django-ox counts total claims, including the first. Per-task declarations require Django 6.1, or Django 5.2 with django-tasks 0.12+. |
+| `huey.immediate` in tests | `django_ox.testing.ImmediateBackend` or `django_ox.testing.DummyBackend`. They accept policy declarations but do not enforce retries, backoff or timeouts. Use a real worker to test enforcement. |
 
 ## Switching over
 
@@ -221,18 +231,25 @@ idempotent. Confirm it before you start rather than halfway through.
 
 ## Migrating away
 
-Task functions are portable. django-ox adds nothing to the producer side, so
-tasks stay ordinary `django.tasks` tasks and moving to another backend is a
-settings change and a drain, run in the same order as above with the roles
-reversed.
+Tasks without django-ox policy declarations use the standard `django.tasks`
+API. Moving them to another backend is a settings change and a drain, run
+in the same order as above with the roles reversed.
 
-One behaviour does not travel, and it needs deciding on the way in
-rather than on the way out. Enqueueing inside `transaction.atomic()` on the
-database that holds `OxTask` ties the task to that transaction, so it
-disappears on rollback. A broker-based backend cannot do this: the enqueue
-leaves your process the moment you call it. Code
-that depends on a rollback removing a task will behave differently once the
-queue lives in a broker, and it will do so quietly.
+Tasks that declare `max_attempts`, `backoff` or `timeout` need a policy
+migration too. A backend whose task class does not accept those fields
+rejects the declaration at import. Remove or translate the declarations
+before switching. Same-named fields on another backend are not a
+compatibility guarantee. In the other direction, django-ox reads policy
+only from `PolicyTask`; other Task classes inherit its backend defaults
+when rebound with `.using(backend=...)`.
+
+Transactional enqueue also needs deciding on the way in rather than on
+the way out. Enqueueing inside `transaction.atomic()` on the database that
+holds `OxTask` ties the task to that transaction, so it disappears on
+rollback. A broker-based backend cannot do this: the enqueue leaves your
+process the moment you call it. Code that depends on a rollback removing
+a task will behave differently once the queue lives in a broker, and it
+will do so quietly.
 
 If you want to keep that option open, wrap enqueues in
 `transaction.on_commit()`, the way a broker-based backend requires. django-ox

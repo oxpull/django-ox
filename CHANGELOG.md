@@ -61,6 +61,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--heartbeat-file` is enabled. Existing fixed-signature constructors
   remain compatible without the flag; enabling it requires support for
   the keyword.
+- Provisional per-task retry and timeout policy through
+  `@task(max_attempts=..., backoff=..., timeout=...)` on Django 6.1 and
+  Django 5.2 with django-tasks 0.12+. Django 6.0 remains supported, but
+  its decorator does not accept these keywords. `PolicyTask`,
+  `BackoffCallback` and the three policy fields follow Django
+  new-features proposals #142 and #144 without a compatibility promise
+  toward the eventual Django core API.
+- Synchronous backoff callbacks can stop retries or choose an immediate
+  or delayed retry. Invalid results and callback failures log
+  `task_policy_error` and fall back to the worker's exponential backoff.
+  Callbacks are not time-bounded.
+- Public policy-aware test backends:
+  `django_ox.testing.ImmediateBackend` and
+  `django_ox.testing.DummyBackend`. They validate declarations but do not
+  enforce retries, backoff or timeouts. `task_policy_inert` warns on the
+  first enqueue of each declaring task per backend instance.
+- `tools/check-policy-pair` for paired django-ox and Oxpull acceptance,
+  including checkout identity, exact-version pinning, subprocess import
+  checks and reviewed skip and expected-failure baselines.
 
 ### Changed
 
@@ -90,6 +109,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   they do not establish a guaranteed healthy maximum age. Plain
   Docker/Compose health checks mark health without restarting an
   unhealthy container. The systemd unit retains process supervision.
+- Attempt budgets are resolved at enqueue and remain stored on each row.
+  Backoff and timeout use the worker's live task declaration on each
+  attempt, including for rows already queued.
+- `result.task` preserves the declared task class and policy fields, with
+  routing reconstructed from the row, matching 1.4.0 behaviour. It does not
+  expose the row's stored attempt budget. Re-enqueueing uses the task's
+  declared `max_attempts`, or the backend's current value when none is
+  declared, rather than copying the source row's budget.
+- Per-task timeouts take precedence over queue and worker defaults.
+  Every attempt receives a fresh deadline; timeout grace and worker
+  recycling remain worker-wide.
+- Backend `MAX_ATTEMPTS` values that cannot be converted, convert to a
+  negative budget, or exceed the destination database's storage ceiling
+  now produce `django_ox.E011`. Backend construction records the problem;
+  enqueue and worker startup refuse the invalid configuration, including
+  startup with `--skip-checks`. Previously working values retain their
+  behaviour under the deprecation policy below.
+- `OxBackend.max_attempts` is now read-only. Tests that assigned or patched
+  this attribute must configure `TASKS` with Django's `override_settings`
+  and obtain the backend under that override.
+- Worker startup validates fallback backoff values even with
+  `--skip-checks`. Explicit worker constructor overrides still accept
+  zero-delay backoff; backend `BACKOFF_INITIAL` and `BACKOFF_MAX` options
+  must remain positive.
+- Operator retry refuses rows whose attempt count has reached 32767.
+  `retry()` returns `False`; bulk retry counts those rows as skipped.
+- Structured retry logs include `retry_in_s`. Terminal failure logs
+  include `reason`, distinguishing exhausted attempts from a backoff
+  callback that declined another retry.
+- PostgreSQL pool-size warnings budget two unpooled connections per
+  worker as a worst case, including a possible watchdog connection for
+  a task-declared timeout. This is a capacity-planning assumption, not
+  a count of open connections or a startup requirement.
+
+### Deprecated
+
+- Previously working backend `MAX_ATTEMPTS` coercions and non-portable
+  budgets now produce system-check warning `django_ox.W004`. Numeric
+  strings, integral and fractional floats, and bools retain their old
+  `int()` conversion. Zero retains its one-attempt behaviour. Budgets
+  above 32767 remain accepted where the database previously stored
+  them: through 65535 on MySQL in strict mode and through
+  9223372036854775807 on SQLite. Set `MAX_ATTEMPTS` to a non-bool integer
+  from 1 to 32767 before a future major release refuses these values.
+  This is a system-check warning, not a runtime `DeprecationWarning`.
+  The new per-task `max_attempts` field is strict from introduction.
 
 ### Fixed
 
@@ -108,6 +173,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schedules in `SCHEDULES` insertion order. An edit does not change traversal
   order through PostgreSQL row movement. The order is for reproducibility;
   the tick unique constraint still coordinates workers.
+- Terminal failures from a task module that raises during import now
+  retain the `FAILED` outcome and log `task_failed`, including when the
+  import exception is not `ImportError`. An attempt that never rebuilt
+  its task does not import it again or send `task_finished`. Attempts
+  that rebuilt the task reuse it for the terminal signal.
+
+### Upgrade notes
+
+- No database migration is required for per-task policy. Deploy the
+  policy-capable django-ox release, and the matching Oxpull release if
+  used, to every host before adding declarations. A 1.4.0 host cannot
+  import an unguarded policy declaration. With an import-compatible
+  module, a 1.4.0 worker honours the stored attempt budget but ignores
+  per-task backoff and timeout. See the
+  [rolling-upgrade guidance](https://oxpull.com/django-ox/production/#rolling-out-per-task-policy).
+- Deploying a new backoff or timeout declaration affects queued rows on
+  their next attempt; deploying a new `max_attempts` declaration does
+  not replace their stored budgets.
+- django-stubs 6.1.1 does not yet type the forwarded decorator keywords.
+  On Django 6.1 with django-stubs 6.1.1, suppressing `call-overload` makes
+  the decorated task's static type `Any`, so task argument checking is
+  lost. Strict mypy also requires suppressing `untyped-decorator`:
+  `# type: ignore[call-overload, untyped-decorator]`. The Django 5.2
+  backport needs no ignore; adding one can fail checks for unused ignores.
 
 ### Fixed
 

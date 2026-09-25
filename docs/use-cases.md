@@ -59,7 +59,7 @@ build_report.enqueue(account_id=42)
 With Django's PostgreSQL pool, check
 [pool sizing](production.md#database-connections-and-postgresql-pooling).
 
-Failed tasks retry with exponential backoff up to `MAX_ATTEMPTS`. When a job needs attention, open Django admin to inspect each attempt's traceback. You supervise a worker process, but there is no second datastore to provision or monitor. The queue uses your database's capacity.
+Failed tasks retry with exponential backoff by default, subject to the stored claim budget selected at enqueue from the task's `max_attempts` or the backend's `MAX_ATTEMPTS`. A task backoff callback can choose an uncapped delay or stop retries by returning `None`. When a job needs attention, open Django admin to inspect each attempt's traceback. You supervise a worker process, but there is no second datastore to provision or monitor. The queue uses your database's capacity.
 
 ## Enqueue a task inside transaction.atomic()
 

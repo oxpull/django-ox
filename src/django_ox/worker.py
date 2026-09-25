@@ -2,6 +2,7 @@ import asyncio
 import copy
 import ctypes
 import functools
+import inspect
 import json
 import logging
 import math
@@ -72,10 +73,13 @@ from .schedules import (
     schedule_name_collisions,
     schedule_source_from_options,
 )
+from .tasks import BackoffCallback, task_policy
 from .timeouts import (
+    MAX_SECONDS,
     RECYCLE_EXIT_CODE,
     _deadline,
     _deadline_monotonic,
+    _seconds,
     task_timeouts_from_options,
 )
 
@@ -494,6 +498,67 @@ class _Watch:
     tracer: str | None = None
     fired: bool = False
     grace_at: float = 0.0
+
+
+@dataclass(slots=True, frozen=True)
+class _AttemptPolicy:
+    """
+    The policy one attempt runs under, as _run_attempt resolved it.
+
+    Held on the attempt's own thread for _handle_failure, which takes no
+    task and whose signature is a contract subclasses and callers rely on.
+    Keyed by the attempt, so a failure recorded for any other row or epoch
+    on this thread, or for this one from another thread, finds nothing and
+    takes the worker's backoff.
+
+    Registered before the rebuild as well as after it. ``task`` None is an
+    attempt that failed before it had a task: the path no longer imports,
+    the module raised while importing, or the declaration was refused. That
+    is what tells _handle_failure not to import the task a second time,
+    which finding no policy at all, the case of a caller outside any
+    attempt, cannot.
+    """
+
+    attempt: tuple[Any, int]
+    task: "Task[..., Any] | None"
+    backoff: BackoffCallback | None
+    #: run_once() on the caller's own thread, where an interrupt from a
+    #: backoff callback belongs to the caller, as one from the task does.
+    inline: bool
+
+
+def _backoff_seconds(
+    override: Any, options: Mapping[str, Any], name: str, default: float
+) -> float:
+    """
+    The worker's effective BACKOFF_INITIAL or BACKOFF_MAX, validated.
+
+    From OPTIONS it is held to what django_ox.E010 holds it to, so a worker
+    started with --skip-checks refuses what `manage.py check` would have.
+    A constructor override may also be zero: backoff_initial=0 is how tests
+    and embedding code have always asked for retries with no wait, and it is
+    a valid instruction rather than a slip. Negative, not finite, above a
+    thousand years, a bool or not a number is refused either way; the delay
+    is added to a datetime on the failure path, where raising would leave
+    the row RUNNING for the reaper.
+    """
+    if override is None:
+        # A float: unlimited=False refuses None.
+        return cast(
+            "float",
+            _seconds(options.get(name, default), f"OPTIONS[{name!r}]", unlimited=False),
+        )
+    if (
+        isinstance(override, bool)
+        or not isinstance(override, (int, float))
+        or math.isnan(override)
+        or not 0 <= override <= MAX_SECONDS
+    ):
+        raise ImproperlyConfigured(
+            f"{name.lower()} must be a number of seconds from 0 to "
+            f"{MAX_SECONDS:.0f}, got {override!r}."
+        )
+    return float(override)
 
 
 # The states an execution may write its outcome onto. RUNNING is the ordinary
@@ -1250,6 +1315,11 @@ class Worker:
             )
         self.backend = backend
         options = backend.options
+        # The budget a row gets when its task declares none. Read for its
+        # validation: a worker started with --skip-checks, or built by code
+        # that never runs checks, refuses an invalid MAX_ATTEMPTS here, the
+        # way it refuses an invalid timeout, instead of enqueueing with it.
+        _ = backend.max_attempts
         # Empty means the backend accepts any queue name; the worker then
         # processes all queues rather than filtering.
         self.queues: list[str] = list(queues) if queues else sorted(backend.queues)
@@ -1343,20 +1413,20 @@ class Worker:
                 f"{backend_alias!r} and {other_alias!r} backends; schedule "
                 "names must be unique across backends."
             )
-        self.backoff_initial: float = (
-            backoff_initial
-            if backoff_initial is not None
-            else float(options.get("BACKOFF_INITIAL", 5.0))
+        # The retry delay for every failure a task's own backoff does not
+        # decide: tasks that declare none, a backoff that raised or answered
+        # something unusable, and attempts that never reached the task.
+        self.backoff_initial: float = _backoff_seconds(
+            backoff_initial, options, "BACKOFF_INITIAL", 5.0
         )
-        self.backoff_max: float = (
-            backoff_max
-            if backoff_max is not None
-            else float(options.get("BACKOFF_MAX", 600.0))
+        self.backoff_max: float = _backoff_seconds(
+            backoff_max, options, "BACKOFF_MAX", 600.0
         )
         # TASK_TIMEOUT, the per-queue TASK_TIMEOUTS and TASK_TIMEOUT_GRACE,
         # validated the same way the system check validates them. The
         # keywords override the default and the grace; per-queue values
-        # still come from the options.
+        # still come from the options. A task's own timeout wins over both
+        # for its attempts; see TaskTimeouts.for_attempt.
         if task_timeout is not None:
             options = {**options, "TASK_TIMEOUT": task_timeout}
         if task_timeout_grace is not None:
@@ -1432,25 +1502,13 @@ class Worker:
         # Said once per worker, not once per claim.
         self._claim_filter_notice = False
         self._backstop_only_lock = Lock()
+        # The running attempt's policy, per pool thread; see _AttemptPolicy.
+        self._attempt_local = threading.local()
+        # Said at startup when the options configure a timeout, and otherwise
+        # by the first attempt that arms one, which is how a worker whose
+        # only timeouts are tasks' own finds out.
         if self.timeouts.enabled and _inject_async_exc is None:
-            self._backstop_only_notice = True
-            logger.warning(
-                "Worker %s cannot raise TaskTimeout inside a running task on "
-                "this interpreter, so the %gs grace backstop is the whole "
-                "enforcement. A task that returns before the backstop fires "
-                "is recorded as whatever it did, however long it ran; one "
-                "still running when it fires is recorded as failed and "
-                "recycles this worker with exit code %d",
-                self.worker_id,
-                self.timeouts.grace,
-                RECYCLE_EXIT_CODE,
-                extra={
-                    "event": "timeouts_backstop_only",
-                    "worker_id": self.worker_id,
-                    "reason": "interpreter",
-                    "grace_s": self.timeouts.grace,
-                },
-            )
+            self._note_injection_unavailable()
 
     # -- logging -----------------------------------------------------------
 
@@ -2215,20 +2273,50 @@ class Worker:
         with self._in_flight_lock:
             self._in_flight.add(held)
             self._running_on[ident] = held
+        # The policy _run_attempt resolves lives for this attempt only. A task
+        # that runs another inline finds its own restored afterwards.
+        outer = getattr(self._attempt_local, "policy", None)
+        self._attempt_local.policy = None
         try:
             self._run_attempt(db_task, inline=inline)
         finally:
+            self._attempt_local.policy = outer
             with self._in_flight_lock:
                 self._in_flight.discard(held)
                 if self._running_on.get(ident) == held:
                     del self._running_on[ident]
 
     def _run_attempt(self, db_task: OxTask, *, inline: bool = False) -> None:
+        """
+        One attempt: rebuild the task, call it, record what happened.
+
+        The task is rebuilt from the row for every attempt, so the policy it
+        runs under is the one the code declares now, with the row's stored
+        budget. That policy is resolved once, here, and kept for this
+        attempt: the timeout is chosen before the call, and the backoff that
+        _handle_failure consults is the one this rebuild found, not a second
+        import halfway through recording the failure. An attempt that fails
+        before the rebuild, because the task no longer imports, its module
+        raised or its declaration was refused, has a policy with no task: it
+        takes the row's budget and the worker's backoff, and recording the
+        failure does not import the task again. execute() clears the policy
+        when the attempt ends.
+        """
         from .results import task_from_db, task_result_from_db
 
         started = time.monotonic()
+        attempt = (db_task.pk, db_task.lease_epoch)
+        self._attempt_local.policy = _AttemptPolicy(
+            attempt=attempt, task=None, backoff=None, inline=inline
+        )
         try:
             task = task_from_db(db_task)
+            self._attempt_local.policy = _AttemptPolicy(
+                attempt=attempt,
+                task=task,
+                backoff=task_policy(task)[1],
+                inline=inline,
+            )
             task_result = task_result_from_db(db_task, task=task)
             # send_robust: these are an observability surface, and a
             # receiver's exception is not the task's fault. task_started fires
@@ -2243,9 +2331,12 @@ class Worker:
                 db_task.max_attempts,
                 extra=self._log_extra("task_started", db_task),
             )
-            timeout = self.timeouts.for_queue(db_task.queue_name)
+            # The task's own timeout, then its queue's, then the worker's.
+            timeout = self.timeouts.for_attempt(
+                db_task.queue_name, task_policy(task)[2]
+            )
             if timeout is None:
-                # No timeout on this queue: the call is the one the worker
+                # No timeout for this attempt: the call is the one the worker
                 # made directly, frame for frame, so the
                 # stored traceback of an ordinary failure is unchanged.
                 if task.takes_context:
@@ -2353,7 +2444,7 @@ class Worker:
 
         The attempt is registered with the watchdog for the duration of the
         call, and the attempt's deadline is published for deadline() and
-        remaining(). A queue with no timeout never comes here: _run_attempt
+        remaining(). An attempt with no timeout never comes here: _run_attempt
         calls the task directly.
 
         A sync task is interrupted by TaskTimeout raised on this thread, at
@@ -2540,8 +2631,11 @@ class Worker:
     def _discard_unusable_connections(self) -> None:
         """
         Close this thread's connections that an error has left unusable, so
-        the outcome write that follows checks out or opens another instead
-        of failing on the dead one.
+        what runs next on this thread, the outcome write and a task's
+        backoff before it, checks out or opens another instead of failing
+        on the dead one. A failure checks twice when a backoff was asked:
+        before it, and after it, since the callback is task code and can end
+        one too.
 
         A task can end its own connection and still reach an outcome: a
         statement the server terminated, a failover, a network drop it
@@ -2581,6 +2675,34 @@ class Worker:
                 continue
             if conn.errors_occurred and not conn.is_usable():
                 _close_lost_connection(conn)
+
+    def _note_injection_unavailable(self) -> None:
+        """
+        Say once, not once per attempt, that this interpreter cannot raise
+        TaskTimeout inside a thread, so the grace backstop is the whole
+        enforcement.
+        """
+        with self._backstop_only_lock:
+            if self._backstop_only_notice:
+                return
+            self._backstop_only_notice = True
+        logger.warning(
+            "Worker %s cannot raise TaskTimeout inside a running task on "
+            "this interpreter, so the %gs grace backstop is the whole "
+            "enforcement. A task that returns before the backstop fires "
+            "is recorded as whatever it did, however long it ran; one "
+            "still running when it fires is recorded as failed and "
+            "recycles this worker with exit code %d",
+            self.worker_id,
+            self.timeouts.grace,
+            RECYCLE_EXIT_CODE,
+            extra={
+                "event": "timeouts_backstop_only",
+                "worker_id": self.worker_id,
+                "reason": "interpreter",
+                "grace_s": self.timeouts.grace,
+            },
+        )
 
     def _note_backstop_only(self, tracer: str) -> None:
         """
@@ -2627,6 +2749,8 @@ class Worker:
         )
         if tracer is not None:
             self._note_backstop_only(tracer)
+        elif injectable and _inject_async_exc is None:
+            self._note_injection_unavailable()
         now = time.monotonic()
         watch = _Watch(
             ident=ident,
@@ -3001,11 +3125,19 @@ class Worker:
         Record a failed attempt: a retry with backoff, or FAILED when the
         attempts are spent. Returns True when the write landed.
 
+        The row's max_attempts decides whether attempts are spent, whatever
+        the task declares now. With attempts left, the delay is the task's
+        own backoff's answer when the attempt resolved one (see
+        _backoff_decision), and the worker's exponential backoff otherwise.
+        A backoff that answers None records FAILED now.
+
         release=True is the stuck-thread case. The execution is being taken
         off the row while its thread is still running, so the write also
         moves the lease epoch, the same way the reaper moves it when it
         takes a row off a worker that went quiet. Whatever that thread
-        writes later carries the old number and matches nothing.
+        writes later carries the old number and matches nothing. That path
+        never calls a task's backoff: it runs on the watchdog thread, whose
+        job is to fence the row and recycle the worker, not to run task code.
         """
         from .results import task_result_from_db
 
@@ -3017,9 +3149,11 @@ class Worker:
             # raises: the row stays RUNNING with its lease no longer renewed,
             # the error is never recorded, and the reaper later requeues the
             # row with no backoff, or marks it LOST on its last attempt. The
-            # stuck-thread record, release=True, runs on the watchdog's own
-            # connection while the task's thread may still be using its
-            # own, which is not the watchdog's to close.
+            # task's backoff, when there is one to ask, runs next on the
+            # same fresh connections. The stuck-thread record, release=True,
+            # runs on the watchdog's own connection while the task's thread
+            # may still be using its own, which is not the watchdog's to
+            # close.
             self._discard_unusable_connections()
         # The attempt's own record goes once more on another connection
         # when the write finds this thread's connection gone; the stuck-thread
@@ -3040,8 +3174,34 @@ class Worker:
                 "traceback": _stored_traceback(exc),
             },
         ]
+        policy = None if release else self._attempt_policy(db_task)
 
-        if db_task.attempts >= db_task.max_attempts:
+        delay: float | None = None
+        declined = False
+        if db_task.attempts < db_task.max_attempts:
+            if policy is not None and policy.backoff is not None:
+                delay, declined = self._backoff_decision(policy, db_task, exc, errors)
+                # The callback is task code on this thread's connections, and
+                # it can end one the way the task can: a statement the server
+                # terminated, a network drop, caught or raised through. The
+                # write below would then fail on it as it would have on the
+                # task's. Checked again, at no cost unless an error flagged
+                # a connection.
+                self._discard_unusable_connections()
+            if delay is None and not declined:
+                # The exponent is capped before the multiplication, not
+                # after. `attempts` is a PositiveSmallIntegerField and can
+                # reach 32767, and 2 ** 32766 overflows on the way to a float
+                # the min() would have discarded. This runs on the failure
+                # path, where raising would leave the row RUNNING for the
+                # reaper.
+                #
+                # Capping at 64 doublings is far past any backoff_max anyone
+                # configures and keeps the arithmetic in range.
+                doublings = min(max(db_task.attempts - 1, 0), 64)
+                delay = min(self.backoff_initial * (2**doublings), self.backoff_max)
+
+        if delay is None:
             if not write(
                 db_task,
                 status=OxTask.Status.FAILED,
@@ -3055,41 +3215,66 @@ class Worker:
                 **handover,
             ):
                 return False
-            try:
-                task_result = task_result_from_db(db_task)
-            except ImportError:
-                # Task module no longer importable; the row still records
-                # the failure, but no result object can be built to signal.
-                task_result = None
+            task_result: TaskResult[..., Any] | None = None
+            if policy is None:
+                # No attempt on this thread: the stuck-thread handover, or a
+                # caller recording a failure directly. Nothing says whether
+                # the task imports, so it is imported to find out.
+                try:
+                    task_result = task_result_from_db(db_task)
+                except ImportError:
+                    # Task module no longer importable; the row still records
+                    # the failure, but no result object can be built to signal.
+                    task_result = None
+            elif policy.task is not None:
+                # The task this attempt rebuilt, rather than a second import
+                # of code that may have changed since.
+                task_result = task_result_from_db(db_task, task=policy.task)
+            # Otherwise this attempt failed before it had a task, and that
+            # failure is the one being recorded. A second import would fail
+            # again, and not always with ImportError: a module that raises
+            # TypeError or InvalidTask while importing would escape here,
+            # after the FAILED write and before task_failed is logged, and
+            # the final attempt would read as a worker_error. There is no
+            # task to build a result from, so no task_finished is sent.
             if task_result is not None:
                 task_finished.send_robust(
                     sender=type(self.backend), task_result=task_result
                 )
-            logger.error(
-                "Task id=%s path=%s failed after %d/%d attempts (%s)",
-                db_task.id,
-                db_task.task_path,
-                db_task.attempts,
-                db_task.max_attempts,
-                exception_type.__qualname__,
-                extra=self._log_extra(
-                    "task_failed",
-                    db_task,
-                    duration_ms=duration_ms,
-                    exception=exception_type.__qualname__,
-                ),
-            )
+            if declined:
+                logger.error(
+                    "Task id=%s path=%s failed on attempt %d/%d (%s); its "
+                    "backoff returned None, so it is not retried",
+                    db_task.id,
+                    db_task.task_path,
+                    db_task.attempts,
+                    db_task.max_attempts,
+                    exception_type.__qualname__,
+                    extra=self._log_extra(
+                        "task_failed",
+                        db_task,
+                        duration_ms=duration_ms,
+                        exception=exception_type.__qualname__,
+                        reason="backoff_declined",
+                    ),
+                )
+            else:
+                logger.error(
+                    "Task id=%s path=%s failed after %d/%d attempts (%s)",
+                    db_task.id,
+                    db_task.task_path,
+                    db_task.attempts,
+                    db_task.max_attempts,
+                    exception_type.__qualname__,
+                    extra=self._log_extra(
+                        "task_failed",
+                        db_task,
+                        duration_ms=duration_ms,
+                        exception=exception_type.__qualname__,
+                        reason="attempts_exhausted",
+                    ),
+                )
         else:
-            # The exponent is capped before the multiplication, not after.
-            # `attempts` is a PositiveSmallIntegerField and can reach 32767,
-            # and 2 ** 32766 overflows on the way to a float the min() would
-            # have discarded. This runs on the failure path, where raising
-            # would leave the row RUNNING for the reaper.
-            #
-            # Capping at 64 doublings is far past any backoff_max anyone
-            # configures and keeps the arithmetic in range.
-            doublings = min(max(db_task.attempts - 1, 0), 64)
-            delay = min(self.backoff_initial * (2**doublings), self.backoff_max)
             if not write(
                 db_task,
                 status=OxTask.Status.READY,
@@ -3115,9 +3300,128 @@ class Worker:
                     db_task,
                     duration_ms=duration_ms,
                     exception=exception_type.__qualname__,
+                    retry_in_s=delay,
                 ),
             )
         return True
+
+    def _attempt_policy(self, db_task: OxTask) -> _AttemptPolicy | None:
+        """The policy this thread's attempt on `db_task` resolved, if any."""
+        policy: _AttemptPolicy | None = getattr(self._attempt_local, "policy", None)
+        if policy is None or policy.attempt != (db_task.pk, db_task.lease_epoch):
+            return None
+        return policy
+
+    def _backoff_decision(
+        self,
+        policy: _AttemptPolicy,
+        db_task: OxTask,
+        exc: BaseException,
+        errors: list[dict[str, str]],
+    ) -> tuple[float | None, bool]:
+        """
+        Ask the task's backoff about this failure: ``(delay, declined)``.
+
+        ``(seconds, False)`` retries after that many seconds, which may
+        exceed BACKOFF_MAX: the backend's caps bound its own formula, not a
+        task's answer. ``(None, True)`` is the callback answering None,
+        which records FAILED now. ``(None, False)`` is a callback that
+        raised or answered something unusable; that is logged as
+        ``task_policy_error`` and the worker's backoff decides instead.
+        Either way the failure recorded is the task's own exception, never
+        the callback's.
+
+        The callback runs synchronously on the attempt's thread, before the
+        outcome write and inside no transaction of ours, with no row lock
+        held. It gets the exception and a TaskResult as the row would read
+        if this attempt were final: FAILED, this claim in attempts and
+        worker_ids, this error last in errors. That snapshot is in memory
+        only; the row goes to READY or FAILED by the write that follows.
+        It uses this thread's ordinary Django connections, after
+        _handle_failure has dropped any that a timeout or a database error
+        left unusable, and any it leaves unusable are dropped again before
+        the write. Nothing bounds how long it runs, so it has to be quick.
+        """
+        from .results import task_result_from_db
+
+        snapshot = copy.copy(db_task)
+        snapshot.status = OxTask.Status.FAILED
+        snapshot.errors = errors
+        snapshot.finished_at = timezone.now()
+        backoff = cast("BackoffCallback", policy.backoff)
+        try:
+            answer = backoff(exc, task_result_from_db(snapshot, task=policy.task))
+        except (KeyboardInterrupt, SystemExit):
+            # Aimed at the caller's process when inline, as the task's own
+            # would be; see _run_attempt. On the pool it is the callback
+            # failing like any other.
+            if policy.inline:
+                raise
+            self._log_policy_error(db_task, exc, "raised", exc_info=True)
+            return None, False
+        # Any other BaseException too: asyncio.CancelledError, or a class of
+        # the application's own. Let out of here on the pool, it would leave
+        # _handle_failure before the outcome write and the thread with no
+        # log line, the row RUNNING until its lease expired and the task's
+        # own error never recorded. Inline, one that is not an Exception is
+        # the caller's to handle, as the two above are.
+        except BaseException as policy_error:
+            if policy.inline and not isinstance(policy_error, Exception):
+                raise
+            self._log_policy_error(db_task, exc, "raised", exc_info=True)
+            return None, False
+        if answer is None:
+            return None, True
+        if inspect.isawaitable(answer):
+            if inspect.iscoroutine(answer):
+                # Never awaited, and closed so Python does not warn that it
+                # was not.
+                answer.close()
+            self._log_policy_error(
+                db_task, exc, "returned an awaitable, which is not awaited"
+            )
+            return None, False
+        seconds: float | None = None
+        if isinstance(answer, timedelta):
+            seconds = answer.total_seconds()
+        elif isinstance(answer, int) and not isinstance(answer, bool):
+            seconds = answer
+        if seconds is None or not 0 <= seconds <= MAX_SECONDS:
+            self._log_policy_error(
+                db_task,
+                exc,
+                f"returned {answer!r}, not a whole number of seconds or a "
+                f"timedelta from 0 to {MAX_SECONDS:.0f} seconds, or None",
+            )
+            return None, False
+        return float(seconds), False
+
+    def _log_policy_error(
+        self,
+        db_task: OxTask,
+        exc: BaseException,
+        what: str,
+        *,
+        exc_info: bool = False,
+    ) -> None:
+        logger.error(
+            "Task id=%s path=%s attempt %d/%d failed (%s), and its backoff %s; "
+            "retrying on the worker's backoff instead",
+            db_task.id,
+            db_task.task_path,
+            db_task.attempts,
+            db_task.max_attempts,
+            type(exc).__qualname__,
+            what,
+            exc_info=exc_info,
+            extra=self._log_extra(
+                "task_policy_error",
+                db_task,
+                policy="backoff",
+                exception=type(exc).__qualname__,
+                error=what,
+            ),
+        )
 
     # -- reaping -----------------------------------------------------------
 
@@ -4034,18 +4338,21 @@ class Worker:
         needed = self.concurrency + 1
         if max_size >= needed:
             return
-        if self.timeouts.enabled:
-            unpooled = 2
-            outside = (
-                "Lease renewal and the timeout watchdog normally use private "
-                "connections outside the pool; budget 2 additional connections"
-            )
-        else:
-            unpooled = 1
-            outside = (
-                "Lease renewal normally uses a private connection outside the pool; "
-                "budget 1 additional connection"
-            )
+        # Two whatever the options say. The watchdog opens its connection for
+        # any attempt that has a timeout, and a task can declare its own, so
+        # a worker whose options configure none can still start one; nothing
+        # at startup can say that no task it claims will. Counting it always
+        # is the budget that is never short. It is a worst case, not a count
+        # of what the worker will open, and the text says so: a worker whose
+        # tasks never have a timeout uses only the renewal connection.
+        unpooled = 2
+        outside = (
+            "Lease renewal normally uses a private connection outside the "
+            "pool. The timeout watchdog uses a second one whenever an attempt "
+            "has a timeout, and a task can declare its own, so this assumes "
+            "the worst case and counts both; if no task this worker runs has "
+            "a timeout, only the first is used. Budget 2 additional connections"
+        )
         logger.warning(
             "Worker %s: Django's PostgreSQL connection pool for database %r "
             "has a connection limit of %d. Allow at least %d pooled connections "
@@ -4167,17 +4474,31 @@ class Worker:
         # The instance was claimed on the main thread's connection; it is a
         # plain in-memory object here, and its saves use this thread's own
         # connection.
-        close_old_connections()
+        #
+        # Everything that runs here is inside the boundary, the connection
+        # setup and cleanup included, and the boundary is BaseException. The
+        # pool stores whatever escapes on this call's future, and nothing
+        # reads it, so it would be lost without a word. No KeyboardInterrupt
+        # reaches a pool thread, and there is no caller here for a SystemExit
+        # or a cancellation to reach, so logging it is all there is to do.
         try:
+            close_old_connections()
             self.execute(db_task)
-        except Exception:
+        except BaseException:
             logger.exception(
                 "Unhandled error executing task id=%s",
                 db_task.pk,
                 extra=self._log_extra("worker_error", db_task),
             )
         finally:
-            close_old_connections()
+            try:
+                close_old_connections()
+            except BaseException:
+                logger.exception(
+                    "Unhandled error closing connections after task id=%s",
+                    db_task.pk,
+                    extra=self._log_extra("worker_error", db_task),
+                )
 
     def run(self) -> None:
         """Poll for tasks until request_stop(), then drain in-flight tasks."""

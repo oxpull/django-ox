@@ -44,7 +44,9 @@ On Django 6.0+, use `from django.tasks import task`. On Django 5.2 LTS, use `fro
 
 ## Keep the work when a worker dies
 
-Workers claim tasks with `SELECT ... FOR UPDATE SKIP LOCKED` on PostgreSQL and MySQL 8+, or an atomic compare-and-set UPDATE on SQLite. A reaper returns unfinished tasks to the queue when their worker dies. Failed tasks retry with exponential backoff up to `MAX_ATTEMPTS`, with every attempt's traceback kept.
+Workers claim tasks with `SELECT ... FOR UPDATE SKIP LOCKED` on PostgreSQL and MySQL 8+, or an atomic compare-and-set UPDATE on SQLite. A reaper returns unfinished tasks to the queue when their worker dies, subject to their stored attempt budgets. Failed tasks retry with exponential backoff by default, with every attempt's traceback kept.
+
+On Django 6.1 or Django 5.2 with django-tasks 0.12+, each task can declare its own `max_attempts`, `backoff` callback and `timeout`. The budget counts claims including the first; backend settings supply the defaults. See [Per-task policy](https://oxpull.com/django-ox/configuration/#per-task-policy).
 
 Execution is at-least-once: make tasks safe to repeat.
 
@@ -112,7 +114,7 @@ each carrying a link and the date it was read on the
 | Broker to run | **None.** The queue is a table in the database you already run | **None.** Django ORM | RabbitMQ, Redis or SQS | Redis, SQLite, PostgreSQL, file or memory |
 | Transactional enqueue | **Yes.** Enqueue is one INSERT on your default database; a task written inside `atomic()` commits or rolls back with the rows beside it | Not claimed | **No.** Django's own docs name this as the case for `on_commit()` | Not claimed |
 | Worker killed mid-task | **Retried.** The lease expires and the task goes back on the queue | **Stuck.** The task stays `PROCESSING`, never retried and never failed. Open since 2024-06-11 | **Lost** when the child process is killed, even with `acks_late` | **Lost.** "will not be retried automatically" |
-| Retries and backoff | **Exponential**, keeping every attempt's traceback | **None** | Yes | Yes |
+| Retries and backoff | **Exponential by default**, keeping every attempt's traceback. Per-task budget and backoff on Django 6.1 or Django 5.2 with django-tasks 0.12+ | **None** | Yes | Yes |
 | Recurring schedules | **Cron or a fixed interval, and no scheduler process.** Editable in the Django admin, limited to the tasks your code exposes | **None** | `celery beat`, a separate process you must run exactly one of | Yes |
 
 The full version has six more backends, a footnote and a date on every cell,
@@ -360,9 +362,12 @@ path, so admin access does not become permission to run anything. See
 ## Scope
 
 The core is finite on purpose: a durable queue, a worker, recurring
-schedules, monitoring, and nothing else to operate. Outside the current
-scope: interrupting one chosen running task on demand (every attempt can be
-bounded with `TASK_TIMEOUT`).
+schedules, monitoring, and nothing else to operate. Interrupting one chosen
+running task on demand is outside the current scope. Attempt deadlines can
+be set with `TASK_TIMEOUT`, per queue with `TASK_TIMEOUTS`, or per task
+with `timeout` on Django 6.1 or Django 5.2 with django-tasks 0.12+.
+See [Task timeouts](https://oxpull.com/django-ox/production/#task-timeouts)
+for enforcement and its limits.
 
 django-ox keeps all its own tables on one database, the one your router
 sends `OxTask` to. `django_ox.E008` reports a router that splits them.

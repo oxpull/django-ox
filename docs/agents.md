@@ -69,12 +69,20 @@ python manage.py ox_health
 OK: backlog=0 oldest_age=none last_claim_age=none
 ```
 
-`manage.py check` also runs the django-ox system checks. Schedule declaration
+`manage.py check` also runs the django-ox system checks, so bad schedule,
+timeout and fallback-backoff options are reported before deployment.
+Schedule declaration
 and timeout errors covered by `django_ox.E002` to `E005` and `E010` fail here,
 before anything deploys. The checks do not establish database acceptance of
 schedule arguments; alert on `schedule_dispatch_error` and
 `schedule_dispatch_failed` at runtime.
-Review any `django_ox.W003` warning before deploying too.
+`django_ox.E011` rejects unusable backend `MAX_ATTEMPTS` values.
+Review `django_ox.W003` and `django_ox.W004` warnings too; `W004` asks for
+a non-bool integer from 1 to 32767 while retaining compatible legacy values.
+
+Invalid per-task fields raise `InvalidTask` (`InvalidTaskError` on the
+backport) when the task is built, normally at import, rather than appearing
+as a system-check message.
 
 Start a worker in its own process, next to the web server, under the same
 supervisor:
@@ -109,10 +117,14 @@ TASKS = {
 - `QUEUES` sits beside `OPTIONS`, not inside it. Inside `OPTIONS` it is
   ignored without warning; the symptom is `InvalidTask: Queue 'X' is not
   valid for backend.`
-- Tasks are plain Tasks-framework tasks. `from django.tasks import task` on
-  Django 6.0+, `from django_tasks import task` on 5.2 LTS,
-  decorate with `@task`, call `.enqueue(...)`. Nothing is imported from
-  `django_ox` in task code.
+- Tasks use the Tasks-framework API. Import `task` from `django.tasks` on
+  Django 6.0+, or `django_tasks` on 5.2 LTS, decorate with `@task`, and call
+  `.enqueue(...)`. No django-ox import is needed for declarations.
+  With `OxBackend`, Django 6.1 and Django 5.2 with django-tasks 0.12+ also
+  accept provisional `max_attempts`, `backoff` and `timeout` keyword
+  arguments. Django 6.0 rejects those arguments at import but supports
+  bare `@task`. Stock framework test backends also reject the extra fields
+  on fresh import; use `django_ox.testing` backends instead.
 - The worker imports a task by its dotted path, so the module must be
   importable in the worker process and the worker runs the same code as the
   producer; nothing is registered and there is no autodiscovery. `async def`
@@ -141,27 +153,42 @@ TASKS = {
 - The task function runs outside any transaction. Open
   `transaction.atomic()` inside the task when it needs `select_for_update()`.
 - An attempt is consumed at claim time, so a worker dying mid-run uses one.
-  Retry delay after attempt n is `BACKOFF_INITIAL * 2 ** (n - 1)`, capped at
-  `BACKOFF_MAX`.
-- The worker schedules lease renewal every `LOCK_TIMEOUT / 3` seconds; task length is not bounded by `LOCK_TIMEOUT` while renewals succeed.
-  Renewal needs a database connection: if the worker cannot refresh its lease for `LOCK_TIMEOUT`, the reaper can hand the task to another worker even while it is alive.
-- With Django's PostgreSQL pool in 1.4.0, provide at least `concurrency + 1` pooled connections per worker process; add a spare pooled connection if fallback must work under full load.
-  Budget up to `max_size + 1` server connections per process (`max_size + 2` with task timeouts), including any added spare; account for all processes, aliases, other clients, and reserved slots.
+  The stored row budget decides how many claims remain. A task's backoff
+  callback can choose a delay or stop retries. Otherwise the worker's
+  delay after attempt n is `BACKOFF_INITIAL * 2 ** (n - 1)`, capped at
+  `BACKOFF_MAX`. Callback errors fall back to that formula; valid callback
+  delays are not capped.
+- The worker schedules lease renewal every `LOCK_TIMEOUT / 3` seconds;
+  task length is not bounded by `LOCK_TIMEOUT` while renewals succeed.
+  Renewal needs a database connection: if the worker cannot refresh its
+  lease for `LOCK_TIMEOUT`, the reaper can hand the task to another worker
+  even while it is alive.
+- With Django's PostgreSQL pool, provide at least `concurrency + 1` pooled
+  connections per worker process; add a spare pooled connection if fallback
+  must work under full load. Budget up to `max_size + 2` server connections
+  per process, including any added spare: one private renewal connection
+  and one possible watchdog connection. A worker whose tasks never use
+  timeouts needs only the first. An absent timeout in `OPTIONS` does not
+  establish that, because tasks can declare their own. Account for all
+  processes, aliases, other clients and reserved slots.
 - The worker polls; `--interval` (default 1.0 s) is the idle sleep, so a task
   starts within one interval of its commit. There is no LISTEN/NOTIFY.
-- `TASK_TIMEOUT` bounds one attempt. At the deadline `TaskTimeout` is raised
-  inside the task on its own thread (an async task is cancelled) and the
-  attempt is recorded as failed and retried on the backoff. A thread that
-  has not stopped `TASK_TIMEOUT_GRACE` seconds later is recorded as failed
-  and the worker exits 75 so its supervisor restarts it. Per-queue values go
-  in `TASK_TIMEOUTS`; there is no per-task value. `django_ox.remaining()`
-  reads the seconds left from inside a task. On a thread a coverage tool or
-  a debugger is watching (a `sys.settrace` hook, or a `sys.monitoring` tool
-  with events enabled) nothing is raised inside a sync task: the worker logs
-  `timeouts_backstop_only`, a task that returns within `TASK_TIMEOUT_GRACE`
-  is recorded as whatever it did, and one still running then is recorded as
-  failed and recycles the worker. An async task is cancelled at the deadline
-  either way.
+- Each attempt's timeout comes from the task's `timeout`, then its queue's
+  `TASK_TIMEOUTS` entry, then `TASK_TIMEOUT`. A task timeout applies even on
+  a queue exempted with `None`; a task cannot disable an inherited limit.
+  At the deadline `TaskTimeout` is raised inside a sync task on its own
+  thread; an async task is cancelled. A recorded failure follows the task's
+  retry policy. A thread that has not stopped `TASK_TIMEOUT_GRACE` seconds
+  later is recorded as failed and the worker exits 75 so its supervisor
+  restarts it. The stuck-thread path uses the worker's backoff without
+  calling user callbacks. `django_ox.remaining()` reads the seconds left
+  from inside a task, including for a task-declared timeout. On a thread
+  a coverage tool or a debugger is watching (a `sys.settrace` hook, or a
+  `sys.monitoring` tool with events enabled) nothing is raised inside a
+  sync task: the worker logs `timeouts_backstop_only`, a task that returns
+  within `TASK_TIMEOUT_GRACE` is recorded as whatever it did, and one still
+  running then is recorded as failed and recycles the worker. An async task
+  is cancelled at the deadline either way.
 - Claiming: one `UPDATE ... SKIP LOCKED ... RETURNING` statement on
   PostgreSQL; `SELECT ... FOR UPDATE SKIP LOCKED` on MySQL 8+; an atomic
   compare-and-set UPDATE on SQLite and other databases without `SKIP LOCKED`.
@@ -225,13 +252,19 @@ TASKS = {
   WAITING, FAILED or LOST task without running it. Neither touches a RUNNING task.
   With `django.contrib.admin` installed, the task table appears in the admin
   with the same two actions.
-- A particular running task cannot be interrupted on demand; `TASK_TIMEOUT`
-  bounds every attempt. Every table lives on the database your router sends
-  `OxTask` to.
-- In tests use the framework's own backends for `TASKS`:
-  `django.tasks.backends.immediate.ImmediateBackend` or
-  `django.tasks.backends.dummy.DummyBackend` on Django 6.0+, and the same
-  paths under `django_tasks.backends.` on Django 5.2 LTS.
+- A particular running task cannot be interrupted on demand. Each attempt
+  can have a task, queue or backend execution timeout. Every table lives
+  on the database your router sends `OxTask` to.
+- In tests use `django_ox.testing.ImmediateBackend` or
+  `django_ox.testing.DummyBackend` for `TASKS` on every supported Django
+  version. Both accept and validate `PolicyTask` fields. Immediate runs
+  each task once on the caller's thread; Dummy stores tasks without running
+  them. Neither retries, calls backoff callbacks or enforces timeouts.
+  Each backend instance logs `task_policy_inert` once per task path with
+  explicitly declared policy. Test policy enforcement against a real worker.
+  Stock framework backends reject policy declarations on fresh import.
+  A task built before switching to stock Immediate with `override_settings`
+  can instead retain fields that the backend silently ignores.
 - Batches, unique tasks, rate limiting and workflows are in
   [Oxpull Pro](pro.md), a paid add-on. `django_ox.stats` and `ox_health`
   are in django-ox.

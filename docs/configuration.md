@@ -49,13 +49,13 @@ retry. Add options when you have a reason to.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `MAX_ATTEMPTS` | `3` | Claims a task gets before it is marked FAILED. The count is claims rather than invocations: it goes up in the statement that hands the task to a worker, before the function is reached. That is what keeps retries bounded when a worker dies mid-run, and it is what lets a task that loses its worker between the claim and the call use an attempt without running. See [Attempts count claims](production.md#attempts-count-claims). |
+| `MAX_ATTEMPTS` | `3` | Default claim budget for tasks that declare no `max_attempts`. Use an integer from 1 to 32767, not a bool. Previously accepted conversions, zero and larger values supported by the write database remain accepted with `django_ox.W004`; see System checks below. The task's value, or this default, is stored at enqueue and decides the budget from then on. Claims include the first and are counted before the function is reached. See [Attempts count claims](production.md#attempts-count-claims). |
 | `LOCK_TIMEOUT` | `300` | Seconds a RUNNING task's lock may go unrefreshed before the reaper takes the task back. |
-| `BACKOFF_INITIAL` | `5` | Delay in seconds before the first retry. |
-| `BACKOFF_MAX` | `600` | Ceiling on the retry delay, in seconds. |
-| `TASK_TIMEOUT` | `None` | Seconds one attempt may run. `None` means no limit. At the deadline the worker raises `django_ox.exceptions.TaskTimeout` inside the task, on the task's own thread, and records the attempt as failed: retried on the usual backoff, or FAILED when attempts are spent. An async task is cancelled at the deadline instead. A sync task on a thread a coverage tool or debugger is watching is left alone, and `TASK_TIMEOUT_GRACE` is the whole enforcement for it. See [Task timeouts](production.md#task-timeouts). |
-| `TASK_TIMEOUTS` | `{}` | Per-queue timeouts, `{"queue name": seconds}`. A queue in the mapping uses its own value instead of `TASK_TIMEOUT`; `None` as a value exempts that queue. Every key must be a queue named in `QUEUES`, unless `QUEUES` is `[]`. Timeouts are configured per queue, not per task. `OxBackend` uses the stock `Task`, which has no timeout field. Django 6.1 and the django-tasks 0.12 backport accept custom task fields through `@task(**kwargs)` and a backend's custom `task_class`. `OxBackend` does not define a custom `task_class`. `Task.using()` overrides only priority, queue name, run-after time, and backend. |
-| `TASK_TIMEOUT_GRACE` | `30` | Seconds a timed-out attempt gets to stop. A thread still running after that is treated as stuck, which usually means it is in a call that never returns to Python, where the exception cannot land: the worker records the attempt as failed, stops claiming, drains its other tasks and exits with code 75 so its supervisor restarts it. A task that catches `TaskTimeout` has the same deadline to return or raise, and so does a task on a watched thread, where nothing was raised at all. |
+| `BACKOFF_INITIAL` | `5` | Initial delay in seconds for the worker's exponential backoff. Used when no task callback decides, including callback errors and task import failures. Validated at worker startup as well as by system checks. |
+| `BACKOFF_MAX` | `600` | Ceiling on the worker's exponential retry delay, in seconds. It does not cap a valid delay returned by a task's backoff callback. Validated at worker startup as well as by system checks. |
+| `TASK_TIMEOUT` | `None` | Default execution timeout in seconds per attempt. `None` means no limit. A task's `timeout` takes precedence, then its queue's `TASK_TIMEOUTS` entry. At the deadline the worker raises `django_ox.exceptions.TaskTimeout` inside a sync task on its own thread; an async task is cancelled. A recorded timeout follows the task's retry policy. A sync task on a thread a coverage tool or debugger is watching is left alone, and `TASK_TIMEOUT_GRACE` is the whole enforcement for it. See [Task timeouts](production.md#task-timeouts). |
+| `TASK_TIMEOUTS` | `{}` | Per-queue timeouts, `{"queue name": seconds}`. A queue in the mapping uses its own value instead of `TASK_TIMEOUT`; `None` exempts tasks that declare no `timeout`. An explicit task timeout still applies on that queue. Every key must be a queue named in `QUEUES`, unless `QUEUES` is `[]`. `Task.using()` overrides only priority, queue name, run-after time, and backend. |
+| `TASK_TIMEOUT_GRACE` | `30` | Seconds a timed-out attempt gets to stop. A thread still running after that is treated as stuck, which usually means it is in a call that never returns to Python, where the exception cannot land: the worker records the attempt as failed, stops claiming, drains its other tasks and exits with code 75 so its supervisor restarts it. A task that catches `TaskTimeout` has the same deadline to return or raise, and so does a task on a watched thread, where nothing was raised at all. This grace period is worker-wide, including for task-declared timeouts. |
 | `WORKER_CLASS` | unset | Dotted path of a `django_ox.worker.Worker` subclass for `ox_worker` to run, on every process it starts. See [Stability](stability.md). |
 | `SCHEDULES` | `{}` | Recurring task definitions. Documented on the [Recurring tasks](recurring-tasks.md) page. |
 | `SCHEDULE_SOURCE` | settings | Dotted path to the class a worker asks for its active schedules. Set it to `django_ox.stored.DatabaseScheduleSource` to read them from the database. See [Schedules in the database](stored-schedules.md). |
@@ -87,10 +87,191 @@ private connection. The stock method returns 0 and opens no connection.
 Custom `WORKER_CLASS` overrides retain their idle calls. An override that
 queries can acquire a connection under the tick's connect deadline.
 
-The retry delay after attempt *n* fails is
+The worker's exponential retry delay after attempt *n* fails is
 `BACKOFF_INITIAL * 2 ** (n - 1)`, capped at `BACKOFF_MAX`. With the
 defaults: 5 s, 10 s, 20 s, 40 s, and so on up to 600 s. There is no
 jitter.
+
+This backoff applies when a task has no callback, its callback raises or
+returns an invalid value, or its task cannot be imported. The stuck-thread
+path also uses it without calling user code. A valid callback delay is not
+capped by `BACKOFF_MAX`. The reaper requeues immediately when the stored
+budget allows; it does not call callbacks.
+
+## Per-task policy
+
+On Django 6.1 or Django 5.2 with django-tasks 0.12+, a task declared
+under an `OxBackend` alias can set its retry budget, backoff callback and
+attempt timeout:
+
+```python
+from django.tasks import task
+
+
+def retry_connection_errors(exception, task_result):
+    if isinstance(exception, ConnectionError):
+        return min(5 * 2 ** (task_result.attempts - 1), 300)
+    return None
+
+
+@task(max_attempts=5, backoff=retry_connection_errors, timeout=60)
+def sync_customer(customer_id): ...
+```
+
+On Django 5.2, import `task` from `django_tasks` instead.
+The backend builds a `django_ox.tasks.PolicyTask`, a frozen subclass of
+the framework's `Task`. `PolicyTask` and the callback type alias
+`BackoffCallback` are also available from `django_ox`.
+
+These types and the three policy fields are provisional. They follow
+Django new-features proposals #142 and #144, but do not promise
+compatibility with whatever Django core eventually ships. See
+[API stability](stability.md).
+
+### Fields and validation
+
+| Field | Accepted declaration | Meaning of `None` |
+| --- | --- | --- |
+| `max_attempts` | A non-bool integer from 1 to 32767, counting claims including the first | Use the backend's `MAX_ATTEMPTS`, defaulting to 3 |
+| `backoff` | A synchronous callable taking `(exception, task_result)` | Use the worker's exponential backoff |
+| `timeout` | A non-bool integer number of seconds, greater than zero and at most 31557600000 | Use the queue timeout, then the worker default |
+
+Strings, floats and bools are not accepted for either integer field.
+The compatibility handling for backend `MAX_ATTEMPTS` does not apply
+to the new per-task field.
+
+A declared timeout cannot disable an inherited limit: `None` inherits,
+and zero is invalid. A declared timeout takes precedence even on a queue
+whose `TASK_TIMEOUTS` entry is `None`.
+
+Validation runs when the task is built, normally at module import, and
+again when django-ox validates it, including enqueue and worker rebuild.
+`.using()` and `dataclasses.replace()` also revalidate the task.
+Invalid declarations raise the framework's `InvalidTask`
+(`InvalidTaskError` on the backport). Multiple problems are joined into
+one message.
+
+These are the messages for representative invalid values:
+
+```text
+max_attempts must be a whole number from 1 to 32767, or None to use the backend's MAX_ATTEMPTS, got 0.
+```
+
+```text
+backoff must be a callable taking (exception, task_result), or None to use the worker's exponential backoff, got 5.
+```
+
+```text
+backoff must be a synchronous callable, got <function a at 0x...>. The worker calls it on the attempt's own thread and does not await what it returns.
+```
+
+```text
+timeout must be a whole number of seconds greater than zero and at most 31557600000 (a thousand years), or None to use the queue's timeout, got 1.5.
+```
+
+The function representation in the synchronous-callable error varies.
+Async functions, async generator functions, partials of either, and
+instances with an async `__call__` are rejected. Passing a class does not
+cause its call implementation to be inspected. Validation is not a
+guarantee that a callable accepts the required arguments or returns a
+valid delay; those failures use the
+[callback fallback](production.md#backoff-callbacks).
+
+### Precedence and persistence
+
+| Policy | Precedence | When resolved |
+| --- | --- | --- |
+| Attempt budget | Task `max_attempts`, then backend `MAX_ATTEMPTS`, then 3 | At enqueue, stored on the row |
+| Retry delay | Task `backoff`, then worker exponential backoff | After an eligible failed attempt |
+| Attempt timeout | Task `timeout`, then `TASK_TIMEOUTS` for the row's queue, then worker `TASK_TIMEOUT` | For each attempt |
+
+Worker constructor overrides supply the corresponding worker defaults.
+An invalid backend `MAX_ATTEMPTS` configuration still prevents enqueue
+and worker startup, even if a task declares its own valid budget.
+
+The stored budget governs both workers and the reaper. Changing a task's
+declaration does not change the budget of rows already queued.
+An operator retry is a separate override: it grants one more claim by
+setting the budget to `attempts + 1`, unless the claim count has already
+reached 32767.
+
+Backoff and timeout are read from the module-level task in the code the
+worker runs. Deploying a new declaration therefore changes those policies
+for queued rows, including rows enqueued before the feature was installed.
+
+Each retry receives a fresh full timeout. `TASK_TIMEOUT_GRACE` remains
+worker-wide, and `--lock-timeout` still controls leases rather than
+execution deadlines. A task timeout longer than the lease relies on
+lease renewal.
+
+The row's `max_attempts` is fixed at enqueue unless an operator action
+changes it. Workers and the reaper use that stored value. `result.task`
+preserves the declared class and policy fields, with routing reconstructed
+from the row. Its `max_attempts`, when present, is the declaration rather
+than the stored budget. Re-enqueueing uses that declaration or, when it is
+`None`, the backend's current value. `TaskResult.attempts` is the number of
+claims already taken.
+
+Legacy rows with a stored budget of zero remain readable, and workers
+continue to use that stored budget. `result.task` contains the declared
+policy, not the stored budget. Reading a legacy row does not inject its
+budget into task validation, so otherwise-valid `using()` and
+`dataclasses.replace()` calls remain supported.
+
+By contrast, `result.task.backoff` and `result.task.timeout` describe the
+live declaration loaded when the task is rebuilt, not a historical record
+of an earlier attempt's policy.
+
+### Task copies and backend changes
+
+`Task.using()` still accepts only its standard options: `priority`,
+`queue_name`, `run_after` and `backend`. It preserves the task's class
+and policy, but cannot set the policy fields.
+
+`dataclasses.replace()` can set policy fields on a `PolicyTask` and
+revalidates them. Only a replaced `max_attempts` is persisted at enqueue.
+Replacing `backoff` or `timeout` on a local task copy does not change what
+the worker runs: the worker imports the module-level declaration.
+
+Only a `PolicyTask` supplies policy fields. A plain framework `Task`, or
+a task subclass from another library, rebound to django-ox with
+`.using(backend=...)` inherits all three policies. Same-named attributes
+on that object do not become django-ox policy declarations.
+
+### Framework and typing compatibility
+
+Django 6.0 supports django-ox but does not forward these decorator
+keywords. For example, `@task(max_attempts=5)` fails at module import
+with:
+
+```text
+TypeError: task() got an unexpected keyword argument 'max_attempts'
+```
+
+Changing the backend does not make Django 6.0 accept the keyword.
+Bare `@task` still works under `OxBackend`, with all three policy fields
+set to `None`.
+
+On supported framework versions, use `OxBackend` or the policy-aware
+[test backends](patterns.md#test-without-a-worker) when importing
+declaring modules. Stock framework test backends do not accept these
+declarations.
+
+django-stubs 6.1.1 does not include the forwarded keywords in its `task`
+overloads. On Django 6.1 with django-stubs 6.1.1, mypy does not recognise
+the forwarded policy keywords. The following suppression also covers strict
+mypy's `untyped-decorator` error:
+
+```python
+@task(max_attempts=5, timeout=60)  # type: ignore[call-overload, untyped-decorator]
+def sync_customer(customer_id: int) -> None: ...
+```
+
+The suppression makes the decorated task's static type `Any`, so calls such
+as `enqueue()` lose argument checking. It does not enable policy
+declarations on Django 6.0 or on an unsupported backend. Django 5.2 with
+django-tasks 0.12+ needs no ignore; adding one can fail checks for unused
+ignores.
 
 ## ox_worker
 
@@ -184,7 +365,17 @@ python manage.py ox_worker --queues exports --lock-timeout 7200
 If you embed the worker programmatically, `django_ox.worker.Worker`
 accepts `reap_interval`, `renew_interval`, `schedule_interval`,
 `backoff_initial`, `backoff_max`, `task_timeout` and `task_timeout_grace`
-keyword overrides, which have no flag; they win over the `OPTIONS` values.
+keyword overrides, which have no flag. They replace their corresponding
+`OPTIONS` values.
+
+`backoff_initial` and `backoff_max` set the worker's fallback backoff;
+a task callback takes precedence. Constructor values must be finite
+numbers from 0 to 31557600000 seconds, not strings or bools. Zero is
+allowed here, unlike in `OPTIONS`. Validation runs at worker construction,
+and an `OPTIONS` value replaced by an override is not read.
+
+`task_timeout` replaces only the backend-wide `TASK_TIMEOUT`. A task's
+`timeout` still wins, followed by its queue's `TASK_TIMEOUTS` entry.
 
 `Worker` also accepts the keyword-only argument `heartbeat_file`, defaulting
 to `None`. `ox_worker` passes it to `WORKER_CLASS` only when
@@ -363,17 +554,54 @@ alert are on the
   live on the same database. Route the `django_ox` app to a single one; it
   need not be the default.
 - `django_ox.E010`: `LOCK_TIMEOUT`, `BACKOFF_INITIAL` or `BACKOFF_MAX` is not a
-  positive, finite number of seconds. The worker reads all three, so the check stops a bad value at deploy time.
+  positive, finite number of seconds. Backoff values must also be at most
+  31557600000 seconds, a thousand years, and cannot be strings or bools.
+- `django_ox.E011`: `MAX_ATTEMPTS` cannot be converted by `int()`, converts
+  to a negative budget, or exceeds the write database's storage ceiling.
+  These values could not be used successfully under the supported database
+  settings. The ceilings are 32767 on PostgreSQL, 65535 on MySQL in strict
+  mode, and 9223372036854775807 on SQLite.
 - `django_ox.W003`: `BACKOFF_INITIAL` and `BACKOFF_MAX` are both set to valid
-  numbers and the initial delay is above the cap. Every retry then waits
-  `BACKOFF_MAX`, so the configured first delay never takes effect. The
-  configuration still runs; lower the initial delay or raise the cap.
+  numbers and the initial delay is above the cap. Every retry using the
+  worker's exponential backoff then waits `BACKOFF_MAX`, so the configured
+  first delay never takes effect. The configuration still runs; lower the
+  initial delay or raise the cap.
+- `django_ox.W004`: `MAX_ATTEMPTS` uses a deprecated value that remains
+  accepted: a numeric string, float or bool converted by `int()`, zero, or
+  a value above 32767 that the write database can store. Set it to an
+  integer from 1 to 32767 that is not a bool. Strict enforcement is no
+  earlier than the next major release.
+
+For `MAX_ATTEMPTS`, compatibility conversions retain their existing
+behaviour. For example, `"3"` and `3.7` give a budget of 3. A budget of 0
+gives each task one attempt: a success is SUCCESSFUL and a failure is FAILED.
+Above 32767, the ceiling comes from the database your router uses to write
+`OxTask`. Other database vendors have no known ceiling for this check, so
+values above 32767 produce `W004`, not `E011`. The MySQL ceiling assumes the
+strict mode Django recommends; non-strict mode can clamp values instead.
+
+`W004` is a system-check warning, not a runtime `DeprecationWarning`.
+`manage.py check` succeeds with the warning, and `ox_worker` prints it and
+starts. A process that skips checks gets no warning.
+
+Backend construction records `MAX_ATTEMPTS` configuration errors so checks
+can report them. Reading `OxBackend.max_attempts`, enqueueing any task on
+that backend, or constructing a worker raises `ImproperlyConfigured` for
+an `E011` value. A task's own budget does not bypass an invalid backend
+default.
 
 The worker performs the same schedule and timeout validation at startup.
+It also validates `MAX_ATTEMPTS` and its effective fallback backoff, so
+`ox_worker --skip-checks` still refuses those invalid values.
 Invalid values these checks detect stop startup. They do not establish that
 the database accepts a schedule's arguments. A schedule-scoped failure at
 dispatch is logged as `schedule_dispatch_error`, and the worker continues
 to later schedules if rollback succeeds and the same connection remains usable.
+
+Invalid per-task policy fields raise the framework's `InvalidTask`
+(`InvalidTaskError` on the backport) when the task is built, normally at
+import. They are not system-check messages. Valid task overrides and valid
+test-backend configurations add no system-check warning.
 
 ## Read replicas
 

@@ -83,6 +83,9 @@ coming back. The mechanics, and the one case to know about, are in
 
 - Transactional enqueue, as above. No `on_commit` boilerplate.
 - Retries with exponential backoff and the full traceback of every attempt.
+  [Per-task policy](configuration.md#per-task-policy) adds a retry budget,
+  backoff callback and attempt timeout on Django 6.1 or Django 5.2 with
+  django-tasks 0.12+.
 - A reaper that reclaims tasks after their leases expire, and a lease that
   protects slow tasks while renewal reaches the database on time.
 - Graceful drain on SIGTERM: in-flight tasks finish before the worker exits.
@@ -136,8 +139,11 @@ python manage.py migrate django_ox
 
 ## Quickstart
 
-Tasks are plain `django.tasks` tasks. django-ox adds nothing to learn on
-the producer side.
+Tasks use the standard `django.tasks` decorator and enqueue API. A bare
+`@task` inherits django-ox's backend defaults. Optional
+[per-task policy](configuration.md#per-task-policy) sets a claim budget,
+backoff callback and timeout on Django 6.1, or Django 5.2 with
+django-tasks 0.12+.
 
 ```python
 # myapp/tasks.py
@@ -190,9 +196,12 @@ schedules, and monitoring, with nothing extra to operate. Design
 decisions to know before you commit:
 
 - A queued task can be discarded before a worker claims it, and a failed
-  one retried, from the admin or with `django_ox.actions`. `TASK_TIMEOUT`
-  bounds how long any attempt may run; a particular running task cannot be
-  interrupted on demand.
+  one retried, from the admin or with `django_ox.actions`. Attempt
+  deadlines come from a task's `timeout`, a queue's `TASK_TIMEOUTS`
+  entry, or `TASK_TIMEOUT`. Per-task declarations require Django 6.1 or
+  Django 5.2 with django-tasks 0.12+. A particular running task cannot be
+  interrupted on demand. See [Task timeouts](production.md#task-timeouts)
+  for enforcement and its limits.
 - Every django-ox table lives on one database, the one your router sends
 `OxTask` to. A queue on a different database from the rows it refers to gives
 up the transactional enqueue.

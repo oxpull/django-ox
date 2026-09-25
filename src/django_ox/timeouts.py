@@ -7,11 +7,16 @@ wins over TASK_TIMEOUT for that queue; None there exempts the queue from a
 global limit. TASK_TIMEOUT_GRACE is how long the worker gives a timed-out
 attempt to stop before it treats the thread as stuck and recycles itself.
 
-The mapping is per queue rather than per task because django.tasks gives a
-Task no field a backend could read a timeout from: Task.using() accepts
-priority, queue_name, run_after and backend, and nothing else. Routing a
-task to a queue is the sanctioned way to give it different handling, so
-that is the unit a timeout attaches to.
+A task can also declare its own, as a PolicyTask field: ``@task(timeout=30)``
+on Django 6.1 and on the 5.2 backport, where the decorator forwards keyword
+arguments to OxBackend's task class. That wins over both options for the
+task's attempts, and it applies on a queue TASK_TIMEOUTS exempts, because it
+is the more specific instruction; a queue's None still exempts every task
+that declares nothing. A task cannot turn a limit off, and the grace stays
+the worker's. The declaration is read from the code the worker is running,
+for every attempt, and is not stored on the row. Task.using() still accepts
+only priority, queue_name, run_after and backend, so a timeout belongs to
+the task rather than to one call of it.
 
 deadline() and remaining() are the cooperative side. The worker sets the
 attempt's deadline in a context variable before it calls the task, so a
@@ -113,8 +118,20 @@ class TaskTimeouts:
         """Seconds the tasks on this queue may run, or None for no limit."""
         return self.by_queue.get(queue_name, self.default)
 
+    def for_attempt(self, queue_name: str, declared: float | None) -> float | None:
+        """
+        Seconds one attempt may run, or None for no limit: the task's own
+        timeout when it declares one, and the queue's otherwise.
+        """
+        return float(declared) if declared is not None else self.for_queue(queue_name)
+
     @property
     def enabled(self) -> bool:
+        """
+        Whether the options configure any timeout. Not whether this worker
+        will ever arm one: a task can declare its own, and only its attempt
+        knows that.
+        """
         return self.default is not None or any(
             value is not None for value in self.by_queue.values()
         )

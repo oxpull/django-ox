@@ -23,10 +23,14 @@ Operational facts to get right:
   main loop hung in a database call cannot begin draining until that call
   returns. A second signal forces exit 130; a process that cannot act on
   signals needs SIGKILL.
-- Tasks are ordinary Tasks-framework tasks: `from django.tasks import task` on
-  Django 6.0+, `from django_tasks import task` on 5.2 LTS,
-  decorate with `@task`, call `.enqueue(...)`. django-ox adds nothing on the
-  producer side, so task code stays portable across `django.tasks` backends.
+- Tasks use the Tasks-framework API: `from django.tasks import task` on
+  Django 6.0+, `from django_tasks import task` on 5.2 LTS, decorate with
+  `@task`, call `.enqueue(...)`. Optional `max_attempts`, `backoff` and
+  `timeout` declarations use django-ox's provisional `PolicyTask`.
+  They require Django 6.1, or Django 5.2 with django-tasks 0.12+.
+  Django 6.0 supports bare tasks but rejects policy keyword arguments at
+  import. Other backends must accept these fields before declaring tasks
+  can be moved to them.
 - The worker imports a task by its dotted path, so the module must be
   importable in the worker process and the worker runs the same code as the
   producer; nothing is registered and there is no autodiscovery. `async def`
@@ -63,38 +67,58 @@ Operational facts to get right:
   defaults to `["default"]`; `[]` allows any queue name. A `QUEUES` key
   inside `OPTIONS` is ignored without warning; the symptom is
   `InvalidTask: Queue 'X' is not valid for backend.`
-- An attempt is consumed at claim time, so a dead worker's run counts. Retry
-  delay after attempt n is `BACKOFF_INITIAL * 2 ** (n - 1)`, capped at
-  `BACKOFF_MAX`, no jitter.
+- Set backend `MAX_ATTEMPTS` to a non-bool integer from 1 to 32767.
+  Previously working coercions and budgets remain accepted with system
+  check `django_ox.W004`, including numeric strings, fractional floats
+  truncated by `int()`, bools and zero. A stored budget of zero still
+  permits one attempt. Above 32767, acceptance depends on the database's
+  storage range. Unconvertible values, converted negatives and values
+  above the database's ceiling produce `django_ox.E011`; enqueue and worker
+  startup refuse them. Migrate deprecated values before a future major
+  release makes the range strict. Per-task `max_attempts` is strict now.
+- An attempt is consumed at claim time, so a dead worker's run counts.
+  The budget is stored at enqueue; later declarations do not change it.
+  The default delay after attempt n is `BACKOFF_INITIAL * 2 ** (n - 1)`,
+  capped at `BACKOFF_MAX`, with no jitter. A live task backoff callback
+  can stop retries or choose a delay not capped by `BACKOFF_MAX`.
+  Per-task declarations require Django 6.1 or Django 5.2 with
+  django-tasks 0.12+.
 - `LOCK_TIMEOUT` bounds how long a worker may stop refreshing its lease
   before the reaper hands the task to another worker. The worker schedules
   renewal every `LOCK_TIMEOUT / 3` seconds. An hour-long task keeps its
   lease while renewals succeed. Renewal needs a database connection,
   so a live worker that cannot get one can still lose the lease.
-- With Django's PostgreSQL pool in 1.4.0, use at least `concurrency + 1`
-  pooled connections per worker process. Budget server connections outside
-  the pool too: each process can hold up to `max_size + 1` server connections
-  in total, or `max_size + 2` with task timeouts.
-  Include all processes, aliases, other clients, and reserved
-  slots. Pool fallback needs a spare pooled connection; add and budget one
-  if fallback must work under full load.
-- `TASK_TIMEOUT` (seconds, default None) bounds one attempt: at the deadline
-  the worker raises `django_ox.exceptions.TaskTimeout` inside the task on its
-  own thread (an async task is cancelled), and the attempt is recorded as
-  failed and retried on the backoff. A thread that has not stopped
-  `TASK_TIMEOUT_GRACE` seconds later (default 30; usually a call that never
-  returns to Python) is recorded as failed and the worker exits with code 75
-  so its supervisor restarts it. `TASK_TIMEOUTS = {"queue": seconds}` sets
-  per-queue values; there is no per-task value, because `django.tasks` has
-  no field for one.
+- With Django's PostgreSQL pool, use at least `concurrency + 1` pooled
+  connections per worker process. Budget two additional server connections
+  outside the pool per worker as a worst case: one for lease renewal and
+  one possible timeout-watchdog connection. This gives `max_size + 2`
+  per worker for capacity planning, not a count of open connections or a
+  startup requirement. A worker whose tasks never use timeouts needs only
+  the baseline extra connection; absent OPTIONS timeouts do not prove
+  that, because a task can declare its own timeout.
+  Include all processes, aliases, other clients, and reserved slots.
+  Pool fallback needs a spare pooled connection; add and budget one if
+  fallback must work under full load.
+- An attempt's timeout comes from the task's `timeout`, then
+  `TASK_TIMEOUTS[queue]`, then `TASK_TIMEOUT` (default None). A task timeout
+  applies even on a queue exempted with None. There is no per-task value
+  that disables an inherited limit. Every retry gets a fresh full timeout.
+  At the deadline the worker raises `django_ox.exceptions.TaskTimeout`
+  inside a sync task on its own thread, or cancels an async task.
+  A recorded failure follows the task's retry policy. A thread that has
+  not stopped `TASK_TIMEOUT_GRACE` seconds later (default 30; usually a call
+  that never returns to Python) is recorded as failed and the worker exits
+  with code 75 so its supervisor restarts it. This stuck-thread path never
+  calls user backoff callbacks.
   `django_ox.deadline()` and `django_ox.remaining()` read the attempt's
-  deadline from inside a task. A worker whose threads are watched by a
-  coverage tool or a debugger (a `sys.settrace` hook, or a `sys.monitoring`
-  tool with events enabled) raises nothing inside a running sync task: it
-  logs `timeouts_backstop_only`, a task that returns within
-  `TASK_TIMEOUT_GRACE` is recorded as whatever it did, and one still running
-  then is recorded as failed and recycles the worker. An async task is
-  cancelled at the deadline either way.
+  deadline from inside a task, including task-declared timeouts.
+  A worker whose threads are watched by a coverage tool or a debugger
+  (a `sys.settrace` hook, or a `sys.monitoring` tool with events enabled)
+  raises nothing inside a running sync task: it logs
+  `timeouts_backstop_only`, a task that returns within `TASK_TIMEOUT_GRACE`
+  is recorded as whatever it did, and one still running then is recorded
+  as failed and recycles the worker. An async task is cancelled at the
+  deadline either way.
 - `ox_worker --concurrency N` is a thread pool in one process, suited to
   I/O-bound tasks. `--processes N` runs N such workers under one supervisor,
   each with its own connections and reaper; for CPU-bound work use
@@ -205,10 +229,15 @@ Operational facts to get right:
   `ox_import_beat_schedules` spells the flag the same way and means something
   else: the alias holding your django-celery-beat tables, defaulting to the
   alias `OxSchedule` reads from.
-- For tests, point `TASKS` at
-  `django.tasks.backends.immediate.ImmediateBackend` or
-  `django.tasks.backends.dummy.DummyBackend` on Django 6.0+; on Django 5.2 LTS
-  the same paths under `django_tasks.backends.`.
+- For tests, point `TASKS` at `django_ox.testing.ImmediateBackend` or
+  `django_ox.testing.DummyBackend` on every supported Django version.
+  They accept and validate policy declarations but do not enforce them:
+  Immediate executes once on the caller's thread; Dummy does not execute.
+  Neither retries, calls backoff callbacks or enforces timeouts.
+  They log `task_policy_inert` once per explicitly policy-bearing task path
+  per backend instance. Stock test backends reject policy declarations on
+  fresh import, or can silently ignore fields on tasks built before a
+  backend switch. Test policy enforcement against a real worker.
 - Batches, unique (deduplicated) tasks, rate limiting and workflows are in
   Oxpull Pro, a paid add-on; <https://oxpull.com/> has the details. They
   are not in django-ox. `django_ox.stats` and

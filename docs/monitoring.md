@@ -646,7 +646,8 @@ The same shape reads `oldest_ready_age()` or `failure_rate()` per queue.
 
 The worker logs through the standard library logger named `django_ox`. No
 logging dependency, no imposed format. Configure handlers and formatters in
-`LOGGING` as usual.
+`LOGGING` as usual. The `django_ox.testing` backends also emit the
+`task_policy_inert` event below.
 
 Lifecycle events carry an `extra` dictionary with stable keys, so a JSON
 formatter that serialises record attributes gets consistent fields to index.
@@ -659,12 +660,14 @@ The message text is not part of the contract. The keys are.
 | `task_claimed` | DEBUG | A task was claimed from the queue. |
 | `task_started` | DEBUG | Execution of an attempt begins. |
 | `task_succeeded` | INFO | The task reached SUCCESSFUL. |
-| `task_timed_out` | WARNING | An attempt ran past its `TASK_TIMEOUT` and is recorded as failed; a `task_retrying` or `task_failed` record follows. It counts timeouts recorded as failures, not deadlines that passed: a task that catches `TaskTimeout` and returns produces no event, and neither does a timeout on a worker logging `timeouts_backstop_only`, where the attempt ends in `task_stuck` or in whatever the task went on to do. |
+| `task_timed_out` | WARNING | An attempt ran past its resolved task, queue or backend timeout and is recorded as failed; a `task_retrying` or `task_failed` record follows. It counts timeouts recorded as failures, not deadlines that passed: a task that catches `TaskTimeout` and returns produces no event, and neither does a timeout on a worker logging `timeouts_backstop_only`, where the attempt ends in `task_stuck` or in whatever the task went on to do. |
 | `task_stuck` | ERROR | A timed-out attempt's thread did not stop within `TASK_TIMEOUT_GRACE`. The attempt is recorded as failed and the worker is recycling. On a worker logging `timeouts_backstop_only` nothing is raised inside the task, so this is the ordinary end of a timeout there rather than a pathological one. |
 | `worker_recycling` | WARNING | The worker stopped claiming after a stuck thread; it drains its other tasks and exits with code 75. It follows a `task_stuck` whose thread is still inside the attempt, which is the usual case, so on a worker logging `timeouts_backstop_only` every timeout that reaches the backstop costs a worker restart. |
-| `timeouts_backstop_only` | WARNING | Once per worker: `TaskTimeout` is not raised inside a running sync task, because the interpreter cannot raise an exception inside another thread (`reason=interpreter`, logged at startup) or a coverage tool or debugger is watching the worker's threads (`reason=tracing_tool`, logged on the first attempt registered under it). `TASK_TIMEOUT_GRACE` is the whole enforcement while it stands. See [Task timeouts](production.md#task-timeouts). |
-| `task_retrying` | WARNING | An attempt failed with retries remaining. |
-| `task_failed` | ERROR | The task reached FAILED, out of attempts. |
+| `timeouts_backstop_only` | WARNING | Once per worker: `TaskTimeout` is not raised inside a running sync task because the interpreter cannot raise an exception inside another thread (`reason=interpreter`) or a coverage tool or debugger is watching the worker's threads (`reason=tracing_tool`). The interpreter warning appears at startup if `OPTIONS` configures a timeout, otherwise on the first attempt that arms one. The tracing warning appears on the first attempt registered under the tool. `TASK_TIMEOUT_GRACE` is the whole enforcement while it stands. See [Task timeouts](production.md#task-timeouts). |
+| `task_retrying` | WARNING | An attempt failed and is scheduled for retry. `retry_in_s` gives the delay in seconds. |
+| `task_failed` | ERROR | The task reached FAILED because its attempts are exhausted (`reason="attempts_exhausted"`) or its backoff callback returned `None` (`reason="backoff_declined"`). An attempt whose task cannot be rebuilt also logs this event on its final claim, without sending `task_finished`. |
+| `task_policy_error` | ERROR | A backoff callback raised or returned an invalid value. The worker uses its exponential backoff instead and records the task's original exception, not the callback error. |
+| `task_policy_inert` | WARNING | A `django_ox.testing` backend first enqueues a task with explicitly declared policy. Once per task path per backend instance. These backends accept and validate policy but do not retry, call backoff callbacks or enforce timeouts. |
 | `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. One record per task. A pass whose stuck set changed while it ran (a lease renewed, or one more lease expired) instead emits a single record carrying `count` and no `task_id`, because it cannot say which tasks the reclaim covered. |
 | `task_lease_lost` | WARNING | A worker finished an attempt whose lease had already been reclaimed, so its write was dropped and no result was signalled. |
 | `task_outcome_reconnected` | WARNING | After a connection-level failure while recording an attempt's outcome, a new connection either recorded it or confirmed that the first write had already committed. Carries `outcome`, `already_written` and `duration_ms`; the usual outcome log follows. Recovery retries outcome persistence at most once, never the task body. Does not cover the watchdog's stuck-attempt records. |
@@ -727,19 +730,25 @@ A failed connect while recording a stuck attempt logs
 | Key | Present on | Meaning |
 | --- | --- | --- |
 | `event` | all events | The event name from the table above. |
-| `worker_id` | all worker events except `heartbeat_write_failed` | Unique id of the worker emitting the record. With `--processes`, the slot number is the last part of the id. |
+| `worker_id` | all worker events except `heartbeat_write_failed` | Unique id of the worker emitting the record. With `--processes`, the slot number is the last part of the id. Absent from `task_policy_inert`, which comes from a test backend. |
 | `worker_class` | `claim_filter_sql_missing` | The Worker subclass's class name. |
 | `claimed` | `worker_batch_empty`, `worker_max_tasks_reached` | Task attempts this worker claimed in its run, failed attempts and retries included. |
-| `task_id` | task events | The task's UUID, as a string. |
+| `task_id` | worker task events | The task's UUID, as a string. Absent from `task_policy_inert`. |
 | `task_path` | task events | Dotted path of the task function. |
-| `queue` | task events | Queue name. |
-| `attempt` | task events | Attempts consumed so far, including the current one. |
+| `queue` | worker task events | Queue name. Absent from `task_policy_inert`. |
+| `attempt` | worker task events | Attempts consumed so far, including the current one. Absent from `task_policy_inert`. |
 | `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_timed_out`, `task_stuck`, `task_lease_lost`, `task_outcome_reconnected`, `task_outcome_unrecorded` | Wall-clock duration of the attempt, in milliseconds. |
 | `timeout_s` | `task_timed_out`, `task_stuck` | The timeout that applied, in seconds. |
 | `grace_s` | `task_stuck`, `timeouts_backstop_only` | `TASK_TIMEOUT_GRACE`, in seconds. |
 | `reason` | `timeouts_backstop_only` | Why the backstop is the whole enforcement: `interpreter` or `tracing_tool`. |
+| `reason` | `task_failed` | Why the task reached FAILED: `attempts_exhausted` or `backoff_declined`. |
 | `tracer` | `timeouts_backstop_only` with `reason=tracing_tool` | How the worker's threads are being watched: `sys.settrace` when a trace function is installed, which does not say which tool installed it, or `sys.monitoring (NAME)` for a registered tool, which names itself. |
-| `exception` | `task_retrying`, `task_failed` | Exception class name of the failure. |
+| `exception` | `task_retrying`, `task_failed`, `task_policy_error` | Exception class name of the task failure, not a callback failure. |
+| `retry_in_s` | `task_retrying` | Retry delay in seconds, as a float. |
+| `policy` | `task_policy_error` | The policy field that failed; currently `backoff`. |
+| `error` | `task_policy_error` | What the callback did: raised, returned an awaitable, or returned an invalid value. A raised exception includes its traceback. |
+| `backend` | `task_policy_inert` | Test-backend alias. |
+| `declared` | `task_policy_inert` | Sorted list of explicitly declared policy field names. |
 | `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `LOST` (out of attempts). |
 | `count` | `task_reclaimed` without `task_id` | How many tasks that pass reclaimed. Present only on the batch record described above. |
 | `held_by` | `task_reclaimed` | The worker that stopped refreshing the lock, from the row. `worker_id` on the same record is the reaper that noticed. Absent on the batch record, along with `task_id`, `task_path`, `queue` and `attempt`. |
@@ -755,7 +764,7 @@ A failed connect while recording a stuck attempt logs
 | `database` | `connection_pool_too_small`, `schedule_dispatch_error`, `schedule_dispatch_failed`, `schedule_dispatch_recovered` | The worker's database alias: `--database`, or the alias used to write `OxTask`. |
 | `max_size` | `connection_pool_too_small` | The effective pool maximum. `pool=True` means 4. For a non-empty mapping, use `max_size`; if absent or `None`, use `min_size`, defaulting to 4. The sizing check skips values that are not an `int` of at least 1. It excludes booleans and floats such as `10.0`. |
 | `recommended_max_size` | `connection_pool_too_small` | `concurrency + 1`: one pooled connection per task thread and one for the poll loop. This does not reserve fallback capacity or validate the server budget. |
-| `unpooled_connections` | `connection_pool_too_small` | Additional private-connection budget per worker process, not a count of open connections. 2 if `TASK_TIMEOUT` is set or any `TASK_TIMEOUTS` value is not `None`; otherwise 1. |
+| `unpooled_connections` | `connection_pool_too_small` | Worst-case additional private-connection budget per worker process, not a count of open connections. Always 2: one for lease renewal and one possible timeout-watchdog connection. A worker whose tasks never use timeouts needs only the first. An absent timeout in `OPTIONS` alone does not establish that, because a task can declare its own. |
 | `pending` | `worker_draining` | In-flight tasks at shutdown. |
 | `processes` | `supervisor_started` | Worker processes the supervisor runs. |
 | `worker_index`, `exit_code` | `worker_process_restarted`, `worker_process_recycled`, `supervisor_restart_cap` | Which slot exited and how. A negative code is the signal that killed it. |
@@ -945,7 +954,7 @@ actions.discard(result.id)  # True if the row was closed
 
 | Function | Accepts | Does |
 | --- | --- | --- |
-| `retry(result_id)` | FAILED, LOST | Sets the row back to READY for one more attempt, clears `run_after` so it is eligible at once, and raises `max_attempts` to `attempts + 1`. The count, `worker_ids` and every per-attempt traceback stay as they were, so the record still says what happened before. The lease number goes up, so a LOST row's last worker, if it is still alive somewhere, writes nothing over the retry. |
+| `retry(result_id)` | FAILED, LOST, with fewer than 32767 claims | Sets the row back to READY for one more attempt, clears `run_after` so it is eligible at once, and sets `max_attempts` to `attempts + 1`. This is an operator override, not the task's declared budget. The count, `worker_ids` and every per-attempt traceback stay as they were, so the record still says what happened before. The lease number goes up, so a LOST row's last worker, if it is still alive somewhere, writes nothing over the retry. A row at the claim ceiling is left untouched and returns `False`. |
 | `expire_lease(result_id)` | RUNNING | Sets the lease's expiry into the past so the next reaper pass reclaims the task; a renewal that lands before that pass restores the lease, so read the result and call it again if needed. The task itself keeps running; the lease number refuses its finish write once another worker holds the row, so this brings the ordinary reclaim forward rather than cancelling anything. For a lease granted with a timeout that turned out to be wrong: the row carries its own deadline, so changing the setting on the workers does not move it. |
 | `discard(result_id)` | READY, WAITING, FAILED, LOST | Marks the row DISCARDED. A READY or WAITING task that is discarded never runs; a discarded FAILED or LOST task is not retried. The attempt records stay. |
 
@@ -954,6 +963,10 @@ for a queryset or a list of ids. They run one conditional UPDATE per
 thousand rows inside one transaction and return `(changed, skipped)`. The
 admin actions use them, so a select-across of a hundred thousand rows is a
 hundred UPDATEs, and either all of it lands or none does.
+
+`retry_many()` counts each row at the claim ceiling as skipped; other
+eligible rows still move. The ceiling check is part of the same UPDATE
+that would grant the extra attempt.
 
 They sort the ids first and take the rows in primary key order. On
 PostgreSQL and MySQL each UPDATE follows a locking read of its thousand
@@ -973,10 +986,12 @@ discard finishes the result without `task_finished`, and a retry requeues
 it without `task_enqueued`.
 
 Both single-row functions return `False` for any other state, for an id
-that is not in the table, and for a malformed id. `RUNNING` and `SUCCESSFUL` rows are never
-matched, and `retry` never matches a `WAITING` row. A retry that races a second retry of the same row, or a discard
-that races a worker's claim, resolves to exactly one winner: the UPDATE
-pins the lease number it read, and the loser matches zero rows.
+that is not in the table, and for a malformed id. `retry()` also returns
+`False` when `attempts` is already 32767 or higher. `RUNNING` and
+`SUCCESSFUL` rows are never matched, and `retry` never matches a `WAITING`
+row. A retry that races a second retry of the same row, or a discard that
+races a worker's claim, resolves to exactly one winner: the UPDATE pins
+the lease number it read, and the loser matches zero rows.
 
 A retried task is one more attempt, not a fresh set. If the new attempt
 fails, the row is FAILED again with one more traceback, and can be retried

@@ -1,0 +1,653 @@
+#!/usr/bin/env python3
+"""
+The acceptance gate for a django-ox release paired with its Oxpull release.
+
+django-ox and Oxpull ship as an exact-pinned pair, so two green suites are
+not a verdict on their own: each could have imported the other package from
+somewhere else (an editable install, a wheel left in the venv, PyPI's copy of
+the pinned version), and skips hide what a leg did not run. This runs both
+suites on one leg and fails unless all of the following hold:
+
+- `django_ox` is imported from the django-ox checkout under test, and
+  `oxpull` from the Oxpull checkout, in the environment each suite runs in.
+  For the Oxpull suite that includes the interpreter on its own, with
+  PYTHONPATH cleared, because Oxpull's subprocess tests start children that
+  build their own path: those children must find the same `django_ox`, and
+  the settings module, without the parent's PYTHONPATH.
+- Oxpull's pyproject pins exactly the `django_ox.__version__` under test.
+- Neither suite has a failure or an error, and pytest exits 0.
+- Every skip is explained. django-ox's explanations are listed below, each
+  for the databases (and Django versions) where it is expected, so a
+  PostgreSQL leg that skips the connection-pool tests because psycopg_pool is
+  missing fails here rather than passing with fewer tests. Oxpull's come
+  from a file (--pro-skips), because they belong to that repository.
+- Every xfail is known: its test id is in the baseline file (--xfails,
+  --pro-xfails). django-ox has none. A test that now passes where the
+  baseline expected a failure is reported, not failed.
+
+One leg is one interpreter and one settings module per suite. Name them with
+flags, or list several in a JSON file (--legs) to run them all in one
+command: a list of objects whose keys are the long flag names without the
+dashes and with underscores, for example
+
+    [{"name": "dj61-pg", "python": ".../dj61/bin/python",
+      "settings": "tests.settings_postgres",
+      "pro_python": ".../paired61/bin/python",
+      "pro_settings": "tests.settings_postgres"}]
+
+A key a leg leaves out takes the flag's value. --record DIR writes the skips
+and xfails each suite showed, in the files' own format, to review and pass
+back next time; the run still fails on any failure.
+
+The suites run from their checkouts with PYTHONPATH built here: the django-ox
+checkout's src and its root (its tests import as `tests`) for the django-ox
+suite, and Oxpull's src plus django-ox's src, never django-ox's root, for the
+Oxpull suite, whose own tests package is also `tests`. --pythonpath entries
+(a settings directory, say) are appended to both. Everything else in the
+environment passes through, so a variable a settings module reads (a test
+database name, say) is set on this command.
+
+Exit status: 0 when every leg passed, 1 when a leg failed the gate, 2 when
+the command or the environment is wrong before any suite ran.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+DEFAULT_DJANGO_OX = HERE.parent
+
+#: Why a django-ox test may skip, and where. `databases` None means on every
+#: database; `django` names the only Django version (major.minor) where it is
+#: expected. A skip matching none of these is unexplained. Add a line here in
+#: the same change that adds the skip, saying where it belongs.
+DJANGO_OX_SKIPS = [
+    # Run without --cov; test_timeouts.py checks the tool id coverage holds.
+    {"reason": r"this session is not measured by coverage"},
+    {"reason": r"there is no process clock on this path to skew"},
+    {"reason": r"Django 6\.0's @task takes no policy", "django": "6.0"},
+    {
+        "reason": r"no gap on this backend: RETURNING or a row lock covers it",
+        "databases": {"postgresql", "mysql"},
+    },
+    {
+        "reason": r"this database claims with SKIP LOCKED, not compare-and-set",
+        "databases": {"postgresql", "mysql"},
+    },
+    {
+        "reason": r"innodb_lock_wait_timeout is MySQL's",
+        "databases": {"postgresql", "sqlite"},
+    },
+    {"reason": r"SQLite's parameter limit", "databases": {"postgresql", "mysql"}},
+    {
+        "reason": r"Django's connection pool is PostgreSQL only",
+        "databases": {"sqlite", "mysql"},
+    },
+    {"reason": r"counts pg_stat_activity sessions", "databases": {"sqlite", "mysql"}},
+    {
+        "reason": r"buffers per claim are PostgreSQL's reading",
+        "databases": {"sqlite", "mysql"},
+    },
+    {
+        "reason": r"only PostgreSQL reports rows actually read",
+        "databases": {"sqlite", "mysql"},
+    },
+    {
+        "reason": r"only PostgreSQL claims in a single statement",
+        "databases": {"sqlite", "mysql"},
+    },
+    {
+        "reason": r"Only PostgreSQL raises a serialization failure here",
+        "databases": {"sqlite", "mysql"},
+    },
+    {
+        "reason": r"stops a worker with SIGSTOP, run on PostgreSQL",
+        "databases": {"sqlite", "mysql"},
+    },
+    {
+        "reason": r"uses pg_terminate_backend or SELECT \.\.\. FOR UPDATE NOWAIT",
+        "databases": {"sqlite", "mysql"},
+    },
+    {
+        "reason": r"has the server end a connection, with pg_terminate_backend or KILL",
+        "databases": {"sqlite"},
+    },
+    {
+        "reason": r"closes the database to new connections, with ALTER DATABASE",
+        "databases": {"sqlite", "mysql"},
+    },
+    {"reason": r"this database has no SKIP LOCKED", "databases": {"sqlite"}},
+    {"reason": r"SQLite has no locking read to lose on", "databases": {"sqlite"}},
+    {
+        "reason": r"SQLite has no row locks to take in any order",
+        "databases": {"sqlite"},
+    },
+    {"reason": r"SQLite has no row locks to deadlock over", "databases": {"sqlite"}},
+    {
+        "reason": r"SQLite has no row locks, and its prune sends no locking read",
+        "databases": {"sqlite"},
+    },
+    {
+        "reason": r"SQLite lets one writer in at a time, whatever the queue",
+        "databases": {"sqlite"},
+    },
+    {
+        "reason": r"SQLite has one writer; this is its lock",
+        "databases": {"postgresql", "mysql"},
+    },
+    {
+        "reason": r"SQLite has one writer; the next test covers it",
+        "databases": {"sqlite"},
+    },
+    {"reason": r"SQLite's single writer", "databases": {"postgresql", "mysql"}},
+    {"reason": r"ends a connection from the server's side", "databases": {"sqlite"}},
+    {
+        "reason": r"ends backends by application name",
+        "databases": {"sqlite", "mysql"},
+    },
+]
+
+PYTEST_ARGS = ["-q", "-p", "no:cacheprovider", "-rfEsxX"]
+
+# Run by each suite's interpreter, in that suite's environment. Prints what
+# the gate checks, as JSON on the last line.
+PROBE = r"""
+import json, os, sys
+out = {"executable": sys.executable, "python": sys.version.split()[0]}
+for name in ("django_ox", "oxpull", "django"):
+    try:
+        module = __import__(name)
+    except Exception as exc:
+        out[name] = {"error": f"{type(exc).__name__}: {exc}"}
+    else:
+        out[name] = {
+            "file": getattr(module, "__file__", None),
+            "version": getattr(module, "__version__", None),
+        }
+settings = os.environ.get("DJANGO_SETTINGS_MODULE")
+if settings:
+    try:
+        import django
+        django.setup()
+        from django.db import connections
+        out["database"] = connections["default"].vendor
+    except Exception as exc:
+        out["database"] = {"error": f"{type(exc).__name__}: {exc}"}
+print(json.dumps(out))
+"""
+
+
+class GateError(Exception):
+    """The environment is wrong before any suite has run."""
+
+
+@dataclass
+class Leg:
+    name: str
+    django_ox: Path
+    pro: Path | None
+    python: str
+    settings: str | None
+    pro_python: str | None
+    pro_settings: str | None
+    pythonpath: list[str]
+    skips: Path | None
+    xfails: Path | None
+    pro_skips: Path | None
+    pro_xfails: Path | None
+    pytest_args: list[str]
+    pro_pytest_args: list[str]
+    only: str
+
+
+@dataclass
+class Outcome:
+    suite: str
+    exit_code: int
+    log: Path
+    counts: dict[str, int] = field(default_factory=dict)
+    problems: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    skips: list[tuple[str, str]] = field(default_factory=list)
+    xfails: list[str] = field(default_factory=list)
+
+
+def _under(path: str | None, root: Path) -> bool:
+    if not path:
+        return False
+    return root.resolve() in Path(path).resolve().parents
+
+
+def _probe(python: str, cwd: Path, env: dict[str, str]) -> dict:
+    completed = subprocess.run(  # noqa: S603
+        [python, "-c", PROBE],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    lines = completed.stdout.strip().splitlines()
+    if completed.returncode != 0 or not lines:
+        raise GateError(
+            f"{python} could not run the import probe in {cwd}:\n"
+            f"{completed.stderr.strip()}"
+        )
+    return json.loads(lines[-1])
+
+
+def _base_env(settings: str | None, pythonpath: list[str]) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    if settings:
+        env["DJANGO_SETTINGS_MODULE"] = settings
+    else:
+        env.pop("DJANGO_SETTINGS_MODULE", None)
+    if pythonpath:
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath)
+    return env
+
+
+def _pinned_version(pro: Path) -> str | None:
+    text = (pro / "pyproject.toml").read_text()
+    found = re.search(r"""["']django-ox\s*==\s*([^"',;\s]+)""", text)
+    return found.group(1) if found else None
+
+
+def _read_list(path: Path | None) -> list[str]:
+    if path is None:
+        return []
+    lines = path.read_text().splitlines()
+    return [line.strip() for line in lines if line.strip() and not line.startswith("#")]
+
+
+def _scoped(line: str) -> tuple[set[str] | None, str]:
+    """`[sqlite,mysql] text` -> ({"sqlite", "mysql"}, "text")."""
+    found = re.match(r"\[([a-z,\s]+)\]\s*(.*)", line)
+    if not found:
+        return None, line
+    return {part.strip() for part in found.group(1).split(",")}, found.group(2)
+
+
+def _explained(reason: str, database: str, django: str, allowed: list[dict]) -> bool:
+    for entry in allowed:
+        databases = entry.get("databases")
+        if databases is not None and database not in databases:
+            continue
+        version = entry.get("django")
+        if version is not None and not django.startswith(version + "."):
+            continue
+        if re.search(entry["reason"], reason):
+            return True
+    return False
+
+
+def _file_skips(path: Path | None) -> list[dict]:
+    allowed = []
+    for line in _read_list(path):
+        databases, reason = _scoped(line)
+        allowed.append({"reason": reason, "databases": databases})
+    return allowed
+
+
+def _file_xfails(path: Path | None, database: str) -> set[str]:
+    known = set()
+    for line in _read_list(path):
+        databases, test_id = _scoped(line)
+        if databases is None or database in databases:
+            known.add(test_id)
+    return known
+
+
+def _junit(path: Path) -> tuple[dict[str, int], list[str], list[tuple], list[str]]:
+    counts = {"passed": 0, "failed": 0, "errors": 0, "skipped": 0, "xfailed": 0}
+    failed: list[str] = []
+    skips: list[tuple[str, str]] = []
+    xfails: list[str] = []
+    for case in ET.parse(path).getroot().iter("testcase"):  # noqa: S314
+        test_id = f"{case.get('classname')}::{case.get('name')}"
+        if case.find("failure") is not None:
+            counts["failed"] += 1
+            failed.append(test_id)
+        elif case.find("error") is not None:
+            counts["errors"] += 1
+            failed.append(test_id)
+        elif (skipped := case.find("skipped")) is not None:
+            if skipped.get("type") == "pytest.xfail":
+                counts["xfailed"] += 1
+                xfails.append(test_id)
+            else:
+                counts["skipped"] += 1
+                skips.append((test_id, skipped.get("message") or ""))
+        else:
+            counts["passed"] += 1
+    return counts, failed, skips, xfails
+
+
+def _run_suite(
+    *,
+    suite: str,
+    python: str,
+    cwd: Path,
+    env: dict[str, str],
+    args: list[str],
+    out: Path,
+    database: str,
+    django: str,
+    allowed_skips: list[dict],
+    known_xfails: set[str],
+) -> Outcome:
+    junit = out / f"{suite}.xml"
+    log = out / f"{suite}.log"
+    command = [python, "-m", "pytest", *PYTEST_ARGS, f"--junitxml={junit}", *args]
+    print(f"  running {suite}: {shlex.join(command)}", flush=True)
+    print(f"    in {cwd}, log {log}", flush=True)
+    started = time.monotonic()
+    with log.open("w") as stream:
+        completed = subprocess.run(  # noqa: S603
+            command,
+            cwd=cwd,
+            env=env,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    outcome = Outcome(suite=suite, exit_code=completed.returncode, log=log)
+    if not junit.exists():
+        outcome.problems.append(
+            f"pytest exited {completed.returncode} without a report; see {log}"
+        )
+        return outcome
+    counts, failed, skips, xfails = _junit(junit)
+    outcome.counts = counts
+    outcome.skips = skips
+    outcome.xfails = xfails
+    outcome.notes.append(f"{time.monotonic() - started:.0f}s")
+    if completed.returncode != 0:
+        outcome.problems.append(f"pytest exited {completed.returncode}")
+    outcome.problems.extend(f"failed: {test_id}" for test_id in failed)
+    for test_id, reason in skips:
+        if not _explained(reason, database, django, allowed_skips):
+            outcome.problems.append(
+                f"unexplained skip on {database}: {test_id}: {reason}"
+            )
+    for test_id in xfails:
+        if test_id not in known_xfails:
+            outcome.problems.append(f"new xfail on {database}: {test_id}")
+    xpassed = re.findall(r"^XPASS (\S+)", log.read_text(), flags=re.MULTILINE)
+    outcome.notes.extend(f"now passes, baseline expects xfail: {t}" for t in xpassed)
+    return outcome
+
+
+def _record(outcome: Outcome, database: str, directory: Path) -> None:
+    """
+    Add what `outcome` showed to the files in `directory`, merged with what
+    they hold already, so a suite run in parts records the whole of it.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    found = {
+        "skips": {f"[{database}] {re.escape(reason)}" for _, reason in outcome.skips},
+        "xfails": {f"[{database}] {test_id}" for test_id in outcome.xfails},
+    }
+    for kind, lines in found.items():
+        path = directory / f"{outcome.suite}-{database}.{kind}"
+        lines |= set(_read_list(path)) if path.exists() else set()
+        path.write_text("".join(f"{line}\n" for line in sorted(lines)))
+
+
+def run_leg(leg: Leg, out: Path, record: Path | None) -> list[Outcome]:
+    out.mkdir(parents=True, exist_ok=True)
+    dox_src = leg.django_ox / "src"
+    outcomes: list[Outcome] = []
+    print(f"leg {leg.name}", flush=True)
+
+    if leg.only in ("both", "django-ox"):
+        env = _base_env(
+            leg.settings, [str(dox_src), str(leg.django_ox), *leg.pythonpath]
+        )
+        seen = _probe(leg.python, leg.django_ox, env)
+        imported = seen["django_ox"].get("file")
+        if not _under(imported, dox_src):
+            raise GateError(
+                f"{leg.name}: the django-ox suite imports django_ox from "
+                f"{imported or seen['django_ox']}, not from {dox_src}"
+            )
+        database = seen.get("database")
+        if not isinstance(database, str):
+            raise GateError(
+                f"{leg.name}: no database for the django-ox suite: {database}"
+            )
+        django = seen["django"]["version"]
+        print(
+            f"  django-ox suite: django_ox {imported}, Django {django}, "
+            f"Python {seen['python']}, {database}",
+            flush=True,
+        )
+        outcome = _run_suite(
+            suite="django-ox",
+            python=leg.python,
+            cwd=leg.django_ox,
+            env=env,
+            args=leg.pytest_args,
+            out=out,
+            database=database,
+            django=django,
+            allowed_skips=DJANGO_OX_SKIPS + _file_skips(leg.skips),
+            known_xfails=_file_xfails(leg.xfails, database),
+        )
+        outcomes.append(outcome)
+        if record is not None:
+            _record(outcome, database, record)
+
+    if leg.only in ("both", "pro"):
+        if leg.pro is None or leg.pro_python is None:
+            raise GateError(
+                f"{leg.name}: the Oxpull suite needs --pro and --pro-python"
+            )
+        pro_src = leg.pro / "src"
+        env = _base_env(leg.pro_settings, [str(pro_src), str(dox_src), *leg.pythonpath])
+        seen = _probe(leg.pro_python, leg.pro, env)
+        for name, root in (("django_ox", dox_src), ("oxpull", pro_src)):
+            imported = seen[name].get("file")
+            if not _under(imported, root):
+                raise GateError(
+                    f"{leg.name}: the Oxpull suite imports {name} from "
+                    f"{imported or seen[name]}, not from {root}"
+                )
+        pinned = _pinned_version(leg.pro)
+        version = seen["django_ox"]["version"]
+        if pinned != version:
+            raise GateError(
+                f"{leg.name}: Oxpull pins django-ox=={pinned}, and the django-ox "
+                f"under test is {version}; the pair is not exact-pinned"
+            )
+        # What Oxpull's subprocess tests' children see: the interpreter's own
+        # path, plus Oxpull's src and the checkout root, which they put on
+        # PYTHONPATH themselves. django_ox is not there: a child that runs a
+        # released Oxpull gets none, so the interpreter has to supply it.
+        child = _base_env(leg.pro_settings, [str(pro_src), str(leg.pro)])
+        alone = _probe(leg.pro_python, leg.pro, child)
+        imported = alone["django_ox"].get("file")
+        if not _under(imported, dox_src):
+            raise GateError(
+                f"{leg.name}: without PYTHONPATH, {leg.pro_python} imports "
+                f"django_ox from {imported or alone['django_ox']}, not from "
+                f"{dox_src}; Oxpull's subprocess tests would run another "
+                "django-ox. Put a .pth naming it in that venv's site-packages, "
+                "or pip install --no-deps -e it there."
+            )
+        if not isinstance(alone.get("database"), str):
+            raise GateError(
+                f"{leg.name}: without PYTHONPATH, {leg.pro_python} cannot load "
+                f"the settings {leg.pro_settings!r}: {alone.get('database')}. "
+                "Oxpull's subprocess tests import it from the interpreter's own "
+                "path; put its directory in a .pth in that venv."
+            )
+        database = seen.get("database")
+        if not isinstance(database, str):
+            raise GateError(f"{leg.name}: no database for the Oxpull suite: {database}")
+        django = seen["django"]["version"]
+        print(
+            f"  Oxpull suite: oxpull {seen['oxpull']['file']}, django_ox "
+            f"{seen['django_ox']['file']} {version} (pinned {pinned}), "
+            f"Django {django}, Python {seen['python']}, {database}",
+            flush=True,
+        )
+        outcome = _run_suite(
+            suite="oxpull",
+            python=leg.pro_python,
+            cwd=leg.pro,
+            env=env,
+            args=leg.pro_pytest_args,
+            out=out,
+            database=database,
+            django=django,
+            allowed_skips=_file_skips(leg.pro_skips),
+            known_xfails=_file_xfails(leg.pro_xfails, database),
+        )
+        outcomes.append(outcome)
+        if record is not None:
+            _record(outcome, database, record)
+    return outcomes
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[1],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--name", default="leg", help="a name for the leg")
+    parser.add_argument(
+        "--django-ox",
+        type=Path,
+        default=DEFAULT_DJANGO_OX,
+        help="the django-ox checkout (default: the one holding this script)",
+    )
+    parser.add_argument("--pro", type=Path, help="the Oxpull checkout")
+    parser.add_argument(
+        "--python", default=sys.executable, help="interpreter for the django-ox suite"
+    )
+    parser.add_argument(
+        "--settings",
+        default="tests.settings",
+        help="DJANGO_SETTINGS_MODULE for django-ox (default: %(default)s)",
+    )
+    parser.add_argument("--pro-python", help="interpreter for the Oxpull suite")
+    parser.add_argument(
+        "--pro-settings",
+        default="tests.settings",
+        help="DJANGO_SETTINGS_MODULE for Oxpull (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--pythonpath",
+        action="append",
+        default=[],
+        help="a directory added to both suites' PYTHONPATH (repeatable)",
+    )
+    parser.add_argument("--skips", type=Path, help="extra django-ox skip reasons")
+    parser.add_argument("--xfails", type=Path, help="known django-ox xfails")
+    parser.add_argument("--pro-skips", type=Path, help="explained Oxpull skip reasons")
+    parser.add_argument("--pro-xfails", type=Path, help="known Oxpull xfails")
+    parser.add_argument(
+        "--pytest-args",
+        default="",
+        help=(
+            "more arguments for the django-ox pytest, as one shell-quoted "
+            "string; write --pytest-args=... when it starts with a dash"
+        ),
+    )
+    parser.add_argument(
+        "--pro-pytest-args",
+        default="",
+        help="more arguments for the Oxpull pytest, the same way",
+    )
+    parser.add_argument(
+        "--only",
+        choices=("both", "django-ox", "pro"),
+        default="both",
+        help="run one suite of the pair (the gate needs both)",
+    )
+    parser.add_argument("--legs", type=Path, help="a JSON list of legs to run")
+    parser.add_argument("--out", type=Path, help="where reports and logs go")
+    parser.add_argument(
+        "--record", type=Path, help="write each suite's skips and xfails here"
+    )
+    return parser
+
+
+def _legs(args: argparse.Namespace) -> list[Leg]:
+    defaults = vars(args)
+    specs = json.loads(args.legs.read_text()) if args.legs else [{}]
+    legs = []
+    for spec in specs:
+        unknown = set(spec) - set(defaults)
+        if unknown:
+            raise GateError(f"unknown keys in a leg: {sorted(unknown)}")
+        merged = {**defaults, **spec}
+
+        def path(key: str, merged: dict = merged) -> Path | None:
+            value = merged.get(key)
+            return None if value in (None, "") else Path(value).resolve()
+
+        legs.append(
+            Leg(
+                name=merged["name"],
+                django_ox=path("django_ox"),
+                pro=path("pro"),
+                python=merged["python"],
+                settings=merged["settings"],
+                pro_python=merged["pro_python"],
+                pro_settings=merged["pro_settings"],
+                pythonpath=[str(Path(p).resolve()) for p in merged["pythonpath"]],
+                skips=path("skips"),
+                xfails=path("xfails"),
+                pro_skips=path("pro_skips"),
+                pro_xfails=path("pro_xfails"),
+                pytest_args=shlex.split(merged["pytest_args"]),
+                pro_pytest_args=shlex.split(merged["pro_pytest_args"]),
+                only=merged["only"],
+            )
+        )
+    return legs
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    out = args.out or Path(tempfile.mkdtemp(prefix="check-policy-pair-"))
+    try:
+        legs = _legs(args)
+        results = [(leg, run_leg(leg, out / leg.name, args.record)) for leg in legs]
+    except GateError as exc:
+        print(f"check-policy-pair: {exc}", file=sys.stderr)
+        return 2
+    failed = False
+    print(f"\nreports and logs: {out}")
+    for leg, outcomes in results:
+        for outcome in outcomes:
+            counts = ", ".join(f"{v} {k}" for k, v in outcome.counts.items())
+            verdict = "FAIL" if outcome.problems else "ok"
+            print(f"{verdict} {leg.name} {outcome.suite}: {counts} ({outcome.log})")
+            for note in outcome.notes:
+                print(f"    {note}")
+            for problem in outcome.problems:
+                print(f"    {problem}")
+            failed = failed or bool(outcome.problems)
+        if leg.only != "both":
+            print(f"    {leg.name} ran --only {leg.only}: not a pair verdict")
+            failed = True
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

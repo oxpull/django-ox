@@ -56,6 +56,14 @@ def worker(settings):
     )
 
 
+@pytest.fixture
+def frozen_now(monkeypatch):
+    """Pin the clock mid-minute, so every pass in a test sees one due tick."""
+    fixed = timezone.now().replace(second=30, microsecond=0)
+    monkeypatch.setattr(timezone, "now", lambda: fixed)
+    return fixed
+
+
 def with_history():
     # A tick of history each, so the pass fires rather than anchors.
     now = timezone.now()
@@ -179,7 +187,7 @@ class TestTheConnectionDecidesNotTheClass:
 
 @pytest.mark.django_db(transaction=True)
 class TestRunReportsAFailedPassAndCarriesOn:
-    def test_the_next_pass_dispatches(self, worker, caplog):
+    def test_the_next_pass_dispatches(self, worker, caplog, frozen_now):
         # Transactional: run() polls on its own thread with its own
         # connection, and the wrapper has to be installed on that one.
         with_history()

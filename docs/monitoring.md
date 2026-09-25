@@ -4,8 +4,8 @@ The queue and the result store are one database table. That means metrics are
 just queries, with no agent or exporter process to run. There are four ways in:
 
 - **`django_ox.stats`**, plain functions returning queue metrics.
-- **`manage.py ox_health`**, the same numbers as an exit code, for cron
-  alerting and container probes.
+- **`manage.py ox_health`**, queue thresholds as an exit code for fleet
+  alerting, or local heartbeat-file checks for controlling-loop liveness.
 - **A Prometheus endpoint**, the same numbers as gauges, rendered by a view
   you mount where your scraper can reach it.
 - **Structured log events** on the `django_ox` logger, with stable extra
@@ -61,9 +61,13 @@ task starves the queue. Age looks fine during a flood of fresh work.
 
 ## Health checks: ox_health
 
-`ox_health` turns thresholds on those metrics into an exit code. Zero when every
-enabled check passes. Non-zero with a one-line reason on stderr when one fails.
-With no flags, it checks only that the database answers.
+`ox_health` has two modes. With no flags, it checks only that the database
+answers. Queue thresholds turn metrics into an exit code for fleet alerting.
+With `--heartbeat-file`, it checks local file timestamps instead of the
+database.
+
+Zero means every enabled check passes. A failed check exits non-zero with a
+one-line reason on stderr.
 
 ```
 python manage.py ox_health --max-backlog 1000 --max-age 600
@@ -71,44 +75,430 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--queue` | all queues | Restrict the checks to one queue. |
-| `--format` | `text` | `json` prints one object on stdout instead of the `OK:` line: `ok`, `queue`, `backlog`, `oldest_age_seconds`, `last_claim_age_seconds` and `problems`. `queue` is `null` when no `--queue` is given. The figures are `null` when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. The object is printed on failure too, before the same non-zero exit. |
+| `--queue` | all queues | Restrict the database checks to one queue. |
+| `--format` | `text` | `json` prints one object on stdout instead of the `OK:` line, on success and failure. In database mode its fields are `ok`, `queue`, `backlog`, `oldest_age_seconds`, `last_claim_age_seconds` and `problems`. `queue` is `null` when no `--queue` is given. The figures are `null` when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. File mode uses the [heartbeat JSON object](#file-mode-json). The exit status is unchanged. |
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. Deferred tasks do not count. |
 | `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
-| `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
+| `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. This measures queue-wide claim activity, not one worker's liveness. |
 | `--database` | the alias `OxTask` writes to | Database alias to check. The figures come from that alias, so the check reports the queue your workers are running. |
+| `--heartbeat-file PATH` | off | Check the local file set written by `ox_worker --heartbeat-file PATH`, instead of the database. Reads metadata only and runs no system or migration checks. |
+| `--max-heartbeat-age SECONDS` | `60` | Maximum file age, inclusive. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds, including fractions. Must be finite and strictly positive. Requires `--heartbeat-file`. |
+| `--processes N` | `1` | Expected worker process count. Must match the worker's `--processes` and be at least 1. At 1, check `PATH`. Above 1, require `PATH.supervisor` and every slot file from `PATH.0` through `PATH.(N-1)` to pass. Requires `--heartbeat-file`. |
 
-On success it prints the measured values, which is useful in cron mail
-and probe logs:
+File mode cannot be combined with `--database`, `--queue`, `--max-backlog`,
+`--max-age` or `--worker-timeout`. Run dependency and queue checks as separate
+commands.
+
+On success, database mode prints the measured values, which is useful in
+cron mail:
 
 ```
 OK: backlog=3 oldest_age=12s last_claim_age=2s
 ```
 
-Which check goes where:
+### Local heartbeat files
+
+`ox_worker --heartbeat-file PATH` enables local loop-liveness evidence.
+It is off by default. `ox_health --heartbeat-file PATH` checks that
+evidence instead of the database.
+
+A passing file probe means **the expected controlling loops have advanced
+recently**. It does not mean that tasks are progressing or that the database
+answers.
+
+**A hung database can cause a restart storm.** A statement that never
+returns stops the controlling loop and makes its heartbeat stale. If this
+happens across the fleet, automatic liveness restarts can restart every
+container. A single half-open connection looks the same to the worker.
+No connect, statement or claim timeout is added. Omit this automatic
+restart trigger if that tradeoff is unacceptable.
+
+#### Updates and scope
+
+The worker updates its file at the head of each poll pass, before database
+work, and at the head of each drain pass. These updates run on the main
+thread, not a heartbeat or lease-renewal thread. A database error that
+returns control to the loop allows subsequent updates; a refused
+connection lets heartbeat updates resume when the error returns control to
+the loop, but a connection-pool wait can still make the file stale.
+
+Startup work before `Worker.run()` writes no heartbeat. This includes
+Django setup and configured startup work such as reading stored schedules
+through `DatabaseScheduleSource`. Allow time for startup before treating a
+missing file as a liveness failure.
+
+A stopped process or a controlling loop wedged in a call eventually fails
+the probe. The probe does not detect:
+
+- All task slots stuck while the controlling loop continues. Use
+  [task timeouts](production.md#task-timeouts) for task execution limits.
+- A dead lease-renewal thread.
+- Failed claims or a lack of workflow progress.
+
+Drain passes continue updating the file, but this does not bound shutdown.
+A worker hung in a claim cannot return to the loop to begin draining after
+the first stop signal. It may need a second signal or SIGKILL.
+
+#### Expected files
+
+Use the same absolute base path and process count for the worker and probe.
+
+| Worker process count | Expected files |
+| --- | --- |
+| `1`, the default | `PATH` |
+| `N > 1` | `PATH.supervisor`, then `PATH.0` through `PATH.(N-1)` |
+
+Above one process, `PATH` itself is not written. Child names use stable
+slot numbers, not PIDs. The supervisor updates only its own file, never a
+child's file.
+
+Every expected file must pass. The probe does not discover files by
+listing the directory. Missing slots fail; extra files do not help.
+A stopped supervisor therefore fails once its own file expires, even
+while children continue updating theirs.
+
+The supervisor makes a best-effort attempt to remove each child's file
+before starting or replacing that child and when it observes the child
+exit. A replacement slot is missing until its loop starts. Allow for the
+restart delay, which starts at one second and doubles to 30 seconds on
+repeated deaths, plus child startup.
+
+If removal fails, `heartbeat_invalidate_failed` is logged once per slot
+path. The old file can still pass until it ages out. The single-process
+worker and supervisor do not remove their own files on exit. A leftover
+single-process file can also pass until it ages out.
+
+With `--processes N` where N is greater than 1, a slot whose supervisor has
+died stops updating `PATH.i`, including during drain. The worker still
+finishes its in-flight tasks, but its file ages without further updates.
+An orphan therefore cannot keep a replacement worker's slot fresh by
+continuing to write the same path.
+
+#### Directory and file requirements
+
+Provision a dedicated, writable directory before starting the worker.
+It must be local and private to the container. Never share it between
+replicas: a live writer can keep a dead worker's evidence fresh.
+django-ox does not create the directory.
+
+Use an absolute path because the worker and probe resolve relative paths
+against their own working directories. Run the probe as the worker UID.
+
+New files are created with mode `0600`, subject to the umask. Existing
+files are not truncated and their permissions are not changed. Contents
+are neither read nor written. The heartbeat's meaning is its modification
+time; updates also change its access time. There are no locks, temporary
+file-and-rename publication, or `fsync` calls.
+
+Writers refuse symlinks and non-regular files without following them or
+blocking on them. An update failure is never fatal to the worker or
+supervisor. It logs `heartbeat_write_failed` once per writer and path and
+retries on every later pass.
+
+The probe reads metadata with `lstat`, not file contents. The file's read
+permission bits do not determine whether the probe can check it; the
+directory must be searchable by the probe user.
+
+Use a pre-existing, dedicated directory on the container-local filesystem.
+The worker needs directory permissions to create its heartbeat file; with
+multiple processes, the supervisor also needs permission to remove slot
+files. The probe needs permission to traverse the directory and inspect
+each expected file's metadata, not to read its contents.
+
+New files are created with mode `0600`, subject to the umask. An existing
+heartbeat file must be a regular file owned by, or writable by, the
+worker's effective UID. If opening it for writing is denied but it is a
+regular file owned by that UID, the worker falls back to updating its
+access and modification times without following symlinks. A restrictive
+umask that removes owner-write permission, or an existing worker-owned
+`0400` file, therefore does not stop updates. Existing file modes and
+contents are left unchanged.
+
+A non-regular file, including a read-only FIFO, is refused. A file owned
+by another user that the worker cannot write is also refused. These
+failures produce a `heartbeat_write_failed` warning.
+
+A host bind mount under Docker Desktop can receive modification times
+from the host's clock rather than the container's clock. Even a small
+difference can make the probe report a file as being in the future. Keep
+the heartbeat directory container-local rather than bind-mounted from
+the host.
+
+#### Freshness and database isolation
+
+The worker updates its heartbeat on the controlling thread at the head of
+each poll and drain pass, and before every claim attempt. A busy pass can
+make up to `--concurrency` claims, each requiring one or more database
+round trips, but the file is updated between claims. Freshness therefore
+does not need to cover concurrency multiplied by claim latency. Allow for
+reap and dispatch work plus one claim, the poll interval, and scheduling
+margin. A claim that never returns still stops heartbeat updates.
+
+An idle poll pass makes two heartbeat updates: one at the pass head and
+one before its claim attempt. A busy pass makes one at the pass head plus
+one per claim attempt.
+
+Size `--max-heartbeat-age` above those expected gaps. With Django's
+PostgreSQL connection pool, a refused database can hold a pass for the
+pool's `timeout`, which defaults to 30 seconds, before the error returns
+control to the loop. The freshness budget must exceed the pool timeout
+plus `--interval` and scheduling margin, with further allowance for other
+reap, dispatch and claim work.
+
+A file passes only if it is regular and:
+
+```text
+0 <= probe wall clock - file modification time <= max heartbeat age
+```
+
+Both boundaries are inclusive. `--max-heartbeat-age` defaults to 60
+seconds and must be finite and strictly positive. It accepts durations
+such as `7d`, `24h`, `90m`, `45s`, or a plain number of seconds, including
+fractions.
+
+Freshness uses wall time, not a monotonic clock. A clock step changes the
+measured ages. Any modification time ahead of the probe's clock fails
+with a clock-skew diagnostic. Worker and probe are expected on the same
+machine. Detection is not immediate: evidence can remain valid for the
+configured age window after updates stop.
+
+File mode is selected before command system checks. It runs no system
+or migration checks, opens no database connection, runs no queries and
+constructs no task backend. `--skip-checks` is not required.
+
+This guarantee covers django-ox's command. Django startup still runs
+before the command. A project's `AppConfig.ready()` or other startup
+code can access the database first. A probe that must survive a database
+outage requires database-free project startup.
+
+#### Options and refusals
+
+`--processes N` defaults to `1`, must be an integer of at least one, and
+must match the worker's process count.
+
+File mode refuses `--database`, `--queue`, `--max-backlog`, `--max-age`
+and `--worker-timeout`, even when their values match database-mode
+defaults. Run database checks as a separate invocation.
+
+`--max-heartbeat-age` and `--processes` require `--heartbeat-file`.
+An empty heartbeat path is refused.
+
+For a path beginning with `-`, use the equals form,
+`--heartbeat-file=-hb`, with both `ox_worker` and `ox_health`. These paths
+also work with multiple processes. The supervisor forwards the base path
+to each child as one argument, `--heartbeat-file=<base>`, alongside
+`--processes 1` and the child's `--worker-index`. It likewise forwards
+queue and lock-timeout values as `--queues=<value>` and
+`--lock-timeout=<value>`.
+
+#### Text output and exit codes
+
+Text success has this form:
+
+```text
+OK: heartbeat_files=<count> oldest_heartbeat_age=<age>s max_heartbeat_age=<max>s
+```
+
+For example:
+
+```text
+OK: heartbeat_files=3 oldest_heartbeat_age=0.1s max_heartbeat_age=60s
+```
+
+A failed file contributes one problem in expected-file order. Problems
+are joined with `; ` in the command's error line on stderr.
+
+| Condition | Problem text |
+| --- | --- |
+| Missing file or directory | `heartbeat file <path> is missing` |
+| Too old | `heartbeat file <path> is <age>s old, over --max-heartbeat-age <max>s` |
+| Future modification time | `heartbeat file <path> was updated <s>s in the future; the clocks of the worker and the check disagree` |
+| Symlink | `heartbeat file <path> is a symlink, not a regular file` |
+| Directory | `heartbeat file <path> is a directory, not a regular file` |
+| Other non-regular file | `heartbeat file <path> is a special file, not a regular file` |
+| Metadata access error | `heartbeat file <path> cannot be read: <strerror>` |
+
+The accepted age window is inclusive: `0 <= age <= max`. A file exactly
+`--max-heartbeat-age` seconds old passes; any future modification time
+fails. Display rounding does not affect this decision. If rounding an
+over-age value to one decimal place would show it at or below the limit,
+the message instead shows the first tenth above the limit. For example,
+an age of 60.001 seconds with a 60-second limit is reported as
+`60.1s old, over --max-heartbeat-age 60s`. A future offset below
+0.05 seconds is reported as `<0.1s in the future`.
+
+Exit codes are:
+
+- `0`: every expected file passes.
+- `1`: a file fails or the command refuses an option value or combination.
+  Examples include an empty path, zero maximum age or a process count
+  below one.
+- `2`: an argument-parsing error. Examples include `nan`, `inf` or an
+  invalid duration for `--max-heartbeat-age`, or a non-integer process
+  count.
+
+#### File-mode JSON
+
+`--format json` prints this file-mode object on stdout. The database-mode
+object is unchanged.
+
+```json
+{
+  "ok": true,
+  "heartbeat_file": "/run/ox/hb",
+  "processes": 2,
+  "max_heartbeat_age_seconds": 60.0,
+  "files": [
+    {
+      "path": "/run/ox/hb.supervisor",
+      "ok": true,
+      "age_seconds": 0.08,
+      "problem": null
+    },
+    {
+      "path": "/run/ox/hb.0",
+      "ok": true,
+      "age_seconds": 0.05,
+      "problem": null
+    },
+    {
+      "path": "/run/ox/hb.1",
+      "ok": true,
+      "age_seconds": 0.02,
+      "problem": null
+    }
+  ],
+  "problems": []
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `ok` | Whether the check passes. |
+| `heartbeat_file` | The base path supplied to the command. |
+| `processes` | The requested worker process count. |
+| `max_heartbeat_age_seconds` | The maximum permitted age in seconds. |
+| `files` | Reports in expected-file order, or `null` when options were refused before files were checked. |
+| `files[].path` | The expected file's path. |
+| `files[].ok` | Whether this file passes. |
+| `files[].age_seconds` | Age as a float; negative for a future modification time, or `null` when there is no regular file to measure. |
+| `files[].problem` | The file's problem string, or `null` when it passes. |
+| `problems` | Problem strings; empty on success. |
+
+`age_seconds` is the raw floating-point age, not the rounded value used
+in text messages.
+
+The object is printed on success, file-check failure and command-level
+option refusal. Exit status is unchanged. Argument-parsing errors are
+not guaranteed to produce JSON.
+
+### Choosing checks and probe thresholds
 
 - **`--max-backlog` and `--max-age` measure the whole queue.** Put them in
   fleet-level alerting, from cron or a monitoring agent. Do not put them in a
-  per-worker probe: a shared backlog would fail every worker's probe and restart
-  healthy workers without shifting the backlog.
-- **`--worker-timeout` is the closest thing to a liveness check here.** Claiming
-  is the only trace a worker leaves, so it works on queues with steady traffic
-  and will false-alarm on ones that are legitimately idle.
-- **For bursty queues, prefer `--max-age`.** It only fires when work exists and
-  is not being picked up.
+  per-worker liveness probe: a shared backlog would fail every worker's
+  probe without shifting the backlog.
+- **`--worker-timeout` measures fleet claim activity.** It can alert on a
+  queue with steady traffic. An idle queue can fail it, and another worker's
+  claims can make it pass while one worker is stopped.
+- **For bursty queues, prefer `--max-age`.** It only fires when work exists
+  and is not being picked up.
+- **Use `--heartbeat-file` for local controlling-loop liveness.** It checks
+  every expected worker loop and, with multiple processes, the supervisor.
+  It does not check task progress or database availability.
 
-As a Kubernetes liveness probe on the worker container, for a queue with
-steady traffic:
+**A database hang can trigger fleet-wide restarts.** django-ox sets no
+overall timeout on a poll pass. A configured `OPTIONS["connect_timeout"]`
+bounds connects. On PostgreSQL and MySQL, statements and claims have no
+timeout by default. On SQLite, the busy timeout, 5 seconds by default,
+bounds each lock wait, not the whole poll pass. If the database accepts
+calls but never answers, every worker's heartbeat can become stale at
+once. A Kubernetes liveness probe then restarts every affected pod. A
+single half-open connection looks the same from inside the worker. Omit
+this automatic restart trigger if that tradeoff is unacceptable. A
+database refusal lets the loop continue once the error returns control.
+With Django's PostgreSQL connection pool, that can take the pool's
+`timeout` of 30 seconds by default, so a refused database can still cause
+freshness failures if the age limit is too short.
+
+Choose `--max-heartbeat-age` above the polling interval (`--interval`,
+default 1 second), expected loop latency and a scheduling margin. The
+default maximum age is 60 seconds. There is no guaranteed healthy maximum
+while database calls remain unbounded.
+
+Allow time for startup. Django setup and worker initialization write no
+heartbeat; the first update happens when `Worker.run()` enters its loop.
+Configured startup work, including loading database-backed schedules, can
+delay that point.
+
+With `--processes`, a replacement slot has a missing file until its loop
+starts. Restart delays begin at 1 second and double to 30 seconds on repeated
+deaths, plus child startup time. Set probe failure thresholds to accommodate
+ordinary replacement.
+
+### Kubernetes liveness
+
+This worker-container fragment uses two processes, a 60-second maximum age,
+a startup allowance of about five minutes, and six consecutive liveness
+failures before restart. Adjust these values for startup time, loop latency
+and replacement backoff.
+
+Before starting the worker, provision `/run/ox` as a dedicated, writable
+directory private to this container. Do not share it between replicas.
+Run the probe as the worker's UID.
 
 ```yaml
+command: ["python", "manage.py", "ox_worker"]
+args:
+  - "--processes"
+  - "2"
+  - "--heartbeat-file"
+  - "/run/ox/heartbeat"
+startupProbe:
+  exec:
+    command:
+      - python
+      - manage.py
+      - ox_health
+      - --heartbeat-file
+      - /run/ox/heartbeat
+      - --processes
+      - "2"
+      - --max-heartbeat-age
+      - "60"
+  periodSeconds: 5
+  timeoutSeconds: 10
+  failureThreshold: 60
 livenessProbe:
   exec:
     command:
-      ["python", "manage.py", "ox_health", "--worker-timeout", "300"]
-  periodSeconds: 60
+      - python
+      - manage.py
+      - ox_health
+      - --heartbeat-file
+      - /run/ox/heartbeat
+      - --processes
+      - "2"
+      - --max-heartbeat-age
+      - "60"
+  periodSeconds: 10
   timeoutSeconds: 10
-  failureThreshold: 3
+  failureThreshold: 6
 ```
+
+The command's file mode makes no database calls, but `manage.py` still runs
+Django startup. A project's `AppConfig.ready()` or other startup code can
+access the database before the command runs. A probe that must survive a
+database outage needs database-free project startup.
+
+A separate readiness or dependency check may report database availability.
+Do not use that result to trigger liveness restarts. Marking a worker pod
+unready does not pause its task claims.
+
+### Fleet alerting from cron
+
+Queue thresholds report fleet conditions, not local worker-loop liveness.
+Use these checks for alerting, not as per-container restart triggers.
 
 From cron, for alerting on the queue itself:
 
@@ -306,6 +696,8 @@ The message text is not part of the contract. The keys are.
 | `worker_batch_empty` | INFO | Under `--batch`, a poll pass succeeded, claimed nothing, and left no task running. The worker drains and stops. A schedule-scoped failure does not prevent this event. An abandoned dispatch pass prevents it until a later dispatch pass completes. This event does not certify that every schedule dispatched. Carries `claimed`. |
 | `worker_max_tasks_reached` | INFO | Under `--max-tasks`, the worker claimed its limit. It drains and stops. Carries `claimed`. |
 | `worker_stopped` | INFO | The run loop exited. |
+| `heartbeat_write_failed` | WARNING | A worker or supervisor could not update its heartbeat file. Logged once per writer and path, without a traceback. Never fatal; every later pass tries again. Carries `heartbeat_file` and `error`. |
+| `heartbeat_invalidate_failed` | WARNING | The supervisor could not remove a slot's heartbeat file before starting or replacing it, or after observing its exit. Logged once per slot path, without a traceback. A regular file can still count as fresh until it ages out. A non-regular path fails that slot until it is removed; a path that cannot be inspected also fails that slot. The warning distinguishes these cases. Carries `heartbeat_file`, `worker_index` and `error`. |
 | `supervisor_started` | INFO | `ox_worker --processes N` started its worker processes. |
 | `worker_process_restarted` | WARNING | A worker process exited on its own and is being restarted. |
 | `worker_process_recycled` | WARNING | A worker process exited with code 75 after a stuck task thread and is being restarted. Not counted against the restart cap. |
@@ -319,6 +711,10 @@ The four renewal connection events and `watchdog_connection_unavailable`
 include `worker_id` and no traceback. They apply only to Django's
 PostgreSQL pool.
 
+`heartbeat_write_failed` and `heartbeat_invalidate_failed` also have no
+traceback. Neither carries a `worker_id` key, including when a worker emits
+`heartbeat_write_failed`.
+
 On that path, connection-acquisition failures use the new events rather
 than `lease_renew_failed`. Update alerts that previously relied on
 `lease_renew_failed` alone. Renewal statement failures still use
@@ -331,7 +727,7 @@ A failed connect while recording a stuck attempt logs
 | Key | Present on | Meaning |
 | --- | --- | --- |
 | `event` | all events | The event name from the table above. |
-| `worker_id` | all worker events | Unique id of the worker emitting the record. With `--processes`, the slot number is the last part of the id. |
+| `worker_id` | all worker events except `heartbeat_write_failed` | Unique id of the worker emitting the record. With `--processes`, the slot number is the last part of the id. |
 | `worker_class` | `claim_filter_sql_missing` | The Worker subclass's class name. |
 | `claimed` | `worker_batch_empty`, `worker_max_tasks_reached` | Task attempts this worker claimed in its run, failed attempts and retries included. |
 | `task_id` | task events | The task's UUID, as a string. |
@@ -363,13 +759,15 @@ A failed connect while recording a stuck attempt logs
 | `pending` | `worker_draining` | In-flight tasks at shutdown. |
 | `processes` | `supervisor_started` | Worker processes the supervisor runs. |
 | `worker_index`, `exit_code` | `worker_process_restarted`, `worker_process_recycled`, `supervisor_restart_cap` | Which slot exited and how. A negative code is the signal that killed it. |
+| `worker_index` | `heartbeat_invalidate_failed` | The slot whose heartbeat file could not be removed. This event has no `exit_code`. |
+| `heartbeat_file` | `heartbeat_write_failed`, `heartbeat_invalidate_failed` | The affected file path: `PATH` for a single worker, `PATH.i` for slot i, or `PATH.supervisor` for the supervisor. |
 | `delay` | `worker_process_restarted`, `worker_process_recycled` | Seconds until the slot is started again. |
 | `task_id`, `exit_code` | `worker_recycling` | The stuck task that started the recycle, and the code the worker will exit with, 75. |
 | `restarts` | `supervisor_restart_cap` | Deaths of that slot inside the window. |
 | `worker_indexes` | `supervisor_killed_workers` | The slots that were killed. |
 | `parent_pid` | `worker_orphaned` | The supervisor pid the worker was started under. |
 | `exit_code` | `supervisor_stopped` | The code the supervisor exits with. |
-| `error` | `lease_renew_degraded`, `lease_renew_fallback`, `lease_renew_missed`, `watchdog_connection_unavailable`, `schedule_dispatch_error`, `schedule_dispatch_failed` | On schedule dispatch events, the exception class name of the latest failure, not its message. On renewal and watchdog events, the private-connection failure reason. When the pool serves a pool-first renewal tick, this instead says the private connection was not tried first and gives the remaining lease time. |
+| `error` | `lease_renew_degraded`, `lease_renew_fallback`, `lease_renew_missed`, `watchdog_connection_unavailable`, `schedule_dispatch_error`, `schedule_dispatch_failed`, `heartbeat_write_failed`, `heartbeat_invalidate_failed` | On schedule dispatch events, the exception class name of the latest failure, not its message. On heartbeat events, the operating-system error text from the failed update or removal. On renewal and watchdog events, the private-connection failure reason. When the pool serves a pool-first renewal tick, this instead says the private connection was not tried first and gives the remaining lease time. |
 | `failures` | `schedule_dispatch_error`, `schedule_dispatch_failed`, `schedule_dispatch_recovered` | On `schedule_dispatch_error`, total failed attempts in this schedule's current run of failures on this worker, including the first. On `schedule_dispatch_failed`, total abandoned passes in the current outage. On `schedule_dispatch_recovered`, failed attempts in the run that just ended. |
 | `suppressed` | `schedule_dispatch_error`, `schedule_dispatch_failed` | Failures counted since the previous report and not logged individually. Zero on the first report of a run. |
 | `fallback` | `lease_renew_degraded` | `succeeded` if pooled renewal succeeded; `failed` if fallback did not renew the leases. |
@@ -481,9 +879,10 @@ and `suppressed` rather than treating each log line as one failed attempt.
 
 - **Alerting.** Alert on `ready_count` and `oldest_ready_age` (via
   `ox_health` thresholds or the functions directly), and on
-  `failure_rate` rising above your normal baseline. Throughput is better
-  as a dashboard line than an alert: its healthy value depends entirely
-  on offered load. Also alert on `schedule_dispatch_error` and
+  `failure_rate` rising above your normal baseline. Use last-claim age
+  only for fleet alerting on queues with steady traffic. Throughput is
+  better as a dashboard line than an alert: its healthy value depends
+  entirely on offered load. Also alert on `schedule_dispatch_error` and
   `schedule_dispatch_failed`, plus `schedule_row_skipped` for stored
   schedules. For stored schedules, also alert on
   `schedule_source_unavailable`: a failed marker read leaves dispatch running
@@ -496,9 +895,11 @@ and `suppressed` rather than treating each log line as one failed attempt.
   register `django_ox.metrics.collector()` with a registry you already run.
   Both are covered [above](#prometheus).
 - **journald.** Under systemd, WARNING and above maps onto journal
-  priorities, so `journalctl -u ox-worker -p warning` shows exactly
-  retries, reclaims and failures. Pair it with `ox_health` in a timer for
-  active checks.
+  priorities, so `journalctl -u ox-worker -p warning` shows retries,
+  reclaims and failures. A timer can run `ox_health` for monitoring,
+  including file-based loop-liveness checks. Keep process restarts under
+  systemd's process supervision; the file check does not notify its
+  watchdog.
 - **Poisoned-task triage.** When `failure_rate` spikes, the rows have the
   forensics: filter FAILED rows and read `errors` (per-attempt
   tracebacks), `attempts` and `worker_ids` to see what died where. The

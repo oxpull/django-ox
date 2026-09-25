@@ -13,6 +13,7 @@ Facts for anyone, human or tool, making changes to django-ox itself.
   `worker.py` (claim, execute, lease, reaper, schedule dispatch),
   `management/commands/` (`ox_worker`, `ox_health`, `ox_prune`),
   `supervisor.py` (the `--processes` supervisor),
+  `heartbeat.py` (local heartbeat-file updates and checks),
   `schedules.py` and `cron.py` (recurring tasks), `stats.py` (queue metrics),
   `metrics.py`, `views.py` and `urls.py` (the Prometheus endpoint),
   `actions.py` (retry, discard), `bulk.py` (`enqueue_many`), `admin.py`

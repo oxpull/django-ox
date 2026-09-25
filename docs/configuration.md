@@ -107,6 +107,7 @@ python manage.py ox_worker [options]
 | `--interval` | `1.0` | Polling interval in seconds when idle. When tasks are in flight the worker wakes as soon as one finishes, so this does not bound throughput. |
 | `--lock-timeout` | backend `LOCK_TIMEOUT`, or 300 | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |
 | `--database` | the alias `OxTask` writes to | Database alias to run against. Each `--processes` child is given the same one, so one router answering differently in two processes can't split a fleet across two databases. It is not checked against the router; see [Read replicas](#read-replicas). |
+| `--heartbeat-file PATH` | off | Update a local file's modification time at the head of every poll and drain pass, before database work. Above one process, the supervisor writes `PATH.supervisor` and slot i writes `PATH.i`; `PATH` itself is not written. The directory must already exist, be writable and be private to the container. Failed updates warn once per writer and path and are retried without stopping the worker. See [heartbeat liveness](monitoring.md#local-heartbeat-files). |
 | `--batch` | off | Exit once a poll pass succeeds, sees no task it can claim, and began with no task of its own in flight, then drain and exit 0. Tasks it can't claim at that moment stay READY for a later worker. These include future `run_after` tasks, backed-off retries, locked rows and tasks its claim filter excludes. A poll pass that hits a database error does not count. After an abandoned dispatch pass, no poll pass counts until a dispatch pass completes. Schedule-scoped failures do not prevent completion: exit 0 means the batch finished, not that every schedule enqueued. Rejected with `--processes` above 1. See [Running as a job](production.md#running-as-a-job). |
 | `--max-tasks N` | none | Exit after claiming N task attempts, then drain and exit 0. Every claim counts, a failed attempt and a retry's repeat claim included, and concurrency never claims past N. Without `--batch` the worker keeps polling an empty queue until it reaches N or is stopped. N must be an integer of at least 1. Rejected with `--processes` above 1. |
 
@@ -116,9 +117,16 @@ enables debug logging. `-v 0` attaches no log handler. With `--processes`
 above 1 every flag is passed on to each worker process unchanged, including
 `--settings` and `--pythonpath`, and each worker process is started the way
 the supervisor was (`manage.py` by absolute path, or `python -m django`), so
-the command works from any working directory.
+the command works from any working directory. For `--heartbeat-file`, each
+child derives its own slot filename from the forwarded base path.
 
-Two intervals are derived rather than flagged:
+Use an absolute heartbeat path. Relative paths resolve against the worker's
+working directory, which may differ from the probe's. An empty path exits 1
+with `--heartbeat-file needs a path.` The flag combines with every other
+worker flag, including `--batch` and `--max-tasks`; updates stop when the
+worker exits.
+
+These intervals are derived rather than flagged:
 
 - The reaper runs every `min(30, max(lock_timeout / 2, 1))` seconds.
 - Lease renewal runs every `max(lock_timeout / 3, 0.1)` seconds, on its own
@@ -128,6 +136,7 @@ Two intervals are derived rather than flagged:
   is configured, because a source that reads the database can gain one at any
   time; a pass with no schedules configured at all returns on a list check,
   before any query.
+- With `--heartbeat-file`, the worker updates its file at the head of each poll and drain pass: about once per `--interval` when idle, and every 0.25 seconds while draining. The supervisor updates its own file every supervision pass, about every 0.1 seconds, and during shutdown.
 
 ### Routing a queue to its own worker
 
@@ -177,6 +186,29 @@ accepts `reap_interval`, `renew_interval`, `schedule_interval`,
 `backoff_initial`, `backoff_max`, `task_timeout` and `task_timeout_grace`
 keyword overrides, which have no flag; they win over the `OPTIONS` values.
 
+`Worker` also accepts the keyword-only argument `heartbeat_file`, defaulting
+to `None`. `ox_worker` passes it to `WORKER_CLASS` only when
+`--heartbeat-file` is enabled. With multiple processes, each child receives
+its own slot path. Existing fixed-signature constructors remain compatible
+without the flag.
+
+With `--heartbeat-file`, the constructor must accept `heartbeat_file`
+explicitly or through `**kwargs`, and pass it to `Worker.__init__()`.
+A constructor whose signature cannot accept the keyword is refused before
+construction with exit code 1 and a one-line `CommandError`, without a
+traceback. With multiple processes, the supervisor performs this check
+before starting any children.
+
+A constructor that accepts the keyword but does not pass it on is refused
+after construction, before the worker loop runs, with exit code 1 and a
+one-line `CommandError`. With multiple processes, this check runs in each
+child. The supervisor restarts those children as for other crashes, and
+the missing slot files keep the heartbeat probe failing.
+
+Heartbeat updates belong to the base worker's poll and drain loops.
+A custom worker that replaces `run()` without calling the base loop does
+not get those updates merely by accepting `heartbeat_file`.
+
 ## ox_prune
 
 Finished task rows stay in the table until pruned; the queue table doubles
@@ -225,8 +257,9 @@ a transaction of your own, it doesn't retry, and the error reaches you.
 
 ## ox_health
 
-A health check for cron alerting and container probes: exits 0 when
-every enabled check passes, non-zero with a one-line reason otherwise.
+Use database checks for dependency monitoring and fleet alerting, and
+`--heartbeat-file` for local controlling-loop liveness. The command exits 0
+when every enabled check passes, non-zero with a one-line reason otherwise.
 With no flags it verifies only that the database answers.
 
 ```
@@ -235,12 +268,50 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--queue` | all queues | Restrict the checks to one queue. |
-| `--format` | `text` | `json` prints one object on stdout instead of the `OK:` line: `ok`, `queue`, `backlog`, `oldest_age_seconds`, `last_claim_age_seconds` and `problems`. `queue` is `null` when no `--queue` is given. The figures are `null` when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. The object is printed on failure too, before the same non-zero exit. |
+| `--queue` | all queues | Restrict the database checks to one queue. |
+| `--format` | `text` | `json` prints one object on stdout instead of the `OK:` line, on success and failure. In database mode its fields are `ok`, `queue`, `backlog`, `oldest_age_seconds`, `last_claim_age_seconds` and `problems`. `queue` is `null` when no `--queue` is given. The figures are `null` when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. File mode uses the [heartbeat JSON object](monitoring.md#file-mode-json). The exit status is unchanged. |
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. Tasks deferred to a future `run_after` do not count. |
 | `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
-| `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
+| `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. Measures fleet claim activity, not per-worker liveness. |
 | `--database` | the alias `OxTask` writes to | Database alias to check. The figures come from that alias, so the check reports the queue your workers are running. |
+| `--heartbeat-file PATH` | off | Check the local file set written by `ox_worker --heartbeat-file PATH`, instead of the database. Reads metadata only, runs no system or migration checks, opens no database connection and constructs no task backend. Cannot be combined with `--database`, `--queue`, `--max-backlog`, `--max-age` or `--worker-timeout`. |
+| `--max-heartbeat-age SECONDS` | `60` | Maximum heartbeat age, inclusive. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds, including fractions. Must be finite and strictly positive. Requires `--heartbeat-file`. |
+| `--processes N` | `1` | Expected worker process count; must match the worker's `--processes`. At 1, check `PATH`. Above 1, require `PATH.supervisor` and every slot file from `PATH.0` through `PATH.(N-1)` to pass. Must be an integer of at least 1. Requires `--heartbeat-file`. |
+
+File mode does not need `--skip-checks`. The command makes no database
+calls, but project startup, including `AppConfig.ready()`, must also avoid
+database access for a probe to survive a database outage. Database mode
+keeps its alias-scoped checks and `--skip-checks` behavior.
+
+An empty heartbeat path, a refused flag combination, a zero or negative
+plain number of seconds for the maximum age, or a process count below 1
+exits 1. A signed duration with a suffix, such as
+`--max-heartbeat-age=-5s`, is an argparse error and exits 2 instead.
+Non-finite or malformed durations and non-integer process counts are
+argparse errors and exit 2. See
+[heartbeat option validation](monitoring.md#options-and-refusals) for the
+option rules.
+
+The exit-1 refusal diagnostics are:
+
+| Condition | Diagnostic |
+| --- | --- |
+| Empty heartbeat path | `CommandError: --heartbeat-file needs a path.` |
+| Zero or negative plain number of seconds | `CommandError: --max-heartbeat-age must be a positive number of seconds.` |
+| Signed duration with a suffix, such as `-5s` | Argparse error: invalid duration; exits 2. |
+| Process count below 1 | `CommandError: --processes must be at least 1.` |
+| `--max-heartbeat-age` without `--heartbeat-file` | `CommandError: --max-heartbeat-age needs --heartbeat-file.` |
+| `--processes` without `--heartbeat-file` | `CommandError: --processes needs --heartbeat-file.` |
+
+Combining file mode with database or queue flags reports, for example:
+
+```
+CommandError: --heartbeat-file checks files, not the database, so it cannot be combined with --queue, --worker-timeout; run those checks as a separate ox_health.
+```
+
+The message lists every conflicting flag given, comma-separated, in this
+order: `--database`, `--queue`, `--max-backlog`, `--max-age`,
+`--worker-timeout`.
 
 Check semantics, probe examples, and guidance on which check fits which
 alert are on the

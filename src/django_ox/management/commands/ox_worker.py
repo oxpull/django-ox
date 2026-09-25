@@ -1,4 +1,5 @@
 import argparse
+import inspect
 import logging
 import os
 import queue
@@ -13,6 +14,7 @@ from typing import Any
 from django.core.management.base import CommandError, CommandParser
 
 from django_ox.compat import DEFAULT_TASK_BACKEND_ALIAS, task_backends
+from django_ox.heartbeat import child_file
 from django_ox.management._database import DatabaseCommand
 from django_ox.supervisor import STOP_SIGNALS, SUPERVISOR_PID_ENV, Supervisor
 from django_ox.timeouts import RECYCLE_EXIT_CODE
@@ -96,6 +98,19 @@ class Command(DatabaseCommand):
                 "attempts and retries."
             ),
         )
+        parser.add_argument(
+            "--heartbeat-file",
+            default=None,
+            metavar="PATH",
+            help=(
+                "Update this file's modification time at the head of every "
+                "poll and drain pass, for ox_health --heartbeat-file. With "
+                "--processes above 1 the supervisor writes PATH.supervisor "
+                "and each worker process PATH.0, PATH.1 and so on. The "
+                "directory must exist and be private to this container "
+                "(default: no heartbeat file)."
+            ),
+        )
         # Set by the supervisor on each child; names the slot in worker ids.
         parser.add_argument(
             "--worker-index", type=int, default=None, help=argparse.SUPPRESS
@@ -108,6 +123,9 @@ class Command(DatabaseCommand):
         if options["processes"] < 1:
             raise CommandError("--processes must be at least 1.")
         max_tasks = _max_tasks(options["max_tasks"])
+        heartbeat_file: str | None = options["heartbeat_file"]
+        if heartbeat_file is not None and not heartbeat_file:
+            raise CommandError("--heartbeat-file needs a path.")
         if options["processes"] > 1 and (options["batch"] or max_tasks is not None):
             # The supervisor restarts a child that exits unasked, so a
             # planned exit would be undone rather than honoured.
@@ -125,6 +143,10 @@ class Command(DatabaseCommand):
                 f"No task backend alias {backend_alias!r} in TASKS. "
                 f"Known aliases: {known}."
             )
+        if heartbeat_file is not None:
+            # Here as well as in each child, so a supervisor refuses once
+            # instead of starting children that fail on it one after another.
+            _require_heartbeat_keyword(worker_class(backend_alias), backend_alias)
         if options["verbosity"] > 0 and not logger.handlers:
             handler = logging.StreamHandler(self.stderr)
             handler.setFormatter(
@@ -144,6 +166,7 @@ class Command(DatabaseCommand):
             supervisor = Supervisor(
                 processes=options["processes"],
                 worker_args=worker_args(options, alias),
+                heartbeat_file=heartbeat_file,
             )
             for signum in STOP_SIGNALS:
                 signal.signal(signum, supervisor.handle_signal)
@@ -169,13 +192,23 @@ class Command(DatabaseCommand):
         )
         # Only when asked for: a WORKER_CLASS with a fixed-signature
         # constructor keeps working on every invocation that does not use
-        # these flags.
-        completion: dict[str, Any] = {}
+        # these flags (--batch, --max-tasks, --heartbeat-file).
+        optional: dict[str, Any] = {}
         if options["batch"]:
-            completion["batch"] = True
+            optional["batch"] = True
         if max_tasks is not None:
-            completion["max_tasks"] = max_tasks
-        worker = worker_class(options["backend"])(
+            optional["max_tasks"] = max_tasks
+        if heartbeat_file is not None:
+            # The supervisor hands every child the base path; the slot's own
+            # file is named here, from the index it was started with, so a
+            # restarted slot writes the file its predecessor did.
+            optional["heartbeat_file"] = (
+                heartbeat_file
+                if options["worker_index"] is None
+                else child_file(heartbeat_file, options["worker_index"])
+            )
+        cls = worker_class(options["backend"])
+        worker = cls(
             backend_alias=options["backend"],
             queues=queues,
             concurrency=options["concurrency"],
@@ -184,8 +217,18 @@ class Command(DatabaseCommand):
             worker_index=options["worker_index"],
             parent_pid=parent_pid,
             db_alias=alias,
-            **completion,
+            **optional,
         )
+        if heartbeat_file is not None and not getattr(worker, "heartbeat_file", None):
+            # Taken, by **kwargs say, and never passed on: the worker would
+            # run and write nothing, and the probe would restart it for a
+            # file it was never going to keep.
+            raise CommandError(
+                f"WORKER_CLASS {_class_name(cls)} on backend {backend_alias!r} "
+                "accepted heartbeat_file but did not pass it on to "
+                "Worker.__init__(), so no heartbeat file would be written. "
+                "Pass it on, or run without --heartbeat-file."
+            )
 
         retire_signal_thread = install_stop_handlers(worker)
         if parent_pid is not None:
@@ -300,6 +343,39 @@ def install_stop_handlers(worker: Worker) -> Callable[[], None]:
     return retire
 
 
+def _class_name(cls: type) -> str:
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _require_heartbeat_keyword(cls: type[Worker], backend_alias: str) -> None:
+    """
+    Refuse --heartbeat-file for a WORKER_CLASS whose constructor cannot take
+    heartbeat_file, in a sentence rather than the TypeError its call would
+    raise. A class written before the flag existed keeps working without
+    it, which is why ox_worker passes the keyword only when asked to.
+    """
+    try:
+        parameters = inspect.signature(cls).parameters.values()
+    except (TypeError, ValueError):  # pragma: no cover - a class has one
+        return
+    if any(
+        parameter.kind is parameter.VAR_KEYWORD
+        or (
+            parameter.name == "heartbeat_file"
+            and parameter.kind
+            in (parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY)
+        )
+        for parameter in parameters
+    ):
+        return
+    raise CommandError(
+        f"WORKER_CLASS {_class_name(cls)} on backend {backend_alias!r} does not "
+        "accept the keyword argument heartbeat_file, which --heartbeat-file "
+        "passes to it. Accept it and pass it on to Worker.__init__(), or run "
+        "without --heartbeat-file."
+    )
+
+
 def _die_with_parent() -> None:
     """
     On Linux, ask the kernel to SIGTERM this process when its parent exits
@@ -340,10 +416,20 @@ def worker_args(options: dict[str, Any], alias: str) -> list[str]:
         "--verbosity",
         str(options["verbosity"]),
     ]
+    # A value the operator chose goes in the same token as its flag. As a
+    # token of its own, one that starts with a dash (a path such as -hb, a
+    # queue named -x) reads as an option in the child, and every child
+    # exits with a usage error before its loop starts, over and over.
     if options["queues"]:
-        args += ["--queues", options["queues"]]
+        args += [f"--queues={options['queues']}"]
     if options["lock_timeout"] is not None:
-        args += ["--lock-timeout", str(options["lock_timeout"])]
+        args += [f"--lock-timeout={options['lock_timeout']}"]
+    # The base path, and only when set: an absent flag stays absent, so a
+    # fixed-signature WORKER_CLASS in every child keeps working. Each child
+    # names its own file from its --worker-index, so none of them writes the
+    # supervisor's file or a sibling's.
+    if options.get("heartbeat_file"):
+        args += [f"--heartbeat-file={options['heartbeat_file']}"]
     # Django's global flags change how a command runs before handle() is
     # reached; each child must run under the same ones it was given.
     if options.get("skip_checks"):

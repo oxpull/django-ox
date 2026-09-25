@@ -198,10 +198,10 @@ def test_worker_args_carry_every_flag_but_processes():
         "0.5",
         "--verbosity",
         "1",
-        "--queues",
-        "emails,default",
-        "--lock-timeout",
-        "60.0",
+        # One token each, so a value that starts with a dash reaches the
+        # child as a value rather than as an option.
+        "--queues=emails,default",
+        "--lock-timeout=60.0",
     ]
 
 

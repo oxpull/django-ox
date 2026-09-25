@@ -33,14 +33,25 @@ export names this page does not list; those names are not public.
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   `128 + the signal number`, following the shell convention.
+- **The heartbeat-file protocol**: one process writes `PATH`; above one
+  process, the supervisor writes `PATH.supervisor` and slot i writes
+  `PATH.i`. The modification time is the signal; file contents are not
+  read or written. Every expected file must be regular and have an age
+  between zero and the configured maximum, inclusive. A passing check
+  means the expected controlling loops have advanced recently, not that
+  tasks are progressing. The documented
+  [file-mode JSON fields](monitoring.md#file-mode-json) are public too.
 - **The system check IDs**, including the `django_ox.E0xx` and
   `django_ox.W0xx` identifiers, which you may list in
   `SILENCED_SYSTEM_CHECKS`. The IDs are stable; the messages are not.
-- **`ox_health`'s exit codes**: 0 when healthy, 1 when unhealthy. A value
-  the command itself rejects exits 1 as well, such as `--max-age 0` or a
-  `--database` alias that isn't in `DATABASES`. A value argparse rejects
-  exits 2, such as `--max-age nonsense` or `--format bogus`, and so does an
-  unknown flag.
+- **`ox_health`'s exit codes**: 0 when every enabled check passes, 1 when
+  a check fails. In file mode, passing means every expected heartbeat file
+  is fresh. A value the command itself rejects exits 1 as well, such as
+  `--max-age 0`, `--max-heartbeat-age 0`, `--processes 0`, a refused flag
+  combination, or a `--database` alias that isn't in `DATABASES`. A value
+  argparse rejects exits 2, such as `--max-age nonsense`,
+  `--max-heartbeat-age nan`, `--processes 1.5` or `--format bogus`, and so
+  does an unknown flag.
 - **The claim filter hooks** `Worker.claim_filter_q()` and
   `Worker.claim_filter_sql()`, and where their result is applied: the
   fragment is conjoined to the conditions the candidate select filters on,
@@ -103,6 +114,8 @@ supervisor behind `--processes` (`django_ox.supervisor`) and the hidden
 with an underscore. The exact SQL a claim emits and the
 model's non-schema helper methods are not part of the contract.
 
+`django_ox.heartbeat` is also an implementation detail, not a public Python API. The documented heartbeat filenames, modification-time meaning, freshness rule and `ox_health` JSON fields are public contracts.
+
 ## Versioning
 
 django-ox follows [Semantic Versioning](https://semver.org/):
@@ -162,29 +175,43 @@ Django 6.1 changed which databases the system checks run against. A command
 that runs the full checks and does not name a database now checks every alias
 in `DATABASES`. Checking a SQLite or MySQL alias opens a connection and runs
 one query. The cost grows with the number of aliases, and every such command
-pays it. An alias that cannot be reached ends the command. Each django-ox
-command names the alias it checks, so none of them opens another one.
-`ox_prune`, `ox_health` and `ox_import_beat_schedules` name the alias they
-work on and pass it to the checks. `ox_worker` passes an empty list, so no
-alias is checked at all and a worker starts while its database is down and
-waits for it. What that costs: the system checks that need a database don't
-run for `ox_worker`. A SQLite build without JSON support fails
-`fields.E180`. `manage.py check --database <alias>` reports it, and so does
-every other django-ox command; each exits non-zero. A worker on that alias
-starts and runs tasks anyway, because SQLite stores those columns as text,
-and it logs nothing. On MySQL, Django's column-type checks emit warnings, so
-`check` still exits 0. The case an operator actually hits is a database with
-no django-ox tables. `check --database <alias>` does not report that: it
-exits 0 and reports no issues. `migrate --check --database <alias>` is what
-exits non-zero, and it prints nothing at all. The worker logs
-`worker_poll_failed` on every pass. A check that cannot fail is worse than
-no check at all. Run `migrate --check` for the alias before you start a
-worker on it. A configuration error still stops a worker at startup, because
-those checks don't need a database. For the rest,
-pass `--skip-checks`, or `--database` to `manage.py check`. Django 6.0 is
-unaffected, and so is an alias on PostgreSQL. The [changelog](changelog.md)
-has the mechanism, what a router does and does not fix, and why `--database`
-alone is not enough on a command that does not pass it on.
+pays it. An alias that cannot be reached ends the command.
+
+`ox_prune`, `ox_health` in database mode, and `ox_import_beat_schedules`
+name the alias they work on and pass it to the checks. `ox_worker` passes
+an empty list, so no alias is checked. Its poll loop can keep retrying a
+database that refuses connections. Startup work before the loop, such as
+loading database-backed schedules, can still access the database.
+
+The system checks that need a database don't run for `ox_worker`.
+A SQLite build without JSON support fails `fields.E180`.
+`manage.py check --database <alias>` reports it, as do `ox_prune`,
+`ox_health` in database mode, and `ox_import_beat_schedules`; each exits
+non-zero. A worker on that alias runs tasks anyway, because SQLite stores
+those columns as text, and it logs nothing. On MySQL, Django's column-type
+checks emit warnings, so `check` still exits 0.
+
+A database with no django-ox tables is a separate case.
+`check --database <alias>` does not report that: it exits 0 and reports no
+issues. `migrate --check --database <alias>` is what exits non-zero, and it
+prints nothing at all. A worker that reaches the poll loop logs
+`worker_poll_failed` on every pass. Run `migrate --check` for the alias
+before you start a worker on it. A configuration error still stops a worker
+at startup, because those checks don't need a database.
+
+`ox_health --heartbeat-file` selects a separate branch before command
+checks run. It runs neither system nor migration checks, validates no
+database alias, constructs no task backend and makes no database calls.
+It does not need `--skip-checks`. Project startup still runs before the
+command: `AppConfig.ready()` and other startup code must be database-free
+if the probe needs to survive a database outage.
+
+For commands that run system checks, pass `--skip-checks`, or pass
+`--database` to `manage.py check`, as appropriate. Django 6.0 is unaffected
+by the check-scope change, and so is an alias on PostgreSQL. The
+[changelog](changelog.md) has the mechanism, what a router does and does
+not fix, and why `--database` alone is not enough on a command that does
+not pass it on.
 
 The support floor tracks Django's own: when a Python or Django version
 reaches end of life upstream, a later django-ox minor release may drop it,

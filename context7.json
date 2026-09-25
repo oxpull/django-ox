@@ -40,7 +40,7 @@
     "django_ox.bulk.enqueue_many(task, calls) enqueues one task many times, where calls is a list of (args, kwargs) pairs. It returns TaskResult objects in input order.",
     "enqueue_many inserts 1,000 rows per INSERT inside one transaction. Queue, priority and run_after are set once on the task with .using(...), never per call.",
     "Execution is at-least-once, so tasks should be written to be idempotent.",
-    "Use ox_health to check worker and queue health, and ox_prune to delete finished task rows older than a cutoff.",
+    "Use ox_health queue thresholds for fleet alerting, not per-container liveness. --worker-timeout measures recent claims across workers, not local loop liveness. Use ox_prune to delete finished task rows older than a cutoff.",
     "path(\"ox/\", include(\"django_ox.urls\")) exposes GET /ox/metrics, the queue stats as Prometheus gauges.",
     "The /ox/metrics gauges are django_ox_tasks{queue,status}, django_ox_ready_tasks, django_ox_oldest_ready_age_seconds, django_ox_last_claim_age_seconds, django_ox_throughput_per_minute and django_ox_failure_rate.",
     "The /ox/metrics view has no authentication; wrap it with login_required or restrict it by network. django_ox.metrics.collector() registers the same gauges with an existing prometheus_client registry.",
@@ -75,8 +75,9 @@
     "For tests, point TASKS at django.tasks.backends.immediate.ImmediateBackend or django.tasks.backends.dummy.DummyBackend instead of django-ox.",
     "On Django 5.2 LTS the test backend paths are django_tasks.backends.immediate.ImmediateBackend and django_tasks.backends.dummy.DummyBackend.",
     "OxTask.Status.WAITING is a status django-ox never writes itself. Workers never claim a waiting task, ox_prune never deletes it, and retry skips it. It reads as READY through django.tasks. Workflows in Oxpull Pro write and release it.",
-    "ox_worker, ox_prune and ox_health take --database, the alias django-ox works on. It defaults to the alias OxTask writes to, and is not checked against the router: a worker given another alias works there and nothing warns.",
+    "ox_worker, ox_prune and database-mode ox_health take --database; it defaults to the OxTask write alias and is not checked against the router. ox_health --heartbeat-file refuses --database.",
     "ox_import_beat_schedules takes --database too, but it names a different thing: the alias holding your django-celery-beat tables. It defaults to the alias the router sends OxSchedule reads to. The command writes nothing anywhere.",
-    "django-ox is finite on purpose: a durable queue, a worker, recurring schedules and monitoring, including django_ox.stats and ox_health. Batches, unique tasks, rate limiting and workflows live in Oxpull Pro, a paid add-on at oxpull.com."
+    "django-ox is finite on purpose: a durable queue, a worker, recurring schedules and monitoring, including django_ox.stats and ox_health. Batches, unique tasks, rate limiting and workflows live in Oxpull Pro, a paid add-on at oxpull.com.",
+    "For optional local liveness, pair ox_worker --heartbeat-file PATH with ox_health --heartbeat-file PATH and matching --processes N. A pass means the expected controlling loops have advanced recently, not task progress. A hung DB can cause restart storms."
   ]
 }

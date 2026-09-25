@@ -19,8 +19,10 @@ Operational facts to get right:
   "django_ox.backend.OxBackend"}}`, run `python manage.py migrate django_ox`.
 - Tasks only execute while a worker is running. Start one with
   `python manage.py ox_worker`. It is a separate foreground process from the
-  web server. SIGTERM and SIGINT both drain in-flight tasks and exit 0; a
-  second signal forces an immediate exit with code 130.
+  web server. SIGTERM and SIGINT request a drain, followed by exit 0. A
+  main loop hung in a database call cannot begin draining until that call
+  returns. A second signal forces exit 130; a process that cannot act on
+  signals needs SIGKILL.
 - Tasks are ordinary Tasks-framework tasks: `from django.tasks import task` on
   Django 6.0+, `from django_tasks import task` on 5.2 LTS,
   decorate with `@task`, call `.enqueue(...)`. django-ox adds nothing on the
@@ -136,9 +138,41 @@ Operational facts to get right:
   rather than firing a tick that already passed, and re-enabling a paused
   schedule does not replay the ticks it missed. `starting_deadline_seconds`
   drops a tick later than that instead of running it however stale.
-- `python manage.py ox_health` exits 0 when the database answers, and takes
-  `--max-backlog`, `--max-age` and `--worker-timeout` thresholds that turn
-  queue stats into a non-zero exit for probes and cron alerting.
+- `python manage.py ox_health` checks database availability. Its
+  `--max-backlog`, `--max-age` and `--worker-timeout` thresholds are for fleet
+  alerting, not per-container liveness. Last-claim age can fail on an idle
+  queue and pass for a stopped worker while another worker claims.
+- For local loop-liveness, enable `ox_worker --heartbeat-file PATH` and run
+  `ox_health --heartbeat-file PATH --processes N`, with the worker's process
+  count. `--max-heartbeat-age` defaults to 60 seconds and must be finite and
+  positive. At one process, check PATH. Above one, every file must pass:
+  PATH.supervisor and PATH.0 through PATH.(N-1). Extra files never help.
+  Use an absolute path in an existing, writable directory private to the
+  container; never share it between replicas.
+- File mode reads metadata only, runs no system or migration checks and
+  makes no database calls. Project Django startup must also be database-free.
+  It refuses --database, --queue, --max-backlog, --max-age and --worker-timeout.
+  A fresh file means the expected controlling loops have advanced recently.
+  It does not prove successful claims, task or workflow progress, or a live
+  renewal thread. All task slots can be stuck while the loop stays fresh;
+  task timeouts are a separate policy.
+- Allow for startup before the first heartbeat and for missing slot files
+  during replacement backoff. The worker updates its file at each poll
+  and drain pass head and before every claim attempt. Size freshness above
+  the poll interval plus reap and dispatch work, one claim, and scheduling
+  margin, not concurrency multiplied by claim latency. Refused database
+  calls let updates resume once the error returns control to the loop.
+  With Django's PostgreSQL connection pool, a refusal can hold a pass for
+  the pool's `timeout`, 30 seconds by default; include that wait in the
+  freshness budget.
+- django-ox sets no overall timeout on a poll pass. A configured
+  `OPTIONS["connect_timeout"]` bounds connects. On PostgreSQL and MySQL,
+  statements and claims have no timeout by default. On SQLite, the busy
+  timeout, 5 seconds by default, bounds each lock wait, not the whole poll
+  pass. A fleet-wide database hang can make every file stale and trigger
+  fleet-wide liveness restarts. Omit that automatic restart trigger if the
+  tradeoff is unacceptable. Plain Docker and Compose mark health; they do
+  not restart a container merely because it is unhealthy.
 - `path("ox/", include("django_ox.urls"))` exposes `GET /ox/metrics`, the
   queue stats as Prometheus gauges (`django_ox_tasks{queue,status}`,
   `django_ox_ready_tasks`, `django_ox_oldest_ready_age_seconds`,
@@ -166,6 +200,8 @@ Operational facts to get right:
   writes them to. `ox_worker`, `ox_prune` and `ox_health` take `--database` to
   name the alias django-ox works on, defaulting to the alias the router sends
   `OxTask` writes to; it is not checked against the router, and nothing warns.
+  `ox_health --heartbeat-file` checks local files instead and refuses
+  `--database`.
   `ox_import_beat_schedules` spells the flag the same way and means something
   else: the alias holding your django-celery-beat tables, defaulting to the
   alias `OxSchedule` reads from.

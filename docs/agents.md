@@ -121,8 +121,10 @@ TASKS = {
   -100 to 100, higher first, and `task.using(run_after=...)` with a timedelta
   or datetime.
 - Tasks run only while `ox_worker` is running. It is a separate process.
-- SIGTERM and SIGINT both drain and exit 0; a second signal forces an
-  immediate exit with code 130.
+- SIGTERM and SIGINT request a drain, followed by exit 0. A main loop
+  hung in a database call cannot begin draining until that call returns.
+  A second signal forces exit 130; a process that cannot act on signals
+  needs SIGKILL.
 - `enqueue()` is one INSERT on the database the router sends `OxTask` to,
   `default` unless you wrote a router. Two things make the commit joint: a
   `transaction.atomic()` opened on that database, because a bare `atomic()`
@@ -184,6 +186,36 @@ TASKS = {
   the change, and re-enabling a paused one does not replay what it missed.
 - `ox_prune --older-than 7d` deletes finished rows; FAILED rows stay unless
   `--include-failed`. READY, WAITING and RUNNING rows are never deleted.
+- For per-container loop-liveness, pair `ox_worker --heartbeat-file PATH`
+  with `ox_health --heartbeat-file PATH --processes N`, matching the
+  worker's process count. Use an absolute path in an existing, writable
+  directory private to the container. Never share it between replicas.
+- A passing file probe means the expected controlling loops have advanced
+  recently. It does not establish task progress, successful claims or a
+  live renewal thread. All task slots can be stuck while the loop stays
+  fresh; task timeouts are separate.
+- File mode makes no database calls and runs no system or migration checks.
+  Project Django startup must also avoid database access. Allow startup
+  time before the first file update and replacement backoff while slot
+  files are missing. Size freshness above the poll interval plus expected
+  loop latency and scheduling margin.
+- Heartbeats are updated at each poll and drain pass head and before every
+  claim attempt. A busy pass can make up to `--concurrency` claims, but
+  updates occur between claims. Budget for reap and dispatch work plus one
+  claim, the poll interval and scheduling margin, not concurrency
+  multiplied by claim latency. With Django's PostgreSQL connection pool,
+  a refused database can hold a pass for the pool's `timeout`, 30 seconds
+  by default. Include that wait in the freshness budget.
+- Do not use bare `ox_health` or `--worker-timeout` for per-container
+  liveness restarts. Database checks report dependencies; queue thresholds
+  belong in fleet alerting. django-ox sets no overall timeout on a poll
+  pass. A configured `OPTIONS["connect_timeout"]` bounds connects. On
+  PostgreSQL and MySQL, statements and claims have no timeout by default.
+  On SQLite, the busy timeout, 5 seconds by default, bounds each lock wait,
+  not the whole poll pass. A hung database can make every file stale and
+  trigger fleet-wide restarts. Omit that automatic restart trigger if the
+  tradeoff is unacceptable. Plain Docker and Compose mark health without
+  restarting merely on an unhealthy status.
 - `path("ox/", include("django_ox.urls"))` mounts `GET /ox/metrics`, the
   queue stats as Prometheus gauges. It has no authentication of its own;
   wrap it with `login_required` or restrict it by network.

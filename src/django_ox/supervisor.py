@@ -17,12 +17,18 @@ the supervisor is not stopping, and exits with the children's worst exit
 code, or 1 when a slot tripped the restart cap. A child that the forwarded
 SIGTERM killed before it had installed its own handler is not one of those
 codes: see _record_exit.
+
+Under ``--heartbeat-file PATH`` it writes ``PATH.supervisor`` at the head of
+each pass of its own loop, and removes slot ``i``'s ``PATH.i`` before it
+starts that slot and once it sees the slot exit. It never writes a child's
+file: django_ox.heartbeat says why.
 """
 
 import logging
 import os
 import queue
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -34,6 +40,7 @@ from typing import Any
 
 from django.conf import settings
 
+from .heartbeat import HeartbeatFile, child_file, invalidate, supervisor_file
 from .timeouts import RECYCLE_EXIT_CODE
 
 logger = logging.getLogger("django_ox")
@@ -136,6 +143,24 @@ def _describe_exit(code: int) -> str:
     return f"exit code {code}"
 
 
+def _left_behind(path: str) -> str:
+    """
+    What a slot file that could not be removed means to the probe, for the
+    warning that says so. Only a regular file can pass for fresh; anything
+    else at the path fails the check for as long as it is there.
+    """
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError:
+        return "it cannot be read, so ox_health --heartbeat-file fails that slot"
+    if stat.S_ISREG(mode):
+        return "it counts as fresh until it ages out"
+    return (
+        "it is not a regular file, so ox_health --heartbeat-file fails that "
+        "slot until it is removed"
+    )
+
+
 class Supervisor:
     """Runs ``processes`` copies of ``ox_worker`` and keeps them running."""
 
@@ -150,6 +175,7 @@ class Supervisor:
         backoff_max: float = BACKOFF_MAX,
         backoff_reset: float = BACKOFF_RESET,
         kill_grace: float = KILL_GRACE,
+        heartbeat_file: str | None = None,
     ) -> None:
         if processes < 1:
             raise ValueError("processes must be at least 1")
@@ -178,6 +204,58 @@ class Supervisor:
         # child that nobody will signal. Re-entrant because _start_due holds
         # it while it calls _start, which takes it too.
         self._lock = threading.RLock()
+        # The base path of ox_worker --heartbeat-file. The supervisor writes
+        # its own file from its own loop and never a child's: a child that is
+        # stopped or wedged must go stale however well the supervisor is.
+        self.heartbeat_file = heartbeat_file
+        self._heartbeat = (
+            HeartbeatFile(
+                supervisor_file(heartbeat_file), owner=f"Supervisor {os.getpid()}"
+            )
+            if heartbeat_file
+            else None
+        )
+        # Slot files whose removal failed, said once each.
+        self._invalidation_reported: set[str] = set()
+
+    # -- heartbeat ---------------------------------------------------------
+
+    def _beat(self) -> None:
+        if self._heartbeat is not None:
+            self._heartbeat.touch()
+
+    def _invalidate(self, index: int) -> None:
+        """
+        Remove slot ``index``'s heartbeat file, before a start and once its
+        exit is seen.
+
+        Without it a slot that dies, or a slot left over from the previous
+        run of this container, keeps a fresh file for up to the probe's age
+        window, and the check passes for a process that is not there. Best
+        effort: a regular file that cannot be removed ages out instead, and
+        anything else at the path fails the check until it is removed.
+        """
+        if self.heartbeat_file is None:
+            return
+        path = child_file(self.heartbeat_file, index)
+        error = invalidate(path)
+        if error is not None and path not in self._invalidation_reported:
+            self._invalidation_reported.add(path)
+            logger.warning(
+                "Supervisor %d could not remove the heartbeat file %s of worker "
+                "process %d (%s); %s",
+                os.getpid(),
+                path,
+                index,
+                error,
+                _left_behind(path),
+                extra={
+                    "event": "heartbeat_invalidate_failed",
+                    "heartbeat_file": path,
+                    "worker_index": index,
+                    "error": str(error),
+                },
+            )
 
     # -- children ----------------------------------------------------------
 
@@ -190,6 +268,7 @@ class Supervisor:
             # a child in the foreground group would otherwise get the
             # terminal's copy and the forwarded one, and two signals mean
             # force-exit.
+            self._invalidate(index)
             proc = subprocess.Popen(  # noqa: S603
                 child_command(self.worker_args, index),
                 env=_child_env(),
@@ -258,6 +337,7 @@ class Supervisor:
             if code is None:
                 continue
             del self._children[index]
+            self._invalidate(index)
             self._record_exit(index, code)
             if self._stopping:
                 continue
@@ -420,6 +500,7 @@ class Supervisor:
             self._start(index)
         try:
             while self._children or (self._restart_due and not self._stopping):
+                self._beat()
                 self._process_signals()
                 self._reap_exited()
                 self._start_due()
@@ -434,6 +515,7 @@ class Supervisor:
             # on include the second and third, which are what turn a child
             # that will not exit into a SIGKILL.
             while True:
+                self._beat()
                 self._process_signals()
                 self._kill_overdue()
                 self._reap_exited()

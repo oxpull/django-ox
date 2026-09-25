@@ -64,6 +64,7 @@ from django_ox.compat import (
 
 from .backend import OxBackend
 from .exceptions import TaskAbandoned, TaskTimeout
+from .heartbeat import HeartbeatFile
 from .models import OxScheduleTick, OxTask
 from .schedules import (
     Schedule,
@@ -1239,6 +1240,7 @@ class Worker:
         db_alias: str | None = None,
         batch: bool = False,
         max_tasks: int | None = None,
+        heartbeat_file: str | None = None,
     ) -> None:
         backend = task_backends[backend_alias]
         if not isinstance(backend, OxBackend):
@@ -1367,6 +1369,17 @@ class Worker:
         suffix = "" if worker_index is None else f"-{worker_index}"
         self.worker_id = (
             f"{socket.gethostname()[:40]}-{os.getpid()}-{get_random_string(8)}{suffix}"
+        )
+        # Updated at the head of every poll and drain pass and before each
+        # claim, and nowhere else; django_ox.heartbeat says what a fresh file
+        # does and does not prove.
+        # The path is this process's own: ox_worker adds the slot suffix
+        # under a supervisor before it gets here.
+        self.heartbeat_file = heartbeat_file
+        self._heartbeat = (
+            HeartbeatFile(heartbeat_file, owner=f"Worker {self.worker_id}")
+            if heartbeat_file
+            else None
         )
         self._stop = Event()
         # Resolved once, here, and every statement this worker runs goes to
@@ -4097,6 +4110,23 @@ class Worker:
         """Stop claiming new tasks; in-flight tasks drain before run() exits."""
         self._stop.set()
 
+    def _beat(self) -> None:
+        # Called from the loop, the claims of a pass and the drain only, on
+        # the thread that runs them. A heartbeat written from any other
+        # thread, the renewer's or one of its own, would stay fresh while
+        # the loop it vouches for is wedged.
+        if self._heartbeat is None:
+            return
+        # An orphan no longer speaks for its slot. Its drain can last as
+        # long as its longest task, and a supervisor started in place of
+        # the dead one expects the same slot file from a child of its own;
+        # an orphan that kept writing it would pass the check for a slot the
+        # new fleet may have lost. Asked here, not only at the head of the
+        # loop, because the drain comes after the loop has noticed.
+        if self.parent_pid is not None and os.getppid() != self.parent_pid:
+            return
+        self._heartbeat.touch()
+
     @property
     def stopping(self) -> bool:
         return self._stop.is_set()
@@ -4204,6 +4234,12 @@ class Worker:
         renewer.start()
         try:
             while not self._stop.is_set():
+                # First, before any statement, and on every pass including
+                # the ones whose statements fail: the file says the loop is
+                # turning, not that the database answered. A pass wedged in
+                # a statement that never returns never comes back here, and
+                # that is what makes the file go stale.
+                self._beat()
                 if self.parent_pid is not None and os.getppid() != self.parent_pid:
                     logger.warning(
                         "Worker %s lost its supervisor (pid %d); draining",
@@ -4262,6 +4298,14 @@ class Worker:
                         and not self._stop.is_set()
                         and not self._limit_reached()
                     ):
+                        # Before each claim as well as at the head of the
+                        # pass: with a backlog one pass makes up to
+                        # --concurrency claims, each a round trip or more,
+                        # and on a database that answers slowly that pass
+                        # would otherwise age the file by all of them while
+                        # the loop is plainly advancing. A claim that never
+                        # returns still stops the updates.
+                        self._beat()
                         self._claim_contended = False
                         db_task = self.claim_one()
                         if db_task is None:
@@ -4425,6 +4469,10 @@ class Worker:
         """
         give_up_at: float | None = None
         while True:
+            # A drain can outlast any age a probe allows, and a worker that
+            # is draining is doing what it was asked to, so each wait here
+            # counts as a pass of the loop.
+            self._beat()
             pending = {future for future in in_flight if not future.done()}
             if not pending:
                 return

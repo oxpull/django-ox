@@ -31,13 +31,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Schedule-scoped failures do not hold a batch open. An abandoned dispatch
   pass prevents normal batch-empty completion until a later pass completes;
   reaching `--max-tasks` still ends the run. Exit 0 means the batch finished,
-  not that every schedule enqueued. `Worker` takes matching `batch` and
-  `max_tasks` keyword arguments, passed by the command only when the flag is
-  given, so existing fixed-signature `WORKER_CLASS` constructors keep working
-  when neither new flag is supplied.
+  not that every schedule enqueued.
+  `Worker` takes matching `batch` and `max_tasks` keyword arguments,
+  passed by the command only when the corresponding flag is given.
 - `schedule_dispatch_recovered` reports when a schedule that failed on this
   worker commits a tick again, by enqueueing a task or recording a
   first-sighting anchor. It carries the number of failed attempts in `failures`.
+- `ox_worker --heartbeat-file PATH` optionally updates local heartbeat
+  files at the head of each poll and drain pass. A passing probe means
+  the expected controlling loops have advanced recently, not that tasks
+  are progressing. Single-process workers write `PATH`; with
+  `--processes N` above one, the supervisor writes `PATH.supervisor` and
+  children write `PATH.0` through `PATH.(N-1)`. The directory must already
+  exist, be writable and be private to the container.
+- `ox_health --heartbeat-file PATH` checks every expected local heartbeat
+  file instead of the database. `--processes N` must match the worker;
+  `--max-heartbeat-age` defaults to 60 seconds. File mode reads metadata
+  only, runs no system or migration checks and makes no database calls.
+  Project startup must also be database-free for the probe to survive a
+  database outage. Database and queue options cannot be combined with
+  file mode. Text and JSON output are supported; database-mode output,
+  checks and `--skip-checks` behavior are unchanged.
+- `heartbeat_write_failed` and `heartbeat_invalidate_failed` warning
+  events report failed heartbeat updates and failed child-file removal.
+  Update failures are nonfatal and retried every pass. Warnings are
+  emitted once per writer/path or slot path, respectively.
+- `Worker` accepts the keyword-only argument `heartbeat_file`, defaulting
+  to `None`. The command passes it to `WORKER_CLASS` only when
+  `--heartbeat-file` is enabled. Existing fixed-signature constructors
+  remain compatible without the flag; enabling it requires support for
+  the keyword.
 
 ### Changed
 
@@ -53,6 +76,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Upgrade:** Schedule isolation requires no migration and adds no system
   check. Replace all workers to apply the behaviour throughout the fleet.
   Deploy django-ox and Oxpull only as the tested exact-pinned release pair.
+- Container probe recipes use optional local heartbeat files for
+  loop-liveness checks. Queue backlog, oldest age and last-claim age stay
+  in fleet alerting. Replace copied liveness recipes that use
+  `ox_health --worker-timeout` or database-only `ox_health`; an idle
+  queue can fail the former, another worker's claims can mask a wedged
+  worker, and a database outage can fail the latter across the fleet.
+- Probe guidance distinguishes loop liveness from task progress.
+  Heartbeats do not detect stuck task slots, lease-renewal thread
+  failure or successful claims. A hung database can make every
+  heartbeat stale and cause a restart storm when failures trigger
+  restarts. Examples include startup allowances and explicit thresholds;
+  they do not establish a guaranteed healthy maximum age. Plain
+  Docker/Compose health checks mark health without restarting an
+  unhealthy container. The systemd unit retains process supervision.
 
 ### Fixed
 

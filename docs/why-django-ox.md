@@ -22,7 +22,7 @@ Create an order and enqueue its confirmation inside `transaction.atomic()`. Both
 
 Inspect tracebacks and use Retry or Discard on failed tasks. Edit recurring schedules in admin. Workers dispatch them.
 
-`ox_health` provides threshold-based exit codes and JSON output. A Prometheus endpoint exports metrics.
+`ox_health` provides queue-threshold checks and local heartbeat-file checks, with exit codes and JSON output. A Prometheus endpoint exports metrics.
 
 ### django-ox vs django-tasks-db
 

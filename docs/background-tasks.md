@@ -604,10 +604,16 @@ in the admin without a deploy.
     restarted by the supervisor. Give the process manager a stop grace
     period longer than your slowest task, so a drain finishes before it
     escalates to SIGKILL.
-- **Probe with `ox_health`.** With no flags it checks that the database
-  answers, which is what a container health check should test. With
-  thresholds it turns queue depth and backlog age into an exit code for
-  cron alerting:
+- **Probe with `ox_health`.** For container loop-liveness, enable
+  `ox_worker --heartbeat-file PATH` and check it with
+  `ox_health --heartbeat-file PATH`, using the same `--processes N` on both
+  commands. Use an existing, writable directory private to the container.
+  A passing file probe means the expected controlling loops have advanced
+  recently, not that tasks are progressing.
+
+    With no flags, `ox_health` checks that the database answers. Keep that
+    dependency check separate from liveness restarts. Queue thresholds turn
+    queue depth and backlog age into an exit code for fleet alerting:
 
     ```
     python manage.py ox_health --max-backlog 100 --max-age 300
@@ -617,10 +623,11 @@ in the admin without a deploy.
     OK: backlog=0 oldest_age=none last_claim_age=37s
     ```
 
-    `--format json` prints the same figures as one object. Which check
-    belongs where is on the
-    [Monitoring](monitoring.md#health-checks-ox_health) page, with the
-    Prometheus endpoint and the log events.
+    `--format json` prints the result as one object. Which check belongs
+    where is on the
+    [Monitoring](monitoring.md#health-checks-ox_health) page, with startup
+    allowances, the hung-database restart tradeoff, the Prometheus endpoint
+    and the log events.
 - **Prune on a timer.** Finished rows stay in the table until you delete
   them, because the table is also the result store. Run `ox_prune` daily
   from cron or a systemd timer, with a retention that suits you. `--dry-run`

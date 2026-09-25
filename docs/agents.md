@@ -69,14 +69,11 @@ python manage.py ox_health
 OK: backlog=0 oldest_age=none last_claim_age=none
 ```
 
-`manage.py check` also runs the django-ox system checks, so bad schedule,
-timeout and fallback-backoff options are reported before deployment.
-Schedule declaration
-and timeout errors covered by `django_ox.E002` to `E005` and `E010` fail here,
-before anything deploys. The checks do not establish database acceptance of
-schedule arguments; alert on `schedule_dispatch_error` and
-`schedule_dispatch_failed` at runtime.
-`django_ox.E011` rejects unusable backend `MAX_ATTEMPTS` values.
+`manage.py check` reports schedule and backend policy errors through
+`django_ox.E002` to `E005`, `E010` and `E011`, and warnings through
+`django_ox.W003` and `django_ox.W004`, before deployment.
+Database acceptance of schedule arguments is determined at dispatch;
+alert on `schedule_dispatch_error` and `schedule_dispatch_failed` at runtime.
 Review `django_ox.W003` and `django_ox.W004` warnings too; `W004` asks for
 a non-bool integer from 1 to 32767 while retaining compatible legacy values.
 
@@ -103,7 +100,7 @@ TASKS = {
             "LOCK_TIMEOUT": 300,  # seconds a worker may stop renewing its lease
             "BACKOFF_INITIAL": 5,  # first retry delay, seconds; doubles each attempt
             "BACKOFF_MAX": 600,  # retry delay ceiling, seconds
-            "TASK_TIMEOUT": None,  # seconds one attempt may run; None is no limit
+            "TASK_TIMEOUT": None,  # seconds one attempt may run; None means no backend-wide limit; queue and task timeouts still apply
             "TASK_TIMEOUTS": {},  # per-queue values, {"queue": seconds}
             "TASK_TIMEOUT_GRACE": 30,  # seconds a timed-out thread gets to stop
             "SCHEDULES": {},  # recurring tasks, see Recurring tasks
@@ -236,13 +233,15 @@ TASKS = {
 - Do not use bare `ox_health` or `--worker-timeout` for per-container
   liveness restarts. Database checks report dependencies; queue thresholds
   belong in fleet alerting. django-ox sets no overall timeout on a poll
-  pass. A configured `OPTIONS["connect_timeout"]` bounds connects. On
-  PostgreSQL and MySQL, statements and claims have no timeout by default.
-  On SQLite, the busy timeout, 5 seconds by default, bounds each lock wait,
-  not the whole poll pass. A hung database can make every file stale and
-  trigger fleet-wide restarts. Omit that automatic restart trigger if the
-  tradeoff is unacceptable. Plain Docker and Compose mark health without
-  restarting merely on an unhealthy status.
+  pass. A configured `OPTIONS["connect_timeout"]` bounds connects; PyMySQL
+  defaults to 10 seconds. PostgreSQL statements are unbounded by default.
+  MySQL row-lock waits use `innodb_lock_wait_timeout`, 50 seconds by
+  default, while PyMySQL's client read timeout is unbounded by default.
+  SQLite's busy timeout, 5 seconds by default, bounds each lock wait. See
+  [heartbeat liveness](monitoring.md#freshness-and-database-isolation) for
+  freshness sizing and database-stall restart tradeoffs. Docker and Compose
+  outside Swarm mark a container unhealthy when its healthcheck fails. Their
+  restart policies act on process exit rather than healthcheck status.
 - `path("ox/", include("django_ox.urls"))` mounts `GET /ox/metrics`, the
   queue stats as Prometheus gauges. It has no authentication of its own;
   wrap it with `login_required` or restrict it by network.

@@ -83,7 +83,7 @@ coming back. The mechanics, and the one case to know about, are in
 
 - Transactional enqueue, as above. No `on_commit` boilerplate.
 - Retries with exponential backoff and the full traceback of every attempt.
-  [Per-task policy](configuration.md#per-task-policy) adds a retry budget,
+  [Per-task policy](configuration.md#per-task-policy) adds an attempt budget,
   backoff callback and attempt timeout on Django 6.1 or Django 5.2 with
   django-tasks 0.12+.
 - A reaper that reclaims tasks after their leases expire, and a lease that

@@ -1,15 +1,20 @@
 # Production
 
-The worker is a plain foreground process: `manage.py ox_worker`, run under
-whatever supervises your other processes. It rides out a database that goes
-away and comes back: a failed pass is logged as `worker_poll_failed`, the
-connection is reopened, and the loop carries on. Once the loop starts, a
-database that refuses connections leaves it polling until the database
-returns. Startup work before the loop, such as loading database-backed
-schedules, can still access the database.
+Run `manage.py ox_worker` as a foreground process under your process
+supervisor. A worker started while the database refuses connections stays
+up and polls until it returns. Failed passes are logged as
+`worker_poll_failed`, and the connection is reopened.
 
-The system checks that need a database don't run for `ox_worker`. A SQLite
-build without JSON support fails `fields.E180`, which
+With settings schedules, the worker opens its first connection during
+polling. With `DatabaseScheduleSource`, a refused startup read logs
+`schedule_source_unavailable`; the worker starts with an empty stored
+schedule set and loads it on a later successful pass. Project startup
+code, such as an `AppConfig.ready()` method that queries the database,
+can still fail before the worker starts.
+
+To support startup during database outages, `ox_worker` leaves database
+system checks to `manage.py check --database <alias>`. A SQLite build
+without JSON support fails `fields.E180`, which
 `manage.py check --database <alias>` reports. The worker runs on that alias
 anyway and logs nothing. A database with no django-ox tables reaches the
 worker loop as a failing poll instead, and `check` does not report it.
@@ -39,7 +44,7 @@ ExecStart=/srv/myproject/.venv/bin/python manage.py ox_worker --processes 2 --co
 Restart=always
 RestartSec=5
 
-# 1.4.0: PostgreSQL pool max_size >= 5 per worker (10 pooled slots here).
+# 1.4.0 and later: PostgreSQL pool max_size >= 5 per worker (10 pooled slots here).
 
 # systemd sends SIGTERM on stop; the worker drains in-flight tasks and
 # exits 0. Give the drain at least as long as your longest task before
@@ -97,8 +102,9 @@ special entrypoint. Give the runtime longer than your slowest task before
 it escalates to SIGKILL. A worker wedged in a database call may not enter
 the drain and can need the full stop grace period before SIGKILL.
 
-For 1.4.0 PostgreSQL pools, set `max_size >= 5` per worker (10 slots here).
-See [pool sizing](#database-connections-and-postgresql-pooling).
+For 1.4.0 and later PostgreSQL pools, set `max_size >= 5` per worker (10
+slots here). See
+[pool sizing](#database-connections-and-postgresql-pooling).
 
 Before starting this service, provision `/run/ox` as a dedicated directory
 writable by the worker and private to this container. The worker does not
@@ -153,19 +159,20 @@ and leave the reaper to clean up. `stop_grace_period` is the container
 equivalent of `TimeoutStopSec`. On Kubernetes it is
 `terminationGracePeriodSeconds` on the pod spec.
 
-`--processes` inside one container, or one worker per container with the
-replica count doing the scaling, both work. The supervisor restarts a child
-that exits, not one that is stopped or wedged. A stale child file fails the
-whole container's probe. If an orchestrator acts on that failure, it restarts
-the container and every slot in it. One container per worker keeps that
-restart scope to one worker.
+`--processes` keeps the container count down on a host, with one command
+and one probe per container. The supervisor restarts children that exit;
+the file probe detects stopped or wedged children. An orchestrator acting
+on a failed probe restarts the container and every slot in it. One worker
+per container, scaled through the replica count, gives each worker its
+own health status, restart accounting and restart scope.
 
-A passing file probe means the expected controlling loops have advanced
-recently. It does not establish task progress or database availability.
-A database that refuses connections lets the loop continue. A database
-that accepts calls but never answers can make every heartbeat stale and
-trigger fleet-wide restarts when used for automatic liveness recovery.
-Omit that automatic restart trigger if the tradeoff is unacceptable.
+A file probe checks local heartbeat files independently of the database.
+It detects stopped or wedged worker loops, a dead supervisor, missing or
+replaced slots, and stale files caused by write failures. A passing probe
+means every expected controlling loop has advanced recently. Use separate
+checks for task progress and database availability. See
+[heartbeat liveness](monitoring.md#freshness-and-database-isolation)
+for freshness sizing and database-stall restart tradeoffs.
 
 With no flags, `ox_health` checks database availability. Keep dependency
 checks separate from liveness restarts, and put queue thresholds in fleet
@@ -220,28 +227,26 @@ schedule fires its first due tick. Use a long-running worker for more
 frequent schedule checks, but missed ticks are still coalesced; this does not
 guarantee that every tick runs. See [Missed ticks](recurring-tasks.md#missed-ticks).
 
-An unreachable server, a lost or changed database session, or a database error
-escaping a shared dispatch read does not count as an empty batch pass. Failed
-polling passes and abandoned dispatch passes are retried, as they are for a
-long-running worker. A batch keeps retrying until a dispatch pass completes
-and the normal queue-drain and idle conditions hold. A database that stays
-reachable but refuses dispatch writes, for example because of a full disk or
-tablespace, revoked grants or a read-only target, is reported per schedule as
-`schedule_dispatch_error` if rollback and the same-session usability check
-succeed; those failures alone do not hold a batch open, so alert on
-`schedule_dispatch_error`.
+An unreachable server, a lost or changed database session, or a database
+error escaping a shared dispatch read does not count as an empty batch pass.
+Failed polling passes and abandoned dispatch passes are retried, as they are
+for a long-running worker. A batch keeps retrying until a dispatch pass
+completes and the normal queue-drain and idle conditions hold. A failed
+shared read, failed rollback or unusable session abandons the dispatch pass,
+logs `schedule_dispatch_failed` at WARNING and keeps the batch open until a
+pass completes.
 
-A schedule-scoped failure is different. Its transaction is rolled back and
-reported as `schedule_dispatch_error`. If rollback succeeds and the same
-database connection remains usable, the worker continues to later schedules.
-Even a schedule the database rejects on every attempt does not hold the batch
-open if rollback succeeds and the same database connection remains usable. The
-batch exits 0 once its normal completion conditions hold. If a schedule's
+A failure inside one schedule's transaction is reported as
+`schedule_dispatch_error` at ERROR if rollback succeeds and the same
+connection remains usable. The worker then continues to later schedules, and
+the batch exits 0 once its normal completion conditions hold. This includes
+refused writes caused by a full disk or tablespace, revoked grants or a
+read-only target, so alert on `schedule_dispatch_error`. If a schedule's
 dispatch repeatedly ends the session, for example through an oversized MySQL
-packet or a receiver that exceeds an idle-in-transaction or wait timeout, each
-pass is abandoned at that schedule, preventing later schedules from being
-reached and holding the batch open. `schedule_dispatch_failed` does not
-identify the schedule being processed.
+packet or a receiver that exceeds an idle-in-transaction or wait timeout,
+each pass is abandoned at that schedule, preventing later schedules from
+being reached and holding the batch open. `schedule_dispatch_failed` does
+not identify the schedule being processed.
 
 Alert on `schedule_dispatch_error` and `schedule_dispatch_failed`, plus
 `schedule_row_skipped` and `schedule_source_unavailable` for stored schedules,
@@ -642,8 +647,9 @@ values receive no sizing warning. This includes whole-valued floats such
 as `10.0`, which psycopg_pool accepts. Pool validation remains separate.
 
 An undersized pool can still cause task-query and task-thread outcome-write
-timeouts. Retries can exhaust `MAX_ATTEMPTS`. Failed outcome writes can leave
-attempts for the reaper to reclaim after the task body has finished.
+timeouts. Retries can exhaust the row's stored attempt budget. Failed
+outcome writes can leave attempts for the reaper to reclaim after the task
+body has finished.
 
 Renewal resilience is not exactly-once execution. Outcome writes can still
 fail after a database restart. A body can run again even when renewal
@@ -654,12 +660,12 @@ When using persistent database connections (`CONN_MAX_AGE > 0`), set
 `CONN_HEALTH_CHECKS = True` on each database alias used by worker tasks.
 Without health checks, a thread can reuse a connection killed by a database
 restart, causing the next task to fail at its first query. That failure
-consumes an attempt and applies the task’s failure/backoff policy, even if no
+consumes an attempt and applies the task's failure/backoff policy, even if no
 useful work ran; on the final attempt, it can exhaust the task. Health checks
 reduce this stale-connection failure but cannot prevent a connection from
 dropping after it has been checked. They do not provide exactly-once
-execution. Django’s PostgreSQL pool requires `CONN_MAX_AGE = 0`; see the pool
-guidance below.
+execution. Django's PostgreSQL pool requires `CONN_MAX_AGE = 0`; see the pool
+guidance above.
 
 #### Rolling upgrades
 
@@ -688,10 +694,10 @@ PgBouncer and third-party pools have not been tested.
 No database migration is required. The attempt-budget column already
 exists, but old and new workers do not execute the same live policy.
 
-Deploy the policy-capable django-ox release to every producer, worker
-and other process that imports task modules before adding declarations.
-Deploy the matching Oxpull release everywhere too if it is installed.
-Only then enable `max_attempts`, `backoff` and `timeout` declarations.
+Deploy django-ox 1.5.0 to every producer, worker and other process that
+imports task modules before adding declarations. Deploy Oxpull Pro 1.5.0
+everywhere too if it is installed. Only then enable `max_attempts`,
+`backoff` and `timeout` declarations.
 
 | Mixed-fleet case | Behaviour |
 | --- | --- |
@@ -706,11 +712,10 @@ the module is loaded during application startup. If a 1.4.0 worker
 instead encounters it while claiming a task, the body never runs:
 the worker spends the stored budget on import failures.
 
-In the recorded 1.4.0 behaviour, a terminal non-`ImportError` import
-failure writes `FAILED`, then logs `worker_error` rather than
-`task_failed`, with no `task_finished` signal. The policy-capable
-release logs `task_failed` without importing again and also sends no
-`task_finished` signal when the attempt could not rebuild the task.
+In 1.4.0, a terminal non-`ImportError` import failure writes `FAILED`, then
+logs `worker_error` rather than `task_failed`, with no `task_finished`
+signal. django-ox 1.5.0 logs `task_failed` without importing again and also
+sends no `task_finished` signal when the attempt could not rebuild the task.
 
 If one source tree must import on both releases during deployment, a
 guarded declaration can bridge module imports:
@@ -943,7 +948,7 @@ that installs one leaves timeouts alone.
 For a **sync task** on a watched thread, `TaskTimeout` is not raised and the
 grace backstop is the whole enforcement:
 
-- A task that returns before `TASK_TIMEOUT` plus `TASK_TIMEOUT_GRACE` is
+- A task that returns before its attempt timeout plus `TASK_TIMEOUT_GRACE` is
   recorded as whatever it did, however long it ran. There is no
   `task_timed_out` event, and nothing else says a deadline passed. With the
   default 30-second grace this is the common case.
@@ -972,9 +977,12 @@ tool cannot be taken off a single thread.
 
 ## Backoff callbacks
 
-A task's `backoff` callback decides what to do after an ordinary failed
-attempt when the stored budget permits another claim. It receives the
-original exception and an in-memory `TaskResult` snapshot.
+Declare a synchronous callback with `@task(backoff=fn)`; see
+[per-task policy](configuration.md#per-task-policy). After an ordinary
+failed attempt, when the stored budget permits another claim, the worker
+calls `fn(exception, task_result)` with the original exception and an
+in-memory `TaskResult` snapshot. Return integer seconds or a `timedelta`
+to schedule a retry, or `None` to stop retrying.
 
 The snapshot has:
 
@@ -982,7 +990,7 @@ The snapshot has:
 - `attempts` and `worker_ids` including the current claim;
 - the current task error appended last to `errors`;
 - `finished_at` set;
-- `task.max_attempts` set to the row's stored budget.
+- `task` containing the live task declaration.
 
 This snapshot is input to the decision, not an intermediate database
 state. The row is written as `FAILED` only if the decision is terminal.
@@ -1112,8 +1120,8 @@ to lapse. A worker can become unresponsive for longer than `LOCK_TIMEOUT`
 and then return. A live worker can also lose its lease when renewal cannot
 get a database connection: before 1.4.0, a Django PostgreSQL pool below
 `concurrency + 2` (`concurrency + 3` with task timeouts) could cause this;
-in 1.4.0, private connects that keep failing for about `LOCK_TIMEOUT`,
-with no pooled spare, can still do so.
+in 1.4.0 and later, private connects that keep failing for about
+`LOCK_TIMEOUT`, with no pooled spare, can still do so.
 See [PostgreSQL pooling](#database-connections-and-postgresql-pooling).
 
 Raising `LOCK_TIMEOUT` gives delayed renewals more time, but does not fix
@@ -1143,16 +1151,13 @@ backend's `MAX_ATTEMPTS`, which defaults to 3. That value is stored on the
 row and decides the budget for workers and the reaper. Changing a
 declaration or backend default does not change existing rows.
 
-Every `TaskResult` django-ox builds from a row exposes that stored value as
-`result.task.max_attempts`. This applies to enqueue results, bulk enqueue
-results, `get_result()`, callback snapshots and signals. With the default
-backend budget, a task that declares nothing reports 3, not `None`.
-An operator retry sets the budget to `attempts + 1`, rather than restoring
-the task's declared budget. Legacy rows with a stored budget of 0 remain
-readable and report 0. `TaskResult.attempts` remains the claim count.
+`result.task` contains the live task declaration. Its `max_attempts`, when
+present, is the declared value, including `None` when the task inherits the
+backend budget. Its `backoff` and `timeout` also describe the live declaration.
 
-`result.task.backoff` and `result.task.timeout` describe the live task
-declaration, not the policy used by an earlier attempt.
+An operator retry sets the stored budget to `attempts + 1`. Legacy rows
+with a stored budget of 0 remain readable, and workers continue to use
+that budget. `TaskResult.attempts` remains the claim count.
 
 Two consequences:
 
@@ -1230,7 +1235,8 @@ reclaimed worker cannot corrupt the record of a task it no longer owns.
 **Two threads can run the same task body at the same time.** The lease fences
 the row, not the function. These cases can cause overlap:
 
-- A task outlives `TASK_TIMEOUT`. The worker asks the thread to stop, and after
+- A task outlives its attempt timeout, from the task declaration, queue
+  setting or `TASK_TIMEOUT`. The worker asks the thread to stop, and after
   `TASK_TIMEOUT_GRACE` it publishes the retry and recycles. The old thread is
   still running while the retry is claimed elsewhere, because nothing in
   CPython can stop a thread that is inside a call which never returns.
@@ -1239,7 +1245,7 @@ the row, not the function. These cases can cause overlap:
   the task to somebody else.
 - Renewal cannot get a connection for longer than `LOCK_TIMEOUT` while the
   body keeps running. Before 1.4.0, Django's PostgreSQL pool could starve
-  renewal; in 1.4.0, private connects that keep failing for about
+  renewal; in 1.4.0 and later, private connects that keep failing for about
   `LOCK_TIMEOUT`, with no pooled spare, can still let the lease expire. See
   [PostgreSQL pooling](#database-connections-and-postgresql-pooling).
 

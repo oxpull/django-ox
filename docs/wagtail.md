@@ -18,7 +18,7 @@ Tested combinations:
 - Wagtail 8.0 / Django 5.2.17.
 - Wagtail 8.0 / Django 6.1.1.
 
-Wagtail 7.3.x declares Django 6.0 support. Wagtail 7.3.1-7.3.3 also resolve on Django 6.0, but those combinations were not run.
+Wagtail 7.3.x declares Django 6.0 support.
 
 On Django 6.1, pip permits Wagtail 7.3.x, but Wagtail 7.3.4 fails in Wagtail's own search with `OperationalError: unable to use function MATCH`, both with and without django-ox.
 
@@ -112,7 +112,7 @@ On Wagtail 7.4 and 8.0, these operations can run through the worker:
 
 Removing deleted objects from the search and reference indexes still happens inline. A task backend does not move every part of publishing into the background.
 
-Verified through the worker: search-index updates, reference-index updates, document file deletion, and frontend-cache purges. Source-reviewed only: image focal-point detection and image/rendition file deletion.
+Wagtail uses tasks for search-index updates, reference-index updates, document file deletion, frontend-cache purges, image focal-point detection, and image/rendition file deletion.
 
 ## Handle delays and failures
 
@@ -130,7 +130,7 @@ Every running worker runs a reaper every `min(30, max(LOCK_TIMEOUT/2, 1))` secon
 
 ### Timeouts
 
-Timeouts are opt-in: `TASK_TIMEOUT` defaults to `None`, meaning no limit. `TASK_TIMEOUTS` sets per-queue limits. Both belong in the backend's [options](configuration.md#options).
+Timeouts are opt-in: `TASK_TIMEOUT` defaults to `None`, meaning no backend-wide limit. `TASK_TIMEOUTS` sets per-queue limits. Both belong in the backend's [options](configuration.md#options). On Django 6.1, or Django 5.2 with django-tasks 0.12+, a task's `timeout` declaration takes precedence over both; see [per-task policy](configuration.md#per-task-policy).
 
 Wagtail's frontend-cache purge makes outbound HTTP calls, so consider an appropriate task timeout rather than assuming one is already active.
 
@@ -142,13 +142,13 @@ With django-ox's default three attempts, those tasks end `FAILED`. The file-dele
 
 ## Monitor and prune
 
-For a per-container probe, check that the database answers:
+Use a local heartbeat-file check for per-container loop liveness; see [heartbeat liveness](monitoring.md#freshness-and-database-isolation). Check database availability separately:
 
 ```
 python manage.py ox_health
 ```
 
-`--max-backlog` and `--max-age` measure the whole queue. Put them in fleet-level alerting, from cron or a monitoring agent. Do not put them in a per-worker probe: a shared backlog would fail every worker's probe and restart healthy workers without shifting the backlog.
+`--max-backlog` and `--max-age` measure the whole queue. Use them for fleet-level alerting, from cron or a monitoring agent, separately from per-container liveness probes.
 
 See [Health checks: ox_health](monitoring.md#health-checks-ox_health).
 

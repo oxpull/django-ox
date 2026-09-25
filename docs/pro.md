@@ -58,8 +58,8 @@ the `django-tasks` backport; Pro does not.
   schedule rows on a queue no backend accepts reports `oxpull.E008`
   instead. Workflows need Oxpull Pro 1.3.0 or later.
 
-Each Pro release pins django-ox exactly: `oxpull==1.4.0` pins
-`django-ox==1.4.0`.
+Each Pro release pins django-ox exactly: `oxpull==1.5.0` pins
+`django-ox==1.5.0`.
 
 Pro runs on the databases the free tier tests in CI: SQLite,
 PostgreSQL and MySQL 8. MariaDB 10.6+ takes the same claim path but is not

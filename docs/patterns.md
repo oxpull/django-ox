@@ -1,10 +1,8 @@
 # Common patterns
 
-Worked examples for common task workflows. Most use the standard
-`django.tasks` API; django-ox-specific features are identified where they
-appear. Per-task retry and timeout declarations require Django 6.1 or
-Django 5.2 with django-tasks 0.12+. The notes also point out where
-django-ox behaves differently from a broker.
+Use these examples to build common task workflows with django-ox.
+Most use the standard `django.tasks` API; django-ox-specific features
+and differences from broker-based queues are identified where they appear.
 
 ## Send an email after signup
 
@@ -41,13 +39,9 @@ model is a bug waiting to happen.
 Retries are automatic. Without a task override, raise and the worker
 schedules the next attempt with exponential backoff.
 
-On Django 6.1, or Django 5.2 with django-tasks 0.12+, declare a task's
-claim budget, backoff callback and timeout through `@task`:
-
-On Django 6.1 with django-stubs 6.1.1, mypy requires
-`# type: ignore[call-overload, untyped-decorator]` on this decorator under
-strict checking. That suppression makes the task's static type `Any` and
-loses argument checking. The Django 5.2 backport needs no ignore.
+On Django 6.1, or Django 5.2 with django-tasks 0.12+, django-ox backends
+(`OxBackend` and `django_ox.testing`) support declaring a task's claim
+budget, backoff callback and timeout through `@task`:
 
 ```python
 import httpx
@@ -75,10 +69,13 @@ transport errors and HTTP 5xx responses, and stops retries for other errors
 by returning `None`. It receives the original exception and a failed-attempt
 snapshot whose `attempts` includes the current claim.
 
-The type-ignore comment works around django-stubs 6.1.1's decorator
-overloads, which do not accept these keyword arguments. Keep it scoped to
-the declaration when using those stubs. Django 6.0 supports bare `@task`,
-but rejects policy keyword arguments at import.
+On Django 6.1 with django-stubs 6.1.1, mypy reports `call-overload` for
+these policy keywords and also `untyped-decorator` under strict checking.
+A declaration-scoped `# type: ignore[call-overload]`, or
+`# type: ignore[call-overload, untyped-decorator]` under strict checking,
+suppresses those diagnostics; the task's static type becomes `Any`.
+The Django 5.2 backport supports the declaration without a suppression.
+On Django 6.0, use bare `@task` and backend-level policy options.
 
 Callbacks must be fast, synchronous and side-effect-free. They are not
 bounded by the task timeout. Return integer seconds or a `timedelta` for a

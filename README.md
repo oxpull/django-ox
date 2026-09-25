@@ -173,7 +173,7 @@ python manage.py ox_worker
 | `--lock-timeout` | backend `LOCK_TIMEOUT` | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |
 | `--database` | the alias `OxTask` writes to | Database alias to run against. Every `--processes` child is given the same one. It is not checked against the router. |
 | `--heartbeat-file PATH` | off | Update a local file at the head of every poll and drain pass. Above one process, write `PATH.supervisor` and `PATH.i` for each slot, not `PATH`. Requires an existing, writable directory private to the container. See [heartbeat liveness](https://oxpull.com/django-ox/monitoring/#local-heartbeat-files). |
-| `--batch` | off | Exit once a poll pass finds nothing to claim and none of its own tasks is running. For cron and job runners. Single process only. |
+| `--batch` | off | Exit once an error-free poll pass finds nothing to claim and began with none of its own tasks in flight. Schedule-scoped failures do not hold a batch open. For cron and job runners. Single process only. |
 | `--max-tasks N` | none | Exit after claiming N task attempts, failed attempts and retries included. Single process only. |
 
 On SIGTERM or SIGINT the worker requests a stop to claiming, drains
@@ -370,14 +370,14 @@ See [Task timeouts](https://oxpull.com/django-ox/production/#task-timeouts)
 for enforcement and its limits.
 
 django-ox keeps all its own tables on one database, the one your router
-sends `OxTask` to. `django_ox.E008` reports a router that splits them.
-Under a router that sends reads to a replica, django-ox reads its own rows
-on the alias it writes them to. The admin has no way out of that: every
-page reads the primary, and no setting changes it. `ox_worker`, `ox_prune`
-and `ox_health` take `--database` to name the alias django-ox works on. It
-defaults to the alias `OxTask` writes to, `default` unless you wrote a
-router. The flag is not checked against the router: a worker pointed at
-another alias works there and nothing warns, so leave it unset unless you
+sends `OxTask` to. `django_ox.E008` reports a router that splits them. Under
+a router that sends reads to a replica, django-ox reads its own rows on the
+alias it writes them to. The admin has no way out of that: every page reads
+the primary, and no setting changes it. `ox_worker`, `ox_prune` and the
+database mode of `ox_health` take `--database` to name the alias django-ox
+works on. It defaults to the alias `OxTask` writes to, `default` unless you
+wrote a router. The flag is not checked against the router: a worker pointed
+at another alias works there and nothing warns, so leave it unset unless you
 mean it. See
 [Read replicas](https://oxpull.com/django-ox/configuration/#read-replicas).
 

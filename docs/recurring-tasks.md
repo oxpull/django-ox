@@ -193,9 +193,7 @@ dispatch until a later pass. Scheduling is a property of the workers you
 already run. There is no separate scheduler process to deploy or fail over.
 
 A pass visits settings schedules in `SCHEDULES` insertion order, followed by
-stored schedules in primary-key order. This makes traversal reproducible.
-It does not establish fairness or priority, and it does not coordinate workers.
-The tick's unique constraint does that.
+stored schedules in primary-key order.
 
 This deduplicates the enqueue, not the execution. The task that a tick enqueues
 runs under the same at-least-once contract as every other task, so write it to
@@ -268,16 +266,18 @@ A stored schedule's `starting_deadline_seconds` still applies. Once a tick
 is too late, it is dropped and reported as `schedule_tick_dropped`, not as
 another dispatch failure.
 
-There is no execution backoff, failure-based tick skipping, stored failure
-state or automatic disabling. While an enqueue rejection persists, each attempt
-is a transaction that inserts a tick row, attempts the enqueue and rolls back,
-followed by a `SELECT 1` connection check, on every dispatch pass on every
-worker. A stored schedule also takes its row lock. Workers attempting a
-settings schedule can queue on the same tick key. On MySQL with three or more
-dispatchers, the claimant's rollback can leave those workers deadlocking,
-producing 1213 `schedule_lock_unavailable` warnings; read these beside
-`schedule_dispatch_error` for the same schedule. Contention reports remain
-unthrottled, and report suppression does not reduce database attempts.
+Each worker keeps failure counts in memory for reporting. Pausing a stored
+schedule preserves those counts; restarting the worker resets them. While an
+enqueue rejection persists, every worker retries the schedule on every
+dispatch pass. Each retry takes the row lock for a stored schedule, inserts
+a tick row and attempts the enqueue in one transaction, then rolls back and
+runs a `SELECT 1` connection check. Workers attempting a settings schedule
+can queue on the same tick key. On MySQL with three or more dispatchers, the
+claimant's rollback can leave those workers deadlocking, producing 1213
+`schedule_lock_unavailable` warnings; read these beside
+`schedule_dispatch_error` for the same schedule. Every contention event is
+reported, and database attempts continue at the same rate when dispatch
+failure reports are suppressed.
 
 When the cause is resolved, the next dispatch pass can enqueue the latest
 eligible, unclaimed tick. An `update_schedule` edit that changes only a stored
@@ -298,11 +298,11 @@ across backends:
 python manage.py check
 ```
 
-Passing these checks does not establish database acceptance. A schedule can
-pass validation and still fail at dispatch. Alert on `schedule_dispatch_error`
-for schedule-scoped failures and `schedule_dispatch_failed` for abandoned
-passes. For stored schedules, also alert on `schedule_row_skipped`.
-`ox_health` has no schedule check.
+Database acceptance is determined at dispatch after validation. Alert on
+`schedule_dispatch_error` for schedule-scoped failures and
+`schedule_dispatch_failed` for abandoned passes. For stored schedules,
+also alert on `schedule_row_skipped` and `schedule_source_unavailable`.
+Use these events for schedule health monitoring.
 
 To see what has actually dispatched, read the tick log:
 

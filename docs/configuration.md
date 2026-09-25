@@ -213,12 +213,11 @@ than the stored budget. Re-enqueueing uses that declaration or, when it is
 claims already taken.
 
 Legacy rows with a stored budget of zero remain readable, and workers
-continue to use that stored budget. `result.task` contains the declared
-policy, not the stored budget. Reading a legacy row does not inject its
-budget into task validation, so otherwise-valid `using()` and
+continue to use that stored budget. Task validation uses the declaration
+when reading a legacy row, so otherwise-valid `using()` and
 `dataclasses.replace()` calls remain supported.
 
-By contrast, `result.task.backoff` and `result.task.timeout` describe the
+`result.task.backoff` and `result.task.timeout` also describe the
 live declaration loaded when the task is rebuilt, not a historical record
 of an earlier attempt's policy.
 
@@ -363,10 +362,12 @@ python manage.py ox_worker --queues exports --lock-timeout 7200
 ```
 
 If you embed the worker programmatically, `django_ox.worker.Worker`
-accepts `reap_interval`, `renew_interval`, `schedule_interval`,
-`backoff_initial`, `backoff_max`, `task_timeout` and `task_timeout_grace`
-keyword overrides, which have no flag. They replace their corresponding
-`OPTIONS` values.
+accepts keyword overrides: `reap_interval`, `renew_interval` and
+`schedule_interval` replace the derived intervals; `backoff_initial`,
+`backoff_max`, `task_timeout` and `task_timeout_grace` replace
+`BACKOFF_INITIAL`, `BACKOFF_MAX`, `TASK_TIMEOUT` and `TASK_TIMEOUT_GRACE`
+in `OPTIONS`, respectively. These overrides are available through the
+constructor.
 
 `backoff_initial` and `backoff_max` set the worker's fallback backoff;
 a task callback takes precedence. Constructor values must be finite
@@ -489,7 +490,6 @@ The exit-1 refusal diagnostics are:
 | --- | --- |
 | Empty heartbeat path | `CommandError: --heartbeat-file needs a path.` |
 | Zero or negative plain number of seconds | `CommandError: --max-heartbeat-age must be a positive number of seconds.` |
-| Signed duration with a suffix, such as `-5s` | Argparse error: invalid duration; exits 2. |
 | Process count below 1 | `CommandError: --processes must be at least 1.` |
 | `--max-heartbeat-age` without `--heartbeat-file` | `CommandError: --max-heartbeat-age needs --heartbeat-file.` |
 | `--processes` without `--heartbeat-file` | `CommandError: --processes needs --heartbeat-file.` |
@@ -553,9 +553,9 @@ alert are on the
   transaction, which is what makes a due tick enqueue once, so they have to
   live on the same database. Route the `django_ox` app to a single one; it
   need not be the default.
-- `django_ox.E010`: `LOCK_TIMEOUT`, `BACKOFF_INITIAL` or `BACKOFF_MAX` is not a
-  positive, finite number of seconds. Backoff values must also be at most
-  31557600000 seconds, a thousand years, and cannot be strings or bools.
+- `django_ox.E010`: `LOCK_TIMEOUT`, `BACKOFF_INITIAL` and `BACKOFF_MAX` must
+  each be a positive, finite number of seconds, at most 31557600000
+  seconds, a thousand years. Strings and bools are rejected.
 - `django_ox.E011`: `MAX_ATTEMPTS` cannot be converted by `int()`, converts
   to a negative budget, or exceeds the write database's storage ceiling.
   These values could not be used successfully under the supported database
@@ -584,19 +584,21 @@ strict mode Django recommends; non-strict mode can clamp values instead.
 `manage.py check` succeeds with the warning, and `ox_worker` prints it and
 starts. A process that skips checks gets no warning.
 
-Backend construction records `MAX_ATTEMPTS` configuration errors so checks
-can report them. Reading `OxBackend.max_attempts`, enqueueing any task on
-that backend, or constructing a worker raises `ImproperlyConfigured` for
-an `E011` value. A task's own budget does not bypass an invalid backend
-default.
+Backend construction stores the configured `MAX_ATTEMPTS` value. Validation
+runs during system checks and on every read of `OxBackend.max_attempts`.
+Reading `OxBackend.max_attempts`, enqueueing any task on that backend, or
+constructing a worker raises `ImproperlyConfigured` for an `E011` value. A
+task's own budget does not bypass an invalid backend default.
 
-The worker performs the same schedule and timeout validation at startup.
-It also validates `MAX_ATTEMPTS` and its effective fallback backoff, so
-`ox_worker --skip-checks` still refuses those invalid values.
-Invalid values these checks detect stop startup. They do not establish that
-the database accepts a schedule's arguments. A schedule-scoped failure at
-dispatch is logged as `schedule_dispatch_error`, and the worker continues
-to later schedules if rollback succeeds and the same connection remains usable.
+At startup, the worker validates schedules, the schedule source,
+`TASK_TIMEOUT`, `TASK_TIMEOUTS`, `TASK_TIMEOUT_GRACE`, `MAX_ATTEMPTS` and
+the effective `BACKOFF_INITIAL` and `BACKOFF_MAX` values, including with
+`ox_worker --skip-checks`. Invalid values in this set stop startup.
+`LOCK_TIMEOUT` validation runs through the `django_ox.E010` system check.
+Database acceptance of a schedule's arguments is determined at dispatch.
+A schedule-scoped failure is logged as `schedule_dispatch_error`, and the
+worker continues to later schedules if rollback succeeds and the same
+connection remains usable.
 
 Invalid per-task policy fields raise the framework's `InvalidTask`
 (`InvalidTaskError` on the backport) when the task is built, normally at

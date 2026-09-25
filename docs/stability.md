@@ -168,7 +168,7 @@ process that shares a database before anything writes the new status. The
 release notes name the value, say how it reads through `django.tasks`, and
 give the upgrade and rollback steps.
 
-Pin accordingly: `django-ox~=1.4.0` accepts patch releases only;
+Pin accordingly: `django-ox~=1.5.0` accepts patch releases only;
 `django-ox~=1.3` accepts the current major line.
 
 ## Deprecation policy
@@ -269,29 +269,3 @@ announced in the changelog. Databases: PostgreSQL, SQLite and MySQL 8 are
 tested in CI. MariaDB 10.6+ uses the same claim path, since Django's own
 floor guarantees `SELECT ... FOR UPDATE SKIP LOCKED` there, but it is not
 part of the tested matrix.
-
-## Paired policy acceptance
-
-The repository includes `tools/check-policy-pair` to check django-ox
-together with a matching Oxpull checkout. It is a release acceptance
-tool, not a worker command.
-
-```console
-tools/check-policy-pair --pro /path/to/oxpull --pro-python /path/to/paired-venv/bin/python
-```
-
-The tool checks that both suite environments import django-ox from the
-intended checkout, that Oxpull comes from its intended checkout, and
-that Oxpull's exact django-ox pin matches the imported version. It also
-checks the paired interpreter with `PYTHONPATH` cleared, as subprocess
-children see it, including settings-module loading.
-
-Suite failures and errors fail the gate. Skip reasons must be explained
-for the database, and expected failures must match the reviewed baseline.
-The tool accepts database-tagged Oxpull baselines through `--pro-skips`
-and `--pro-xfails`; `--record DIR` records observed skips and expected
-failures for review, not automatic acceptance.
-
-Exit status 0 means the selected gate passed, 1 means the gate failed,
-and 2 means environment validation failed before a suite ran. A pass
-covers the selected environments and suites, not every release check.

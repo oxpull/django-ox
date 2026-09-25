@@ -5,7 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.0] - 2026-09-25
+
+**Upgrading to 1.5.0:** No database migration is required. Replace every
+worker to apply schedule isolation, dead-connection outcome recovery and the
+timeout-watchdog fix throughout the fleet. Schedule isolation adds no system
+check. When using Oxpull, deploy django-ox and Oxpull only as the tested
+exact-pinned release pair.
+
+If you used `ox_import_beat_schedules`, read the [Security entry](#security)
+before generating or applying output. Upgrade and regenerate saved output.
+If you applied output from an affected version, inspect the settings entries
+and schedules as described there.
+
+Deploy the policy-capable releases to every host before adding per-task
+declarations. A 1.4.0 host cannot import an unguarded policy declaration.
+With an import-compatible module, a 1.4.0 worker honours the stored attempt
+budget but ignores per-task backoff and timeout. See the
+[rolling-upgrade guidance](https://oxpull.com/django-ox/production/#rolling-out-per-task-policy).
+
+New backoff or timeout declarations affect queued rows on their next
+attempt. New `max_attempts` declarations do not replace their stored
+budgets. `result.task` preserves the declared task class and policy fields,
+with routing reconstructed from the row; it does not report the row's stored
+budget.
+
+On Django 6.1, django-stubs 6.1.1 does not type the forwarded decorator
+keywords. Suppressing `call-overload` makes the decorated task's static type
+`Any`, losing task argument checking. Strict mypy also requires suppressing
+`untyped-decorator`: `# type: ignore[call-overload, untyped-decorator]`. The
+Django 5.2 backport needs no ignore; adding one can fail checks for unused
+ignores.
 
 ### Security
 
@@ -31,30 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   These checks cannot rule out prior execution; upgrading or
   removing unexpected code does not undo it. Found during the
   project's own review; there are no reports of this issue being used.
-
-### Fixed
-
-- `ox_prune --older-than` now rejects durations too large to convert or
-  subtract from the current time with a `CommandError` naming the value,
-  before deleting any rows (#82).
-- Documented the `worker_class` structured log key on
-  `claim_filter_sql_missing` and added a source-to-documentation test for
-  structured-log extra keys.
-- `ox_import_beat_schedules` now lists one-off, expired and
-  empty-window rows under "Not translated, and why:" instead of
-  importing them as recurring or live schedules. Supported schedules
-  retain start times only when they are later than the import instant,
-  otherwise starting when created; exclusive expiry bounds are always
-  preserved by setting `end_time` one microsecond earlier. If you
-  applied output from versions 1.2.0-1.4.0, review imported schedules
-  for unintended recurrence, missing start times and missing expiries;
-  disable or correct affected schedules. Database read errors,
-  non-null date bounds decoded as `None`, and date-bound conversion
-  failures stop the import with a concise error before any code is
-  printed. Rows with invalid JSON arguments or non-finite numeric
-  values are skipped with a reason. The application notes describe
-  naive-local date interpretation and the difference in first-run
-  behavior for tasks with a start time.
 
 ### Added
 
@@ -100,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to `None`. The command passes it to `WORKER_CLASS` only when
   `--heartbeat-file` is enabled. Existing fixed-signature constructors
   remain compatible without the flag; enabling it requires support for
-  the keyword.
+  the keyword, otherwise the command raises `CommandError`.
 - Provisional per-task retry and timeout policy through
   `@task(max_attempts=..., backoff=..., timeout=...)` on Django 6.1 and
   Django 5.2 with django-tasks 0.12+. Django 6.0 remains supported, but
@@ -117,9 +123,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `django_ox.testing.DummyBackend`. They validate declarations but do not
   enforce retries, backoff or timeouts. `task_policy_inert` warns on the
   first enqueue of each declaring task per backend instance.
-- `tools/check-policy-pair` for paired django-ox and Oxpull acceptance,
-  including checkout identity, exact-version pinning, subprocess import
-  checks and reviewed skip and expected-failure baselines.
+
+- Two outcome-persistence events: `task_outcome_reconnected` (WARNING)
+  reports that, after a connection-level failure, a new connection
+  recorded the outcome or confirmed that the first write had already
+  committed. It carries `outcome`, `already_written` and `duration_ms`;
+  the usual outcome log follows. Recovery retries outcome persistence
+  at most once, never the task body. `task_outcome_unrecorded` (ERROR)
+  reports that recovery on a new connection also failed. It carries
+  `dropped_status` and `duration_ms`, with a traceback of the second
+  failure. The outcome is unconfirmed, not necessarily absent.
 
 ### Changed
 
@@ -131,10 +144,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Schedule reports are limited per worker, database alias and schedule;
   abandoned-pass reports are limited per worker. Alert on both events and
   read `failures` and `suppressed` rather than counting log lines. For stored
-  schedules, also alert on `schedule_row_skipped`, regardless of batch exit.
-- **Upgrade:** Schedule isolation requires no migration and adds no system
-  check. Replace all workers to apply the behaviour throughout the fleet.
-  Deploy django-ox and Oxpull only as the tested exact-pinned release pair.
+  schedules, also alert on `schedule_row_skipped` and
+  `schedule_source_unavailable`, regardless of batch exit.
 - Container probe recipes use optional local heartbeat files for
   loop-liveness checks. Queue backlog, oldest age and last-claim age stay
   in fleet alerting. Replace copied liveness recipes that use
@@ -142,29 +153,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   queue can fail the former, another worker's claims can mask a wedged
   worker, and a database outage can fail the latter across the fleet.
 - Probe guidance distinguishes loop liveness from task progress.
-  Heartbeats do not detect stuck task slots, lease-renewal thread
-  failure or successful claims. A hung database can make every
-  heartbeat stale and cause a restart storm when failures trigger
-  restarts. Examples include startup allowances and explicit thresholds;
-  they do not establish a guaranteed healthy maximum age. Plain
-  Docker/Compose health checks mark health without restarting an
-  unhealthy container. The systemd unit retains process supervision.
+  Heartbeats cover the poll, drain and supervisor loops. Queue-age
+  alerting monitors task progress, and configured task timeouts recover
+  stuck slots. A hung database can make every heartbeat stale and cause
+  a restart storm when failures trigger restarts. Examples include
+  startup allowances and explicit thresholds to tune for the deployment.
+  Plain Docker/Compose health checks report container health; restart
+  behaviour requires separate supervision. The systemd unit retains
+  process supervision.
 - Attempt budgets are resolved at enqueue and remain stored on each row.
   Backoff and timeout use the worker's live task declaration on each
   attempt, including for rows already queued.
 - `result.task` preserves the declared task class and policy fields, with
-  routing reconstructed from the row, matching 1.4.0 behaviour. It does not
-  expose the row's stored attempt budget. Re-enqueueing uses the task's
-  declared `max_attempts`, or the backend's current value when none is
-  declared, rather than copying the source row's budget.
+  `priority`, `backend`, `queue_name`, `run_after` and `takes_context`
+  reconstructed from the row. Re-enqueueing uses the task's declared
+  `max_attempts`, or the backend's current `MAX_ATTEMPTS` when none is
+  declared.
 - Per-task timeouts take precedence over queue and worker defaults.
   Every attempt receives a fresh deadline; timeout grace and worker
   recycling remain worker-wide.
 - Backend `MAX_ATTEMPTS` values that cannot be converted, convert to a
   negative budget, or exceed the destination database's storage ceiling
-  now produce `django_ox.E011`. Backend construction records the problem;
-  enqueue and worker startup refuse the invalid configuration, including
-  startup with `--skip-checks`. Previously working values retain their
+  now produce system-check error `django_ox.E011`. Backend construction
+  retains the configured value; enqueue and worker startup validate it
+  when read and refuse invalid values, including startup with
+  `--skip-checks`. Previously working values retain their
   behaviour under the deprecation policy below.
 - `OxBackend.max_attempts` is now read-only. Tests that assigned or patched
   this attribute must configure `TASKS` with Django's `override_settings`
@@ -183,6 +196,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a task-declared timeout. This is a capacity-planning assumption, not
   a count of open connections or a startup requirement.
 
+- Connection-level outcome-write failures whose recovery on a new
+  connection also fails are now reported as `task_outcome_unrecorded`
+  instead of `worker_error`. Update alerts that rely on `worker_error`
+  for these failures to also monitor `task_outcome_unrecorded`.
+
 ### Deprecated
 
 - Previously working backend `MAX_ATTEMPTS` coercions and non-portable
@@ -198,13 +216,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- On PostgreSQL and MySQL, one schedule the database rejects no longer stops
-  later schedules or holds `ox_worker --batch` open when rollback succeeds
-  and the same database session remains usable. This includes non-finite
-  floats in arguments and stored values that pass form validation but fail
-  at enqueue. SQLite retains its local-failure completion behaviour.
-  Failed rollback, an unusable connection or a database error escaping a
-  shared dispatch read still abandons the pass.
+- `ox_prune --older-than` now rejects durations too large to convert or
+  subtract from the current time with a `CommandError` naming the value,
+  before deleting any rows (#88).
+- The monitoring documentation lists the `worker_class` structured log key
+  on `claim_filter_sql_missing`.
+- On PostgreSQL and MySQL, dispatch continues to later schedules after a
+  database rejection when rollback succeeds and the same database session
+  remains usable. This includes non-finite floats in arguments and stored
+  values that pass form validation but fail at enqueue. SQLite already
+  continues to later schedules after such a rejection. Failed rollback, an
+  unusable connection or a database error escaping a shared dispatch read
+  still abandons the pass.
 - On PostgreSQL, failed SQL in a `task_enqueued` receiver is isolated to its
   schedule when rollback succeeds and the same connection remains usable.
   Integrity errors on the tick insert that are not genuine duplicate-key
@@ -218,49 +241,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   import exception is not `ImportError`. An attempt that never rebuilt
   its task does not import it again or send `task_finished`. Attempts
   that rebuilt the task reuse it for the terminal signal.
-
-### Upgrade notes
-
-- No database migration is required for per-task policy. Deploy the
-  policy-capable django-ox release, and the matching Oxpull release if
-  used, to every host before adding declarations. A 1.4.0 host cannot
-  import an unguarded policy declaration. With an import-compatible
-  module, a 1.4.0 worker honours the stored attempt budget but ignores
-  per-task backoff and timeout. See the
-  [rolling-upgrade guidance](https://oxpull.com/django-ox/production/#rolling-out-per-task-policy).
-- Deploying a new backoff or timeout declaration affects queued rows on
-  their next attempt; deploying a new `max_attempts` declaration does
-  not replace their stored budgets.
-- django-stubs 6.1.1 does not yet type the forwarded decorator keywords.
-  On Django 6.1 with django-stubs 6.1.1, suppressing `call-overload` makes
-  the decorated task's static type `Any`, so task argument checking is
-  lost. Strict mypy also requires suppressing `untyped-decorator`:
-  `# type: ignore[call-overload, untyped-decorator]`. The Django 5.2
-  backport needs no ignore; adding one can fail checks for unused ignores.
-
-### Fixed
-
-- Recover outcome recording after a task encounters a dropped database
-  connection, fixing a defect present in every release from 0.1.0 through
-  1.4.0, and retry recording once if the dropped connection is first
-  detected during the outcome write. Previously, a successful task could
-  remain `RUNNING` and execute again after lease expiry; a failed attempt
-  could lose its error record and intended backoff. Exhausted attempts
-  could become `LOST`. Recovery retries only outcome persistence, not the
-  task body, and preserves lease fencing without duplicating error records
-  or applying backoff twice. Even a brief outage spanning the outcome
-  write and its single retry can leave the outcome unconfirmed and require
-  recovery by the reaper after lease expiry. This does not provide
-  exactly-once execution or repair transaction state; recovery does not
-  run inside a caller-owned transaction or with caller-disabled
-  autocommit.
-- Without Django's PostgreSQL pool, close the timeout watchdog's connection
-  after every batch of stuck-attempt records, including failed batches.
-  This prevents stale-connection reuse after a database restart or other
-  disconnect between batches. Previously, a later batch could fail to record
-  `TaskTimeout` and backoff, leaving recovery to the reaper after lease
-  expiry. The pooled lifecycle is unchanged. An outage during a batch can
-  still prevent recording.
+- The worker recovers outcome recording after a task encounters a dropped
+  database connection, fixing a defect present in releases 0.1.0 through
+  1.4.0. If the connection loss is first detected during the outcome write,
+  the worker retries recording once. Recovery is limited to outcome
+  persistence and preserves lease fencing, a single error record and a
+  single application of backoff. With Django's PostgreSQL pool, closing
+  an unusable lost connection also sweeps that alias's open pool before
+  the first outcome write or its single retry. The sweep checks idle
+  connections and schedules replacements for dead ones. A failed poll
+  pass also sweeps the pool before the usual poll-interval delay.
+  Sweeps are best-effort and can block on connection checks; a subsequent
+  checkout can still return a dead connection. Outcome recording still
+  makes at most two writes, and failed poll passes are not replayed.
+  An outage spanning both writes can leave the outcome unconfirmed; a
+  row still requiring recovery is handled by the reaper after lease
+  expiry. Execution remains at-least-once. Reconnection recovery runs
+  with autocommit enabled and outside caller-owned transactions.
+- For aliases without Django's PostgreSQL pool, the worker closes the
+  timeout watchdog's connection after every batch of stuck-attempt records,
+  including failed batches. This prevents stale-connection reuse after a
+  database restart or other disconnect between batches. Previously, a later
+  batch could fail to record `TaskTimeout` and backoff, leaving recovery to
+  the reaper after lease expiry. The 1.4.0 release notes overstated cleanup
+  by saying the connection was always closed or returned at the end of
+  each batch. The pooled lifecycle is unchanged. An outage during a batch
+  can still prevent recording.
+- `ox_import_beat_schedules` now lists one-off, expired and
+  empty-window rows under "Not translated, and why:" instead of
+  importing them as recurring or live schedules. Supported schedules
+  retain start times only when they are later than the import instant,
+  otherwise starting when created; exclusive expiry bounds are always
+  preserved by setting `end_time` one microsecond earlier. If you
+  applied output from versions 1.2.0-1.4.0, review imported schedules
+  for unintended recurrence, missing start times and missing expiries;
+  disable or correct affected schedules. Database read errors,
+  non-null date bounds decoded as `None`, and date-bound conversion
+  failures stop the import with a concise error before any code is
+  printed. Rows with invalid JSON arguments or non-finite numeric
+  values are skipped with a reason. The application notes describe
+  naive-local date interpretation and the difference in first-run
+  behavior for tasks with a start time.
+  Regenerating output with 1.5.0 does not resolve the cron day-field
+  mismatch: Celery requires both `day_of_month` and `day_of_week` to
+  match, while django-ox accepts either, so review and manually adapt
+  schedules that restrict both fields before applying them.
 
 ## [1.4.0] - 2026-09-23
 
@@ -1571,7 +1596,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
-[Unreleased]: https://github.com/oxpull/django-ox/compare/v1.4.0...HEAD
+[1.5.0]: https://github.com/oxpull/django-ox/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/oxpull/django-ox/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/oxpull/django-ox/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/oxpull/django-ox/compare/v1.2.0...v1.3.0

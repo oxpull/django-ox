@@ -310,12 +310,12 @@ Use these rather than `OxSchedule.objects.create()`. Django's `save()` does not
 run model validation, so a direct write skips the checks, leaves the activation
 boundary set for the old timing, and doesn't tell workers the row moved.
 
-A row written that way is validated when a worker reads it. One that does not
-validate is skipped and logged as `schedule_row_skipped`. One that does validate
-has its activation boundary moved to the moment a worker noticed the row,
-logged as `schedule_boundary_healed`, so any `start_time` the writer chose is
-discarded. Validation does not establish database acceptance at dispatch.
-A schedule-scoped dispatch failure is reported as `schedule_dispatch_error`.
+A row written that way has its activation boundary moved to the moment a
+worker noticed it, logged as `schedule_boundary_healed`, whether or not it
+validates. This replaces any `start_time` the writer chose. A row that fails
+validation is also skipped and logged as `schedule_row_skipped`.
+Database acceptance is determined at dispatch; a schedule-scoped dispatch
+failure is reported as `schedule_dispatch_error`.
 
 `update_schedule` and `create_schedule` take an optional `user=`, and enforce any
 per-entry permission when you pass one.
@@ -338,6 +338,14 @@ registry entries and `create_schedule` calls it would take. It writes nothing:
 retiming production is a decision, so you read the output, edit it and apply it
 yourself. `--database` names the alias holding the `django_celery_beat`
 tables, not django-ox's; it defaults to the alias `OxSchedule` reads from.
+
+Celery requires both `day_of_month` and `day_of_week` to match, while
+django-ox's cron fires when either matches. The 1.5.0 importer passes both
+fields through unchanged, so a "first Monday" schedule
+(`day_of_month="1-7"`, `day_of_week="mon"`) imports as roughly 11 runs per
+month instead of one. Regenerating output preserves this difference;
+reviewing and manually adapting schedules that restrict both fields
+before applying them is the reader's responsibility.
 
 The interval difference is the one to watch. `every=timedelta(minutes=90)` fires
 at 00:00, 01:30, 03:00 and so on, whatever time you created it. Celery would
@@ -404,7 +412,7 @@ failures. The full set, with every field, is on the
 | --- | --- |
 | `schedule_dispatched` | A tick enqueued its task. |
 | `schedule_tick_dropped` | A tick was past its starting deadline. Carries `late_seconds`. |
-| `schedule_row_skipped` | A row failed read-time validation and could not be used. Carries `reason`. |
+| `schedule_row_skipped` | A row could not be built. A skip during a periodic full read carries `schedule`, `schedule_pk` and `reason`. A skip during the locked dispatch read carries `schedule_pk` and a traceback. |
 | `schedule_dispatch_error` | A schedule-scoped failure, database or not. Its tick and task rolled back, and the pass continues. The schedule is retried under the usual due-tick and deadline rules. Reporting is rate-limited. |
 | `schedule_dispatch_failed` | A dispatch pass was abandoned. It is retried on a later pass. Reporting is rate-limited. |
 | `schedule_dispatch_recovered` | A schedule that had failed on this worker committed a tick again. Carries `failures`. |

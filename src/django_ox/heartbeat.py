@@ -318,8 +318,8 @@ def check(
 ) -> list[HeartbeatReport]:
     """
     Judge every file an ``ox_worker --processes processes`` run should keep
-    fresh, in the order ``expected_files`` gives. All of them share one
-    reading of the clock.
+    fresh, in the order ``expected_files`` gives. By default, each file is
+    checked against the current time sampled after reading its metadata. If
+    `now` is supplied, that value is used for all files.
     """
-    now = time.time() if now is None else now
     return [check_file(p, max_age, now) for p in expected_files(path, processes)]

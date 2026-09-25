@@ -1,7 +1,9 @@
 # Monitoring
 
-The queue and the result store are one database table. That means metrics are
-just queries, with no agent or exporter process to run. There are four ways in:
+Monitor django-ox workers and queues in production through queue metrics,
+health checks and liveness probes, Prometheus, and structured log events.
+The queue and result store share one database table, so metrics come
+directly from queries. There are four interfaces:
 
 - **`django_ox.stats`**, plain functions returning queue metrics.
 - **`manage.py ox_health`**, queue thresholds as an exit code for fleet
@@ -115,12 +117,14 @@ restart trigger if that tradeoff is unacceptable.
 
 #### Updates and scope
 
-The worker updates its file at the head of each poll pass, before database
-work, and at the head of each drain pass. These updates run on the main
-thread, not a heartbeat or lease-renewal thread. A database error that
-returns control to the loop allows subsequent updates; a refused
-connection lets heartbeat updates resume when the error returns control to
-the loop, but a connection-pool wait can still make the file stale.
+The worker updates its file on the main thread at the head of each poll
+pass, before database work, and at the head of each drain pass. Updates
+resume when database work returns control to the loop. On a pooled
+PostgreSQL alias, a `worker_poll_failed` pass is followed by a synchronous
+test of each idle pooled connection on the main thread, then the polling
+wait, before the next update. Include pool acquisition and these connection
+tests in the freshness budget. A connection test that never returns stalls
+updates just as a hung statement does.
 
 Startup work before `Worker.run()` writes no heartbeat. This includes
 Django setup and configured startup work such as reading stored schedules
@@ -241,9 +245,9 @@ one per claim attempt.
 Size `--max-heartbeat-age` above those expected gaps. With Django's
 PostgreSQL connection pool, a refused database can hold a pass for the
 pool's `timeout`, which defaults to 30 seconds, before the error returns
-control to the loop. The freshness budget must exceed the pool timeout
-plus `--interval` and scheduling margin, with further allowance for other
-reap, dispatch and claim work.
+control to the loop. The freshness budget must exceed the pool timeout,
+idle-connection testing after a failed pass, `--interval` and scheduling
+margin, with further allowance for other reap, dispatch and claim work.
 
 A file passes only if it is regular and:
 
@@ -339,8 +343,7 @@ Exit codes are:
 
 #### File-mode JSON
 
-`--format json` prints this file-mode object on stdout. The database-mode
-object is unchanged.
+`--format json` prints this file-mode object on stdout.
 
 ```json
 {
@@ -407,24 +410,19 @@ not guaranteed to produce JSON.
   every expected worker loop and, with multiple processes, the supervisor.
   It does not check task progress or database availability.
 
-**A database hang can trigger fleet-wide restarts.** django-ox sets no
-overall timeout on a poll pass. A configured `OPTIONS["connect_timeout"]`
-bounds connects. On PostgreSQL and MySQL, statements and claims have no
-timeout by default. On SQLite, the busy timeout, 5 seconds by default,
-bounds each lock wait, not the whole poll pass. If the database accepts
-calls but never answers, every worker's heartbeat can become stale at
-once. A Kubernetes liveness probe then restarts every affected pod. A
-single half-open connection looks the same from inside the worker. Omit
-this automatic restart trigger if that tradeoff is unacceptable. A
-database refusal lets the loop continue once the error returns control.
-With Django's PostgreSQL connection pool, that can take the pool's
-`timeout` of 30 seconds by default, so a refused database can still cause
-freshness failures if the age limit is too short.
+Size the freshness budget for the database's worst expected stall; see
+[freshness and database isolation](#freshness-and-database-isolation).
+A configured `OPTIONS["connect_timeout"]` bounds connects; PyMySQL defaults
+to 10 seconds. PostgreSQL statements are unbounded by default. MySQL
+row-lock waits use `innodb_lock_wait_timeout`, 50 seconds by default, while
+PyMySQL's client read timeout is unbounded by default. SQLite's busy timeout,
+5 seconds by default, bounds each lock wait. With Django's PostgreSQL pool,
+include its acquisition `timeout`, 30 seconds by default, and the time
+spent testing idle connections after a failed pass.
 
 Choose `--max-heartbeat-age` above the polling interval (`--interval`,
 default 1 second), expected loop latency and a scheduling margin. The
-default maximum age is 60 seconds. There is no guaranteed healthy maximum
-while database calls remain unbounded.
+default maximum age is 60 seconds.
 
 Allow time for startup. Django setup and worker initialization write no
 heartbeat; the first update happens when `Worker.run()` enters its loop.
@@ -679,7 +677,7 @@ The message text is not part of the contract. The keys are.
 | `lease_renew_recovered` | INFO | On a pooled PostgreSQL database, renewal succeeded on its private connection again. Includes counts of successful fallback renewals and missed renewals during the degraded period. |
 | `schedule_dispatched` | INFO | A recurring tick enqueued its task. |
 | `schedule_tick_dropped` | WARNING | A tick was past its starting deadline and was not run. Carries `late_seconds`. Each worker reports a given tick once, not once per dispatch pass, so a schedule that stays droppable does not repeat the warning every second. |
-| `schedule_row_skipped` | WARNING | A stored schedule could not be used: its task key is not registered, its arguments no longer validate, or its timing does not parse. The others in the same pass still run. Carries `reason`. |
+| `schedule_row_skipped` | WARNING | A row could not be built. A skip during a periodic full read carries `schedule`, `schedule_pk` and `reason`. A skip during the locked dispatch read carries `schedule_pk` and a traceback. |
 | `schedule_dispatch_error` | ERROR | A schedule-scoped failure, database or not. Its transaction rolled back and the same database connection remains usable, so the rest of the pass continues. The schedule is retried under the usual due-tick and deadline rules. The first failure has a traceback; continued failures produce at most one summary per 60 seconds. Carries `schedule`, `database`, `error`, `failures` and `suppressed`. |
 | `schedule_dispatch_recovered` | INFO | A schedule that had been logging `schedule_dispatch_error` on this worker committed a tick again, by enqueueing a task or recording a first-sighting anchor. Logged once per run of failures. Carries `schedule`, `database` and `failures`, the number of failed attempts in that run. |
 | `schedule_dispatch_callback_failed` | WARNING | A `transaction.on_commit` callback registered by a `task_enqueued` receiver raised after the dispatch transaction committed. The task is enqueued, the tick is recorded and the dispatch is counted; the failure is the callback's. Carries `task_id`. |
@@ -730,7 +728,7 @@ A failed connect while recording a stuck attempt logs
 | Key | Present on | Meaning |
 | --- | --- | --- |
 | `event` | all events | The event name from the table above. |
-| `worker_id` | all worker events except `heartbeat_write_failed` | Unique id of the worker emitting the record. With `--processes`, the slot number is the last part of the id. Absent from `task_policy_inert`, which comes from a test backend. |
+| `worker_id` | Worker events except `heartbeat_write_failed`, `schedule_source_unavailable`, `schedule_boundary_healed`, `schedule_boundary_heal_failed`, `schedule_row_skipped` and `schedule_lock_unavailable` for a stored schedule | Unique id of the worker emitting the record. With `--processes`, the slot number is the last part of the id. Settings-declared `schedule_lock_unavailable` events carry this key. The test-backend event `task_policy_inert` omits it. |
 | `worker_class` | `claim_filter_sql_missing` | The Worker subclass's class name. |
 | `claimed` | `worker_batch_empty`, `worker_max_tasks_reached` | Task attempts this worker claimed in its run, failed attempts and retries included. |
 | `task_id` | worker task events | The task's UUID, as a string. Absent from `task_policy_inert`. |
@@ -755,10 +753,10 @@ A failed connect while recording a stuck attempt logs
 | `dropped_status` | `task_lease_lost`, `task_outcome_unrecorded` | The status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |
 | `outcome` | `task_outcome_reconnected` | Confirmed outcome status: `SUCCESSFUL`, `READY` or `FAILED`. `READY` means the failed attempt was recorded for retry with its backoff. |
 | `already_written` | `task_outcome_reconnected` | Boolean. `true` when the new connection found the first write already committed; `false` when recovery wrote the outcome on the new connection. |
-| `schedule` | `schedule_dispatched`, `schedule_row_skipped`, `schedule_dispatch_error`, `schedule_dispatch_recovered`, `schedule_dispatch_callback_failed`, `schedule_tick_dropped`, `schedule_lock_unavailable` for a settings-declared schedule | The schedule's name, from `SCHEDULES` or from its row. |
+| `schedule` | `schedule_dispatched`, `schedule_row_skipped` during a periodic full read, `schedule_dispatch_error`, `schedule_dispatch_recovered`, `schedule_dispatch_callback_failed`, `schedule_tick_dropped`, `schedule_lock_unavailable` for a settings-declared schedule | The schedule's name, from `SCHEDULES` or from its row. |
 | `schedule_pk` | `schedule_row_skipped`, `schedule_lock_unavailable` for a stored schedule, `schedule_boundary_healed` | The stored schedule's row id. Absent for a settings-declared schedule, which has no row. |
 | `scheduled_for`, `late_seconds` | `schedule_tick_dropped` | The tick that was dropped, and how late it was when the deadline rejected it. |
-| `reason` | `schedule_row_skipped` | Why the row could not be used. |
+| `reason` | `schedule_row_skipped` during a periodic full read | Why the row could not be used. A skip during the locked dispatch read carries `schedule_pk` and a traceback instead. |
 | `queues` | `worker_started` | The worker's queues. |
 | `concurrency` | `worker_started`, `connection_pool_too_small` | The worker's task-thread concurrency, set by `--concurrency`. |
 | `database` | `connection_pool_too_small`, `schedule_dispatch_error`, `schedule_dispatch_failed`, `schedule_dispatch_recovered` | The worker's database alias: `--database`, or the alias used to write `OxTask`. |
@@ -776,7 +774,7 @@ A failed connect while recording a stuck attempt logs
 | `worker_indexes` | `supervisor_killed_workers` | The slots that were killed. |
 | `parent_pid` | `worker_orphaned` | The supervisor pid the worker was started under. |
 | `exit_code` | `supervisor_stopped` | The code the supervisor exits with. |
-| `error` | `lease_renew_degraded`, `lease_renew_fallback`, `lease_renew_missed`, `watchdog_connection_unavailable`, `schedule_dispatch_error`, `schedule_dispatch_failed`, `heartbeat_write_failed`, `heartbeat_invalidate_failed` | On schedule dispatch events, the exception class name of the latest failure, not its message. On heartbeat events, the operating-system error text from the failed update or removal. On renewal and watchdog events, the private-connection failure reason. When the pool serves a pool-first renewal tick, this instead says the private connection was not tried first and gives the remaining lease time. |
+| `error` | `lease_renew_degraded`, `lease_renew_fallback`, `lease_renew_missed`, `watchdog_connection_unavailable`, `schedule_dispatch_error`, `schedule_dispatch_failed`, `heartbeat_write_failed`, `heartbeat_invalidate_failed` | Schedule dispatch: the exception class name of the latest failure. Heartbeat: the operating-system error text from the failed update or removal. Renewal and watchdog: the private-connection failure reason, except that a pool-first renewal tick reports that the pool was tried first and gives the remaining lease time. |
 | `failures` | `schedule_dispatch_error`, `schedule_dispatch_failed`, `schedule_dispatch_recovered` | On `schedule_dispatch_error`, total failed attempts in this schedule's current run of failures on this worker, including the first. On `schedule_dispatch_failed`, total abandoned passes in the current outage. On `schedule_dispatch_recovered`, failed attempts in the run that just ended. |
 | `suppressed` | `schedule_dispatch_error`, `schedule_dispatch_failed` | Failures counted since the previous report and not logged individually. Zero on the first report of a run. |
 | `fallback` | `lease_renew_degraded` | `succeeded` if pooled renewal succeeded; `failed` if fallback did not renew the leases. |
@@ -903,12 +901,14 @@ and `suppressed` rather than treating each log line as one failed attempt.
 - **Prometheus.** Mount `django_ox.urls` and scrape `/ox/metrics`, or
   register `django_ox.metrics.collector()` with a registry you already run.
   Both are covered [above](#prometheus).
-- **journald.** Under systemd, WARNING and above maps onto journal
-  priorities, so `journalctl -u ox-worker -p warning` shows retries,
-  reclaims and failures. A timer can run `ox_health` for monitoring,
-  including file-based loop-liveness checks. Keep process restarts under
-  systemd's process supervision; the file check does not notify its
-  watchdog.
+- **journald.** Configure a level-aware journal handler, such as
+  `systemd.journal.JournalHandler`, or syslog-priority prefixes so
+  `journalctl -u ox-worker -p warning` selects retries, reclaims and
+  failures. With the default stderr handler and systemd settings, all lines
+  enter the journal at info priority. A timer can run `ox_health` for
+  monitoring, including file-based loop-liveness checks. Keep process
+  restarts under systemd's process supervision; the file check does not
+  notify its watchdog.
 - **Poisoned-task triage.** When `failure_rate` spikes, the rows have the
   forensics: filter FAILED rows and read `errors` (per-attempt
   tracebacks), `attempts` and `worker_ids` to see what died where. The

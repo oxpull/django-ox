@@ -190,13 +190,17 @@ Operational facts to get right:
   the pool's `timeout`, 30 seconds by default; include that wait in the
   freshness budget.
 - django-ox sets no overall timeout on a poll pass. A configured
-  `OPTIONS["connect_timeout"]` bounds connects. On PostgreSQL and MySQL,
-  statements and claims have no timeout by default. On SQLite, the busy
-  timeout, 5 seconds by default, bounds each lock wait, not the whole poll
-  pass. A fleet-wide database hang can make every file stale and trigger
-  fleet-wide liveness restarts. Omit that automatic restart trigger if the
-  tradeoff is unacceptable. Plain Docker and Compose mark health; they do
-  not restart a container merely because it is unhealthy.
+  `OPTIONS["connect_timeout"]` bounds connects. PostgreSQL and MySQL use
+  database and driver settings for statement and network-read limits;
+  django-ox sets no statement timeout. PostgreSQL's `lock_timeout` defaults
+  to 0 (unlimited); MySQL's `innodb_lock_wait_timeout` defaults to 50
+  seconds for InnoDB row-lock waits. Claims use `SKIP LOCKED` to skip locked
+  rows. A hung network read can remain unbounded on either engine. On
+  SQLite, the busy timeout, 5 seconds by default, bounds each lock wait, not
+  the whole poll pass. A fleet-wide database hang can make every file stale
+  and trigger fleet-wide liveness restarts. Omit that automatic restart
+  trigger if the tradeoff is unacceptable. Plain Docker and Compose mark
+  health; they do not restart a container merely because it is unhealthy.
 - `path("ox/", include("django_ox.urls"))` exposes `GET /ox/metrics`, the
   queue stats as Prometheus gauges (`django_ox_tasks{queue,status}`,
   `django_ox_ready_tasks`, `django_ox_oldest_ready_age_seconds`,
@@ -217,7 +221,9 @@ Operational facts to get right:
   task table is registered in the admin with the same two actions.
 - Run `migrate` before rolling workers, not from the worker process.
 - Out of scope in the core: interrupting one chosen running task on demand
-  (every attempt can be bounded with `TASK_TIMEOUT`).
+  (every attempt is unbounded by default and can have a configured deadline
+  through `TASK_TIMEOUT`, per-queue `TASK_TIMEOUTS`, or a task's declared
+  `timeout` on Django 6.1 or Django 5.2 with django-tasks 0.12+).
 - Every django-ox table lives on the database your router sends `OxTask` to,
   and `django_ox.E008` reports a router that splits them. Under a router that
   sends reads to a replica, django-ox reads its own rows on the alias it

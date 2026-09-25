@@ -6,7 +6,7 @@ if TYPE_CHECKING:
     from .tasks import BackoffCallback, PolicyTask
 
 __all__ = ["BackoffCallback", "PolicyTask", "__version__", "deadline", "remaining"]
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 
 def __getattr__(name: str) -> Any:

@@ -76,20 +76,27 @@ behind the project's own policy before it is reachable from outside; the
 
 ## SQL
 
-Every query is built through the Django ORM. The one raw statement (the
-PostgreSQL `UPDATE ... FOR UPDATE SKIP LOCKED` claim) interpolates only the
-model's own table name, two fixed clauses chosen by branch (the queue filter
-and the lease clock) and, for a `Worker` subclass, the fragment its
+Most queries are built through the Django ORM. The raw PostgreSQL
+`UPDATE ... FOR UPDATE SKIP LOCKED` claim interpolates only the model's own
+table name, two fixed clauses chosen by branch (the queue filter and the
+lease clock) and, for a `Worker` subclass, the fragment its
 `claim_filter_sql()` returns, which is application code on the trusted side
-of the boundary; every runtime value, that fragment's included, is passed as
-a bound parameter. No query is assembled from row data or user input by
-string formatting.
+of the boundary; every runtime value, that fragment's included, is passed
+as a bound parameter. `ox_import_beat_schedules` uses raw SELECTs from
+django-celery-beat's periodic-task, crontab and interval tables,
+interpolating only fixed table names and fixed column fragments selected
+according to the tables' introspected column names. After a schedule's
+dispatch fails, the worker checks the connection with the constant
+statement `SELECT 1` plus Django's backend-specific
+`connection.features.bare_select_suffix`; no value is interpolated.
+No migration uses `RunSQL`. No query is assembled from row data or user
+input by string formatting.
 
 ## Supported versions
 
 | Version | Supported |
 | ------- | --------- |
-| 1.4.x   | yes       |
+| 1.5.x   | yes       |
 | older   | no        |
 
 ## Reporting a vulnerability

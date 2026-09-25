@@ -481,6 +481,49 @@ class TestTheSetIsJudgedWhole:
         assert [r.path for r in reports] == expected_files(str(base), 2)
         assert [r.ok for r in reports] == [True, False, True]
 
+    def test_a_write_between_the_clock_read_and_the_stat_is_not_the_future(
+        self, base, monkeypatch
+    ):
+        # A worker's update can land just before its file's metadata is read.
+        # Each file is checked against the clock sampled after its metadata,
+        # so the update is not treated as a future timestamp.
+        for name in expected_files(str(base), 2):
+            self.write(name, T0)
+        clock = [T0 + 1.0]
+        real_lstat = os.lstat
+        racing = child_file(str(base), 1)
+
+        def lstat(path, *args, **kwargs):
+            if str(path) == racing:
+                clock[0] = T0 + 1.005
+                set_mtime(racing, clock[0])
+            return real_lstat(path, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(heartbeat.time, "time", lambda: clock[0])
+            patch.setattr(heartbeat.os, "lstat", lstat)
+            reports = check(str(base), 60, 2)
+        assert [r.problem for r in reports] == [None, None, None]
+
+    def test_a_file_ahead_of_the_clock_still_fails(self, base, monkeypatch):
+        for name in expected_files(str(base), 2):
+            self.write(name, T0)
+        self.write(child_file(str(base), 1), T0 + 10)
+        with monkeypatch.context() as patch:
+            patch.setattr(heartbeat.time, "time", lambda: T0 + 1)
+            reports = check(str(base), 60, 2)
+        assert [r.ok for r in reports] == [True, True, False]
+        assert reports[2].problem.startswith(
+            f"heartbeat file {base}.1 was updated 9.0s in the future"
+        )
+
+    def test_a_supplied_now_is_used_for_every_file(self, base):
+        for name in expected_files(str(base), 2):
+            self.write(name, T0)
+        reports = check(str(base), 60, 2, now=T0 - 1)
+        assert [r.ok for r in reports] == [False, False, False]
+        assert all("in the future" in r.problem for r in reports)
+
     def test_one_process_ignores_slot_files(self, base):
         self.write(child_file(str(base), 0), T0)
         self.write(supervisor_file(str(base)), T0)

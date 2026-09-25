@@ -332,6 +332,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../wagtail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wagtail background tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../configuration/" class="md-nav__link">
         
   
@@ -986,14 +1013,27 @@ part is where migrations go wrong.</p>
 </table>
 <p>The decorator, <code>.enqueue()</code>, and result API stay the same. Worker options
 and queue selection differ.</p>
-<p>Of <code>db_worker</code>'s worker-specific options, only <code>--backend</code> and <code>--interval</code>
-carry over unchanged.</p>
+<p>Of <code>db_worker</code>'s worker-specific options, <code>--backend</code>, <code>--interval</code>,
+<code>--batch</code> and <code>--max-tasks</code> carry over by name.</p>
 <ul>
 <li>Replace <code>--queue-name</code> with <code>--queues</code>.</li>
-<li>Remove <code>--batch</code>, <code>--max-tasks</code>, <code>--reload</code>, <code>--no-reload</code>,
-  <code>--exclude-queues</code>, <code>--worker-id</code>, and <code>--no-startup-delay</code>.
-  <code>ox_worker</code> rejects these options as unrecognized arguments.</li>
-<li><code>ox_worker</code> does not support exit-when-idle or task-count limits.</li>
+<li><code>--batch</code> maps by name to <code>--batch</code>. In <code>ox_worker</code>, it ends after an
+  error-free empty claim pass with no local tasks in flight; it does not
+  wait for future tasks, retry backoff or deferred releases. <code>db_worker</code>
+  exits with a traceback when the database is unreachable or its tables are
+  missing. <code>ox_worker</code> keeps retrying. An abandoned dispatch pass prevents
+  batch completion until a later dispatch pass completes. A schedule-scoped
+  failure is reported as <code>schedule_dispatch_error</code> and does not hold the
+  batch open. Exit 0 means the batch finished, not that every schedule
+  enqueued. Give the job a timeout, as
+  <a href="../production/#running-as-a-job">Running as a job</a> explains.</li>
+<li><code>--max-tasks N</code> maps by name to <code>--max-tasks N</code>. In <code>ox_worker</code>, every
+  claimed attempt consumes one of N, including failed attempts and repeat
+  claims of the same task. These mappings do not imply identical completion
+  or retry semantics between the workers.</li>
+<li>Remove <code>--reload</code>, <code>--no-reload</code>, <code>--exclude-queues</code>, <code>--worker-id</code>, and
+  <code>--no-startup-delay</code>. <code>ox_worker</code> rejects these options as unrecognized
+  arguments.</li>
 <li><code>ox_worker</code> does not autoreload. Without <code>--batch</code>, <code>db_worker</code> enables
   autoreload by default when <code>settings.DEBUG</code> is true.</li>
 <li><code>db_worker</code> runs only the <code>default</code> queue unless configured otherwise.
@@ -1057,7 +1097,11 @@ already have, so there is no broker to run.</p>
 </tr>
 <tr>
 <td><code>autoretry_for</code>, <code>self.retry</code></td>
-<td>automatic. Tune with <code>MAX_ATTEMPTS</code>, <code>BACKOFF_INITIAL</code>, <code>BACKOFF_MAX</code>.</td>
+<td>automatic retries on task exceptions. Set backend defaults with <code>MAX_ATTEMPTS</code>, <code>BACKOFF_INITIAL</code> and <code>BACKOFF_MAX</code>, or declare per-task <code>max_attempts</code> and <code>backoff</code>. A callback can decline a retry for a particular exception.</td>
+</tr>
+<tr>
+<td><code>soft_time_limit</code>, <code>time_limit</code></td>
+<td>not a one-to-one mapping. A task's <code>timeout</code> sets its attempt deadline; <code>TASK_TIMEOUT_GRACE</code> and worker recycling remain worker-wide. See <a href="../production/#task-timeouts">Task timeouts</a>.</td>
 </tr>
 <tr>
 <td>Result backend</td>
@@ -1069,6 +1113,13 @@ already have, so there is no broker to run.</p>
 </tr>
 </tbody>
 </table>
+<p>Per-task policy declarations require Django 6.1 or Django 5.2 with
+django-tasks 0.12+. They are not accepted by Django 6.0's <code>@task</code>
+decorator. See <a href="../configuration/#per-task-policy">Per-task policy</a>.</p>
+<p>In django-ox, <code>max_attempts</code> counts worker claims, including the first.
+A worker that dies after claiming a task consumes an attempt too. Choose
+the budget from that definition rather than copying a retry count from
+another task runner.</p>
 <p>One difference in behaviour to read before you switch. With a broker,
 <code>enqueue</code> leaves your process immediately. If the surrounding transaction then
 rolls back, a worker can pick up an order that no longer exists. The usual fix
@@ -1148,11 +1199,11 @@ the admin today, see <a href="../stored-schedules/">Schedules in the database</a
 </tr>
 <tr>
 <td><code>retries</code>, <code>retry_delay</code></td>
-<td><code>MAX_ATTEMPTS</code> and the backoff options</td>
+<td>Backend defaults in <code>MAX_ATTEMPTS</code> and the backoff options, or per-task <code>max_attempts</code> and <code>backoff</code>. django-ox counts total claims, including the first. Per-task declarations require Django 6.1, or Django 5.2 with django-tasks 0.12+.</td>
 </tr>
 <tr>
 <td><code>huey.immediate</code> in tests</td>
-<td>Django's <code>ImmediateBackend</code> or <code>DummyBackend</code></td>
+<td><code>django_ox.testing.ImmediateBackend</code> or <code>django_ox.testing.DummyBackend</code>. They accept policy declarations but do not enforce retries, backoff or timeouts. Use a real worker to test enforcement.</td>
 </tr>
 </tbody>
 </table>
@@ -1176,17 +1227,23 @@ while new work goes to django-ox. They cannot see each other's rows.</p>
 <p>Both systems run tasks at least once, so your tasks should already be
 idempotent. Confirm it before you start rather than halfway through.</p>
 <h2 id="migrating-away">Migrating away</h2>
-<p>Task functions are portable. django-ox adds nothing to the producer side, so
-tasks stay ordinary <code>django.tasks</code> tasks and moving to another backend is a
-settings change and a drain, run in the same order as above with the roles
-reversed.</p>
-<p>One behaviour does not travel, and it needs deciding on the way in
-rather than on the way out. Enqueueing inside <code>transaction.atomic()</code> on the
-database that holds <code>OxTask</code> ties the task to that transaction, so it
-disappears on rollback. A broker-based backend cannot do this: the enqueue
-leaves your process the moment you call it. Code
-that depends on a rollback removing a task will behave differently once the
-queue lives in a broker, and it will do so quietly.</p>
+<p>Tasks without django-ox policy declarations use the standard <code>django.tasks</code>
+API. Moving them to another backend is a settings change and a drain, run
+in the same order as above with the roles reversed.</p>
+<p>Tasks that declare <code>max_attempts</code>, <code>backoff</code> or <code>timeout</code> need a policy
+migration too. A backend whose task class does not accept those fields
+rejects the declaration at import. Remove or translate the declarations
+before switching. Same-named fields on another backend are not a
+compatibility guarantee. In the other direction, django-ox reads policy
+only from <code>PolicyTask</code>; other Task classes inherit its backend defaults
+when rebound with <code>.using(backend=...)</code>.</p>
+<p>Transactional enqueue also needs deciding on the way in rather than on
+the way out. Enqueueing inside <code>transaction.atomic()</code> on the database that
+holds <code>OxTask</code> ties the task to that transaction, so it disappears on
+rollback. A broker-based backend cannot do this: the enqueue leaves your
+process the moment you call it. Code that depends on a rollback removing
+a task will behave differently once the queue lives in a broker, and it
+will do so quietly.</p>
 <p>If you want to keep that option open, wrap enqueues in
 <code>transaction.on_commit()</code>, the way a broker-based backend requires. django-ox
 runs correctly either way, and the task is enqueued after the commit instead of

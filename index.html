@@ -474,6 +474,33 @@
   
   
     <li class="md-nav__item">
+      <a href="wagtail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wagtail background tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="configuration/" class="md-nav__link">
         
   
@@ -1085,7 +1112,10 @@ coming back. The mechanics, and the one case to know about, are in
 <h2 id="what-you-get">What you get</h2>
 <ul>
 <li>Transactional enqueue, as above. No <code>on_commit</code> boilerplate.</li>
-<li>Retries with exponential backoff and the full traceback of every attempt.</li>
+<li>Retries with exponential backoff and the full traceback of every attempt.
+  <a href="configuration/#per-task-policy">Per-task policy</a> adds an attempt budget,
+  backoff callback and attempt timeout on Django 6.1 or Django 5.2 with
+  django-tasks 0.12+.</li>
 <li>A reaper that reclaims tasks after their leases expire, and a lease that
   protects slow tasks while renewal reaches the database on time.</li>
 <li>Graceful drain on SIGTERM: in-flight tasks finish before the worker exits.</li>
@@ -1097,8 +1127,8 @@ coming back. The mechanics, and the one case to know about, are in
   standard <code>django.tasks</code> result API.</li>
 <li>A <a href="configuration/#ox_prune">prune command</a> to keep the table small.</li>
 <li><a href="monitoring/">Monitoring</a>: a queue-stats API, an <code>ox_health</code> command
-  for probes and cron alerting, a Prometheus endpoint, structured log
-  events, and an admin page with retry and discard.</li>
+  for fleet alerting and optional local heartbeat probes, a Prometheus
+  endpoint, structured log events, and an admin page with retry and discard.</li>
 </ul>
 <h2 id="install">Install</h2>
 <p>Requires Python 3.12+ and Django 5.2+. Django 6.0 and later ship the Tasks
@@ -1128,8 +1158,11 @@ pip install "django-ox[backport]"
 <div class="highlight"><pre><span></span><code>python manage.py migrate django_ox
 </code></pre></div>
 <h2 id="quickstart">Quickstart</h2>
-<p>Tasks are plain <code>django.tasks</code> tasks. django-ox adds nothing to learn on
-the producer side.</p>
+<p>Tasks use the standard <code>django.tasks</code> decorator and enqueue API. A bare
+<code>@task</code> inherits django-ox's backend defaults. Optional
+<a href="configuration/#per-task-policy">per-task policy</a> sets a claim budget,
+backoff callback and timeout on Django 6.1, or Django 5.2 with
+django-tasks 0.12+.</p>
 <div class="highlight"><pre><span></span><code><span class="c1"># myapp/tasks.py</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>  <span class="c1"># Django 6.0+</span>
 <span class="c1"># On Django 5.2 the Tasks framework comes from the backport:</span>
@@ -1169,9 +1202,12 @@ schedules, and monitoring, with nothing extra to operate. Design
 decisions to know before you commit:</p>
 <ul>
 <li>A queued task can be discarded before a worker claims it, and a failed
-  one retried, from the admin or with <code>django_ox.actions</code>. <code>TASK_TIMEOUT</code>
-  bounds how long any attempt may run; a particular running task cannot be
-  interrupted on demand.</li>
+  one retried, from the admin or with <code>django_ox.actions</code>. Attempt
+  deadlines come from a task's <code>timeout</code>, a queue's <code>TASK_TIMEOUTS</code>
+  entry, or <code>TASK_TIMEOUT</code>. Per-task declarations require Django 6.1 or
+  Django 5.2 with django-tasks 0.12+. A particular running task cannot be
+  interrupted on demand. See <a href="production/#task-timeouts">Task timeouts</a>
+  for enforcement and its limits.</li>
 <li>Every django-ox table lives on one database, the one your router sends
 <code>OxTask</code> to. A queue on a different database from the rows it refers to gives
 up the transactional enqueue.</li>

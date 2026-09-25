@@ -332,6 +332,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../wagtail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wagtail background tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../configuration/" class="md-nav__link">
         
   
@@ -970,7 +997,7 @@ fewer service. The last section says where django-ox is not the right fit.</p>
 </tr>
 <tr>
 <td>Retries and backoff</td>
-<td>Exponential backoff, <code>MAX_ATTEMPTS</code>, <code>BACKOFF_INITIAL</code>, <code>BACKOFF_MAX</code>; every attempt's traceback kept</td>
+<td>Exponential backoff by default; per-task <code>max_attempts</code> and <code>backoff</code> on Django 6.1 or Django 5.2 with django-tasks 0.12+. Backend defaults: <code>MAX_ATTEMPTS</code>, <code>BACKOFF_INITIAL</code>, <code>BACKOFF_MAX</code>. Every attempt's traceback kept. See <a href="../configuration/#per-task-policy">Per-task policy</a></td>
 <td>No retry option in the README or the worker flags <sup id="fnref4:tdb-readme"><a class="footnote-ref" href="#fn:tdb-readme">1</a></sup> <sup id="fnref:tdb-worker"><a class="footnote-ref" href="#fn:tdb-worker">2</a></sup></td>
 <td><code>retries</code>, <code>retry_delay</code>, <code>retry_backoff</code> <sup id="fnref3:huey-guide"><a class="footnote-ref" href="#fn:huey-guide">8</a></sup></td>
 <td><code>autoretry_for</code>, <code>retry_backoff</code>, <code>retry_backoff_max</code> (default 600 s), <code>retry_jitter</code> <sup id="fnref:celery-tasks"><a class="footnote-ref" href="#fn:celery-tasks">11</a></sup></td>
@@ -1000,7 +1027,7 @@ fewer service. The last section says where django-ox is not the right fit.</p>
 </tr>
 <tr>
 <td>Time limit on a running task</td>
-<td><code>TASK_TIMEOUT</code>, per queue in <code>TASK_TIMEOUTS</code>: <code>TaskTimeout</code> raised inside the task at the deadline, and a worker recycle when the thread does not stop. The recycle is the whole enforcement on an interpreter with no facility for raising an exception in another thread, and for a thread a coverage tool or debugger is watching. See <a href="../production/#task-timeouts">Production</a></td>
+<td>Configured through backend <code>TASK_TIMEOUT</code>, per-queue <code>TASK_TIMEOUTS</code>, or a task's declared <code>timeout</code> on Django 6.1 or Django 5.2 with django-tasks 0.12+. <code>TaskTimeout</code> is raised inside the task at the deadline, followed by a worker recycle if the thread does not stop. The recycle is the whole enforcement on an interpreter with no facility for raising an exception in another thread, and for a thread a coverage tool or debugger is watching. See <a href="../production/#task-timeouts">Production</a></td>
 <td>Not documented in the README or the worker flags <sup id="fnref5:tdb-readme"><a class="footnote-ref" href="#fn:tdb-readme">1</a></sup> <sup id="fnref2:tdb-worker"><a class="footnote-ref" href="#fn:tdb-worker">2</a></sup></td>
 <td><code>timeout</code> per task or per call; "a <code>TaskTimeout</code> is raised and returned to the caller via the result handle" <sup id="fnref6:huey-guide"><a class="footnote-ref" href="#fn:huey-guide">8</a></sup></td>
 <td><code>soft_time_limit</code> raises <code>SoftTimeLimitExceeded</code> inside the task; <code>time_limit</code> terminates the process running it, which is replaced. "Time limits don't currently work on platforms that don't support the <code>SIGUSR1</code> signal" <sup id="fnref:celery-workers"><a class="footnote-ref" href="#fn:celery-workers">13</a></sup></td>
@@ -1107,7 +1134,7 @@ those pages do not say.</p>
 </tr>
 <tr>
 <td>Retries and backoff</td>
-<td>Exponential backoff, <code>MAX_ATTEMPTS</code>, <code>BACKOFF_INITIAL</code>, <code>BACKOFF_MAX</code>; every attempt's traceback kept</td>
+<td>Exponential backoff by default; per-task <code>max_attempts</code> and <code>backoff</code> on Django 6.1 or Django 5.2 with django-tasks 0.12+. Backend defaults: <code>MAX_ATTEMPTS</code>, <code>BACKOFF_INITIAL</code>, <code>BACKOFF_MAX</code>. Every attempt's traceback kept. See <a href="../configuration/#per-task-policy">Per-task policy</a></td>
 <td>Not stated in the README or the configuration page; failed tasks are retried from the Django admin <sup id="fnref4:sq-readme"><a class="footnote-ref" href="#fn:sq-readme">38</a></sup> <sup id="fnref:sq-config"><a class="footnote-ref" href="#fn:sq-config">39</a></sup></td>
 <td>None built in: "<code>dj_queue</code> does not add an automatic retry policy or backoff engine". Failed jobs are retried from the admin or with <code>retry_failed_job()</code> <sup id="fnref4:djq-readme"><a class="footnote-ref" href="#fn:djq-readme">41</a></sup></td>
 <td>No automatic retry stated. A FAILED task is re-run from the admin action "Retry failed tasks" or with <code>run_task_by_id(..., allow_retry=True)</code> <sup id="fnref4:ddt-readme"><a class="footnote-ref" href="#fn:ddt-readme">43</a></sup></td>
@@ -1165,11 +1192,13 @@ those pages do not say.</p>
 </table>
 <h2 id="when-not-to-use-django-ox">When not to use django-ox</h2>
 <ul>
-<li><strong>You need to stop one chosen task while it runs.</strong> django-ox bounds every
-  attempt with <code>TASK_TIMEOUT</code>, discards a queued task and retries a failed
-  one, but has no call that interrupts a particular running task on demand.
-  Celery can revoke and terminate a running task, from Flower or the control
-  API <sup id="fnref:flower"><a class="footnote-ref" href="#fn:flower">21</a></sup>.</li>
+<li><strong>You need to stop one chosen task while it runs.</strong> django-ox supports
+  configured attempt deadlines through <code>TASK_TIMEOUT</code>, per-queue
+  <code>TASK_TIMEOUTS</code>, or a task's declared <code>timeout</code> on Django 6.1 or
+  Django 5.2 with django-tasks 0.12+. Attempts are unbounded by default.
+  Operator actions discard queued tasks and retry failed ones.
+  For on-demand interruption, Celery can revoke and terminate a running
+  task, from Flower or the control API <sup id="fnref:flower"><a class="footnote-ref" href="#fn:flower">21</a></sup>.</li>
 <li><strong>The queue must live on a different database from your models.</strong> Every django-ox table
   lives on the database <code>OxTask</code> routes to, and a queue on a different
   database from your models gives up the transactional enqueue.</li>

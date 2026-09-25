@@ -332,6 +332,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../wagtail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wagtail background tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../configuration/" class="md-nav__link">
         
   
@@ -1066,9 +1093,9 @@
 
 
 <h1 id="common-patterns">Common patterns</h1>
-<p>Worked examples for the things people actually reach for. Every snippet uses the
-standard <code>django.tasks</code> API, so it works on any backend; the notes point out
-where django-ox behaves differently from a broker.</p>
+<p>Use these examples to build common task workflows with django-ox.
+Most use the standard <code>django.tasks</code> API; django-ox-specific features
+and differences from broker-based queues are identified where they appear.</p>
 <h2 id="send-an-email-after-signup">Send an email after signup</h2>
 <p>The common case, and the one where a database queue behaves differently from a
 broker.</p>
@@ -1094,24 +1121,63 @@ further up, the email task disappears with it.</p>
 <p>Pass the id, not the object. Arguments are stored as JSON, and a stale copy of a
 model is a bug waiting to happen.</p>
 <h2 id="retry-a-flaky-third-party-call">Retry a flaky third-party call</h2>
-<p>Retries are automatic. Raise, and the worker schedules the next attempt with
-exponential backoff.</p>
-<div class="highlight"><pre><span></span><code><span class="nd">@task</span>
+<p>Retries are automatic. Without a task override, raise and the worker
+schedules the next attempt with exponential backoff.</p>
+<p>On Django 6.1, or Django 5.2 with django-tasks 0.12+, django-ox backends
+(<code>OxBackend</code> and <code>django_ox.testing</code>) support declaring a task's claim
+budget, backoff callback and timeout through <code>@task</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">httpx</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>  <span class="c1"># On Django 5.2: from django_tasks import task</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">crm_backoff</span><span class="p">(</span><span class="n">exception</span><span class="p">,</span> <span class="n">task_result</span><span class="p">):</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">exception</span><span class="p">,</span> <span class="n">httpx</span><span class="o">.</span><span class="n">TransportError</span><span class="p">):</span>
+        <span class="k">return</span> <span class="mi">10</span> <span class="o">*</span> <span class="n">task_result</span><span class="o">.</span><span class="n">attempts</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">exception</span><span class="p">,</span> <span class="n">httpx</span><span class="o">.</span><span class="n">HTTPStatusError</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">exception</span><span class="o">.</span><span class="n">response</span><span class="o">.</span><span class="n">status_code</span> <span class="o">&gt;=</span> <span class="mi">500</span><span class="p">:</span>
+            <span class="k">return</span> <span class="mi">10</span> <span class="o">*</span> <span class="n">task_result</span><span class="o">.</span><span class="n">attempts</span>
+    <span class="k">return</span> <span class="kc">None</span>
+
+
+<span class="nd">@task</span><span class="p">(</span><span class="n">max_attempts</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">backoff</span><span class="o">=</span><span class="n">crm_backoff</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">30</span><span class="p">)</span>
 <span class="k">def</span><span class="w"> </span><span class="nf">sync_to_crm</span><span class="p">(</span><span class="n">order_id</span><span class="p">):</span>
     <span class="n">order</span> <span class="o">=</span> <span class="n">Order</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">pk</span><span class="o">=</span><span class="n">order_id</span><span class="p">)</span>
     <span class="n">response</span> <span class="o">=</span> <span class="n">httpx</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">"https://crm.example.com/orders"</span><span class="p">,</span> <span class="n">json</span><span class="o">=</span><span class="n">order</span><span class="o">.</span><span class="n">payload</span><span class="p">)</span>
-    <span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>  <span class="c1"># a 5xx raises, so the task retries</span>
+    <span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
 </code></pre></div>
-<p>Tune the envelope on the backend, not per task:</p>
+<p>This task gets up to five claims, including the first. The callback retries
+transport errors and HTTP 5xx responses, and stops retries for other errors
+by returning <code>None</code>. It receives the original exception and a failed-attempt
+snapshot whose <code>attempts</code> includes the current claim.</p>
+<p>On Django 6.1 with django-stubs 6.1.1, mypy reports <code>call-overload</code> for
+these policy keywords and also <code>untyped-decorator</code> under strict checking.
+A declaration-scoped <code># type: ignore[call-overload]</code>, or
+<code># type: ignore[call-overload, untyped-decorator]</code> under strict checking,
+suppresses those diagnostics; the task's static type becomes <code>Any</code>.
+The Django 5.2 backport supports the declaration without a suppression.
+On Django 6.0, use bare <code>@task</code> and backend-level policy options.</p>
+<p>Callbacks must be fast, synchronous and side-effect-free. They are not
+bounded by the task timeout. Return integer seconds or a <code>timedelta</code> for a
+delay, <code>0</code> for immediate eligibility, or <code>None</code> to stop retrying. Invalid
+returns and callback errors log <code>task_policy_error</code> and fall back to the
+worker's exponential backoff. See the
+<a href="../production/#backoff-callbacks">callback contract</a>.</p>
+<p>Backend defaults still apply to fields a task leaves as <code>None</code>:</p>
 <div class="highlight"><pre><span></span><code><span class="s2">"OPTIONS"</span><span class="p">:</span> <span class="p">{</span>
     <span class="s2">"MAX_ATTEMPTS"</span><span class="p">:</span> <span class="mi">5</span><span class="p">,</span>
-    <span class="s2">"BACKOFF_INITIAL"</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>   <span class="c1"># seconds before the second attempt</span>
-    <span class="s2">"BACKOFF_MAX"</span><span class="p">:</span> <span class="mi">600</span><span class="p">,</span>      <span class="c1"># ceiling</span>
+    <span class="s2">"BACKOFF_INITIAL"</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>  <span class="c1"># seconds before the second attempt</span>
+    <span class="s2">"BACKOFF_MAX"</span><span class="p">:</span> <span class="mi">600</span><span class="p">,</span>  <span class="c1"># ceiling for the worker's exponential backoff</span>
 <span class="p">}</span>
 </code></pre></div>
+<p>The stored claim budget decides how many attempts remain. Backoff and
+timeout come from the worker's live task declaration on each attempt.
+<code>BACKOFF_MAX</code> does not cap a valid callback delay.</p>
 <p>Every attempt keeps its own traceback, so a task that failed four times shows
-all four. After <code>MAX_ATTEMPTS</code> the task is <code>FAILED</code> and stays in the table:
-<code>ox_prune</code> keeps failed rows unless you pass <code>--include-failed</code>.</p>
+all four. After its attempts are spent, or its callback declines a retry,
+the task is <code>FAILED</code> and stays in the table: <code>ox_prune</code> keeps failed rows
+unless you pass <code>--include-failed</code>.</p>
+<p>These policy declarations are provisional. See
+<a href="../stability/#provisional-task-policy">API stability</a>.</p>
 <h2 id="answer-a-webhook-fast">Answer a webhook fast</h2>
 <p>Do the minimum in the request, then hand off. The sender gets its <code>200</code> straight
 away, however long the work behind it takes.</p>
@@ -1253,18 +1319,28 @@ claiming and bookkeeping, but your function is called outside them, so
 <code>select_for_update()</code> and anything else needing an open transaction must open
 one, as above.</p>
 <h2 id="test-without-a-worker">Test without a worker</h2>
-<p>Point the test settings at Django's own backends. No django-ox tables, no worker
-process.</p>
-<div class="highlight"><pre><span></span><code><span class="c1"># runs tasks inline, so an assertion right after enqueue sees the effect</span>
-<span class="c1"># On Django 5.2 LTS the path is django_tasks.backends.immediate.ImmediateBackend</span>
-<span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"django.tasks.backends.immediate.ImmediateBackend"</span><span class="p">}}</span>
+<p>Point the test settings at django-ox's policy-aware test backends. No
+django-ox tables, no worker process. The paths are the same on every
+supported Django version.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Runs each task once on the caller's thread.</span>
+<span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"django_ox.testing.ImmediateBackend"</span><span class="p">}}</span>
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><span class="c1"># records tasks without running them, for asserting what was enqueued</span>
-<span class="c1"># On Django 5.2 LTS the path is django_tasks.backends.dummy.DummyBackend</span>
-<span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"django.tasks.backends.dummy.DummyBackend"</span><span class="p">}}</span>
+<div class="highlight"><pre><span></span><code><span class="c1"># Records tasks without running them, for asserting what was enqueued.</span>
+<span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"django_ox.testing.DummyBackend"</span><span class="p">}}</span>
 </code></pre></div>
+<p>Both backends accept and validate <code>PolicyTask</code> fields. Neither retries,
+calls a backoff callback or enforces a timeout. Each backend instance logs
+a <code>task_policy_inert</code> warning on the first enqueue of each task path that
+explicitly declares policy. This is not a system-check warning.</p>
+<p>Use these paths instead of the framework's stock test backends when tasks
+declare policy. On fresh import, the stock backends reject the extra task
+fields. A task built under <code>OxBackend</code> before <code>override_settings</code> switches
+to stock Immediate can instead retain policy fields that the backend
+silently ignores. These test backends do not make policy declarations work
+on Django 6.0, whose decorator rejects the keyword arguments.</p>
 <p>Keep django-ox in the settings you use for integration tests, where the point is
-to exercise claiming and retries for real.</p>
+to exercise claiming and retries for real. Test retry decisions, backoff
+delays and timeout enforcement against a real worker.</p>
 <h2 id="not-in-the-core">Not in the core</h2>
 <p>Batches, unique or deduplicated tasks, rate limiting and workflows are in
 <a href="../pro/">Oxpull Pro</a>, a paid add-on. Metrics are in the

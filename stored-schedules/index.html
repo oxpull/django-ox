@@ -332,6 +332,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../wagtail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wagtail background tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../configuration/" class="md-nav__link">
         
   
@@ -1241,6 +1268,11 @@ whatever their permissions on the schedule table.</p>
 </code></pre></div>
 <p>An unknown argument is rejected rather than ignored, and a number in a text field
 is rejected rather than quietly turned into a string.</p>
+<p>Form validation does not establish database acceptance. For example, an
+<code>ArgsForm</code> field declared as <code>forms.JSONField</code> takes a JSON string.
+The string <code>{"max_age": Infinity}</code> passes <code>create_schedule</code>, but its parsed
+value is rejected at enqueue by PostgreSQL, MySQL and SQLite. Such a dispatch
+is reported as <code>schedule_dispatch_error</code>, not <code>schedule_row_skipped</code>.</p>
 <h2 id="when-a-schedule-fires">When a schedule fires</h2>
 <p>This is the part worth reading properly. A stored schedule can be changed while
 workers are running, and what should happen isn't always obvious.</p>
@@ -1371,11 +1403,12 @@ admin itself calls:</p>
 <p>Use these rather than <code>OxSchedule.objects.create()</code>. Django's <code>save()</code> does not
 run model validation, so a direct write skips the checks, leaves the activation
 boundary set for the old timing, and doesn't tell workers the row moved.</p>
-<p>A row written that way is validated when a worker reads it. One that does not
-validate is skipped and logged as <code>schedule_row_skipped</code>. One that does validate
-runs, but its activation boundary is moved to the moment a worker noticed the
-row and logged as <code>schedule_boundary_healed</code>, so any <code>start_time</code> the writer
-chose is discarded.</p>
+<p>A row written that way has its activation boundary moved to the moment a
+worker noticed it, logged as <code>schedule_boundary_healed</code>, whether or not it
+validates. This replaces any <code>start_time</code> the writer chose. A row that fails
+validation is also skipped and logged as <code>schedule_row_skipped</code>.
+Database acceptance is determined at dispatch; a schedule-scoped dispatch
+failure is reported as <code>schedule_dispatch_error</code>.</p>
 <p><code>update_schedule</code> and <code>create_schedule</code> take an optional <code>user=</code>, and enforce any
 per-entry permission when you pass one.</p>
 <h2 id="coming-from-django-celery-beat">Coming from django-celery-beat</h2>
@@ -1426,6 +1459,13 @@ registry entries and <code>create_schedule</code> calls it would take. It writes
 retiming production is a decision, so you read the output, edit it and apply it
 yourself. <code>--database</code> names the alias holding the <code>django_celery_beat</code>
 tables, not django-ox's; it defaults to the alias <code>OxSchedule</code> reads from.</p>
+<p>Celery requires both <code>day_of_month</code> and <code>day_of_week</code> to match, while
+django-ox's cron fires when either matches. The 1.5.0 importer passes both
+fields through unchanged, so a "first Monday" schedule
+(<code>day_of_month="1-7"</code>, <code>day_of_week="mon"</code>) imports as roughly 11 runs per
+month instead of one. Regenerating output preserves this difference;
+reviewing and manually adapting schedules that restrict both fields
+before applying them is the reader's responsibility.</p>
 <p>The interval difference is the one to watch. <code>every=timedelta(minutes=90)</code> fires
 at 00:00, 01:30, 03:00 and so on, whatever time you created it. Celery would
 measure ninety minutes from the last run. Use <code>phase</code> to shift the sequence if
@@ -1445,13 +1485,30 @@ the alignment matters.</p>
   indexed read of a small table.</li>
 <li><strong>One extra query per pass.</strong> Workers read a single row to learn whether
   anything changed, and re-read the schedules only when it did.</li>
-<li><strong>A broken row is skipped, not fatal.</strong> One that no longer validates is logged
-  and ignored so the others keep running. Watch for <code>schedule_row_skipped</code>.</li>
+<li><strong>Read-time validation failures are skipped.</strong> A row that no longer
+  validates is logged as <code>schedule_row_skipped</code> and ignored so the others
+  keep running.</li>
+<li><strong>Dispatch failures have a separate boundary.</strong> A row can validate and
+  still fail when dispatched. A schedule-scoped failure rolls back its tick
+  and task and is reported as <code>schedule_dispatch_error</code>. If rollback succeeds
+  and the same connection remains usable, later schedules are still attempted.
+  The failed schedule is retried on subsequent passes under the usual
+  due-tick and deadline rules; only its reporting is rate-limited.</li>
+<li><strong>An abandoned pass stops further traversal.</strong> A <code>django.db.DatabaseError</code>
+  escaping a shared dispatch read, failed rollback or unusable connection is
+  reported as <code>schedule_dispatch_failed</code>. The stored source's marker read and
+  boundary heal retain their own events: a failed marker read reports
+  <code>schedule_source_unavailable</code> and dispatch continues from the cached set; a
+  failed boundary heal reports <code>schedule_boundary_heal_failed</code>. Dispatch is
+  retried on a later pass. Ticks already committed are not undone. Alert on
+  <code>schedule_row_skipped</code>, <code>schedule_dispatch_error</code>, <code>schedule_dispatch_failed</code>
+  and <code>schedule_source_unavailable</code>.</li>
 <li><strong><code>manage.py check</code> cannot see rows.</strong> Checks run before <code>migrate</code>, so a bad
-  schedule in the database is a log line, not a start-up error. Settings-declared
-  schedules still fail fast. A missing <code>SCHEDULE_SOURCE</code> is not a check error
-  either: leaving it out is the default, and a check cannot read the rows that
-  would make it a mistake.</li>
+  schedule in the database is a log line, not a start-up error.
+  Settings-declared schedules still fail fast for errors their checks can
+  detect. A missing <code>SCHEDULE_SOURCE</code> is not a check error either: leaving it
+  out is the default, and a check cannot read the rows that would make it a
+  mistake.</li>
 <li><strong><code>task_enqueued</code> receivers run inside the dispatch transaction</strong>, while the
   worker holds the schedule row's lock. A receiver that takes row locks of its
   own can deadlock against an application transaction that holds those rows and
@@ -1463,7 +1520,8 @@ the alignment matters.</p>
   the task it followed is enqueued and counted.</li>
 </ul>
 <h2 id="monitoring">Monitoring</h2>
-<p>The events worth alerting on. The full set, with every field, is on the
+<p>The events below distinguish dispatched ticks, skipped rows and dispatch
+failures. The full set, with every field, is on the
 <a href="../monitoring/">monitoring</a> page:</p>
 <table>
 <thead>
@@ -1483,12 +1541,34 @@ the alignment matters.</p>
 </tr>
 <tr>
 <td><code>schedule_row_skipped</code></td>
-<td>A row could not be used. Carries <code>reason</code>.</td>
+<td>A row could not be built. A skip during a periodic full read carries <code>schedule</code>, <code>schedule_pk</code> and <code>reason</code>. A skip during the locked dispatch read carries <code>schedule_pk</code> and a traceback.</td>
+</tr>
+<tr>
+<td><code>schedule_dispatch_error</code></td>
+<td>A schedule-scoped failure, database or not. Its tick and task rolled back, and the pass continues. The schedule is retried under the usual due-tick and deadline rules. Reporting is rate-limited.</td>
+</tr>
+<tr>
+<td><code>schedule_dispatch_failed</code></td>
+<td>A dispatch pass was abandoned. It is retried on a later pass. Reporting is rate-limited.</td>
+</tr>
+<tr>
+<td><code>schedule_dispatch_recovered</code></td>
+<td>A schedule that had failed on this worker committed a tick again. Carries <code>failures</code>.</td>
 </tr>
 </tbody>
 </table>
-<p><code>schedule_row_skipped</code> is the one to alert on. It usually means a task key was
-removed from the code while a row still names it.</p>
+<p>Pausing a stored schedule preserves its failure state on each worker; deleting
+the row drops it without an event. A paused, fixed and resumed row reports
+<code>schedule_dispatch_recovered</code> when it next commits a tick on a worker that
+retained its failure state.</p>
+<p>Alert on <code>schedule_row_skipped</code>, <code>schedule_dispatch_error</code>,
+<code>schedule_dispatch_failed</code> and <code>schedule_source_unavailable</code>, regardless of a
+batch's exit code. <code>schedule_row_skipped</code> usually means a task key was removed
+from the code while a row still names it. A row can pass validation and still
+fail at dispatch, so that event alone is not enough.</p>
+<p>Read <code>failures</code> and <code>suppressed</code> on dispatch failure events rather than
+counting log lines. <code>ox_health</code> has no schedule check, and a rolled-back
+dispatch leaves no tick row.</p>
 <div class="footnote">
 <hr />
 <ol>

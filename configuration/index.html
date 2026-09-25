@@ -13,7 +13,7 @@
         <link rel="canonical" href="https://oxpull.com/django-ox/configuration/">
       
       
-        <link rel="prev" href="../background-tasks/">
+        <link rel="prev" href="../wagtail/">
       
       
         <link rel="next" href="../recurring-tasks/">
@@ -329,6 +329,33 @@
       
   
   
+  
+  
+    <li class="md-nav__item">
+      <a href="../wagtail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wagtail background tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
     
   
   
@@ -421,6 +448,67 @@
       
     </span>
   </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#per-task-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-task policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Per-task policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fields-and-validation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fields and validation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#precedence-and-persistence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Precedence and persistence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-copies-and-backend-changes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task copies and backend changes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#framework-and-typing-compatibility" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Framework and typing compatibility
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -970,6 +1058,67 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#per-task-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-task policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Per-task policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fields-and-validation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fields and validation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#precedence-and-persistence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Precedence and persistence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-copies-and-backend-changes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task copies and backend changes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#framework-and-typing-compatibility" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Framework and typing compatibility
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#ox_worker" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1159,7 +1308,7 @@ retry. Add options when you have a reason to.</p>
 <tr>
 <td><code>MAX_ATTEMPTS</code></td>
 <td><code>3</code></td>
-<td>Claims a task gets before it is marked FAILED. The count is claims rather than invocations: it goes up in the statement that hands the task to a worker, before the function is reached. That is what keeps retries bounded when a worker dies mid-run, and it is what lets a task that loses its worker between the claim and the call use an attempt without running. See <a href="../production/#attempts-count-claims">Attempts count claims</a>.</td>
+<td>Default claim budget for tasks that declare no <code>max_attempts</code>. Use an integer from 1 to 32767, not a bool. Previously accepted conversions, zero and larger values supported by the write database remain accepted with <code>django_ox.W004</code>; see System checks below. The task's value, or this default, is stored at enqueue and decides the budget from then on. Claims include the first and are counted before the function is reached. See <a href="../production/#attempts-count-claims">Attempts count claims</a>.</td>
 </tr>
 <tr>
 <td><code>LOCK_TIMEOUT</code></td>
@@ -1169,27 +1318,27 @@ retry. Add options when you have a reason to.</p>
 <tr>
 <td><code>BACKOFF_INITIAL</code></td>
 <td><code>5</code></td>
-<td>Delay in seconds before the first retry.</td>
+<td>Initial delay in seconds for the worker's exponential backoff. Used when no task callback decides, including callback errors and task import failures. Validated at worker startup as well as by system checks.</td>
 </tr>
 <tr>
 <td><code>BACKOFF_MAX</code></td>
 <td><code>600</code></td>
-<td>Ceiling on the retry delay, in seconds.</td>
+<td>Ceiling on the worker's exponential retry delay, in seconds. It does not cap a valid delay returned by a task's backoff callback. Validated at worker startup as well as by system checks.</td>
 </tr>
 <tr>
 <td><code>TASK_TIMEOUT</code></td>
 <td><code>None</code></td>
-<td>Seconds one attempt may run. <code>None</code> means no limit. At the deadline the worker raises <code>django_ox.exceptions.TaskTimeout</code> inside the task, on the task's own thread, and records the attempt as failed: retried on the usual backoff, or FAILED when attempts are spent. An async task is cancelled at the deadline instead. A sync task on a thread a coverage tool or debugger is watching is left alone, and <code>TASK_TIMEOUT_GRACE</code> is the whole enforcement for it. See <a href="../production/#task-timeouts">Task timeouts</a>.</td>
+<td>Default execution timeout in seconds per attempt. <code>None</code> means no limit. A task's <code>timeout</code> takes precedence, then its queue's <code>TASK_TIMEOUTS</code> entry. At the deadline the worker raises <code>django_ox.exceptions.TaskTimeout</code> inside a sync task on its own thread; an async task is cancelled. A recorded timeout follows the task's retry policy. A sync task on a thread a coverage tool or debugger is watching is left alone, and <code>TASK_TIMEOUT_GRACE</code> is the whole enforcement for it. See <a href="../production/#task-timeouts">Task timeouts</a>.</td>
 </tr>
 <tr>
 <td><code>TASK_TIMEOUTS</code></td>
 <td><code>{}</code></td>
-<td>Per-queue timeouts, <code>{"queue name": seconds}</code>. A queue in the mapping uses its own value instead of <code>TASK_TIMEOUT</code>; <code>None</code> as a value exempts that queue. Every key must be a queue named in <code>QUEUES</code>, unless <code>QUEUES</code> is <code>[]</code>. Timeouts are configured per queue, not per task. <code>OxBackend</code> uses the stock <code>Task</code>, which has no timeout field. Django 6.1 and the django-tasks 0.12 backport accept custom task fields through <code>@task(**kwargs)</code> and a backend's custom <code>task_class</code>. <code>OxBackend</code> does not define a custom <code>task_class</code>. <code>Task.using()</code> overrides only priority, queue name, run-after time, and backend.</td>
+<td>Per-queue timeouts, <code>{"queue name": seconds}</code>. A queue in the mapping uses its own value instead of <code>TASK_TIMEOUT</code>; <code>None</code> exempts tasks that declare no <code>timeout</code>. An explicit task timeout still applies on that queue. Every key must be a queue named in <code>QUEUES</code>, unless <code>QUEUES</code> is <code>[]</code>. <code>Task.using()</code> overrides only priority, queue name, run-after time, and backend.</td>
 </tr>
 <tr>
 <td><code>TASK_TIMEOUT_GRACE</code></td>
 <td><code>30</code></td>
-<td>Seconds a timed-out attempt gets to stop. A thread still running after that is treated as stuck, which usually means it is in a call that never returns to Python, where the exception cannot land: the worker records the attempt as failed, stops claiming, drains its other tasks and exits with code 75 so its supervisor restarts it. A task that catches <code>TaskTimeout</code> has the same deadline to return or raise, and so does a task on a watched thread, where nothing was raised at all.</td>
+<td>Seconds a timed-out attempt gets to stop. A thread still running after that is treated as stuck, which usually means it is in a call that never returns to Python, where the exception cannot land: the worker records the attempt as failed, stops claiming, drains its other tasks and exits with code 75 so its supervisor restarts it. A task that catches <code>TaskTimeout</code> has the same deadline to return or raise, and so does a task on a watched thread, where nothing was raised at all. This grace period is worker-wide, including for task-declared timeouts.</td>
 </tr>
 <tr>
 <td><code>WORKER_CLASS</code></td>
@@ -1238,10 +1387,187 @@ for capacity requirements and timeout limits.</p>
 private connection. The stock method returns 0 and opens no connection.
 Custom <code>WORKER_CLASS</code> overrides retain their idle calls. An override that
 queries can acquire a connection under the tick's connect deadline.</p>
-<p>The retry delay after attempt <em>n</em> fails is
+<p>The worker's exponential retry delay after attempt <em>n</em> fails is
 <code>BACKOFF_INITIAL * 2 ** (n - 1)</code>, capped at <code>BACKOFF_MAX</code>. With the
 defaults: 5 s, 10 s, 20 s, 40 s, and so on up to 600 s. There is no
 jitter.</p>
+<p>This backoff applies when a task has no callback, its callback raises or
+returns an invalid value, or its task cannot be imported. The stuck-thread
+path also uses it without calling user code. A valid callback delay is not
+capped by <code>BACKOFF_MAX</code>. The reaper requeues immediately when the stored
+budget allows; it does not call callbacks.</p>
+<h2 id="per-task-policy">Per-task policy</h2>
+<p>On Django 6.1 or Django 5.2 with django-tasks 0.12+, a task declared
+under an <code>OxBackend</code> alias can set its retry budget, backoff callback and
+attempt timeout:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">retry_connection_errors</span><span class="p">(</span><span class="n">exception</span><span class="p">,</span> <span class="n">task_result</span><span class="p">):</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">exception</span><span class="p">,</span> <span class="ne">ConnectionError</span><span class="p">):</span>
+        <span class="k">return</span> <span class="nb">min</span><span class="p">(</span><span class="mi">5</span> <span class="o">*</span> <span class="mi">2</span> <span class="o">**</span> <span class="p">(</span><span class="n">task_result</span><span class="o">.</span><span class="n">attempts</span> <span class="o">-</span> <span class="mi">1</span><span class="p">),</span> <span class="mi">300</span><span class="p">)</span>
+    <span class="k">return</span> <span class="kc">None</span>
+
+
+<span class="nd">@task</span><span class="p">(</span><span class="n">max_attempts</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">backoff</span><span class="o">=</span><span class="n">retry_connection_errors</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">60</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">sync_customer</span><span class="p">(</span><span class="n">customer_id</span><span class="p">):</span> <span class="o">...</span>
+</code></pre></div>
+<p>On Django 5.2, import <code>task</code> from <code>django_tasks</code> instead.
+The backend builds a <code>django_ox.tasks.PolicyTask</code>, a frozen subclass of
+the framework's <code>Task</code>. <code>PolicyTask</code> and the callback type alias
+<code>BackoffCallback</code> are also available from <code>django_ox</code>.</p>
+<p>These types and the three policy fields are provisional. They follow
+Django new-features proposals #142 and #144, but do not promise
+compatibility with whatever Django core eventually ships. See
+<a href="../stability/">API stability</a>.</p>
+<h3 id="fields-and-validation">Fields and validation</h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Accepted declaration</th>
+<th>Meaning of <code>None</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>max_attempts</code></td>
+<td>A non-bool integer from 1 to 32767, counting claims including the first</td>
+<td>Use the backend's <code>MAX_ATTEMPTS</code>, defaulting to 3</td>
+</tr>
+<tr>
+<td><code>backoff</code></td>
+<td>A synchronous callable taking <code>(exception, task_result)</code></td>
+<td>Use the worker's exponential backoff</td>
+</tr>
+<tr>
+<td><code>timeout</code></td>
+<td>A non-bool integer number of seconds, greater than zero and at most 31557600000</td>
+<td>Use the queue timeout, then the worker default</td>
+</tr>
+</tbody>
+</table>
+<p>Strings, floats and bools are not accepted for either integer field.
+The compatibility handling for backend <code>MAX_ATTEMPTS</code> does not apply
+to the new per-task field.</p>
+<p>A declared timeout cannot disable an inherited limit: <code>None</code> inherits,
+and zero is invalid. A declared timeout takes precedence even on a queue
+whose <code>TASK_TIMEOUTS</code> entry is <code>None</code>.</p>
+<p>Validation runs when the task is built, normally at module import, and
+again when django-ox validates it, including enqueue and worker rebuild.
+<code>.using()</code> and <code>dataclasses.replace()</code> also revalidate the task.
+Invalid declarations raise the framework's <code>InvalidTask</code>
+(<code>InvalidTaskError</code> on the backport). Multiple problems are joined into
+one message.</p>
+<p>These are the messages for representative invalid values:</p>
+<div class="highlight"><pre><span></span><code>max_attempts must be a whole number from 1 to 32767, or None to use the backend's MAX_ATTEMPTS, got 0.
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>backoff must be a callable taking (exception, task_result), or None to use the worker's exponential backoff, got 5.
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>backoff must be a synchronous callable, got &lt;function a at 0x...&gt;. The worker calls it on the attempt's own thread and does not await what it returns.
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>timeout must be a whole number of seconds greater than zero and at most 31557600000 (a thousand years), or None to use the queue's timeout, got 1.5.
+</code></pre></div>
+<p>The function representation in the synchronous-callable error varies.
+Async functions, async generator functions, partials of either, and
+instances with an async <code>__call__</code> are rejected. Passing a class does not
+cause its call implementation to be inspected. Validation is not a
+guarantee that a callable accepts the required arguments or returns a
+valid delay; those failures use the
+<a href="../production/#backoff-callbacks">callback fallback</a>.</p>
+<h3 id="precedence-and-persistence">Precedence and persistence</h3>
+<table>
+<thead>
+<tr>
+<th>Policy</th>
+<th>Precedence</th>
+<th>When resolved</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Attempt budget</td>
+<td>Task <code>max_attempts</code>, then backend <code>MAX_ATTEMPTS</code>, then 3</td>
+<td>At enqueue, stored on the row</td>
+</tr>
+<tr>
+<td>Retry delay</td>
+<td>Task <code>backoff</code>, then worker exponential backoff</td>
+<td>After an eligible failed attempt</td>
+</tr>
+<tr>
+<td>Attempt timeout</td>
+<td>Task <code>timeout</code>, then <code>TASK_TIMEOUTS</code> for the row's queue, then worker <code>TASK_TIMEOUT</code></td>
+<td>For each attempt</td>
+</tr>
+</tbody>
+</table>
+<p>Worker constructor overrides supply the corresponding worker defaults.
+An invalid backend <code>MAX_ATTEMPTS</code> configuration still prevents enqueue
+and worker startup, even if a task declares its own valid budget.</p>
+<p>The stored budget governs both workers and the reaper. Changing a task's
+declaration does not change the budget of rows already queued.
+An operator retry is a separate override: it grants one more claim by
+setting the budget to <code>attempts + 1</code>, unless the claim count has already
+reached 32767.</p>
+<p>Backoff and timeout are read from the module-level task in the code the
+worker runs. Deploying a new declaration therefore changes those policies
+for queued rows, including rows enqueued before the feature was installed.</p>
+<p>Each retry receives a fresh full timeout. <code>TASK_TIMEOUT_GRACE</code> remains
+worker-wide, and <code>--lock-timeout</code> still controls leases rather than
+execution deadlines. A task timeout longer than the lease relies on
+lease renewal.</p>
+<p>The row's <code>max_attempts</code> is fixed at enqueue unless an operator action
+changes it. Workers and the reaper use that stored value. <code>result.task</code>
+preserves the declared class and policy fields, with routing reconstructed
+from the row. Its <code>max_attempts</code>, when present, is the declaration rather
+than the stored budget. Re-enqueueing uses that declaration or, when it is
+<code>None</code>, the backend's current value. <code>TaskResult.attempts</code> is the number of
+claims already taken.</p>
+<p>Legacy rows with a stored budget of zero remain readable, and workers
+continue to use that stored budget. Task validation uses the declaration
+when reading a legacy row, so otherwise-valid <code>using()</code> and
+<code>dataclasses.replace()</code> calls remain supported.</p>
+<p><code>result.task.backoff</code> and <code>result.task.timeout</code> also describe the
+live declaration loaded when the task is rebuilt, not a historical record
+of an earlier attempt's policy.</p>
+<h3 id="task-copies-and-backend-changes">Task copies and backend changes</h3>
+<p><code>Task.using()</code> still accepts only its standard options: <code>priority</code>,
+<code>queue_name</code>, <code>run_after</code> and <code>backend</code>. It preserves the task's class
+and policy, but cannot set the policy fields.</p>
+<p><code>dataclasses.replace()</code> can set policy fields on a <code>PolicyTask</code> and
+revalidates them. Only a replaced <code>max_attempts</code> is persisted at enqueue.
+Replacing <code>backoff</code> or <code>timeout</code> on a local task copy does not change what
+the worker runs: the worker imports the module-level declaration.</p>
+<p>Only a <code>PolicyTask</code> supplies policy fields. A plain framework <code>Task</code>, or
+a task subclass from another library, rebound to django-ox with
+<code>.using(backend=...)</code> inherits all three policies. Same-named attributes
+on that object do not become django-ox policy declarations.</p>
+<h3 id="framework-and-typing-compatibility">Framework and typing compatibility</h3>
+<p>Django 6.0 supports django-ox but does not forward these decorator
+keywords. For example, <code>@task(max_attempts=5)</code> fails at module import
+with:</p>
+<div class="highlight"><pre><span></span><code>TypeError: task() got an unexpected keyword argument 'max_attempts'
+</code></pre></div>
+<p>Changing the backend does not make Django 6.0 accept the keyword.
+Bare <code>@task</code> still works under <code>OxBackend</code>, with all three policy fields
+set to <code>None</code>.</p>
+<p>On supported framework versions, use <code>OxBackend</code> or the policy-aware
+<a href="../patterns/#test-without-a-worker">test backends</a> when importing
+declaring modules. Stock framework test backends do not accept these
+declarations.</p>
+<p>django-stubs 6.1.1 does not include the forwarded keywords in its <code>task</code>
+overloads. On Django 6.1 with django-stubs 6.1.1, mypy does not recognise
+the forwarded policy keywords. The following suppression also covers strict
+mypy's <code>untyped-decorator</code> error:</p>
+<div class="highlight"><pre><span></span><code><span class="nd">@task</span><span class="p">(</span><span class="n">max_attempts</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">60</span><span class="p">)</span>  <span class="c1"># type: ignore[call-overload, untyped-decorator]</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">sync_customer</span><span class="p">(</span><span class="n">customer_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span> <span class="o">...</span>
+</code></pre></div>
+<p>The suppression makes the decorated task's static type <code>Any</code>, so calls such
+as <code>enqueue()</code> lose argument checking. It does not enable policy
+declarations on Django 6.0 or on an unsupported backend. Django 5.2 with
+django-tasks 0.12+ needs no ignore; adding one can fail checks for unused
+ignores.</p>
 <h2 id="ox_worker">ox_worker</h2>
 <div class="highlight"><pre><span></span><code>python manage.py ox_worker [options]
 </code></pre></div>
@@ -1289,6 +1615,21 @@ jitter.</p>
 <td>the alias <code>OxTask</code> writes to</td>
 <td>Database alias to run against. Each <code>--processes</code> child is given the same one, so one router answering differently in two processes can't split a fleet across two databases. It is not checked against the router; see <a href="#read-replicas">Read replicas</a>.</td>
 </tr>
+<tr>
+<td><code>--heartbeat-file PATH</code></td>
+<td>off</td>
+<td>Update a local file's modification time at the head of every poll and drain pass, before database work. Above one process, the supervisor writes <code>PATH.supervisor</code> and slot i writes <code>PATH.i</code>; <code>PATH</code> itself is not written. The directory must already exist, be writable and be private to the container. Failed updates warn once per writer and path and are retried without stopping the worker. See <a href="../monitoring/#local-heartbeat-files">heartbeat liveness</a>.</td>
+</tr>
+<tr>
+<td><code>--batch</code></td>
+<td>off</td>
+<td>Exit once a poll pass succeeds, sees no task it can claim, and began with no task of its own in flight, then drain and exit 0. Tasks it can't claim at that moment stay READY for a later worker. These include future <code>run_after</code> tasks, backed-off retries, locked rows and tasks its claim filter excludes. A poll pass that hits a database error does not count. After an abandoned dispatch pass, no poll pass counts until a dispatch pass completes. Schedule-scoped failures do not prevent completion: exit 0 means the batch finished, not that every schedule enqueued. Rejected with <code>--processes</code> above 1. See <a href="../production/#running-as-a-job">Running as a job</a>.</td>
+</tr>
+<tr>
+<td><code>--max-tasks N</code></td>
+<td>none</td>
+<td>Exit after claiming N task attempts, then drain and exit 0. Every claim counts, a failed attempt and a retry's repeat claim included, and concurrency never claims past N. Without <code>--batch</code> the worker keeps polling an empty queue until it reaches N or is stopped. N must be an integer of at least 1. Rejected with <code>--processes</code> above 1.</td>
+</tr>
 </tbody>
 </table>
 <p>The command also honors Django's standard <code>-v/--verbosity</code>: at the default
@@ -1297,8 +1638,14 @@ enables debug logging. <code>-v 0</code> attaches no log handler. With <code>--p
 above 1 every flag is passed on to each worker process unchanged, including
 <code>--settings</code> and <code>--pythonpath</code>, and each worker process is started the way
 the supervisor was (<code>manage.py</code> by absolute path, or <code>python -m django</code>), so
-the command works from any working directory.</p>
-<p>Two intervals are derived rather than flagged:</p>
+the command works from any working directory. For <code>--heartbeat-file</code>, each
+child derives its own slot filename from the forwarded base path.</p>
+<p>Use an absolute heartbeat path. Relative paths resolve against the worker's
+working directory, which may differ from the probe's. An empty path exits 1
+with <code>--heartbeat-file needs a path.</code> The flag combines with every other
+worker flag, including <code>--batch</code> and <code>--max-tasks</code>; updates stop when the
+worker exits.</p>
+<p>These intervals are derived rather than flagged:</p>
 <ul>
 <li>The reaper runs every <code>min(30, max(lock_timeout / 2, 1))</code> seconds.</li>
 <li>Lease renewal runs every <code>max(lock_timeout / 3, 0.1)</code> seconds, on its own
@@ -1308,6 +1655,7 @@ the command works from any working directory.</p>
   is configured, because a source that reads the database can gain one at any
   time; a pass with no schedules configured at all returns on a list check,
   before any query.</li>
+<li>With <code>--heartbeat-file</code>, the worker updates its file at the head of each poll and drain pass: about once per <code>--interval</code> when idle, and every 0.25 seconds while draining. The supervisor updates its own file every supervision pass, about every 0.1 seconds, and during shutdown.</li>
 </ul>
 <h3 id="routing-a-queue-to-its-own-worker">Routing a queue to its own worker</h3>
 <p>Declare every queue on the backend, then give each worker a subset. Slow work
@@ -1341,9 +1689,38 @@ raising the global value and delaying recovery for everything else:</p>
 <div class="highlight"><pre><span></span><code>python manage.py ox_worker --queues exports --lock-timeout 7200
 </code></pre></div>
 <p>If you embed the worker programmatically, <code>django_ox.worker.Worker</code>
-accepts <code>reap_interval</code>, <code>renew_interval</code>, <code>schedule_interval</code>,
-<code>backoff_initial</code>, <code>backoff_max</code>, <code>task_timeout</code> and <code>task_timeout_grace</code>
-keyword overrides, which have no flag; they win over the <code>OPTIONS</code> values.</p>
+accepts keyword overrides: <code>reap_interval</code>, <code>renew_interval</code> and
+<code>schedule_interval</code> replace the derived intervals; <code>backoff_initial</code>,
+<code>backoff_max</code>, <code>task_timeout</code> and <code>task_timeout_grace</code> replace
+<code>BACKOFF_INITIAL</code>, <code>BACKOFF_MAX</code>, <code>TASK_TIMEOUT</code> and <code>TASK_TIMEOUT_GRACE</code>
+in <code>OPTIONS</code>, respectively. These overrides are available through the
+constructor.</p>
+<p><code>backoff_initial</code> and <code>backoff_max</code> set the worker's fallback backoff;
+a task callback takes precedence. Constructor values must be finite
+numbers from 0 to 31557600000 seconds, not strings or bools. Zero is
+allowed here, unlike in <code>OPTIONS</code>. Validation runs at worker construction,
+and an <code>OPTIONS</code> value replaced by an override is not read.</p>
+<p><code>task_timeout</code> replaces only the backend-wide <code>TASK_TIMEOUT</code>. A task's
+<code>timeout</code> still wins, followed by its queue's <code>TASK_TIMEOUTS</code> entry.</p>
+<p><code>Worker</code> also accepts the keyword-only argument <code>heartbeat_file</code>, defaulting
+to <code>None</code>. <code>ox_worker</code> passes it to <code>WORKER_CLASS</code> only when
+<code>--heartbeat-file</code> is enabled. With multiple processes, each child receives
+its own slot path. Existing fixed-signature constructors remain compatible
+without the flag.</p>
+<p>With <code>--heartbeat-file</code>, the constructor must accept <code>heartbeat_file</code>
+explicitly or through <code>**kwargs</code>, and pass it to <code>Worker.__init__()</code>.
+A constructor whose signature cannot accept the keyword is refused before
+construction with exit code 1 and a one-line <code>CommandError</code>, without a
+traceback. With multiple processes, the supervisor performs this check
+before starting any children.</p>
+<p>A constructor that accepts the keyword but does not pass it on is refused
+after construction, before the worker loop runs, with exit code 1 and a
+one-line <code>CommandError</code>. With multiple processes, this check runs in each
+child. The supervisor restarts those children as for other crashes, and
+the missing slot files keep the heartbeat probe failing.</p>
+<p>Heartbeat updates belong to the base worker's poll and drain loops.
+A custom worker that replaces <code>run()</code> without calling the base loop does
+not get those updates merely by accepting <code>heartbeat_file</code>.</p>
 <h2 id="ox_prune">ox_prune</h2>
 <p>Finished task rows stay in the table until pruned; the queue table doubles
 as the result store, and django-ox does not guess at your retention
@@ -1420,8 +1797,9 @@ If it still fails, <code>ox_prune</code> stops and exits non-zero. The batches i
 before that stay deleted. Run it again and it deletes the rest. Called inside
 a transaction of your own, it doesn't retry, and the error reaches you.</p>
 <h2 id="ox_health">ox_health</h2>
-<p>A health check for cron alerting and container probes: exits 0 when
-every enabled check passes, non-zero with a one-line reason otherwise.
+<p>Use database checks for dependency monitoring and fleet alerting, and
+<code>--heartbeat-file</code> for local controlling-loop liveness. The command exits 0
+when every enabled check passes, non-zero with a one-line reason otherwise.
 With no flags it verifies only that the database answers.</p>
 <div class="highlight"><pre><span></span><code>python manage.py ox_health --max-backlog 1000 --max-age 600
 </code></pre></div>
@@ -1437,12 +1815,12 @@ With no flags it verifies only that the database answers.</p>
 <tr>
 <td><code>--queue</code></td>
 <td>all queues</td>
-<td>Restrict the checks to one queue.</td>
+<td>Restrict the database checks to one queue.</td>
 </tr>
 <tr>
 <td><code>--format</code></td>
 <td><code>text</code></td>
-<td><code>json</code> prints one object on stdout instead of the <code>OK:</code> line: <code>ok</code>, <code>queue</code>, <code>backlog</code>, <code>oldest_age_seconds</code>, <code>last_claim_age_seconds</code> and <code>problems</code>. <code>queue</code> is <code>null</code> when no <code>--queue</code> is given. The figures are <code>null</code> when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. The object is printed on failure too, before the same non-zero exit.</td>
+<td><code>json</code> prints one object on stdout instead of the <code>OK:</code> line, on success and failure. In database mode its fields are <code>ok</code>, <code>queue</code>, <code>backlog</code>, <code>oldest_age_seconds</code>, <code>last_claim_age_seconds</code> and <code>problems</code>. <code>queue</code> is <code>null</code> when no <code>--queue</code> is given. The figures are <code>null</code> when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. File mode uses the <a href="../monitoring/#file-mode-json">heartbeat JSON object</a>. The exit status is unchanged.</td>
 </tr>
 <tr>
 <td><code>--max-backlog</code></td>
@@ -1457,15 +1835,79 @@ With no flags it verifies only that the database answers.</p>
 <tr>
 <td><code>--worker-timeout</code></td>
 <td>off</td>
-<td>Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts <code>7d</code>, <code>24h</code>, <code>90m</code>, <code>45s</code>, or a plain number of seconds.</td>
+<td>Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts <code>7d</code>, <code>24h</code>, <code>90m</code>, <code>45s</code>, or a plain number of seconds. Measures fleet claim activity, not per-worker liveness.</td>
 </tr>
 <tr>
 <td><code>--database</code></td>
 <td>the alias <code>OxTask</code> writes to</td>
 <td>Database alias to check. The figures come from that alias, so the check reports the queue your workers are running.</td>
 </tr>
+<tr>
+<td><code>--heartbeat-file PATH</code></td>
+<td>off</td>
+<td>Check the local file set written by <code>ox_worker --heartbeat-file PATH</code>, instead of the database. Reads metadata only, runs no system or migration checks, opens no database connection and constructs no task backend. Cannot be combined with <code>--database</code>, <code>--queue</code>, <code>--max-backlog</code>, <code>--max-age</code> or <code>--worker-timeout</code>.</td>
+</tr>
+<tr>
+<td><code>--max-heartbeat-age SECONDS</code></td>
+<td><code>60</code></td>
+<td>Maximum heartbeat age, inclusive. Accepts <code>7d</code>, <code>24h</code>, <code>90m</code>, <code>45s</code>, or a plain number of seconds, including fractions. Must be finite and strictly positive. Requires <code>--heartbeat-file</code>.</td>
+</tr>
+<tr>
+<td><code>--processes N</code></td>
+<td><code>1</code></td>
+<td>Expected worker process count; must match the worker's <code>--processes</code>. At 1, check <code>PATH</code>. Above 1, require <code>PATH.supervisor</code> and every slot file from <code>PATH.0</code> through <code>PATH.(N-1)</code> to pass. Must be an integer of at least 1. Requires <code>--heartbeat-file</code>.</td>
+</tr>
 </tbody>
 </table>
+<p>File mode does not need <code>--skip-checks</code>. The command makes no database
+calls, but project startup, including <code>AppConfig.ready()</code>, must also avoid
+database access for a probe to survive a database outage. Database mode
+keeps its alias-scoped checks and <code>--skip-checks</code> behavior.</p>
+<p>An empty heartbeat path, a refused flag combination, a zero or negative
+plain number of seconds for the maximum age, or a process count below 1
+exits 1. A signed duration with a suffix, such as
+<code>--max-heartbeat-age=-5s</code>, is an argparse error and exits 2 instead.
+Non-finite or malformed durations and non-integer process counts are
+argparse errors and exit 2. See
+<a href="../monitoring/#options-and-refusals">heartbeat option validation</a> for the
+option rules.</p>
+<p>The exit-1 refusal diagnostics are:</p>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Diagnostic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Empty heartbeat path</td>
+<td><code>CommandError: --heartbeat-file needs a path.</code></td>
+</tr>
+<tr>
+<td>Zero or negative plain number of seconds</td>
+<td><code>CommandError: --max-heartbeat-age must be a positive number of seconds.</code></td>
+</tr>
+<tr>
+<td>Process count below 1</td>
+<td><code>CommandError: --processes must be at least 1.</code></td>
+</tr>
+<tr>
+<td><code>--max-heartbeat-age</code> without <code>--heartbeat-file</code></td>
+<td><code>CommandError: --max-heartbeat-age needs --heartbeat-file.</code></td>
+</tr>
+<tr>
+<td><code>--processes</code> without <code>--heartbeat-file</code></td>
+<td><code>CommandError: --processes needs --heartbeat-file.</code></td>
+</tr>
+</tbody>
+</table>
+<p>Combining file mode with database or queue flags reports, for example:</p>
+<div class="highlight"><pre><span></span><code>CommandError: --heartbeat-file checks files, not the database, so it cannot be combined with --queue, --worker-timeout; run those checks as a separate ox_health.
+</code></pre></div>
+<p>The message lists every conflicting flag given, comma-separated, in this
+order: <code>--database</code>, <code>--queue</code>, <code>--max-backlog</code>, <code>--max-age</code>,
+<code>--worker-timeout</code>.</p>
 <p>Check semantics, probe examples, and guidance on which check fits which
 alert are on the
 <a href="../monitoring/#health-checks-ox_health">Monitoring</a> page.</p>
@@ -1479,7 +1921,9 @@ alert are on the
   command ships with the app.</li>
 <li><code>django_ox.E002</code>: a <code>SCHEDULES</code> entry is invalid (task path does not
   import, cron expression does not parse or can never fire, arguments not
-  JSON-serializable, bad queue name or priority).</li>
+  JSON-serializable, bad queue name or priority). JSON serialization does
+  not establish database acceptance. For example, <code>float("inf")</code> passes
+  this check but is rejected at enqueue by PostgreSQL, MySQL and SQLite.</li>
 <li><code>django_ox.E003</code>: the same schedule name is defined on more than one
   backend; schedule names must be unique across backends.</li>
 <li><code>django_ox.E004</code>: <code>TASK_TIMEOUT</code>, a <code>TASK_TIMEOUTS</code> value or
@@ -1511,15 +1955,53 @@ alert are on the
   transaction, which is what makes a due tick enqueue once, so they have to
   live on the same database. Route the <code>django_ox</code> app to a single one; it
   need not be the default.</li>
-<li><code>django_ox.E010</code>: <code>LOCK_TIMEOUT</code>, <code>BACKOFF_INITIAL</code> or <code>BACKOFF_MAX</code> is not a
-  positive, finite number of seconds. The worker reads all three, so the check stops a bad value at deploy time.</li>
+<li><code>django_ox.E010</code>: <code>LOCK_TIMEOUT</code>, <code>BACKOFF_INITIAL</code> and <code>BACKOFF_MAX</code> must
+  each be a positive, finite number of seconds, at most 31557600000
+  seconds, a thousand years. Strings and bools are rejected.</li>
+<li><code>django_ox.E011</code>: <code>MAX_ATTEMPTS</code> cannot be converted by <code>int()</code>, converts
+  to a negative budget, or exceeds the write database's storage ceiling.
+  These values could not be used successfully under the supported database
+  settings. The ceilings are 32767 on PostgreSQL, 65535 on MySQL in strict
+  mode, and 9223372036854775807 on SQLite.</li>
 <li><code>django_ox.W003</code>: <code>BACKOFF_INITIAL</code> and <code>BACKOFF_MAX</code> are both set to valid
-  numbers and the initial delay is above the cap. Every retry then waits
-  <code>BACKOFF_MAX</code>, so the configured first delay never takes effect. The
-  configuration still runs; lower the initial delay or raise the cap.</li>
+  numbers and the initial delay is above the cap. Every retry using the
+  worker's exponential backoff then waits <code>BACKOFF_MAX</code>, so the configured
+  first delay never takes effect. The configuration still runs; lower the
+  initial delay or raise the cap.</li>
+<li><code>django_ox.W004</code>: <code>MAX_ATTEMPTS</code> uses a deprecated value that remains
+  accepted: a numeric string, float or bool converted by <code>int()</code>, zero, or
+  a value above 32767 that the write database can store. Set it to an
+  integer from 1 to 32767 that is not a bool. Strict enforcement is no
+  earlier than the next major release.</li>
 </ul>
-<p>The worker performs the same schedule and timeout validation at startup, so
-a bad deploy fails loudly rather than skipping dispatches.</p>
+<p>For <code>MAX_ATTEMPTS</code>, compatibility conversions retain their existing
+behaviour. For example, <code>"3"</code> and <code>3.7</code> give a budget of 3. A budget of 0
+gives each task one attempt: a success is SUCCESSFUL and a failure is FAILED.
+Above 32767, the ceiling comes from the database your router uses to write
+<code>OxTask</code>. Other database vendors have no known ceiling for this check, so
+values above 32767 produce <code>W004</code>, not <code>E011</code>. The MySQL ceiling assumes the
+strict mode Django recommends; non-strict mode can clamp values instead.</p>
+<p><code>W004</code> is a system-check warning, not a runtime <code>DeprecationWarning</code>.
+<code>manage.py check</code> succeeds with the warning, and <code>ox_worker</code> prints it and
+starts. A process that skips checks gets no warning.</p>
+<p>Backend construction stores the configured <code>MAX_ATTEMPTS</code> value. Validation
+runs during system checks and on every read of <code>OxBackend.max_attempts</code>.
+Reading <code>OxBackend.max_attempts</code>, enqueueing any task on that backend, or
+constructing a worker raises <code>ImproperlyConfigured</code> for an <code>E011</code> value. A
+task's own budget does not bypass an invalid backend default.</p>
+<p>At startup, the worker validates schedules, the schedule source,
+<code>TASK_TIMEOUT</code>, <code>TASK_TIMEOUTS</code>, <code>TASK_TIMEOUT_GRACE</code>, <code>MAX_ATTEMPTS</code> and
+the effective <code>BACKOFF_INITIAL</code> and <code>BACKOFF_MAX</code> values, including with
+<code>ox_worker --skip-checks</code>. Invalid values in this set stop startup.
+<code>LOCK_TIMEOUT</code> validation runs through the <code>django_ox.E010</code> system check.
+Database acceptance of a schedule's arguments is determined at dispatch.
+A schedule-scoped failure is logged as <code>schedule_dispatch_error</code>, and the
+worker continues to later schedules if rollback succeeds and the same
+connection remains usable.</p>
+<p>Invalid per-task policy fields raise the framework's <code>InvalidTask</code>
+(<code>InvalidTaskError</code> on the backport) when the task is built, normally at
+import. They are not system-check messages. Valid task overrides and valid
+test-backend configurations add no system-check warning.</p>
 <h2 id="read-replicas">Read replicas</h2>
 <p>Under a router that sends reads to a replica, django-ox reads its own rows
 on the alias it writes them to. That covers <code>django_ox.stats</code>, the metrics
@@ -1583,7 +2065,7 @@ you mean it.</p>
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../background-tasks/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Background tasks, step by step">
+          <a href="../wagtail/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Wagtail background tasks">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
@@ -1593,7 +2075,7 @@ you mean it.</p>
                 Previous
               </span>
               <div class="md-ellipsis">
-                Background tasks, step by step
+                Wagtail background tasks
               </div>
             </div>
           </a>

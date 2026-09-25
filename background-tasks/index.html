@@ -16,7 +16,7 @@
         <link rel="prev" href="..">
       
       
-        <link rel="next" href="../configuration/">
+        <link rel="next" href="../wagtail/">
       
       
         
@@ -506,6 +506,33 @@
   
 </nav>
       
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../wagtail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wagtail background tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
     </li>
   
 
@@ -1483,22 +1510,27 @@ same:</p>
 2026-09-19 07:58:05,143 INFO django_ox Task id=0f68e1a7-17db-4f6f-87e5-6f05c6b3245e path=accounts.tasks.sync_to_crm succeeded in 0ms
 Task id=0f68e1a7-17db-4f6f-87e5-6f05c6b3245e path=accounts.tasks.sync_to_crm state=SUCCESSFUL
 </code></pre></div>
-<p>You did nothing to make this happen. A task that raises is retried with
-exponential backoff: three attempts by default, with the delay starting at
-five seconds and doubling each time, up to ten minutes. After the last
+<p>This task needs no retry declaration. By default, a task that raises is
+retried with exponential backoff: three attempts, with the delay starting
+at five seconds and doubling each time, up to ten minutes. After the last
 failure the task is <code>FAILED</code> and stays in the table with the traceback of
 every attempt, where the admin's <strong>Retry selected tasks</strong> action can give
 it another go. In the admin, this task's detail page now shows <code>Attempt 1:
 builtins.ConnectionError</code> with its traceback under <strong>Attempt errors</strong>, and
 the return value beside it. <code>MAX_ATTEMPTS</code>, <code>BACKOFF_INITIAL</code> and
 <code>BACKOFF_MAX</code> on the <a href="../configuration/#options">Configuration</a> page tune
-the envelope.</p>
+the defaults.</p>
+<p>On Django 6.1 or Django 5.2 with django-tasks 0.12+, a task can instead
+declare its own <code>max_attempts</code>, <code>backoff</code> and <code>timeout</code>. The budget counts
+claims including the first; a backoff callback can choose a delay or stop
+retrying, and a timeout applies separately to each attempt. See
+<a href="../configuration/#per-task-policy">Per-task policy</a>.</p>
 <p>An attempt is counted when a worker claims the task, so a worker that dies
 mid-task uses one as well; after <code>LOCK_TIMEOUT</code> the reaper hands the task
-to another worker. Execution is at-least-once, so write tasks that are safe
-to run twice. <a href="../patterns/#make-a-task-safe-to-run-twice">Common patterns</a>
-shows the shape, and <a href="../production/#the-reaper">Production</a> has the
-mechanics.</p>
+to another worker if its stored budget permits another claim. Execution
+is at-least-once, so write tasks that are safe to run twice.
+<a href="../patterns/#make-a-task-safe-to-run-twice">Common patterns</a> shows the
+shape, and <a href="../production/#the-reaper">Production</a> has the mechanics.</p>
 <h2 id="step-7-add-a-recurring-task-with-no-scheduler-process">Step 7: Add a recurring task, with no scheduler process</h2>
 <p>Add a third task, a stand-in for a nightly report:</p>
 <div class="highlight"><pre><span></span><code><span class="c1"># accounts/tasks.py, below sync_to_crm</span>
@@ -1526,8 +1558,8 @@ enqueue through. This one fires every minute so you can watch it:</p>
 <code>"cron": "0 3 * * *"</code>; for a fixed interval, <code>"every": timedelta(hours=1)</code>
 in place of <code>cron</code>. Times are wall-clock in your <code>TIME_ZONE</code>, which is UTC
 in a fresh project.</p>
-<p>A schedule is validated before it can run. <code>manage.py check</code> reports a
-task path that does not import, or an expression that can never fire:</p>
+<p><code>manage.py check</code> validates a schedule's declaration before it runs. It reports
+a task path that does not import, or an expression that can never fire:</p>
 <div class="highlight"><pre><span></span><code>python manage.py check
 </code></pre></div>
 <div class="highlight"><pre><span></span><code>System check identified no issues (0 silenced).
@@ -1542,10 +1574,12 @@ ERRORS:
 
 System check identified 1 issue (0 silenced).
 </code></pre></div>
-<p>The worker runs the same validation at startup, so a bad schedule stops a
-deploy rather than skipping in silence. Put <code>* * * * *</code> back and restart
-the worker. The startup line now says <code>schedules=1</code>, and at the next minute
-boundary the schedule fires:</p>
+<p>The worker runs the same validation at startup, so these errors stop startup
+rather than skipping dispatch in silence. The checks do not establish database
+acceptance of arguments; schedule-scoped failures at dispatch are logged as
+<code>schedule_dispatch_error</code>. Put <code>* * * * *</code> back and restart the worker.
+The startup line now says <code>schedules=1</code>, and at the next minute boundary
+the schedule fires:</p>
 <div class="highlight"><pre><span></span><code>2026-09-19 07:59:12,044 INFO django_ox Worker myhost-23929-gJ7A6QmA starting: queues=['default'] concurrency=1 poll=1.0s schedules=1
 2026-09-19 08:00:00,399 INFO django_ox Dispatched schedule signup-report tick 2026-09-19T08:00:00+00:00 (task id=fe1388c3-bb4a-4f11-9e21-85449a4d50e0)
 Task id=fe1388c3-bb4a-4f11-9e21-85449a4d50e0 path=accounts.tasks.signup_report state=RUNNING
@@ -1587,18 +1621,24 @@ For CPU-bound tasks run
 restarted by the supervisor. Give the process manager a stop grace
 period longer than your slowest task, so a drain finishes before it
 escalates to SIGKILL.
-- <strong>Probe with <code>ox_health</code>.</strong> With no flags it checks that the database
-  answers, which is what a container health check should test. With
-  thresholds it turns queue depth and backlog age into an exit code for
-  cron alerting:</p>
+- <strong>Probe with <code>ox_health</code>.</strong> For container loop-liveness, enable
+  <code>ox_worker --heartbeat-file PATH</code> and check it with
+  <code>ox_health --heartbeat-file PATH</code>, using the same <code>--processes N</code> on both
+  commands. Use an existing, writable directory private to the container.
+  A passing file probe means the expected controlling loops have advanced
+  recently, not that tasks are progressing.</p>
+<p>With no flags, <code>ox_health</code> checks that the database answers. Keep that
+dependency check separate from liveness restarts. Queue thresholds turn
+queue depth and backlog age into an exit code for fleet alerting:</p>
 <div class="highlight"><pre><span></span><code>python manage.py ox_health --max-backlog 100 --max-age 300
 </code></pre></div>
 <div class="highlight"><pre><span></span><code>OK: backlog=0 oldest_age=none last_claim_age=37s
 </code></pre></div>
-<p><code>--format json</code> prints the same figures as one object. Which check
-belongs where is on the
-<a href="../monitoring/#health-checks-ox_health">Monitoring</a> page, with the
-Prometheus endpoint and the log events.
+<p><code>--format json</code> prints the result as one object. Which check belongs
+where is on the
+<a href="../monitoring/#health-checks-ox_health">Monitoring</a> page, with startup
+allowances, the hung-database restart tradeoff, the Prometheus endpoint
+and the log events.
 - <strong>Prune on a timer.</strong> Finished rows stay in the table until you delete
   them, because the table is also the result store. Run <code>ox_prune</code> daily
   from cron or a systemd timer, with a retention that suits you. <code>--dry-run</code>
@@ -1692,13 +1732,13 @@ tracebacks survive until someone has read them. The
         
         
           
-          <a href="../configuration/" class="md-footer__link md-footer__link--next" aria-label="Next: Configuration">
+          <a href="../wagtail/" class="md-footer__link md-footer__link--next" aria-label="Next: Wagtail background tasks">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Configuration
+                Wagtail background tasks
               </div>
             </div>
             <div class="md-footer__button md-icon">

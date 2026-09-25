@@ -10,13 +10,13 @@
       
       
       
-        <link rel="canonical" href="https://oxpull.com/django-ox/benchmarks/">
+        <link rel="canonical" href="https://oxpull.com/django-ox/wagtail/">
       
       
-        <link rel="prev" href="../monitoring/">
+        <link rel="prev" href="../background-tasks/">
       
       
-        <link rel="next" href="../stability/">
+        <link rel="next" href="../configuration/">
       
       
         
@@ -27,7 +27,7 @@
     
     
       
-        <title>Benchmarks - django-ox</title>
+        <title>Wagtail background tasks - django-ox</title>
       
     
     
@@ -64,16 +64,16 @@
 
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="django-ox">
-  <meta property="og:title" content="Benchmarks - django-ox">
+  <meta property="og:title" content="Wagtail background tasks - django-ox">
   <meta property="og:description" content="Database-backed worker backend for Django's Tasks framework.">
-  <meta property="og:url" content="https://oxpull.com/django-ox/benchmarks/">
+  <meta property="og:url" content="https://oxpull.com/django-ox/wagtail/">
   <meta property="og:image" content="https://oxpull.com/django-ox/assets/social-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="django-ox: the production worker for Django Tasks. Your database is the queue.">
 
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Benchmarks - django-ox">
+  <meta name="twitter:title" content="Wagtail background tasks - django-ox">
   <meta name="twitter:description" content="Database-backed worker backend for Django's Tasks framework.">
   <meta name="twitter:image" content="https://oxpull.com/django-ox/assets/social-card.png">
 
@@ -98,7 +98,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#benchmarks" class="md-skip">
+        <a href="#wagtail-background-tasks-step-by-step" class="md-skip">
           Skip to content
         </a>
       
@@ -133,7 +133,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Benchmarks
+              Wagtail background tasks
             
           </span>
         </div>
@@ -329,10 +329,37 @@
       
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../wagtail/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wagtail background tasks
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -348,6 +375,153 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#choose-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choose versions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#install" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configure-django" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configure Django
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#start-the-worker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Start the worker
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-moves-out-of-the-request" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What moves out of the request
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#handle-delays-and-failures" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Handle delays and failures
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Handle delays and failures">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#worker-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worker recovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#timeouts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Timeouts
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#objects-deleted-before-their-tasks-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Objects deleted before their tasks run
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#monitor-and-prune" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Monitor and prune
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#continuous-integration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Continuous integration
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -626,37 +800,10 @@
       
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Benchmarks
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../benchmarks/" class="md-nav__link">
         
   
   
@@ -672,98 +819,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#queue-drain-and-worker-recovery" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Queue drain and worker recovery
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Queue drain and worker recovery">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#2000-of-2000-tasks-finished" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        2,000 of 2,000 tasks finished
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#up-to-20-faster-queue-drain-than-django-tasks-db" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Up to 20% faster queue drain than django-tasks-db
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#enqueue-10000-tasks-in-071-s" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Enqueue 10,000 tasks in 0.71 s
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#20-of-20-tasks-retried-successfully" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        20 of 20 tasks retried successfully
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#how-we-measured" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        How we measured
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -903,22 +958,77 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#queue-drain-and-worker-recovery" class="md-nav__link">
+  <a href="#choose-versions" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Queue drain and worker recovery
+        Choose versions
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Queue drain and worker recovery">
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#install" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configure-django" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configure Django
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#start-the-worker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Start the worker
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-moves-out-of-the-request" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What moves out of the request
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#handle-delays-and-failures" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Handle delays and failures
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Handle delays and failures">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#2000-of-2000-tasks-finished" class="md-nav__link">
+  <a href="#worker-recovery" class="md-nav__link">
     <span class="md-ellipsis">
       
-        2,000 of 2,000 tasks finished
+        Worker recovery
       
     </span>
   </a>
@@ -926,10 +1036,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#up-to-20-faster-queue-drain-than-django-tasks-db" class="md-nav__link">
+  <a href="#timeouts" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Up to 20% faster queue drain than django-tasks-db
+        Timeouts
       
     </span>
   </a>
@@ -937,32 +1047,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#enqueue-10000-tasks-in-071-s" class="md-nav__link">
+  <a href="#objects-deleted-before-their-tasks-run" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Enqueue 10,000 tasks in 0.71 s
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#20-of-20-tasks-retried-successfully" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        20 of 20 tasks retried successfully
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#how-we-measured" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        How we measured
+        Objects deleted before their tasks run
       
     </span>
   </a>
@@ -971,6 +1059,28 @@
         
       </ul>
     </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#monitor-and-prune" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Monitor and prune
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#continuous-integration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Continuous integration
+      
+    </span>
+  </a>
   
 </li>
       
@@ -994,67 +1104,101 @@
   
 
 
-<h1 id="benchmarks">Benchmarks</h1>
-<h2 id="queue-drain-and-worker-recovery">Queue drain and worker recovery</h2>
-<h3 id="2000-of-2000-tasks-finished">2,000 of 2,000 tasks finished</h3>
-<p>Every django-ox kill-test trial finished with zero tasks stuck. django-tasks-db left 13 to 19 tasks stuck RUNNING per trial.</p>
-<p><small>Five trials, each with 20 worker kills and replacements, with LOCK_TIMEOUT set to 15 s.</small></p>
-<p>Execution is at-least-once. The trials recorded 7 repeated effects across 10,000 tasks. Write tasks that can run again safely.</p>
-<h3 id="up-to-20-faster-queue-drain-than-django-tasks-db">Up to 20% faster queue drain than django-tasks-db</h3>
-<p>Worker counts match in each row. Rates are tasks per second.</p>
-<table>
-<thead>
-<tr>
-<th>Queued tasks</th>
-<th style="text-align: right;">Workers per backend</th>
-<th style="text-align: right;">django-ox, tasks/s</th>
-<th style="text-align: right;">django-tasks-db, tasks/s</th>
-<th style="text-align: right;">django-ox faster</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>2,000</td>
-<td style="text-align: right;">1</td>
-<td style="text-align: right;">118.5</td>
-<td style="text-align: right;">103.9</td>
-<td style="text-align: right;"><strong>14.0%</strong></td>
-</tr>
-<tr>
-<td>2,000</td>
-<td style="text-align: right;">4</td>
-<td style="text-align: right;">426.3</td>
-<td style="text-align: right;">387.1</td>
-<td style="text-align: right;"><strong>10.1%</strong></td>
-</tr>
-<tr>
-<td>20,000*</td>
-<td style="text-align: right;">1</td>
-<td style="text-align: right;">115.2</td>
-<td style="text-align: right;">97.4</td>
-<td style="text-align: right;"><strong>18.2%</strong></td>
-</tr>
-<tr>
-<td>20,000*</td>
-<td style="text-align: right;">4</td>
-<td style="text-align: right;">461.8</td>
-<td style="text-align: right;">401.6</td>
-<td style="text-align: right;"><strong>15.0%</strong></td>
-</tr>
-</tbody>
-</table>
-<p>In each row, every django-ox run outperformed every django-tasks-db run. Results apply to these workloads, not every application.</p>
-<h3 id="enqueue-10000-tasks-in-071-s">Enqueue 10,000 tasks in 0.71 s</h3>
-<p><code>enqueue_many()</code> inserted all 10,000 rows in one transaction, including COMMIT. Run times ranged from 0.69 to 0.72 s.</p>
-<h3 id="20-of-20-tasks-retried-successfully">20 of 20 tasks retried successfully</h3>
-<p>Each task raised an exception on its first attempt. django-ox retried them automatically, and all succeeded on attempt two, every run. django-tasks-db marked all 20 FAILED after the first exception.</p>
-<h3 id="how-we-measured">How we measured</h3>
-<p>Oxpull, 2026-09-19. django-ox 1.3.0 vs django-tasks-db 0.13.0.</p>
-<p>PostgreSQL 16 ran locally in Docker on an Apple M1 Max. Task bodies were no-ops. Each cell used five interleaved runs per backend.</p>
-<p>Package defaults applied except for the kill test, with LOCK_TIMEOUT set to 15 s.</p>
-<p><small>*The wallpaper process rendered during kill trials 2 and 3 only; kill counts were unaffected. The four drain cells (2,000 and 20,000 tasks) ran interleaved in one window; the 100,000-task run was one pair, not five.</small></p>
-<p><a href="https://github.com/oxpull/django-ox/tree/main/benchmarks"><strong>Download both raw JSON files</strong></a></p>
-<p><a href="../background-tasks/"><strong>Get started</strong></a></p>
+<h1 id="wagtail-background-tasks-step-by-step">Wagtail background tasks, step by step</h1>
+<p>Wagtail runs search-index updates, reference-index updates, file deletion, and other tasks inside the request by default. django-ox moves that work into a worker process, with the queue in your existing database and no broker to run.</p>
+<p>django-ox adds automatic retries with backoff, recovery after worker death, recurring schedules, and health checks. See <a href="../why-django-ox/">Why django-ox</a> for the backend comparison.</p>
+<h2 id="choose-versions">Choose versions</h2>
+<p>Use Python 3.12 or later. PostgreSQL is recommended in production.</p>
+<p>Tested combinations:</p>
+<ul>
+<li>Wagtail 7.3.1 / Django 5.2.17.</li>
+<li>Wagtail 7.3.4 / Django 6.0.8.</li>
+<li>Wagtail 7.4.3 / Django 5.2.17.</li>
+<li>Wagtail 7.4.3 / Django 6.0.8.</li>
+<li>Wagtail 7.4.3 / Django 6.1.1.</li>
+<li>Wagtail 8.0 / Django 5.2.17.</li>
+<li>Wagtail 8.0 / Django 6.1.1.</li>
+</ul>
+<p>Wagtail 7.3.x declares Django 6.0 support.</p>
+<p>On Django 6.1, pip permits Wagtail 7.3.x, but Wagtail 7.3.4 fails in Wagtail's own search with <code>OperationalError: unable to use function MATCH</code>, both with and without django-ox.</p>
+<p>Do not use Wagtail 7.3.0 with this setup on Django 5.2 or 6.0. Its dependency constraints resolve <code>django-tasks</code> 0.9.0. On Django 6.0, that version crashes during app loading (<code>django.setup()</code>) once <code>TASKS</code> selects a backend built on core Django's <code>Task</code>. Every <code>manage.py</code> command and the web process fail, not just migrations.</p>
+<p>Upgrade Wagtail before installing django-ox into a Wagtail 7.3.0 environment.</p>
+<h2 id="install">Install</h2>
+<p>On Django 5.2 LTS, install the extra for the <code>django-tasks</code> backport:</p>
+<div class="highlight"><pre><span></span><code>pip install "django-ox[backport]"
+</code></pre></div>
+<p>On Django 6.0 and later:</p>
+<div class="highlight"><pre><span></span><code>pip install django-ox
+</code></pre></div>
+<p>Wagtail imports tasks from the <code>django-tasks</code> backport even on Django 6.0 and later. If an existing environment pins it to 0.9.0, update that pin:</p>
+<div class="highlight"><pre><span></span><code>pip install "django-tasks&gt;=0.10"
+</code></pre></div>
+<p>Refresh the lockfile if the project uses one, then check dependencies:</p>
+<div class="highlight"><pre><span></span><code>pip check
+</code></pre></div>
+<h2 id="configure-django">Configure Django</h2>
+<p>Add django-ox to the installed apps and configure the <code>default</code> backend:</p>
+<div class="highlight"><pre><span></span><code>INSTALLED_APPS += ["django_ox"]
+
+TASKS = {
+    "default": {
+        "BACKEND": "django_ox.backend.OxBackend",
+    },
+}
+</code></pre></div>
+<p>If <code>TASKS</code> already exists, update its <code>default</code> entry rather than replacing other backends. Wagtail's bare <code>@task()</code> binds to backend alias <code>default</code> and queue <code>default</code>.</p>
+<p>Run migrations:</p>
+<div class="highlight"><pre><span></span><code>python manage.py migrate
+</code></pre></div>
+<p>Restart the web processes. Web and worker processes must use the same settings and database.</p>
+<p>Wagtail now queues work in the database. The work waits until a worker runs.</p>
+<h2 id="start-the-worker">Start the worker</h2>
+<p>Leave the worker stopped and publish a page in Wagtail.</p>
+<p>In a <code>wagtail start</code> project, Django admin is at <code>/django-admin/</code>. Open <a href="../monitoring/#the-admin-page">the admin page</a> at <code>/django-admin/django_ox/oxtask/</code>, labelled "Ox tasks", to inspect the queued work.</p>
+<p>Start a worker in another terminal, using the project's environment:</p>
+<div class="highlight"><pre><span></span><code>python manage.py ox_worker
+</code></pre></div>
+<p>Reload the admin list to see statuses such as "Successful", then search for the published page. Search and reference-index updates can lag behind saves until the worker processes them.</p>
+<p>Without <code>--queues</code>, django-ox processes all queues configured for the backend. If restricting queues, include <code>default</code>:</p>
+<div class="highlight"><pre><span></span><code>python manage.py ox_worker --queues default
+</code></pre></div>
+<p>Keep the worker running alongside the web processes. In production, run it as a supervised service; see <a href="../production/#running-under-systemd">Running under systemd</a> or <a href="../production/#running-in-containers">Running in containers</a>.</p>
+<h2 id="what-moves-out-of-the-request">What moves out of the request</h2>
+<p>On Wagtail 7.4 and 8.0, these operations can run through the worker:</p>
+<ul>
+<li>Search-index updates when indexed models are saved.</li>
+<li>Reference-index updates when tracked models are saved.</li>
+<li>File deletion after images, renditions, or documents are deleted, once the transaction commits.</li>
+<li>Image focal-point detection when <code>WAGTAILIMAGES_FEATURE_DETECTION_ENABLED</code> is enabled.</li>
+<li>Frontend-cache purges on publication or unpublication when <code>wagtail.contrib.frontend_cache</code> is installed.</li>
+</ul>
+<p>Removing deleted objects from the search and reference indexes still happens inline. A task backend does not move every part of publishing into the background.</p>
+<p>Wagtail uses tasks for search-index updates, reference-index updates, document file deletion, frontend-cache purges, image focal-point detection, and image/rendition file deletion.</p>
+<h2 id="handle-delays-and-failures">Handle delays and failures</h2>
+<p>If tasks are not draining, check that the worker uses the correct database and processes the <code>default</code> queue. Use <a href="../monitoring/#the-admin-page">the admin page</a> to inspect attempts and tracebacks.</p>
+<h3 id="worker-recovery">Worker recovery</h3>
+<p>If a worker dies, its unfinished tasks return to the queue if they have attempts left. If the expired claim was the last attempt, the task becomes <code>LOST</code> instead.</p>
+<p>Attempts count claims. The default <code>MAX_ATTEMPTS</code> is 3.</p>
+<p>Every running worker runs a reaper every <code>min(30, max(LOCK_TIMEOUT/2, 1))</code> seconds. With the default 300-second lease and 30-second reaper interval, recovery can take about 330 seconds after the last lease renewal. Recovery requires at least one running worker.</p>
+<p><code>LOCK_TIMEOUT</code> and <code>MAX_ATTEMPTS</code> belong inside <code>TASKS["default"]["OPTIONS"]</code>, not at the top level of Django settings. See <a href="../configuration/#options">Backend options</a>.</p>
+<h3 id="timeouts">Timeouts</h3>
+<p>Timeouts are opt-in: <code>TASK_TIMEOUT</code> defaults to <code>None</code>, meaning no backend-wide limit. <code>TASK_TIMEOUTS</code> sets per-queue limits. Both belong in the backend's <a href="../configuration/#options">options</a>. On Django 6.1, or Django 5.2 with django-tasks 0.12+, a task's <code>timeout</code> declaration takes precedence over both; see <a href="../configuration/#per-task-policy">per-task policy</a>.</p>
+<p>Wagtail's frontend-cache purge makes outbound HTTP calls, so consider an appropriate task timeout rather than assuming one is already active.</p>
+<h3 id="objects-deleted-before-their-tasks-run">Objects deleted before their tasks run</h3>
+<p>Wagtail's search-index and reference-index task bodies raise <code>DoesNotExist</code> if the object is deleted before they run. This behavior applies on any task backend.</p>
+<p>With django-ox's default three attempts, those tasks end <code>FAILED</code>. The file-deletion task still runs. Check the traceback and whether the object still exists before investigating a worker outage.</p>
+<h2 id="monitor-and-prune">Monitor and prune</h2>
+<p>Use a local heartbeat-file check for per-container loop liveness; see <a href="../monitoring/#freshness-and-database-isolation">heartbeat liveness</a>. Check database availability separately:</p>
+<div class="highlight"><pre><span></span><code>python manage.py ox_health
+</code></pre></div>
+<p><code>--max-backlog</code> and <code>--max-age</code> measure the whole queue. Use them for fleet-level alerting, from cron or a monitoring agent, separately from per-container liveness probes.</p>
+<p>See <a href="../monitoring/#health-checks-ox_health">Health checks: ox_health</a>.</p>
+<p>Task rows accumulate: one page publish writes about six rows. Run pruning from cron or a timer:</p>
+<div class="highlight"><pre><span></span><code>python manage.py ox_prune --older-than 7d
+</code></pre></div>
+<p>Seven days is the default retention threshold for finished rows. <code>FAILED</code> and <code>LOST</code> rows remain unless <code>--include-failed</code> is supplied. See <a href="../configuration/#ox_prune">ox_prune</a>.</p>
+<h2 id="continuous-integration">Continuous integration</h2>
+<p>The CI job pins Wagtail 7.4.3 / Django 5.2.17 and Wagtail 8.0 / Django 6.1.1, and runs on SQLite. It checks publishing, search before and after worker execution, task success, and clean worker shutdown on pull requests and pushes to <code>main</code>.</p>
 
 
 
@@ -1084,7 +1228,7 @@
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../monitoring/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Monitoring">
+          <a href="../background-tasks/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Background tasks, step by step">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
@@ -1094,20 +1238,20 @@
                 Previous
               </span>
               <div class="md-ellipsis">
-                Monitoring
+                Background tasks, step by step
               </div>
             </div>
           </a>
         
         
           
-          <a href="../stability/" class="md-footer__link md-footer__link--next" aria-label="Next: API stability">
+          <a href="../configuration/" class="md-footer__link md-footer__link--next" aria-label="Next: Configuration">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                API stability
+                Configuration
               </div>
             </div>
             <div class="md-footer__button md-icon">

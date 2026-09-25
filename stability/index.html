@@ -332,6 +332,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../wagtail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wagtail background tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../configuration/" class="md-nav__link">
         
   
@@ -701,10 +728,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#not-public" class="md-nav__link">
+  <a href="#provisional-task-policy" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Not public
+        Provisional task policy
       
     </span>
   </a>
@@ -713,39 +740,6 @@
         
       </ul>
     </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#versioning" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Versioning
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#deprecation-policy" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Deprecation policy
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#supported-python-and-django" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Supported Python and Django
-      
-    </span>
-  </a>
   
 </li>
       
@@ -877,10 +871,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#not-public" class="md-nav__link">
+  <a href="#provisional-task-policy" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Not public
+        Provisional task policy
       
     </span>
   </a>
@@ -889,39 +883,6 @@
         
       </ul>
     </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#versioning" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Versioning
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#deprecation-policy" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Deprecation policy
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#supported-python-and-django" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Supported Python and Django
-      
-    </span>
-  </a>
   
 </li>
       
@@ -965,18 +926,37 @@ export names this page does not list; those names are not public.</p>
 <li><strong>The management commands</strong> and their flags: <code>ox_worker</code>, <code>ox_prune</code>,
   <code>ox_health</code>. <code>ox_worker</code>'s exit codes: 0 after a drain, 130 on a forced
   exit, 75 when the worker recycles itself after a stuck task thread.
+  A worker that finishes under <code>--batch</code> or <code>--max-tasks</code> drains and exits
+  0, even when task attempts or individual schedule dispatches failed.
+  Task outcomes stay on their task rows; schedule-scoped failures are
+  reported in logs and leave no tick or task row. Exit 0 means the batch
+  finished, not that every schedule enqueued. An abandoned dispatch pass
+  prevents normal batch-empty completion until a later pass completes;
+  reaching <code>--max-tasks</code> still ends the run. An invalid <code>--max-tasks</code>, or
+  either flag with <code>--processes</code> above 1, exits 1 before any worker starts.
   Under <code>--processes</code>, the supervisor exits 0 when every worker drained
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   <code>128 + the signal number</code>, following the shell convention.</li>
+<li><strong>The heartbeat-file protocol</strong>: one process writes <code>PATH</code>; above one
+  process, the supervisor writes <code>PATH.supervisor</code> and slot i writes
+  <code>PATH.i</code>. The modification time is the signal; file contents are not
+  read or written. Every expected file must be regular and have an age
+  between zero and the configured maximum, inclusive. A passing check
+  means the expected controlling loops have advanced recently, not that
+  tasks are progressing. The documented
+  <a href="../monitoring/#file-mode-json">file-mode JSON fields</a> are public too.</li>
 <li><strong>The system check IDs</strong>, including the <code>django_ox.E0xx</code> and
   <code>django_ox.W0xx</code> identifiers, which you may list in
   <code>SILENCED_SYSTEM_CHECKS</code>. The IDs are stable; the messages are not.</li>
-<li><strong><code>ox_health</code>'s exit codes</strong>: 0 when healthy, 1 when unhealthy. A value
-  the command itself rejects exits 1 as well, such as <code>--max-age 0</code> or a
-  <code>--database</code> alias that isn't in <code>DATABASES</code>. A value argparse rejects
-  exits 2, such as <code>--max-age nonsense</code> or <code>--format bogus</code>, and so does an
-  unknown flag.</li>
+<li><strong><code>ox_health</code>'s exit codes</strong>: 0 when every enabled check passes, 1 when
+  a check fails. In file mode, passing means every expected heartbeat file
+  is fresh. A value the command itself rejects exits 1 as well, such as
+  <code>--max-age 0</code>, <code>--max-heartbeat-age 0</code>, <code>--processes 0</code>, a refused flag
+  combination, or a <code>--database</code> alias that isn't in <code>DATABASES</code>. A value
+  argparse rejects exits 2, such as <code>--max-age nonsense</code>,
+  <code>--max-heartbeat-age nan</code>, <code>--processes 1.5</code> or <code>--format bogus</code>, and so
+  does an unknown flag.</li>
 <li><strong>The claim filter hooks</strong> <code>Worker.claim_filter_q()</code> and
   <code>Worker.claim_filter_sql()</code>, and where their result is applied: the
   fragment is conjoined to the conditions the candidate select filters on,
@@ -1016,17 +996,38 @@ export names this page does not list; those names are not public.</p>
 <li><strong>The exceptions</strong> <code>django_ox.exceptions.TaskAbandoned</code>, recorded against
   tasks whose worker stopped reporting with no attempts left (it records the
   lost lease, not a cause of failure), and <code>django_ox.exceptions.TaskTimeout</code>,
-  a <code>TimeoutError</code> raised inside a task that ran past its <code>TASK_TIMEOUT</code> and
-  recorded against the attempt.</li>
+  a <code>TimeoutError</code> raised inside a sync task at its execution deadline and
+  recorded against a timed-out attempt. The timeout comes from the task's
+  own declaration, then its queue's <code>TASK_TIMEOUTS</code> entry, then
+  <code>TASK_TIMEOUT</code>. Async tasks are cancelled and their timeout is recorded
+  with <code>TaskTimeout</code>.</li>
 <li><strong>The structured-log contract</strong>: the event names and stable <code>extra</code> keys
-  documented on the <a href="../monitoring/">Monitoring</a> page.</li>
+  documented on the <a href="../monitoring/">Monitoring</a> page. This includes the
+  policy events and keys, even though the declaration API is provisional.</li>
+<li><strong>The test backends</strong> <code>django_ox.testing.ImmediateBackend</code> and
+  <code>django_ox.testing.DummyBackend</code>. They accept policy declarations but do
+  not enforce retries, backoff or timeouts.</li>
 <li><strong>The database schema</strong> of <code>OxTask</code> and <code>OxScheduleTick</code>, evolved only
   through shipped migrations.</li>
 <li><strong><code>django_ox.__version__</code>.</strong></li>
 </ul>
-<p>The producer-side API is <code>django.tasks</code> itself (<code>@task</code>, <code>.enqueue()</code>,
-<code>get_result()</code>); django-ox adds nothing there and follows Django's
-contract.</p>
+<p>The producer-side API uses the Tasks framework's <code>@task</code>, <code>.enqueue()</code> and
+<code>get_result()</code>. Bare tasks follow that framework's contract. django-ox also
+accepts the provisional policy declarations below.</p>
+<h3 id="provisional-task-policy">Provisional task policy</h3>
+<p><code>django_ox.tasks.PolicyTask</code> and <code>django_ox.tasks.BackoffCallback</code>, also
+available as <code>django_ox.PolicyTask</code> and <code>django_ox.BackoffCallback</code>, are
+public, provisional APIs. This includes the <code>max_attempts</code>, <code>backoff</code> and
+<code>timeout</code> fields accepted through <code>@task</code> by <code>OxBackend</code>, and their
+representation on <code>result.task</code>.</p>
+<p>This surface follows the names and two-argument callback in Django's open
+new-features proposals #142 and #144. It makes no promise of compatibility
+with whatever Django core eventually ships. <code>timedelta</code> callback returns
+are supported; timeout declarations use integer seconds. Retry scheduling
+updates <code>run_after</code>, rather than preserving its original value as proposal</p>
+<h1 id="142-suggests">142 suggests.</h1>
+<p>See <a href="../configuration/#per-task-policy">Configuration</a> for validation,
+framework support and precedence.</p>
 <h3 id="not-public">Not public</h3>
 <p>Everything else is an implementation detail and may change in any release
 without notice. That covers the <code>django_ox.worker.Worker</code> internals, the cron
@@ -1036,6 +1037,13 @@ supervisor behind <code>--processes</code> (<code>django_ox.supervisor</code>) a
 <code>--worker-index</code> flag it starts each child with, and any name starting
 with an underscore. The exact SQL a claim emits and the
 model's non-schema helper methods are not part of the contract.</p>
+<p><code>django_ox.heartbeat</code> is also an implementation detail, not a public Python API. The documented heartbeat filenames, modification-time meaning, freshness rule and <code>ox_health</code> JSON fields are public contracts.</p>
+<p>In <code>django_ox.tasks</code>, only <code>PolicyTask</code> and <code>BackoffCallback</code> are public,
+with the provisional status above. <code>MAX_ATTEMPTS_LIMIT</code> and
+<code>validate_policy</code> are implementation details. In <code>django_ox.testing</code>, only
+<code>ImmediateBackend</code> and <code>DummyBackend</code> are public. Timeout implementation
+classes and methods, including <code>TaskTimeouts.enabled</code> and
+<code>TaskTimeouts.for_attempt()</code>, are not public.</p>
 <h2 id="versioning">Versioning</h2>
 <p>django-ox follows <a href="https://semver.org/">Semantic Versioning</a>:</p>
 <ul>
@@ -1054,7 +1062,7 @@ has no filter for it. Bulk discards skip it, and <code>queue_stats()</code>, the
 process that shares a database before anything writes the new status. The
 release notes name the value, say how it reads through <code>django.tasks</code>, and
 give the upgrade and rollback steps.</p>
-<p>Pin accordingly: <code>django-ox~=1.4.0</code> accepts patch releases only;
+<p>Pin accordingly: <code>django-ox~=1.5.0</code> accepts patch releases only;
 <code>django-ox~=1.3</code> accepts the current major line.</p>
 <h2 id="deprecation-policy">Deprecation policy</h2>
 <p>When a public surface is going to be removed or changed incompatibly, and
@@ -1107,33 +1115,76 @@ corners; these are the supported combinations.</p>
 <p>Django 6.0 and later ship the Tasks framework in core. The Django 5.2 legs
 install the <code>django-tasks</code> backport and run the whole suite against it, which
 is what <code>django-ox[backport]</code> pulls in.</p>
+<p>Support for per-task policy declarations differs from support for the
+backend itself:</p>
+<table>
+<thead>
+<tr>
+<th>Declaration</th>
+<th>Django 5.2 with django-tasks 0.12+</th>
+<th>Django 6.0</th>
+<th>Django 6.1</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Bare <code>@task</code> with django-ox</td>
+<td>supported</td>
+<td>supported</td>
+<td>supported</td>
+</tr>
+<tr>
+<td><code>@task(max_attempts=..., backoff=..., timeout=...)</code> with django-ox</td>
+<td>supported</td>
+<td>not supported</td>
+<td>supported</td>
+</tr>
+</tbody>
+</table>
+<p>The backport dependency already requires django-tasks 0.12 or later.
+On Django 6.0, policy keyword arguments raise <code>TypeError</code> when the module
+is imported, regardless of the configured backend. Bare <code>@task</code> still
+builds a <code>PolicyTask</code> under <code>OxBackend</code>, with all three policy fields set
+to <code>None</code>, so backend and queue defaults apply.</p>
+<p>The policy fields are provisional. See the
+<a href="../configuration/#per-task-policy">declaration reference</a> for validation,
+precedence and typing guidance.</p>
 <p>Django 6.1 changed which databases the system checks run against. A command
 that runs the full checks and does not name a database now checks every alias
 in <code>DATABASES</code>. Checking a SQLite or MySQL alias opens a connection and runs
 one query. The cost grows with the number of aliases, and every such command
-pays it. An alias that cannot be reached ends the command. Each django-ox
-command names the alias it checks, so none of them opens another one.
-<code>ox_prune</code>, <code>ox_health</code> and <code>ox_import_beat_schedules</code> name the alias they
-work on and pass it to the checks. <code>ox_worker</code> passes an empty list, so no
-alias is checked at all and a worker starts while its database is down and
-waits for it. What that costs: the system checks that need a database don't
-run for <code>ox_worker</code>. A SQLite build without JSON support fails
-<code>fields.E180</code>. <code>manage.py check --database &lt;alias&gt;</code> reports it, and so does
-every other django-ox command; each exits non-zero. A worker on that alias
-starts and runs tasks anyway, because SQLite stores those columns as text,
-and it logs nothing. On MySQL, Django's column-type checks emit warnings, so
-<code>check</code> still exits 0. The case an operator actually hits is a database with
-no django-ox tables. <code>check --database &lt;alias&gt;</code> does not report that: it
-exits 0 and reports no issues. <code>migrate --check --database &lt;alias&gt;</code> is what
-exits non-zero, and it prints nothing at all. The worker logs
-<code>worker_poll_failed</code> on every pass. A check that cannot fail is worse than
-no check at all. Run <code>migrate --check</code> for the alias before you start a
-worker on it. A configuration error still stops a worker at startup, because
-those checks don't need a database. For the rest,
-pass <code>--skip-checks</code>, or <code>--database</code> to <code>manage.py check</code>. Django 6.0 is
-unaffected, and so is an alias on PostgreSQL. The <a href="../changelog/">changelog</a>
-has the mechanism, what a router does and does not fix, and why <code>--database</code>
-alone is not enough on a command that does not pass it on.</p>
+pays it. An alias that cannot be reached ends the command.</p>
+<p><code>ox_prune</code>, <code>ox_health</code> in database mode, and <code>ox_import_beat_schedules</code>
+name the alias they work on and pass it to the checks. <code>ox_worker</code> passes
+an empty list, so no alias is checked. Its poll loop can keep retrying a
+database that refuses connections. Startup work before the loop, such as
+loading database-backed schedules, can still access the database.</p>
+<p>The system checks that need a database don't run for <code>ox_worker</code>.
+A SQLite build without JSON support fails <code>fields.E180</code>.
+<code>manage.py check --database &lt;alias&gt;</code> reports it, as do <code>ox_prune</code>,
+<code>ox_health</code> in database mode, and <code>ox_import_beat_schedules</code>; each exits
+non-zero. A worker on that alias runs tasks anyway, because SQLite stores
+those columns as text, and it logs nothing. On MySQL, Django's column-type
+checks emit warnings, so <code>check</code> still exits 0.</p>
+<p>A database with no django-ox tables is a separate case.
+<code>check --database &lt;alias&gt;</code> does not report that: it exits 0 and reports no
+issues. <code>migrate --check --database &lt;alias&gt;</code> is what exits non-zero, and it
+prints nothing at all. A worker that reaches the poll loop logs
+<code>worker_poll_failed</code> on every pass. Run <code>migrate --check</code> for the alias
+before you start a worker on it. A configuration error still stops a worker
+at startup, because those checks don't need a database.</p>
+<p><code>ox_health --heartbeat-file</code> selects a separate branch before command
+checks run. It runs neither system nor migration checks, validates no
+database alias, constructs no task backend and makes no database calls.
+It does not need <code>--skip-checks</code>. Project startup still runs before the
+command: <code>AppConfig.ready()</code> and other startup code must be database-free
+if the probe needs to survive a database outage.</p>
+<p>For commands that run system checks, pass <code>--skip-checks</code>, or pass
+<code>--database</code> to <code>manage.py check</code>, as appropriate. Django 6.0 is unaffected
+by the check-scope change, and so is an alias on PostgreSQL. The
+<a href="../changelog/">changelog</a> has the mechanism, what a router does and does
+not fix, and why <code>--database</code> alone is not enough on a command that does
+not pass it on.</p>
 <p>The support floor tracks Django's own: when a Python or Django version
 reaches end of life upstream, a later django-ox minor release may drop it,
 announced in the changelog. Databases: PostgreSQL, SQLite and MySQL 8 are

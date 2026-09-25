@@ -332,6 +332,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../wagtail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wagtail background tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../configuration/" class="md-nav__link">
         
   
@@ -999,7 +1026,7 @@ before starting workers.</p>
 <code>python manage.py ox_worker --concurrency 4</code> to execute the work.
 With Django's PostgreSQL pool, check
 <a href="../production/#database-connections-and-postgresql-pooling">pool sizing</a>.</p>
-<p>Failed tasks retry with exponential backoff up to <code>MAX_ATTEMPTS</code>. When a job needs attention, open Django admin to inspect each attempt's traceback. You supervise a worker process, but there is no second datastore to provision or monitor. The queue uses your database's capacity.</p>
+<p>Failed tasks retry with exponential backoff by default, subject to the stored claim budget selected at enqueue from the task's <code>max_attempts</code> or the backend's <code>MAX_ATTEMPTS</code>. A task backoff callback can choose a delay from zero to about a thousand years, independently of <code>BACKOFF_MAX</code>, or stop retries by returning <code>None</code>. When a job needs attention, open Django admin to inspect each attempt's traceback. You supervise a worker process, but there is no second datastore to provision or monitor. The queue uses your database's capacity.</p>
 <h2 id="enqueue-a-task-inside-transactionatomic">Enqueue a task inside transaction.atomic()</h2>
 <p>Save the user and queue their welcome email together. If signup rolls back, its email task should disappear too.</p>
 <div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django.contrib.auth</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_user_model</span>
@@ -1036,7 +1063,7 @@ With Django's PostgreSQL pool, check
 </code></pre></div>
 <p>Every worker dispatches due schedules. A unique constraint on the schedule name and tick time prevents workers from enqueueing the same tick twice.</p>
 <p>Keep schedules in settings, or let your team pause and edit them as <a href="../stored-schedules/">rows in Django admin</a>. See <a href="../recurring-tasks/">Recurring tasks</a> for the configuration.</p>
-<p>Schedules run while at least one worker is running. After an outage, only the most recent missed tick is enqueued.</p>
+<p>Schedules need at least one running worker and a usable database. A schedule-scoped failure does not stop later entries if rollback succeeds and the same connection remains usable. After an outage, only the most recent missed tick is enqueued.</p>
 <h2 id="deduplicate-a-repeated-webhook-with-oxpull-pro">Deduplicate a repeated webhook with Oxpull Pro</h2>
 <p>A payment provider sends the same event twice. Your webhook queues the same invoice sync twice. Stop the duplicate at enqueue rather than making the queue do the same work again.</p>
 <p>With django-ox alone, these calls create separate tasks:</p>

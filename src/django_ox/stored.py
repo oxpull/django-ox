@@ -449,7 +449,18 @@ class DatabaseScheduleSource:
     A row is input from a person, unlike a settings entry, so it is
     treated as such. One that no longer validates, or that names a key
     this deployment does not register, is skipped and logged rather than
-    allowed to stop every other schedule from firing.
+    allowed to stop every other schedule from firing. Validation cannot
+    see everything the database will refuse, so a row that passes it and
+    is then refused at dispatch is isolated there instead: the worker
+    rolls back that row's tick, reports it, and dispatches the rest
+    (`Worker.dispatch_schedules`).
+
+    Rows come after the settings schedules, in primary-key order. The
+    order is for reproducibility and nothing else: every schedule in a
+    pass is attempted whatever happens to the ones before it, and the
+    tick constraint, not the order, is what coordinates workers. Without
+    an explicit order a PostgreSQL table hands back rows in heap order,
+    which an ordinary edit changes.
 
     The backend's ``OPTIONS["SCHEDULES"]`` come along as well. Naming this
     source adds the rows to the schedules a project already declared; it
@@ -466,6 +477,10 @@ class DatabaseScheduleSource:
         #: startup because its constructor asks for the schedules.
         self._settings: list[Any] | None = None
         self._cached: list[Any] = []
+        #: The dispatch key of every row the last full read met, the
+        #: disabled ones and the ones that did not build included, less any
+        #: found gone under its lock since. What `_stored_keys` answers.
+        self._row_keys: set[str] = set()
         self._seen_change: Any = _UNREAD
         #: Rows whose boundary was found stale, with the boundary as it
         #: stood when it was found: the digest column, the start time and
@@ -506,6 +521,26 @@ class DatabaseScheduleSource:
 
             self._settings = schedules_from_options(self._options, self._backend_alias)
         return [*self._settings, *self._rows()]
+
+    def _stored_keys(self) -> set[str]:
+        """
+        The dispatch key of every row that exists, whether or not it is
+        among the schedules this source answers: a paused row, and one
+        that no longer builds, included. As of the last full read, less the
+        rows found gone under their lock since.
+
+        The worker keeps a failing schedule's report while its key is here
+        or among `schedules()` (`Worker.dispatch_schedules`). A paused row
+        is not dispatched, so `schedules()` leaves it out, but it is the
+        same schedule when it is resumed, and its run of failures ends with
+        a recovery or goes on, rather than starting again, only if the
+        report outlives the pause. A deleted row's report goes.
+
+        Costs no statement: the full read already reads every row, the
+        disabled ones included, to find stale boundaries, and the row lock
+        at dispatch already finds a row gone.
+        """
+        return self._row_keys
 
     def _rows(self) -> list[Any]:
         """The enabled rows as schedules, re-read when the marker moves."""
@@ -683,13 +718,16 @@ class DatabaseScheduleSource:
 
     def _build(self) -> list[Any]:
         built = []
+        keys = set()
         # Every row, the disabled ones included. A disabled row is not
         # dispatched, but its boundary can be stale: a pause made outside
         # the write API leaves the boundary set for the enabled state, and
         # moving it now is what stops a raw resume from firing a tick that
         # came due inside the pause. This is the only read that sees a
-        # disabled row at all.
-        for row in OxSchedule.objects.using(self._db_alias).all():
+        # disabled row at all, which is also why it is the one that says
+        # which rows exist (`_stored_keys`).
+        for row in OxSchedule.objects.using(self._db_alias).order_by("pk"):
+            keys.add(f"{STORED_KEY_PREFIX}{row.pk}")
             # Checked here, where every row is read whether or not a tick
             # of it is due. At dispatch it would sit behind the snapshot's
             # own filters, so a row whose cached copy said "not due" would
@@ -722,6 +760,9 @@ class DatabaseScheduleSource:
                         "reason": str(exc),
                     },
                 )
+        # Once the read has gone through. One that raises part way leaves
+        # the last complete answer, as it leaves the cached schedules.
+        self._row_keys = keys
         return built
 
     def _to_schedule(self, row: OxSchedule) -> Any:
@@ -805,8 +846,10 @@ class DatabaseScheduleSource:
         except DatabaseError as exc:
             # A lock-wait timeout, or SQLite reporting the database busy.
             # One schedule's contention must not end the pass for the rest,
-            # and it is contention, so no traceback. Anything else the
-            # database raises is the database's, and the pass reports it.
+            # and it is contention, so no traceback. Anything else goes to
+            # the dispatch loop, which rolls this schedule back and decides
+            # from the connection, not the class, whether the rest of the
+            # pass can go on.
             if not lock_contention(exc):
                 raise
             logger.warning(
@@ -832,9 +875,14 @@ class DatabaseScheduleSource:
             # Drop it from the snapshot too. Returning None alone would
             # leave the row in the cache, so every later pass would plan its
             # tick and take its lock again for a schedule that cannot fire.
-            self._cached = [
-                s for s in self._cached if s.dispatch_key != f"{STORED_KEY_PREFIX}{pk}"
-            ]
+            key = f"{STORED_KEY_PREFIX}{pk}"
+            self._cached = [s for s in self._cached if s.dispatch_key != key]
+            if row is None:
+                # Gone, deleted without the write API or before the marker
+                # read saw it: its failure report can go now rather than at
+                # the next full read. A disabled row stays among the keys;
+                # it is paused, not gone.
+                self._row_keys.discard(key)
             return None
         if row.boundary_for != boundary_digest(row):
             # The timing changed without the boundary moving, so the tick

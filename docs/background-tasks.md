@@ -524,8 +524,8 @@ For a nightly report at three in the morning you would write
 in place of `cron`. Times are wall-clock in your `TIME_ZONE`, which is UTC
 in a fresh project.
 
-A schedule is validated before it can run. `manage.py check` reports a
-task path that does not import, or an expression that can never fire:
+`manage.py check` validates a schedule's declaration before it runs. It reports
+a task path that does not import, or an expression that can never fire:
 
 ```
 python manage.py check
@@ -548,10 +548,12 @@ ERRORS:
 System check identified 1 issue (0 silenced).
 ```
 
-The worker runs the same validation at startup, so a bad schedule stops a
-deploy rather than skipping in silence. Put `* * * * *` back and restart
-the worker. The startup line now says `schedules=1`, and at the next minute
-boundary the schedule fires:
+The worker runs the same validation at startup, so these errors stop startup
+rather than skipping dispatch in silence. The checks do not establish database
+acceptance of arguments; schedule-scoped failures at dispatch are logged as
+`schedule_dispatch_error`. Put `* * * * *` back and restart the worker.
+The startup line now says `schedules=1`, and at the next minute boundary
+the schedule fires:
 
 ```
 2026-09-19 07:59:12,044 INFO django_ox Worker myhost-23929-gJ7A6QmA starting: queues=['default'] concurrency=1 poll=1.0s schedules=1

@@ -23,14 +23,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ordinary change-list visits. The page shows status counts, eligible backlog
   and age, five-minute throughput and failure rate, and time since the last
   claim.
-- `ox_worker --batch` exits once a poll pass finds nothing to claim and none
-  of its own tasks is running, and `--max-tasks N` exits after N claimed attempts, for
-  cron and job runners. Both drain and exit 0, log `worker_batch_empty` or
-  `worker_max_tasks_reached` with the `claimed` count, and are rejected with
-  `--processes` above 1. `Worker` takes matching `batch` and `max_tasks`
-  keyword arguments, passed by the command only when the flag is given, so
-  existing fixed-signature `WORKER_CLASS` constructors keep working when
-  neither new flag is supplied.
+- `ox_worker --batch` exits once an error-free poll pass finds nothing to
+  claim and began with none of its own tasks in flight, and `--max-tasks N`
+  exits after N claimed attempts, for cron and job runners. Both drain and
+  exit 0, log `worker_batch_empty` or `worker_max_tasks_reached` with the
+  `claimed` count, and are rejected with `--processes` above 1.
+  Schedule-scoped failures do not hold a batch open. An abandoned dispatch
+  pass prevents normal batch-empty completion until a later pass completes;
+  reaching `--max-tasks` still ends the run. Exit 0 means the batch finished,
+  not that every schedule enqueued. `Worker` takes matching `batch` and
+  `max_tasks` keyword arguments, passed by the command only when the flag is
+  given, so existing fixed-signature `WORKER_CLASS` constructors keep working
+  when neither new flag is supplied.
+- `schedule_dispatch_recovered` reports when a schedule that failed on this
+  worker commits a tick again, by enqueueing a task or recording a
+  first-sighting anchor. It carries the number of failed attempts in `failures`.
+
+### Changed
+
+- `schedule_dispatch_failed` now reports an abandoned dispatch pass.
+  Schedule-scoped failures, including database rejections, are reported as
+  `schedule_dispatch_error` at ERROR on every engine. Both events include
+  `database`, `error`, `failures` and `suppressed`. The first failure has a
+  traceback; continued failures produce at most one summary per 60 seconds.
+  Schedule reports are limited per worker, database alias and schedule;
+  abandoned-pass reports are limited per worker. Alert on both events and
+  read `failures` and `suppressed` rather than counting log lines. For stored
+  schedules, also alert on `schedule_row_skipped`, regardless of batch exit.
+- **Upgrade:** Schedule isolation requires no migration and adds no system
+  check. Replace all workers to apply the behaviour throughout the fleet.
+  Deploy django-ox and Oxpull only as the tested exact-pinned release pair.
+
+### Fixed
+
+- On PostgreSQL and MySQL, one schedule the database rejects no longer stops
+  later schedules or holds `ox_worker --batch` open when rollback succeeds
+  and the same database session remains usable. This includes non-finite
+  floats in arguments and stored values that pass form validation but fail
+  at enqueue. SQLite retains its local-failure completion behaviour.
+  Failed rollback, an unusable connection or a database error escaping a
+  shared dispatch read still abandons the pass.
+- On PostgreSQL, failed SQL in a `task_enqueued` receiver is isolated to its
+  schedule when rollback succeeds and the same connection remains usable.
+  Integrity errors on the tick insert that are not genuine duplicate-key
+  races are reported rather than silently ignored.
+- Stored schedules are traversed in primary-key order after settings
+  schedules in `SCHEDULES` insertion order. An edit does not change traversal
+  order through PostgreSQL row movement. The order is for reproducibility;
+  the tick unique constraint still coordinates workers.
 
 ### Fixed
 

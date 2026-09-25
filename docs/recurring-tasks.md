@@ -55,10 +55,22 @@ Each entry accepts exactly these keys. Anything else is rejected at startup:
 | `cron` | one of | Five-field cron expression or `@` shortcut, syntax below. |
 | `every` | one of | A fixed interval, as a `timedelta` or a number of seconds. |
 | `phase` | no | Shifts an `every` sequence. A `timedelta` or seconds, less than `every`. |
-| `args` | no | Positional arguments, as a list. Must be JSON-serializable. |
-| `kwargs` | no | Keyword arguments, as a dict. Must be JSON-serializable. |
+| `args` | no | Positional arguments, as a list. Must be JSON-serializable and accepted by the database. |
+| `kwargs` | no | Keyword arguments, as a dict. Must be JSON-serializable and accepted by the database. |
 | `queue_name` | no | Queue override; defaults to the task's own queue. |
 | `priority` | no | Priority override, -100 to 100. |
+
+JSON serialization does not establish database acceptance. Non-finite floats
+such as `float("inf")` and `float("nan")` pass `manage.py check` and worker
+startup, but PostgreSQL, MySQL and SQLite reject them at enqueue. For
+`float("inf")`, PostgreSQL raises `DataError`, MySQL through PyMySQL raises
+`OperationalError` 3140, and SQLite raises `IntegrityError` through Django's
+`JSON_VALID` check. PostgreSQL also rejects a NUL character (`"\x00"`) in a
+string; MySQL and SQLite accept it.
+
+These are database restrictions, not startup validation. A rejected dispatch
+is rolled back and reported as `schedule_dispatch_error`. If the same
+connection remains usable after rollback, later schedules are still attempted.
 
 ### Overriding the queue and priority
 
@@ -173,9 +185,17 @@ works like this:
 3. When workers race the same tick, exactly one `INSERT` succeeds.
 4. The losers stop at the constraint and enqueue nothing.
 
-So a due tick is enqueued once, whatever the worker count, and dispatch keeps
-working as long as one worker is alive. Scheduling is a property of the workers
-you already run. There is nothing extra to deploy, monitor or fail over.
+The constraint deduplicates each due tick across workers. Dispatch needs at
+least one running worker and a usable database. A schedule-scoped failure
+does not stop later entries: after rollback, the worker continues if the
+same database connection remains usable. An abandoned pass stops further
+dispatch until a later pass. Scheduling is a property of the workers you
+already run. There is no separate scheduler process to deploy or fail over.
+
+A pass visits settings schedules in `SCHEDULES` insertion order, followed by
+stored schedules in primary-key order. This makes traversal reproducible.
+It does not establish fairness or priority, and it does not coordinate workers.
+The tick's unique constraint does that.
 
 This deduplicates the enqueue, not the execution. The task that a tick enqueues
 runs under the same at-least-once contract as every other task, so write it to
@@ -234,15 +254,55 @@ runs.
 worker sees a schedule with no history, it records the current tick as an anchor
 and enqueues nothing. The schedule first fires at its next tick.
 
+### Retrying a failed dispatch
+
+A schedule-scoped failure rolls back that schedule's transaction. It leaves
+no tick row or task from the attempt, and the tick remains unclaimed.
+
+The worker tries the schedule again on subsequent dispatch passes under the
+usual due-tick, deadline and coordination rules. The command's dispatch
+interval is `max(1, min(--interval, 30))` seconds. Only the latest due tick is
+considered; failed dispatches do not create a backlog of ticks to replay.
+
+A stored schedule's `starting_deadline_seconds` still applies. Once a tick
+is too late, it is dropped and reported as `schedule_tick_dropped`, not as
+another dispatch failure.
+
+There is no execution backoff, failure-based tick skipping, stored failure
+state or automatic disabling. While an enqueue rejection persists, each attempt
+is a transaction that inserts a tick row, attempts the enqueue and rolls back,
+followed by a `SELECT 1` connection check, on every dispatch pass on every
+worker. A stored schedule also takes its row lock. Workers attempting a
+settings schedule can queue on the same tick key. On MySQL with three or more
+dispatchers, the claimant's rollback can leave those workers deadlocking,
+producing 1213 `schedule_lock_unavailable` warnings; read these beside
+`schedule_dispatch_error` for the same schedule. Contention reports remain
+unthrottled, and report suppression does not reduce database attempts.
+
+When the cause is resolved, the next dispatch pass can enqueue the latest
+eligible, unclaimed tick. An `update_schedule` edit that changes only a stored
+schedule's arguments keeps the same due tick. Recovery does not replay every
+tick missed during the failure.
+
+See [Monitoring](monitoring.md#schedule-failure-reporting) for failure counts
+and the per-worker recovery event.
+
 ## Checking a schedule is live
 
-`manage.py check` validates every schedule without starting a worker. It reports
-a bad task path, an unparseable or never-firing cron expression, arguments that
-are not JSON-serializable, and duplicate names across backends:
+`manage.py check` validates every settings-declared schedule without starting
+a worker. It reports a bad task path, an unparseable or never-firing cron
+expression, arguments that are not JSON-serializable, and duplicate names
+across backends:
 
 ```
 python manage.py check
 ```
+
+Passing these checks does not establish database acceptance. A schedule can
+pass validation and still fail at dispatch. Alert on `schedule_dispatch_error`
+for schedule-scoped failures and `schedule_dispatch_failed` for abandoned
+passes. For stored schedules, also alert on `schedule_row_skipped`.
+`ox_health` has no schedule check.
 
 To see what has actually dispatched, read the tick log:
 
@@ -256,7 +316,8 @@ OxScheduleTick.objects.filter(schedule_name="nightly-report").order_by(
 
 Each row is one dispatched tick. A row whose `task` is `None` is the anchor
 written the first time a worker saw the schedule; it enqueued nothing and marks
-the tick before the first real fire.
+the tick before the first real fire. A schedule-scoped failure rolls back its
+tick row and task, so the tick log alone does not report failed dispatches.
 
 The recovery baseline is each schedule's most recent tick row, which is why
 `ox_prune` always keeps it. See

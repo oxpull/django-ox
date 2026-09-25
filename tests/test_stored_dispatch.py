@@ -1236,9 +1236,11 @@ class TestTheDeadlineIsJudgedUnderTheLock:
 class TestTheRowLockDistinguishesContentionFromTheDatabase:
     """
     The stored source skips a schedule whose row lock the database gave up
-    waiting for, and only that. A connection gone away at the same
-    statement is the database's failure, and it ends the pass so run()
-    reports it and drops the connection.
+    waiting for, and only that. Any other failure at the lock goes to the
+    dispatch loop, which asks the connection rather than the exception: a
+    connection gone away at that statement ends the pass so run() reports
+    it and drops the connection, and a statement that failed on a
+    connection still standing is that schedule's.
     """
 
     def _lock_row_raising(self, monkeypatch, exc):
@@ -1268,26 +1270,59 @@ class TestTheRowLockDistinguishesContentionFromTheDatabase:
         assert len(warned) == 1
         assert warned[0].exc_info is None, "contention is not a traceback"
 
+    @pytest.mark.django_db(transaction=True)
     def test_a_connection_gone_away_at_the_lock_ends_the_pass(
         self, worker, monkeypatch, caplog
     ):
         import logging
 
-        from django.db import DatabaseError, OperationalError
+        from django.db import Error
+
+        from django_ox import stored
+
+        from .isolation import kill
+
+        a_minutely()
+        real_lock_row = stored._lock_row
+
+        def lock_row_on_a_dead_session(pk, alias):
+            from django.db import connections
+
+            kill(connections[alias])
+            return real_lock_row(pk, alias)
+
+        monkeypatch.setattr(stored, "_lock_row", lock_row_on_a_dead_session)
+        with (
+            caplog.at_level(logging.WARNING, logger="django_ox"),
+            pytest.raises(Error),
+        ):
+            worker.dispatch_schedules()
+        assert not any(
+            getattr(r, "event", None)
+            in ("schedule_lock_unavailable", "schedule_dispatch_error")
+            for r in caplog.records
+        ), "a dead connection was reported as one schedule's"
+
+    def test_a_failure_at_the_lock_on_a_usable_connection_is_the_schedules(
+        self, worker, monkeypatch, caplog
+    ):
+        import logging
+
+        from django.db import OperationalError
 
         a_minutely()
         self._lock_row_raising(
             monkeypatch, OperationalError("server closed the connection unexpectedly")
         )
-        with (
-            caplog.at_level(logging.WARNING, logger="django_ox"),
-            pytest.raises(DatabaseError),
-        ):
-            worker.dispatch_schedules()
-        assert not any(
-            getattr(r, "event", None) == "schedule_lock_unavailable"
+        with caplog.at_level(logging.WARNING, logger="django_ox"):
+            assert worker.dispatch_schedules() == 0
+        reported = [
+            r
             for r in caplog.records
-        ), "a dead connection was reported as lock contention"
+            if getattr(r, "event", None) == "schedule_dispatch_error"
+        ]
+        assert [r.schedule for r in reported] == ["minutely"]
+        assert not OxScheduleTick.objects.exists()
 
 
 class TestTheWriteApiCannotLoseAnUpdate:

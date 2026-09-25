@@ -1,10 +1,13 @@
 """
-What the dispatch pass does with an exception depends on where it came from.
+What the dispatch pass does with an exception depends on what it left
+behind, not on its class.
 
-One schedule's own failure, a task that will not enqueue or a row that
-raises, is logged against that schedule and the rest of the pass continues.
-A database error is not one schedule's: it ends the pass and reaches run(),
-which logs `schedule_dispatch_failed`, drops a connection that is no longer
+One schedule's own failure, database or not, is logged against that
+schedule and the rest of the pass continues: a task that will not enqueue,
+a row that raises, arguments the database refuses, a statement that fails
+while the connection stays usable. A failure that leaves the connection
+unusable is not one schedule's: it ends the pass and reaches run(), which
+logs `schedule_dispatch_failed`, drops a connection that is no longer
 usable, and goes on to the claim.
 """
 
@@ -16,6 +19,7 @@ from datetime import timedelta
 import pytest
 from django.db import (
     DatabaseError,
+    Error,
     IntegrityError,
     OperationalError,
     connection,
@@ -27,6 +31,8 @@ from django_ox.compat import task_enqueued
 from django_ox.models import OxScheduleTick, OxTask
 from django_ox.schedules import lock_contention
 from django_ox.worker import Worker
+
+from .isolation import kill
 
 pytestmark = pytest.mark.django_db
 
@@ -78,25 +84,86 @@ def raising_on_tick_insert(exc, times=None):
     return wrapper
 
 
+def losing_the_connection_at_tick_insert(times=1):
+    """
+    An execute wrapper that loses the connection for real just before the
+    tick INSERT goes out, `times` times: the INSERT, the rollback after it
+    and the check after that all meet a session that is gone.
+    """
+    lost = []
+
+    def wrapper(execute, sql, params, many, context):
+        is_tick_insert = sql.lstrip().upper().startswith("INSERT") and (
+            "oxscheduletick" in sql
+        )
+        if is_tick_insert and len(lost) < times:
+            lost.append(1)
+            kill(context["connection"])
+        return execute(sql, params, many, context)
+
+    return wrapper
+
+
 def events(caplog, name):
     return [r for r in caplog.records if getattr(r, "event", None) == name]
 
 
-class TestADatabaseErrorIsNotOneSchedules:
-    def test_it_leaves_the_pass_rather_than_being_logged_against_a_schedule(
-        self, worker, caplog
-    ):
+class TestTheConnectionDecidesNotTheClass:
+    @pytest.mark.django_db(transaction=True)
+    def test_a_connection_lost_at_the_tick_insert_ends_the_pass(self, worker, caplog):
+        # Transactional, so the block is the outermost transaction and its
+        # rollback meets the dead session the way it does in a worker.
         with_history()
-        gone = OperationalError("server closed the connection unexpectedly")
         with (
             caplog.at_level(logging.ERROR, logger="django_ox"),
-            connection.execute_wrapper(raising_on_tick_insert(gone)),
-            pytest.raises(DatabaseError),
+            connection.execute_wrapper(losing_the_connection_at_tick_insert()),
+            pytest.raises(Error),
         ):
             worker.dispatch_schedules()
         assert not events(caplog, "schedule_dispatch_error"), (
-            "a database error was reported as one schedule's failure"
+            "a lost connection was reported as one schedule's failure"
         )
+        assert not OxTask.objects.exists()
+        assert not OxScheduleTick.objects.exclude(task_id=None).exists()
+
+    def test_the_same_class_on_a_usable_connection_is_one_schedules(
+        self, worker, caplog
+    ):
+        # The error an outage raises, from a statement that failed on a
+        # connection that is still there: what MySQL does with arguments
+        # it refuses (3140) is an OperationalError too. The class cannot
+        # tell those apart, and the connection can.
+        with_history()
+        failed = OperationalError("server closed the connection unexpectedly")
+        with (
+            caplog.at_level(logging.ERROR, logger="django_ox"),
+            connection.execute_wrapper(raising_on_tick_insert(failed, times=1)),
+        ):
+            assert worker.dispatch_schedules() == 1, "the other schedule must fire"
+        (reported,) = events(caplog, "schedule_dispatch_error")
+        assert reported.schedule == "one"
+        assert reported.error == "OperationalError"
+        assert reported.exc_info is not None
+        assert OxTask.objects.count() == 1
+
+    def test_an_integrity_error_before_the_claim_is_not_always_a_lost_race(
+        self, worker, caplog
+    ):
+        # Only a duplicate key on the tick INSERT is another worker winning.
+        # Any other integrity failure there is a fault, and silence would
+        # retry it forever with nothing in the log.
+        with_history()
+        not_a_race = IntegrityError(
+            "NOT NULL constraint failed: django_ox_oxscheduletick.created_at"
+        )
+        with (
+            caplog.at_level(logging.ERROR, logger="django_ox"),
+            connection.execute_wrapper(raising_on_tick_insert(not_a_race, times=1)),
+        ):
+            assert worker.dispatch_schedules() == 1, "the other schedule must fire"
+        (reported,) = events(caplog, "schedule_dispatch_error")
+        assert reported.schedule == "one"
+        assert reported.error == "IntegrityError"
 
     def test_one_schedules_own_failure_is_still_isolated(self, worker, caplog):
         with_history()
@@ -116,16 +183,15 @@ class TestRunReportsAFailedPassAndCarriesOn:
         # Transactional: run() polls on its own thread with its own
         # connection, and the wrapper has to be installed on that one.
         with_history()
-        gone = OperationalError("server closed the connection unexpectedly")
 
-        def run_with_one_broken_statement():
-            with connection.execute_wrapper(raising_on_tick_insert(gone, times=1)):
+        def run_losing_the_connection_once():
+            with connection.execute_wrapper(losing_the_connection_at_tick_insert()):
                 worker.run()
 
-        thread = threading.Thread(target=run_with_one_broken_statement, daemon=True)
+        thread = threading.Thread(target=run_losing_the_connection_once, daemon=True)
         with caplog.at_level(logging.INFO, logger="django_ox"):
             thread.start()
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 if events(caplog, "schedule_dispatch_failed") and (
                     len(events(caplog, "schedule_dispatched")) == len(TWO)
@@ -136,7 +202,8 @@ class TestRunReportsAFailedPassAndCarriesOn:
             thread.join(timeout=5)
 
         assert not thread.is_alive(), "run() did not return after the stop"
-        assert events(caplog, "schedule_dispatch_failed"), "the pass was not reported"
+        (failed,) = events(caplog, "schedule_dispatch_failed")
+        assert failed.exc_info is not None, "the first report of an outage is in full"
         assert len(events(caplog, "schedule_dispatched")) == len(TWO), (
             "the pass after the failure did not dispatch"
         )
@@ -332,9 +399,10 @@ class TestAPostCommitCallbackThatRaises:
     def test_a_commit_that_fails_is_not_a_callback_failure(
         self, worker, caplog, monkeypatch
     ):
-        # The body ran to its end and then the COMMIT itself failed. Nothing
+        # The body ran to its end and then the COMMIT itself failed, on a
+        # connection that is still usable once it has rolled back. Nothing
         # is committed, so nothing is counted and nothing is a callback's:
-        # the error is the database's and ends the pass.
+        # the failure is that schedule's, and the pass goes on to the next.
         with_history()
         commit = connection._commit
 
@@ -343,10 +411,36 @@ class TestAPostCommitCallbackThatRaises:
             raise OperationalError("server closed the connection unexpectedly")
 
         monkeypatch.setattr(connection, "_commit", failing_commit)
+        with caplog.at_level(logging.INFO, logger="django_ox"):
+            assert worker.dispatch_schedules() == 1
+        (dispatched,) = events(caplog, "schedule_dispatched")
+        assert dispatched.schedule == "two"
+        (reported,) = events(caplog, "schedule_dispatch_error")
+        assert reported.schedule == "one"
+        assert not events(caplog, "schedule_dispatch_callback_failed")
+        assert OxTask.objects.count() == 1
+        assert OxScheduleTick.objects.exclude(task_id=None).count() == 1
+
+    def test_a_commit_that_loses_the_connection_ends_the_pass(
+        self, worker, caplog, monkeypatch
+    ):
+        # The session goes away under the COMMIT. The rollback after it
+        # fails too, Django drops the connection, and the pass is over.
+        with_history()
+        commit = connection._commit
+
+        def commit_on_a_dead_session():
+            monkeypatch.setattr(connection, "_commit", commit)
+            kill(connection)
+            return commit()
+
+        monkeypatch.setattr(connection, "_commit", commit_on_a_dead_session)
         with (
             caplog.at_level(logging.INFO, logger="django_ox"),
-            pytest.raises(DatabaseError),
+            pytest.raises(Error),
         ):
             worker.dispatch_schedules()
         assert not events(caplog, "schedule_dispatched")
         assert not events(caplog, "schedule_dispatch_callback_failed")
+        assert not events(caplog, "schedule_dispatch_error")
+        assert not OxTask.objects.exists()

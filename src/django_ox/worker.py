@@ -120,6 +120,11 @@ LIBPQ_MIN_CONNECT_TIMEOUT = 2
 # often, with the number of renewals missed since it last did.
 MISSED_RENEWAL_REPORT_INTERVAL = 30.0
 
+# While one schedule keeps failing to dispatch, or dispatch passes keep being
+# abandoned, the worker says so with a traceback the first time and after
+# that at most this often, with the number of failures since it last did.
+DISPATCH_FAILURE_REPORT_INTERVAL = 60.0
+
 
 def _load_async_exc_injector() -> Callable[[int], None] | None:
     """
@@ -261,6 +266,209 @@ def _latch_instant() -> datetime:
     """
     instant = datetime(1900, 1, 1)
     return instant.replace(tzinfo=UTC) if settings.USE_TZ else instant
+
+
+def _lost_the_race(exc: IntegrityError) -> bool:
+    """
+    Is this the tick INSERT refused by the unique constraint, and nothing else?
+
+    Asked only of an IntegrityError raised before this pass's tick row is
+    in, where the tick INSERT is the only statement that can meet a unique
+    constraint. Losing the race for a tick is a duplicate key and nothing
+    else: PostgreSQL's unique_violation (23505), MySQL's duplicate entry
+    (1062, or 1586 where the message names the key), SQLite's UNIQUE
+    constraint message, Oracle's ORA-00001. Any other integrity failure on
+    the INSERT is a fault, and read as a lost race it would be retried
+    silently forever.
+    """
+    cause = exc.__cause__
+    # Not "any SQLSTATE but 23505 is something else": PyMySQL sets one too,
+    # the class-wide 23000 that every MySQL integrity error shares.
+    sqlstate = getattr(cause, "sqlstate", None) or getattr(cause, "pgcode", None)
+    if sqlstate == "23505":
+        return True
+    if exc.args and exc.args[0] in (1062, 1586):
+        return True
+    message = str(exc)
+    return "UNIQUE constraint failed" in message or "ORA-00001" in message
+
+
+@dataclass(slots=True)
+class _Failing:
+    """One run of consecutive dispatch failures, as _DispatchReport counts it."""
+
+    #: Failures in this run, the first included.
+    failures: int
+    #: Failures since the last line about them.
+    unreported: int
+    #: When the last line was written, on the report's clock.
+    reported_at: float
+
+
+class _DispatchReport:
+    """
+    What a worker logs about schedule dispatch failing: once in full, then
+    in summary, then once when it recovers.
+
+    Execution is not throttled, only the reporting. A schedule the database
+    rejects is tried again on every dispatch pass, about once a second, and
+    fails the same way each time; a traceback per attempt is some 6 KB per
+    worker per second of byte-identical text, enough to crowd out every
+    other report in the log.
+
+    Per schedule, keyed on this worker, its database alias and the
+    schedule's dispatch key, which for a stored row is its primary key and
+    survives a rename. The first failure is `schedule_dispatch_error` at
+    ERROR with the traceback. Later ones are counted, and at most every
+    DISPATCH_FAILURE_REPORT_INTERVAL seconds the same event is logged again
+    without a traceback, carrying how many were suppressed and the class of
+    the latest. The next successful dispatch of that schedule on this worker
+    is one `schedule_dispatch_recovered` line with the total. No event
+    carries the schedule's arguments, which are what the database refused
+    and can be anything a person typed; only the first traceback carries
+    the database's own message, which on PostgreSQL can quote part of the
+    refused value.
+
+    Per pass, the same shape for `schedule_dispatch_failed`: the first
+    abandoned pass of an outage is reported with its traceback, and the
+    passes after it are counted into a summary at most every interval. A
+    completed pass ends the run, so the next outage is reported in full.
+
+    The state is bounded by the schedules that exist: `retain` forgets a
+    schedule that is no longer among them. A stored row that is paused
+    still exists, so a run of failures outlives the pause: resumed and
+    still refused, it goes on counting without a second first report;
+    repaired while paused, its next dispatch is the recovery. A deleted
+    row is forgotten without an event, and so is a schedule that any
+    other source stops answering, since only the stored source can say
+    what exists beyond its answer. `clock` is time.monotonic outside
+    tests.
+    """
+
+    def __init__(
+        self,
+        worker_id: str,
+        db_alias: str,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.worker_id = worker_id
+        self.db_alias = db_alias
+        self.clock = clock
+        self._schedules: dict[str, _Failing] = {}
+        self._passes: _Failing | None = None
+
+    def retain(self, keys: set[str]) -> None:
+        """Forget every failing schedule whose key is not in `keys`."""
+        for key in [k for k in self._schedules if k not in keys]:
+            del self._schedules[key]
+
+    def schedule_failed(self, schedule: Schedule, exc: BaseException) -> None:
+        """One schedule's dispatch failed and the pass goes on without it."""
+        now = self.clock()
+        state = self._schedules.get(schedule.key)
+        # Each record's extra is a literal dict, so the docs test's scan of
+        # emitted keys can read every key it carries.
+        if state is None:
+            self._schedules[schedule.key] = _Failing(1, 0, now)
+            logger.error(
+                "Schedule %s could not be dispatched this pass",
+                schedule.name,
+                exc_info=exc,
+                extra={
+                    "event": "schedule_dispatch_error",
+                    "schedule": schedule.name,
+                    "worker_id": self.worker_id,
+                    "database": self.db_alias,
+                    "error": type(exc).__name__,
+                    "failures": 1,
+                    "suppressed": 0,
+                },
+            )
+            return
+        state.failures += 1
+        state.unreported += 1
+        if now - state.reported_at < DISPATCH_FAILURE_REPORT_INTERVAL:
+            return
+        logger.error(
+            "Schedule %s still cannot be dispatched: %d more failure(s) since "
+            "it was last reported, latest error %s",
+            schedule.name,
+            state.unreported,
+            type(exc).__name__,
+            extra={
+                "event": "schedule_dispatch_error",
+                "schedule": schedule.name,
+                "worker_id": self.worker_id,
+                "database": self.db_alias,
+                "error": type(exc).__name__,
+                "failures": state.failures,
+                "suppressed": state.unreported,
+            },
+        )
+        state.reported_at = now
+        state.unreported = 0
+
+    def schedule_dispatched(self, schedule: Schedule) -> None:
+        """A schedule's tick committed; if it had been failing, say it is back."""
+        state = self._schedules.pop(schedule.key, None)
+        if state is None:
+            return
+        logger.info(
+            "Schedule %s dispatched again after %d failed attempt(s)",
+            schedule.name,
+            state.failures,
+            extra={
+                "event": "schedule_dispatch_recovered",
+                "schedule": schedule.name,
+                "worker_id": self.worker_id,
+                "database": self.db_alias,
+                "failures": state.failures,
+            },
+        )
+
+    def pass_failed(self, exc: BaseException) -> None:
+        """A dispatch pass was abandoned."""
+        now = self.clock()
+        state = self._passes
+        if state is None:
+            self._passes = _Failing(1, 0, now)
+            logger.warning(
+                "Schedule dispatch failed; retrying next pass",
+                exc_info=exc,
+                extra={
+                    "event": "schedule_dispatch_failed",
+                    "worker_id": self.worker_id,
+                    "database": self.db_alias,
+                    "error": type(exc).__name__,
+                    "failures": 1,
+                    "suppressed": 0,
+                },
+            )
+            return
+        state.failures += 1
+        state.unreported += 1
+        if now - state.reported_at < DISPATCH_FAILURE_REPORT_INTERVAL:
+            return
+        logger.warning(
+            "Schedule dispatch still failing: %d more pass(es) abandoned since "
+            "the last report, latest error %s",
+            state.unreported,
+            type(exc).__name__,
+            extra={
+                "event": "schedule_dispatch_failed",
+                "worker_id": self.worker_id,
+                "database": self.db_alias,
+                "error": type(exc).__name__,
+                "failures": state.failures,
+                "suppressed": state.unreported,
+            },
+        )
+        state.reported_at = now
+        state.unreported = 0
+
+    def pass_completed(self) -> None:
+        """A dispatch pass went through every schedule it had."""
+        self._passes = None
 
 
 @dataclass(slots=True)
@@ -1167,6 +1375,8 @@ class Worker:
         self._db_alias = (
             db_alias if db_alias is not None else router.db_for_write(OxTask)
         )
+        #: Rate-limits what dispatch failures log; _DispatchReport says how.
+        self._dispatch_report = _DispatchReport(self.worker_id, self._db_alias)
         # (pk, lease_epoch) of every execution running right now, added and
         # removed by execute(). Renewal reads it rather than renewing
         # everything stamped with this worker_id, so a row whose execution
@@ -3248,6 +3458,87 @@ class Worker:
         OxScheduleTick.objects.using(self._db_alias).filter(pk=latch.pk).delete()
         return earliest
 
+    def _session(self) -> tuple[Any, Any] | None:
+        """
+        The database session this worker's connection is on right now, as
+        something to compare later, or None when there is no connection.
+
+        Read from the driver's own state, with no round trip: the driver's
+        connection object, and the server's id for the session where there
+        is one (PostgreSQL's backend pid, MySQL's connection id). The object
+        alone is not enough. PyMySQL reconnects in place, keeping the
+        object and changing the session under it, whenever a ping is made
+        with reconnect on, which Django's `is_usable()` does.
+        """
+        connection = connections[self._db_alias]
+        raw = connection.connection
+        if raw is None:
+            return None
+        server_id: Any = None
+        try:
+            if connection.vendor == "postgresql":
+                info = getattr(raw, "info", None)
+                server_id = (
+                    info.backend_pid if info is not None else raw.get_backend_pid()
+                )
+            elif connection.vendor == "mysql":
+                server_id = raw.thread_id()
+        except Exception:
+            # A driver that cannot say which session it is on is not on
+            # the one it was: an object equal to nothing else.
+            server_id = object()
+        return (raw, server_id)
+
+    def _unusable_after_failure(self, before: tuple[Any, Any] | None) -> str | None:
+        """
+        Why the dispatch pass cannot go on after one schedule's block
+        failed, or None when it can. `before` is `_session()` from just
+        before the block.
+
+        Asked after the block's rollback, of the connection that ran it and
+        on the alias it ran on. Three things end the pass.
+
+        A session that is not the one the block ran on. When an outermost
+        rollback fails, Django closes the connection, and the same exit
+        then turns autocommit back on, which opens a new one. By the time
+        anyone looks there is a connection and it works, and it is not the
+        one that failed: judged by whether it answers, a server that had
+        dropped the session reads as a schedule the database refused.
+
+        An enclosing transaction marked for rollback: inside a transaction
+        the caller owns, a savepoint whose rollback failed leaves nothing
+        more that can run this pass.
+
+        A session that does not answer a trivial query once the rollback is
+        through. The query goes out on the connection as it stands, never
+        through Django's `is_usable()`, which on PyMySQL pings with
+        reconnect on.
+        """
+        connection = connections[self._db_alias]
+        after = self._session()
+        if (
+            after is None
+            or before is None
+            or after[0] is not before[0]
+            or after[1] != before[1]
+        ):
+            return (
+                "the connection a schedule's dispatch ran on was lost; its "
+                "rollback did not go through"
+            )
+        if connection.needs_rollback:
+            return (
+                "the rollback to a schedule's savepoint did not go through, "
+                "and the enclosing transaction can only be rolled back"
+            )
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(f"SELECT 1{connection.features.bare_select_suffix}")
+                cursor.fetchone()
+        except Error as exc:
+            return f"the connection did not answer after a schedule's failure: {exc}"
+        return None
+
     def _log_tick_dropped(
         self, schedule: Schedule, scheduled_for: datetime, now: datetime
     ) -> None:
@@ -3329,8 +3620,52 @@ class Worker:
         latest missed tick fires. A schedule with no rows yet is anchored
         at its current tick without firing, so it first fires at the next
         tick after deployment rather than for a time before it existed.
+
+        One schedule's failure is that schedule's, whatever raised it. Each
+        schedule is dispatched in a transaction of its own, and everything
+        that concerns that schedule alone runs inside the boundary around
+        it: the read asking whether a future-dated tick already covers it,
+        its row lock, the tick INSERT, the enqueue and the tick update.
+        When any of those raises, the transaction rolls back, the tick stays
+        unclaimed, and the pass goes on to the next schedule, provided the
+        rollback went through and the same connection still answers a
+        trivial query. A database that refuses one schedule's arguments,
+        which PostgreSQL does with a DataError, MySQL with an
+        OperationalError and SQLite with an IntegrityError for the same
+        non-finite float, is one `schedule_dispatch_error` on every engine,
+        and the schedules after it still fire.
+
+        The exception's class cannot make that call. A class names what the
+        driver saw, not whose failure it was: the same OperationalError is a
+        refused argument on MySQL and a dropped connection anywhere. What a
+        refusal leaves behind is a connection that still works, and what an
+        outage leaves is one that does not, so that is what is asked. A
+        check that passes says the connection is usable, not that the
+        failure was the schedule's for good. The schedule is tried again on
+        the next pass under the usual rules and fires once whatever refused
+        it stops refusing.
+
+        The pass fails, and this raises, when the failure is not one
+        schedule's: a shared read before the loop (the source's own reads,
+        the bounded tick read), a rollback that did not go through, or a
+        connection that does not answer after one. Nothing is given up on
+        the strength of how many schedules failed before: a run of refused
+        schedules followed by a healthy one leaves the healthy one to fire.
         """
         schedules = self._schedule_source.schedules()
+        # Forget schedules that no longer exist, so the failure report
+        # holds state for at most the schedules that do. That is wider than
+        # the ones answered this pass: a stored row that is paused is left
+        # out of them, and forgetting it at the pause would report the same
+        # refusal as a new first failure, traceback and all, if it resumes
+        # unrepaired, and no recovery if it was repaired while paused. The
+        # stored source says which rows exist from the reads it already
+        # makes; any other source is taken at its answer.
+        keys = {schedule.key for schedule in schedules}
+        stored_keys = getattr(self._schedule_source, "_stored_keys", None)
+        if stored_keys is not None:
+            keys |= stored_keys()
+        self._dispatch_report.retain(keys)
         if not schedules:
             return 0
         now = timezone.now()
@@ -3373,32 +3708,7 @@ class Worker:
             if schedule.end_time is not None and scheduled_for > schedule.end_time:
                 continue
             last = latest.get(schedule.key)
-            if last is not None and scheduled_for <= last:
-                if last <= now:
-                    continue
-                # The newest tick in the log is in the future, which a
-                # clock-skewed worker's write can leave behind. That must not
-                # suppress ticks which are due now, so the comparison against
-                # the newest one cannot decide this. Ask about this instant
-                # instead: if it has already been recorded, it has run.
-                #
-                # One extra query, and only while a future tick is the newest
-                # one. In ordinary operation the comparison above answers.
-                if (
-                    OxScheduleTick.objects.using(self._db_alias)
-                    .filter(schedule_name=schedule.key, scheduled_for=scheduled_for)
-                    .exists()
-                ):
-                    continue
-            # After the suppression, not before. A tick that already fired
-            # is not a tick that was dropped, and checking the deadline
-            # first would report one as dropped on every pass until its
-            # next tick came due, which for a daily schedule is a warning
-            # a second for a day.
-            if schedule.starting_deadline is not None and (
-                now - scheduled_for > schedule.starting_deadline
-            ):
-                self._log_tick_dropped(schedule, scheduled_for, now)
+            if last is not None and scheduled_for <= last and last <= now:
                 continue
             result = None
             # Set once this pass's tick row is in. An IntegrityError arriving
@@ -3421,8 +3731,47 @@ class Worker:
                 nonlocal committed
                 committed = True
 
+            # Set once the block has exited without an exception: the tick
+            # is committed, or, inside a transaction the caller owns, its
+            # savepoint is released. Either way this schedule dispatched.
+            settled = False
+            # The session this schedule's block runs on, to tell afterwards
+            # whether a failure left it standing. Opened first if nothing
+            # has yet, so a connection the block itself opens is not taken
+            # for a replacement.
+            connections[self._db_alias].ensure_connection()
+            session = self._session()
             try:
                 try:
+                    # The newest tick in the log is in the future, which a
+                    # clock-skewed worker's write can leave behind. That must
+                    # not suppress ticks which are due now, so the comparison
+                    # against the newest one cannot decide this. Ask about
+                    # this instant instead: if it has already been recorded,
+                    # it has run.
+                    #
+                    # One extra query, and only while a future tick is the
+                    # newest one. In ordinary operation the comparison before
+                    # this block answers. Inside the boundary, since it is a
+                    # read about this schedule alone.
+                    if (
+                        last is not None
+                        and scheduled_for <= last
+                        and OxScheduleTick.objects.using(self._db_alias)
+                        .filter(schedule_name=schedule.key, scheduled_for=scheduled_for)
+                        .exists()
+                    ):
+                        continue
+                    # After the suppression, not before. A tick that already
+                    # fired is not a tick that was dropped, and checking the
+                    # deadline first would report one as dropped on every
+                    # pass until its next tick came due, which for a daily
+                    # schedule is a warning a second for a day.
+                    if schedule.starting_deadline is not None and (
+                        now - scheduled_for > schedule.starting_deadline
+                    ):
+                        self._log_tick_dropped(schedule, scheduled_for, now)
+                        continue
                     with transaction.atomic(using=self._db_alias):
                         transaction.on_commit(mark_committed, using=self._db_alias)
                         # The definition as it stands now, under its own lock.
@@ -3530,6 +3879,7 @@ class Worker:
                             )
                             tick_row.task_id = result.id
                             tick_row.save(using=self._db_alias, update_fields=["task"])
+                    settled = True
                 except Exception:
                     if not committed:
                         raise
@@ -3559,76 +3909,63 @@ class Worker:
                 # unclaimed so a worker with a current view can still act
                 # on it.
                 continue
-            except IntegrityError:
-                # Two things raise this inside the block, told apart by how
-                # far the block had got. Before the tick row is in, it is the
-                # INSERT itself: another worker claimed this tick first, its
-                # INSERT won, and ours rolled back before it enqueued
-                # anything. Silent, and the ordinary case on every tick with
-                # more than one worker. Once the row is in, the failure is a
-                # later statement's, the enqueue's or the latch's, and
-                # reading it as a lost race would retry it silently for as
-                # long as it kept failing. Asking the log whether the tick
-                # row exists cannot tell them apart: a winner committing
-                # between the rollback and that read made a real failure
-                # look like a lost race.
-                if claimed:
-                    logger.exception(
-                        "Schedule %s could not be dispatched this pass",
+            except Exception as exc:
+                if (
+                    not claimed
+                    and isinstance(exc, IntegrityError)
+                    and _lost_the_race(exc)
+                ):
+                    # Another worker claimed this tick first: its INSERT won
+                    # the unique constraint and ours rolled back before it
+                    # enqueued anything. Silent, and the ordinary case on
+                    # every tick with more than one worker, so it costs no
+                    # check of the connection either: a duplicate key is the
+                    # database answering. Only this: before the tick row is
+                    # in, and only a duplicate key. Once the row is in, the
+                    # failure is a later statement's, the enqueue's or the
+                    # latch's, and reading it as a lost race would retry it
+                    # silently for as long as it kept failing. Asking the log
+                    # whether the tick row exists cannot tell them apart
+                    # either: a winner committing between the rollback and
+                    # that read made a real failure look like a lost race.
+                    continue
+                # Whether the pass can go on is the connection's to say, not
+                # the exception's; dispatch_schedules says why.
+                broken = self._unusable_after_failure(session)
+                if broken is not None:
+                    if isinstance(exc, DatabaseError):
+                        raise
+                    raise DatabaseError(broken) from exc
+                if isinstance(exc, OperationalError) and lock_contention(exc):
+                    # The database gave up waiting for a lock: another
+                    # worker held this tick's unique row, or the schedule's
+                    # row, for longer than the engine's patience. That is a
+                    # lost race with a slow winner, not a broken schedule,
+                    # so it is one warning without a traceback, and the tick
+                    # fires on a later pass if it is still unclaimed. The
+                    # stored source treats a timeout on its own row lock the
+                    # same way.
+                    logger.warning(
+                        "Could not claim schedule %s this pass, the database "
+                        "gave up waiting for a lock: %s",
                         schedule.name,
+                        exc,
                         extra={
-                            "event": "schedule_dispatch_error",
+                            "event": "schedule_lock_unavailable",
                             "schedule": schedule.name,
                             "worker_id": self.worker_id,
                         },
                     )
-                continue
-            except OperationalError as exc:
-                # The database gave up waiting for a lock: another worker
-                # held this tick's unique row, or the schedule's row, for
-                # longer than the engine's patience. That is a lost race
-                # with a slow winner, not a broken schedule, so it is one
-                # warning without a traceback, and the tick fires on a later
-                # pass if it is still unclaimed. The stored source treats a
-                # timeout on its own row lock the same way.
-                if not lock_contention(exc):
-                    raise
-                logger.warning(
-                    "Could not claim schedule %s this pass, the database gave up "
-                    "waiting for a lock: %s",
-                    schedule.name,
-                    exc,
-                    extra={
-                        "event": "schedule_lock_unavailable",
-                        "schedule": schedule.name,
-                        "worker_id": self.worker_id,
-                    },
-                )
-                continue
-            except DatabaseError:
-                # The database, not the schedule: a connection gone away, a
-                # server refusing a statement, a lock the engine gave up
-                # waiting for. Read as one bad row, it was logged against
-                # whichever schedule was in hand, with a traceback, once per
-                # schedule, while the pass returned as if it had succeeded
-                # and the handler in run() written for exactly this never
-                # ran. It goes there instead.
-                raise
-            except Exception:
-                # Anything else at all. A schedule read from a row is
-                # input from a person, and the guarantee that one bad
-                # row cannot stop the others has to hold for the
-                # exception nobody predicted as much as for the ones
-                # that were.
-                logger.exception(
-                    "Schedule %s could not be dispatched this pass",
-                    schedule.name,
-                    extra={
-                        "event": "schedule_dispatch_error",
-                        "schedule": schedule.name,
-                        "worker_id": self.worker_id,
-                    },
-                )
+                    continue
+                # This schedule's own failure, database or not: arguments the
+                # database refused, a task that will not enqueue, a
+                # task_enqueued receiver whose SQL aborted the transaction, a
+                # row that raised. A schedule read from a row is input from a
+                # person, and the guarantee that one bad schedule cannot stop
+                # the others has to hold for the exception nobody predicted
+                # as much as for the ones that were. Tried again next pass;
+                # reported in full once and then in summary.
+                self._dispatch_report.schedule_failed(schedule, exc)
                 continue
             if result is not None:
                 dispatched += 1
@@ -3644,6 +3981,10 @@ class Worker:
                         "worker_id": self.worker_id,
                     },
                 )
+            # A committed tick, whether it enqueued or anchored, ends a run
+            # of failures for this schedule on this worker.
+            if settled or committed:
+                self._dispatch_report.schedule_dispatched(schedule)
         return dispatched
 
     # -- lifecycle ---------------------------------------------------------
@@ -3828,11 +4169,22 @@ class Worker:
         in_flight: set[Future[None]] = set()
         last_reap = 0.0
         last_dispatch = 0.0
-        # Set by a failed schedule dispatch and cleared only by one that
-        # succeeds, not per pass. Dispatch runs once per schedule_interval,
-        # at least a second by default, so under a shorter poll the passes
-        # after a failure do not dispatch at all, and --batch must not end
-        # on one of them while a due tick may never have been enqueued.
+        # Set when a dispatch pass starts and cleared only when one is
+        # traversed to its end, not per poll pass. Dispatch runs once per
+        # schedule_interval, at least a second by default, so under a
+        # shorter poll the passes after an abandoned one do not dispatch at
+        # all, and --batch must not end on one of them while a due tick may
+        # never have been looked at.
+        #
+        # A completed pass is not a pass in which every schedule enqueued.
+        # A schedule that failed on its own was attempted, reported and
+        # left for the next pass, and a schedule the database refuses on
+        # every attempt would otherwise hold a batch open until the job
+        # runner's timeout. So it clears this, and --batch can end with
+        # such a schedule still failing: the exit means the batch finished,
+        # and the failures are the ERROR events that say otherwise. Set
+        # before the pass rather than in a handler, so an exception of any
+        # class that escapes the pass leaves it owed.
         dispatch_owed = False
         executor = ThreadPoolExecutor(
             max_workers=self.concurrency, thread_name_prefix="ox"
@@ -3875,32 +4227,27 @@ class Worker:
                     # returns immediately when it has nothing, which for the
                     # default settings source is one list check.
                     if time.monotonic() - last_dispatch >= self.schedule_interval:
+                        dispatch_owed = True
                         try:
                             self.dispatch_schedules()
-                        except DatabaseError:
-                            # Any statement in the pass can raise this: the
-                            # bounded tick read, a row lock, the tick INSERT,
-                            # the enqueue. The cause is the database rather
-                            # than a schedule, so the loop lets it out
-                            # instead of logging it against whichever
-                            # schedule was in hand. A pass lost this way is
+                        except DatabaseError as exc:
+                            # The pass was abandoned: a shared read failed,
+                            # or a schedule's failure left the connection
+                            # unusable (dispatch_schedules says which is
+                            # which). The cause is the database rather than
+                            # a schedule. A pass lost this way is
                             # recoverable at the next one, and the claim
                             # below still runs this pass. A connection that
                             # is no longer usable is dropped first, so the
                             # claim reconnects rather than failing on it too
-                            # and costing the whole poll pass.
-                            logger.warning(
-                                "Schedule dispatch failed; retrying next pass",
-                                exc_info=True,
-                                extra={
-                                    "event": "schedule_dispatch_failed",
-                                    "worker_id": self.worker_id,
-                                },
-                            )
+                            # and costing the whole poll pass. Reported in
+                            # full at the start of an outage and in summary
+                            # while it lasts.
+                            self._dispatch_report.pass_failed(exc)
                             close_old_connections()
-                            dispatch_owed = True
                         else:
                             dispatch_owed = False
+                            self._dispatch_report.pass_completed()
                         last_dispatch = time.monotonic()
                     in_flight = {f for f in in_flight if not f.done()}
                     # Read before claiming, not after: a task still running

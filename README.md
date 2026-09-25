@@ -292,7 +292,7 @@ once however many workers are polling. Execution stays at-least-once.
 | `cron` | one of | Five-field cron expression. |
 | `every` | one of | A fixed interval, as a `timedelta` or seconds, counted from a fixed instant rather than from the last run. |
 | `phase` | no | Shifts an `every` sequence. |
-| `args`, `kwargs` | no | JSON-serializable arguments passed to each enqueue. |
+| `args`, `kwargs` | no | JSON-serializable arguments passed to each enqueue. The database must also accept the values; serialization alone does not establish that. |
 | `queue_name` | no | Queue override; defaults to the task's own queue. |
 | `priority` | no | Priority override (-100 to 100). |
 
@@ -303,9 +303,12 @@ shortcuts. When both day-of-month and day-of-week are restricted, a day
 matches if either field does, as in vixie cron. Times are wall-clock in
 your `TIME_ZONE`.
 
-Misconfigured schedules (a task path that does not import, an expression
-that can never fire) fail at worker startup and in `manage.py check`, not
-silently at dispatch time.
+A task path that does not import or an expression that can never fire fails
+at worker startup and in `manage.py check`. These checks do not establish
+database acceptance: a value such as `float("inf")` passes them but is
+rejected at enqueue by PostgreSQL, MySQL and SQLite. A schedule-scoped
+failure is logged as `schedule_dispatch_error`. After rollback, the worker
+continues to later schedules if the same database connection remains usable.
 
 Missed ticks: if every worker was down when a tick passed, the latest
 missed tick fires once on recovery and older ones are skipped, so a

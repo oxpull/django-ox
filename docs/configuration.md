@@ -107,7 +107,7 @@ python manage.py ox_worker [options]
 | `--interval` | `1.0` | Polling interval in seconds when idle. When tasks are in flight the worker wakes as soon as one finishes, so this does not bound throughput. |
 | `--lock-timeout` | backend `LOCK_TIMEOUT`, or 300 | Seconds a RUNNING task's lock may go unrefreshed before the task is reclaimed. |
 | `--database` | the alias `OxTask` writes to | Database alias to run against. Each `--processes` child is given the same one, so one router answering differently in two processes can't split a fleet across two databases. It is not checked against the router; see [Read replicas](#read-replicas). |
-| `--batch` | off | Exit once a poll pass succeeds, sees no task it can claim, and began with no task of its own in flight, then drain and exit 0. Tasks it can't claim at that moment stay READY for a later worker. These include future `run_after` tasks, backed-off retries, locked rows and tasks its claim filter excludes. A pass that hits a database error does not count, and after a failed schedule dispatch no pass counts until a dispatch succeeds. Rejected with `--processes` above 1. See [Running as a job](production.md#running-as-a-job). |
+| `--batch` | off | Exit once a poll pass succeeds, sees no task it can claim, and began with no task of its own in flight, then drain and exit 0. Tasks it can't claim at that moment stay READY for a later worker. These include future `run_after` tasks, backed-off retries, locked rows and tasks its claim filter excludes. A poll pass that hits a database error does not count. After an abandoned dispatch pass, no poll pass counts until a dispatch pass completes. Schedule-scoped failures do not prevent completion: exit 0 means the batch finished, not that every schedule enqueued. Rejected with `--processes` above 1. See [Running as a job](production.md#running-as-a-job). |
 | `--max-tasks N` | none | Exit after claiming N task attempts, then drain and exit 0. Every claim counts, a failed attempt and a retry's repeat claim included, and concurrency never claims past N. Without `--batch` the worker keeps polling an empty queue until it reaches N or is stopped. N must be an integer of at least 1. Rejected with `--processes` above 1. |
 
 The command also honors Django's standard `-v/--verbosity`: at the default
@@ -257,7 +257,9 @@ alert are on the
   command ships with the app.
 - `django_ox.E002`: a `SCHEDULES` entry is invalid (task path does not
   import, cron expression does not parse or can never fire, arguments not
-  JSON-serializable, bad queue name or priority).
+  JSON-serializable, bad queue name or priority). JSON serialization does
+  not establish database acceptance. For example, `float("inf")` passes
+  this check but is rejected at enqueue by PostgreSQL, MySQL and SQLite.
 - `django_ox.E003`: the same schedule name is defined on more than one
   backend; schedule names must be unique across backends.
 - `django_ox.E004`: `TASK_TIMEOUT`, a `TASK_TIMEOUTS` value or
@@ -296,8 +298,11 @@ alert are on the
   `BACKOFF_MAX`, so the configured first delay never takes effect. The
   configuration still runs; lower the initial delay or raise the cap.
 
-The worker performs the same schedule and timeout validation at startup, so
-a bad deploy fails loudly rather than skipping dispatches.
+The worker performs the same schedule and timeout validation at startup.
+Invalid values these checks detect stop startup. They do not establish that
+the database accepts a schedule's arguments. A schedule-scoped failure at
+dispatch is logged as `schedule_dispatch_error`, and the worker continues
+to later schedules if rollback succeeds and the same connection remains usable.
 
 ## Read replicas
 

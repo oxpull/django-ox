@@ -356,8 +356,9 @@ class TestABatchPassMustSucceed:
     """
     `--batch` ends run() on a pass that found nothing, and a pass the
     database interrupted found out nothing: it cannot count as empty. A
-    failed schedule dispatch holds the batch open until one succeeds, since
-    the passes in between do not dispatch at all.
+    dispatch pass the database abandoned holds the batch open until a later
+    pass completes, since the passes in between do not dispatch at all. A
+    single schedule the database rejects no longer abandons the pass.
     """
 
     @pytest.fixture
@@ -474,8 +475,12 @@ class TestABatchPassMustSucceed:
         (done,) = events(caplog, "worker_batch_empty")
         assert done.claimed == 1
 
-    # DataError stands for a schedule the database rejects on every
-    # dispatch, which the job docs say holds the batch until its timeout.
+    # A pass-level failure: dispatch_schedules() itself raises, as it does
+    # when a shared read fails or a schedule's failure leaves the connection
+    # unusable. Any DatabaseError class holds the batch; none is read as
+    # transient. It stands for nothing about one schedule: a schedule the
+    # database refuses is isolated inside the pass, reported, and does not
+    # hold the batch (tests/test_schedule_isolation.py).
     @pytest.mark.parametrize("error", [OperationalError, DataError])
     @pytest.mark.django_db(transaction=True)
     def test_a_dispatch_that_keeps_failing_holds_the_batch_open(

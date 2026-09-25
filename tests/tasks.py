@@ -60,6 +60,13 @@ def record(label):
 
 
 @task
+def labelled(label, **kwargs):
+    """Returns its label. A schedule names itself with it, so a task row says
+    which schedule enqueued it."""
+    return label
+
+
+@task
 def slow(seconds):
     time.sleep(seconds)
     return "done"

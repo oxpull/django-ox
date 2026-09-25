@@ -125,13 +125,18 @@ workers starting at once would race the same migration.
 
 For cron and job runners, `--batch` stops after an error-free polling pass
 observes no claimable task, claims nothing, and began claiming with no local
-tasks in flight. If a schedule dispatch failed, a later one must succeed
-first. `--max-tasks N` stops after N claimed attempts, including failed
-attempts and repeat claims of retries; without `--batch`, an empty queue does
-not end the run. Combined, the first completion condition reached stops
-further claims and drains in-flight tasks. Normal completion exits 0 even if
-attempts failed; recycling and forced shutdown retain their existing exit
-codes.
+tasks in flight. If a dispatch pass was abandoned, a later pass must complete
+first. A pass completes when it has traversed every schedule, even if some
+had schedule-scoped failures.
+
+`--max-tasks N` stops after N claimed attempts, including failed attempts
+and repeat claims of retries; without `--batch`, an empty queue does not end
+the run. Combined, the first completion condition reached stops further
+claims and drains in-flight tasks. Reaching `--max-tasks` ends the run even
+if a dispatch pass was abandoned. Normal completion exits 0 even if task
+attempts or individual schedule dispatches failed. Exit 0 means the batch
+finished, not that every schedule enqueued. Recycling and forced shutdown
+retain their existing exit codes.
 
 ```
 python manage.py ox_worker --batch --concurrency 4
@@ -157,13 +162,36 @@ schedule fires its first due tick. Use a long-running worker for more
 frequent schedule checks, but missed ticks are still coalesced; this does not
 guarantee that every tick runs. See [Missed ticks](recurring-tasks.md#missed-ticks).
 
-A database error doesn't end a batch, whether the server is unreachable or
-the django-ox tables are missing. Each failed pass is retried, as it is for a
-long-running worker, and a failed pass never counts as an empty one. So a
-worker in a job keeps retrying for as long as the error lasts. That includes
-a schedule the database rejects on every dispatch, which holds every batch
-run, so alert on `schedule_dispatch_failed`. Give the job runner a timeout:
-it is what bounds a run against a failing database.
+An unreachable server, a lost or changed database session, or a database error
+escaping a shared dispatch read does not count as an empty batch pass. Failed
+polling passes and abandoned dispatch passes are retried, as they are for a
+long-running worker. A batch keeps retrying until a dispatch pass completes
+and the normal queue-drain and idle conditions hold. A database that stays
+reachable but refuses dispatch writes, for example because of a full disk or
+tablespace, revoked grants or a read-only target, is reported per schedule as
+`schedule_dispatch_error` if rollback and the same-session usability check
+succeed; those failures alone do not hold a batch open, so alert on
+`schedule_dispatch_error`.
+
+A schedule-scoped failure is different. Its transaction is rolled back and
+reported as `schedule_dispatch_error`. If rollback succeeds and the same
+database connection remains usable, the worker continues to later schedules.
+Even a schedule the database rejects on every attempt does not hold the batch
+open if rollback succeeds and the same database connection remains usable. The
+batch exits 0 once its normal completion conditions hold. If a schedule's
+dispatch repeatedly ends the session, for example through an oversized MySQL
+packet or a receiver that exceeds an idle-in-transaction or wait timeout, each
+pass is abandoned at that schedule, preventing later schedules from being
+reached and holding the batch open. `schedule_dispatch_failed` does not
+identify the schedule being processed.
+
+Alert on `schedule_dispatch_error` and `schedule_dispatch_failed`, plus
+`schedule_row_skipped` and `schedule_source_unavailable` for stored schedules,
+regardless of the batch's exit. Each `--batch` invocation starts a new worker,
+so a schedule that keeps failing logs its first-failure traceback on every run
+and no `schedule_dispatch_recovered` event carries across runs; alert on the
+presence of `schedule_dispatch_error` in each run. Give the job runner a
+timeout: it is what bounds a run against a failing database.
 
 Both flags run a single process. `--processes` above 1 is rejected, because
 the supervisor restarts a worker that exits on its own; for more throughput in
@@ -1005,9 +1033,10 @@ summary:
 - **The Prometheus endpoint.** Mounting `django_ox.urls` serves the same
   numbers as gauges at `GET /ox/metrics`.
 - **Logs.** The worker logs to the `django_ox` logger: lifecycle at
-  INFO, retries and reaper reclaims at WARNING, terminal failures and
-  unhandled worker errors at ERROR, each with stable extra keys for JSON
-  log handlers. Under systemd this lands in the journal.
+  INFO, retries, reaper reclaims and abandoned dispatch passes at WARNING,
+  terminal failures, schedule-scoped failures and unhandled worker errors
+  at ERROR, each with stable extra keys for JSON log handlers. Under systemd
+  this lands in the journal.
 - **Per-task forensics.** Each row keeps its attempts count, the id of
   every worker that ran it, timestamps for enqueue/start/finish, and the
   full traceback of every failed attempt.

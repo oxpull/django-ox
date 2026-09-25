@@ -131,6 +131,12 @@ def daily_report(region): ...
 An unknown argument is rejected rather than ignored, and a number in a text field
 is rejected rather than quietly turned into a string.
 
+Form validation does not establish database acceptance. For example, an
+`ArgsForm` field declared as `forms.JSONField` takes a JSON string.
+The string `{"max_age": Infinity}` passes `create_schedule`, but its parsed
+value is rejected at enqueue by PostgreSQL, MySQL and SQLite. Such a dispatch
+is reported as `schedule_dispatch_error`, not `schedule_row_skipped`.
+
 ## When a schedule fires
 
 This is the part worth reading properly. A stored schedule can be changed while
@@ -306,9 +312,10 @@ boundary set for the old timing, and doesn't tell workers the row moved.
 
 A row written that way is validated when a worker reads it. One that does not
 validate is skipped and logged as `schedule_row_skipped`. One that does validate
-runs, but its activation boundary is moved to the moment a worker noticed the
-row and logged as `schedule_boundary_healed`, so any `start_time` the writer
-chose is discarded.
+has its activation boundary moved to the moment a worker noticed the row,
+logged as `schedule_boundary_healed`, so any `start_time` the writer chose is
+discarded. Validation does not establish database acceptance at dispatch.
+A schedule-scoped dispatch failure is reported as `schedule_dispatch_error`.
 
 `update_schedule` and `create_schedule` take an optional `user=`, and enforce any
 per-entry permission when you pass one.
@@ -353,13 +360,30 @@ Worth knowing before you turn it on:
   indexed read of a small table.
 - **One extra query per pass.** Workers read a single row to learn whether
   anything changed, and re-read the schedules only when it did.
-- **A broken row is skipped, not fatal.** One that no longer validates is logged
-  and ignored so the others keep running. Watch for `schedule_row_skipped`.
+- **Read-time validation failures are skipped.** A row that no longer
+  validates is logged as `schedule_row_skipped` and ignored so the others
+  keep running.
+- **Dispatch failures have a separate boundary.** A row can validate and
+  still fail when dispatched. A schedule-scoped failure rolls back its tick
+  and task and is reported as `schedule_dispatch_error`. If rollback succeeds
+  and the same connection remains usable, later schedules are still attempted.
+  The failed schedule is retried on subsequent passes under the usual
+  due-tick and deadline rules; only its reporting is rate-limited.
+- **An abandoned pass stops further traversal.** A `django.db.DatabaseError`
+  escaping a shared dispatch read, failed rollback or unusable connection is
+  reported as `schedule_dispatch_failed`. The stored source's marker read and
+  boundary heal retain their own events: a failed marker read reports
+  `schedule_source_unavailable` and dispatch continues from the cached set; a
+  failed boundary heal reports `schedule_boundary_heal_failed`. Dispatch is
+  retried on a later pass. Ticks already committed are not undone. Alert on
+  `schedule_row_skipped`, `schedule_dispatch_error`, `schedule_dispatch_failed`
+  and `schedule_source_unavailable`.
 - **`manage.py check` cannot see rows.** Checks run before `migrate`, so a bad
-  schedule in the database is a log line, not a start-up error. Settings-declared
-  schedules still fail fast. A missing `SCHEDULE_SOURCE` is not a check error
-  either: leaving it out is the default, and a check cannot read the rows that
-  would make it a mistake.
+  schedule in the database is a log line, not a start-up error.
+  Settings-declared schedules still fail fast for errors their checks can
+  detect. A missing `SCHEDULE_SOURCE` is not a check error either: leaving it
+  out is the default, and a check cannot read the rows that would make it a
+  mistake.
 - **`task_enqueued` receivers run inside the dispatch transaction**, while the
   worker holds the schedule row's lock. A receiver that takes row locks of its
   own can deadlock against an application transaction that holds those rows and
@@ -372,17 +396,33 @@ Worth knowing before you turn it on:
 
 ## Monitoring
 
-The events worth alerting on. The full set, with every field, is on the
+The events below distinguish dispatched ticks, skipped rows and dispatch
+failures. The full set, with every field, is on the
 [monitoring](monitoring.md) page:
 
 | Event | Meaning |
 | --- | --- |
 | `schedule_dispatched` | A tick enqueued its task. |
 | `schedule_tick_dropped` | A tick was past its starting deadline. Carries `late_seconds`. |
-| `schedule_row_skipped` | A row could not be used. Carries `reason`. |
+| `schedule_row_skipped` | A row failed read-time validation and could not be used. Carries `reason`. |
+| `schedule_dispatch_error` | A schedule-scoped failure, database or not. Its tick and task rolled back, and the pass continues. The schedule is retried under the usual due-tick and deadline rules. Reporting is rate-limited. |
+| `schedule_dispatch_failed` | A dispatch pass was abandoned. It is retried on a later pass. Reporting is rate-limited. |
+| `schedule_dispatch_recovered` | A schedule that had failed on this worker committed a tick again. Carries `failures`. |
 
-`schedule_row_skipped` is the one to alert on. It usually means a task key was
-removed from the code while a row still names it.
+Pausing a stored schedule preserves its failure state on each worker; deleting
+the row drops it without an event. A paused, fixed and resumed row reports
+`schedule_dispatch_recovered` when it next commits a tick on a worker that
+retained its failure state.
+
+Alert on `schedule_row_skipped`, `schedule_dispatch_error`,
+`schedule_dispatch_failed` and `schedule_source_unavailable`, regardless of a
+batch's exit code. `schedule_row_skipped` usually means a task key was removed
+from the code while a row still names it. A row can pass validation and still
+fail at dispatch, so that event alone is not enough.
+
+Read `failures` and `suppressed` on dispatch failure events rather than
+counting log lines. `ox_health` has no schedule check, and a rolled-back
+dispatch leaves no tick row.
 
 [^q2-func]: django-q2 1.11.1. `django_q/models.py`: `Schedule.func` is `models.CharField(max_length=256)` with no `choices` and no validators. `django_q/scheduler.py` passes the stored value to `async_task(s.func, ...)`, and `django_q/worker.py` runs `f = pydoc.locate(f)` and then `res = f(*task["args"], **task["kwargs"])`. The documentation describes the field as "the function to schedule. Dotted strings only." <https://django-q2.readthedocs.io/en/master/schedules.html>, checked 2026-09-12.
 [^beat-task]: django-celery-beat 2.9.0. `django_celery_beat/models.py`: `PeriodicTask.task` is `models.CharField(max_length=200)` with no `choices` and no validators, and the model defines no `clean()`. The documentation says periodic tasks "can be managed from the Django Admin interface". <https://django-celery-beat.readthedocs.io/en/latest/>, checked 2026-09-12.

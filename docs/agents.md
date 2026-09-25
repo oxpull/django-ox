@@ -69,8 +69,11 @@ python manage.py ox_health
 OK: backlog=0 oldest_age=none last_claim_age=none
 ```
 
-`manage.py check` also runs the django-ox system checks, so a bad schedule
-or timeout option fails here, as `django_ox.E002` to `E005` and `E010`, before anything deploys.
+`manage.py check` also runs the django-ox system checks. Schedule declaration
+and timeout errors covered by `django_ox.E002` to `E005` and `E010` fail here,
+before anything deploys. The checks do not establish database acceptance of
+schedule arguments; alert on `schedule_dispatch_error` and
+`schedule_dispatch_failed` at runtime.
 Review any `django_ox.W003` warning before deploying too.
 
 Start a worker in its own process, next to the web server, under the same

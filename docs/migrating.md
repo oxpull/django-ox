@@ -55,9 +55,12 @@ Of `db_worker`'s worker-specific options, `--backend`, `--interval`,
   error-free empty claim pass with no local tasks in flight; it does not
   wait for future tasks, retry backoff or deferred releases. `db_worker`
   exits with a traceback when the database is unreachable or its tables are
-  missing. `ox_worker` keeps retrying, a failed schedule dispatch included,
-  and doesn't end the batch until a retry succeeds. Give the job a timeout,
-  as [Running as a job](production.md#running-as-a-job) explains.
+  missing. `ox_worker` keeps retrying. An abandoned dispatch pass prevents
+  batch completion until a later dispatch pass completes. A schedule-scoped
+  failure is reported as `schedule_dispatch_error` and does not hold the
+  batch open. Exit 0 means the batch finished, not that every schedule
+  enqueued. Give the job a timeout, as
+  [Running as a job](production.md#running-as-a-job) explains.
 - `--max-tasks N` maps by name to `--max-tasks N`. In `ox_worker`, every
   claimed attempt consumes one of N, including failed attempts and repeat
   claims of the same task. These mappings do not imply identical completion

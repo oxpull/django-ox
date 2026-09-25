@@ -109,11 +109,19 @@ Operational facts to get right:
   a unique constraint on (schedule name, tick time) stops two workers enqueueing
   the same tick, so there is no separate scheduler process. After an outage only
   the most recent missed tick is enqueued and older ones are skipped, and a new
-  schedule never fires for a time before it existed. Bad schedules fail
-  `manage.py check` and worker startup. `every` (a timedelta or seconds, with
-  an optional `phase`) is the alternative to `cron`; interval ticks are counted
-  from a fixed instant, not from the last run, so a restart cannot shift the
-  cadence.
+  schedule never fires for a time before it existed. `manage.py check` and worker
+  startup validate settings schedules but do not establish database acceptance.
+  A schedule-scoped failure rolls back its tick and task and is reported as
+  `schedule_dispatch_error`. Later schedules are attempted if rollback succeeds
+  and the same database connection remains usable. Only reporting is throttled,
+  not execution. Such failures do not hold `ox_worker --batch` open: exit 0 means
+  the batch finished, not that every schedule enqueued. An abandoned dispatch
+  pass is `schedule_dispatch_failed` and prevents normal batch-empty completion
+  until a later pass completes. Alert on both events and read `failures` and
+  `suppressed` rather than counting log lines. `every` (a timedelta or seconds,
+  with an optional `phase`) is the alternative to `cron`; interval ticks are
+  counted from a fixed instant, not from the last run, so a restart cannot shift
+  the cadence.
 - Schedules can be stored as rows and edited in the Django admin without a
   deploy. Set `OPTIONS["SCHEDULE_SOURCE"]` to
   `"django_ox.stored.DatabaseScheduleSource"`. A row names a key exposed in

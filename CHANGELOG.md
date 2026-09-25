@@ -32,6 +32,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing fixed-signature `WORKER_CLASS` constructors keep working when
   neither new flag is supplied.
 
+### Fixed
+
+- Recover outcome recording after a task encounters a dropped database
+  connection, fixing a defect present in every release from 0.1.0 through
+  1.4.0, and retry recording once if the dropped connection is first
+  detected during the outcome write. Previously, a successful task could
+  remain `RUNNING` and execute again after lease expiry; a failed attempt
+  could lose its error record and intended backoff. Exhausted attempts
+  could become `LOST`. Recovery retries only outcome persistence, not the
+  task body, and preserves lease fencing without duplicating error records
+  or applying backoff twice. Even a brief outage spanning the outcome
+  write and its single retry can leave the outcome unconfirmed and require
+  recovery by the reaper after lease expiry. This does not provide
+  exactly-once execution or repair transaction state; recovery does not
+  run inside a caller-owned transaction or with caller-disabled
+  autocommit.
+
 ## [1.4.0] - 2026-09-23
 
 If you use Django's PostgreSQL pool, check PostgreSQL `max_connections`

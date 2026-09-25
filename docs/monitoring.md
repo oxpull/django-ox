@@ -277,6 +277,8 @@ The message text is not part of the contract. The keys are.
 | `task_failed` | ERROR | The task reached FAILED, out of attempts. |
 | `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. One record per task. A pass whose stuck set changed while it ran (a lease renewed, or one more lease expired) instead emits a single record carrying `count` and no `task_id`, because it cannot say which tasks the reclaim covered. |
 | `task_lease_lost` | WARNING | A worker finished an attempt whose lease had already been reclaimed, so its write was dropped and no result was signalled. |
+| `task_outcome_reconnected` | WARNING | After a connection-level failure while recording an attempt's outcome, a new connection either recorded it or confirmed that the first write had already committed. Carries `outcome`, `already_written` and `duration_ms`; the usual outcome log follows. Recovery retries outcome persistence at most once, never the task body. Does not cover the watchdog's stuck-attempt records. |
+| `task_outcome_unrecorded` | ERROR | After a connection-level failure while recording an attempt's outcome, recovery on a new connection also failed. Carries `dropped_status` and `duration_ms`, with a traceback of the second failure. The outcome is unconfirmed, not necessarily absent: the first write may have committed, or another recovery path may already have fenced this attempt. If the row still awaits recovery, the reaper handles it after lease expiry. Even a brief outage spanning both write attempts can cause this event; the worker adds no backoff before the single retry. Does not cover the watchdog's stuck-attempt records. |
 | `lease_renew_failed` | WARNING | A lease renewal statement failed. Outside Django's PostgreSQL pool, this also covers connection failures during renewal. The thread continues. The next tick is due within one renewal interval and starts immediately after an overrun. |
 | `lease_renew_degraded` | WARNING | On a pooled PostgreSQL database, renewal left its private connection path. The worker renewed through the pool or failed to renew through either path. `fallback` is `succeeded` or `failed`. Logged once on entering degraded renewal, not on every degraded tick. Alert on this event; `lease_renew_missed` can arrive after live work has already been reclaimed. |
 | `lease_renew_fallback` | DEBUG | On a pooled PostgreSQL database, a later renewal succeeded through the pool while renewal remained degraded. |
@@ -292,7 +294,7 @@ The message text is not part of the contract. The keys are.
 | `schedule_lock_unavailable` | WARNING | The database gave up waiting for a lock another worker held: a stored schedule's row, or the tick row a settings-declared schedule's dispatch claims. MySQL's lock-wait timeout or a deadlock it resolved against this worker, SQLite's busy timeout, PostgreSQL's `lock_timeout`. The schedule is skipped this pass and its tick fires on a later one if still unclaimed. No traceback; a stream of it means one worker's dispatch transactions are long, which is usually a slow `task_enqueued` receiver. |
 | `schedule_boundary_healed` | INFO | A stored schedule's timing had changed without its activation boundary moving, so the boundary was moved onto the current timing. Expected after a bulk update; repeated for one schedule is not. |
 | `schedule_boundary_heal_failed` | WARNING | That move failed and will be retried. |
-| `worker_error` | ERROR | The execution wrapper itself raised (an internal worker error, not a task failure). |
+| `worker_error` | ERROR | The execution wrapper itself raised (an internal worker error, not a task failure). A connection-level outcome-write failure whose recovery on a new connection also failed is reported as `task_outcome_unrecorded` instead. |
 | `worker_poll_failed` | WARNING | A database error ended one pass of the poll loop. The pass is abandoned and retried on the next one; the worker keeps running. A steady stream of it means the database is unreachable rather than slow. |
 | `watchdog_error` | ERROR | The timeout watchdog failed while handling an armed attempt or cleaning up a batch's connection. Cleanup includes closing a private connection or returning a borrowed connection. A database error while closing the private connection is suppressed without this event. The watchdog thread continues. |
 | `task_stuck_unrecorded` | WARNING | A timed-out attempt could not be recorded as failed. The worker recycles regardless, so the row is recovered by the reaper rather than by this write. |
@@ -335,7 +337,7 @@ A failed connect while recording a stuck attempt logs
 | `task_path` | task events | Dotted path of the task function. |
 | `queue` | task events | Queue name. |
 | `attempt` | task events | Attempts consumed so far, including the current one. |
-| `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_timed_out`, `task_stuck`, `task_lease_lost` | Wall-clock duration of the attempt, in milliseconds. |
+| `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_timed_out`, `task_stuck`, `task_lease_lost`, `task_outcome_reconnected`, `task_outcome_unrecorded` | Wall-clock duration of the attempt, in milliseconds. |
 | `timeout_s` | `task_timed_out`, `task_stuck` | The timeout that applied, in seconds. |
 | `grace_s` | `task_stuck`, `timeouts_backstop_only` | `TASK_TIMEOUT_GRACE`, in seconds. |
 | `reason` | `timeouts_backstop_only` | Why the backstop is the whole enforcement: `interpreter` or `tracing_tool`. |
@@ -344,7 +346,9 @@ A failed connect while recording a stuck attempt logs
 | `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `LOST` (out of attempts). |
 | `count` | `task_reclaimed` without `task_id` | How many tasks that pass reclaimed. Present only on the batch record described above. |
 | `held_by` | `task_reclaimed` | The worker that stopped refreshing the lock, from the row. `worker_id` on the same record is the reaper that noticed. Absent on the batch record, along with `task_id`, `task_path`, `queue` and `attempt`. |
-| `dropped_status` | `task_lease_lost` | Status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |
+| `dropped_status` | `task_lease_lost`, `task_outcome_unrecorded` | Status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |
+| `outcome` | `task_outcome_reconnected` | Confirmed outcome status: `SUCCESSFUL`, `READY` or `FAILED`. `READY` means the failed attempt was recorded for retry with its backoff. |
+| `already_written` | `task_outcome_reconnected` | Boolean. `true` when the new connection found the first write already committed; `false` when recovery wrote the outcome on the new connection. |
 | `schedule` | `schedule_dispatched`, `schedule_row_skipped`, `schedule_dispatch_error`, `schedule_dispatch_callback_failed`, `schedule_tick_dropped`, `schedule_lock_unavailable` for a settings-declared schedule | The schedule's name, from `SCHEDULES` or from its row. |
 | `schedule_pk` | `schedule_row_skipped`, `schedule_lock_unavailable` for a stored schedule, `schedule_boundary_healed` | The stored schedule's row id. Absent for a settings-declared schedule, which has no row. |
 | `scheduled_for`, `late_seconds` | `schedule_tick_dropped` | The tick that was dropped, and how late it was when the deadline rejected it. |

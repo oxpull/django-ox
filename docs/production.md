@@ -537,6 +537,17 @@ fail after a database restart. A body can run again even when renewal
 recovers without losing its lease. Repeated execution can repeat side
 effects.
 
+When using persistent database connections (`CONN_MAX_AGE > 0`), set
+`CONN_HEALTH_CHECKS = True` on each database alias used by worker tasks.
+Without health checks, a thread can reuse a connection killed by a database
+restart, causing the next task to fail at its first query. That failure
+consumes an attempt and applies the task’s failure/backoff policy, even if no
+useful work ran; on the final attempt, it can exhaust the task. Health checks
+reduce this stale-connection failure but cannot prevent a connection from
+dropping after it has been checked. They do not provide exactly-once
+execution. Django’s PostgreSQL pool requires `CONN_MAX_AGE = 0`; see the pool
+guidance below.
+
 #### Rolling upgrades
 
 While workers older than 1.4.0 still run, give their pools at least

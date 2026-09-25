@@ -29,13 +29,22 @@ from django.db import (
     DatabaseError,
     Error,
     IntegrityError,
+    InterfaceError,
     OperationalError,
     close_old_connections,
     connections,
     router,
     transaction,
 )
-from django.db.models import DateTimeField, ExpressionWrapper, F, Max, Q, QuerySet
+from django.db.models import (
+    DateTimeField,
+    ExpressionWrapper,
+    F,
+    JSONField,
+    Max,
+    Q,
+    QuerySet,
+)
 from django.db.models.expressions import Combinable, CombinedExpression
 from django.db.models.functions import Now
 from django.utils import timezone
@@ -464,6 +473,71 @@ def _pool_options(alias: str) -> Mapping[str, Any] | None:
     if isinstance(pool, Mapping) and pool:
         return pool
     return None
+
+
+def _connection_pool(conn: Any) -> Any:
+    """
+    The open psycopg_pool pool Django checks `conn`'s alias out of, or None
+    when the alias is not pooled or its pool is not open. A pool that
+    nothing has connected through yet, or that was closed, holds no
+    connection to test, and checking it would ask a pool with no workers
+    to grow.
+    """
+    if conn.vendor != "postgresql" or _pool_options(conn.alias) is None:
+        return None
+    pool = getattr(conn, "pool", None)
+    if pool is None or pool.closed:
+        return None
+    return pool
+
+
+def _sweep_pool(conn: Any) -> None:
+    """
+    Have Django's PostgreSQL pool for `conn`'s alias test every connection
+    it holds idle, now, and discard each that fails; nothing when the alias
+    is not pooled.
+
+    A connection lost to a restart or a failover is rarely the only one:
+    the server ended every session, and the pool's idle connections are as
+    dead as the one that just failed. Closing that one hands it back for
+    the pool to discard, but the next statement on this thread checks out
+    one of the others. Without CONN_HEALTH_CHECKS the pool hands it out
+    unchecked, and it fails at its first statement too; with them, the
+    checkout tests it, discards it and tries the next, waiting longer each
+    time, and enough dead ones use up the checkout's timeout. psycopg_pool's
+    check() takes every idle connection out, tests each once, puts the
+    live ones back and asks for a replacement of each dead one.
+
+    It costs one round trip per idle connection, and a dead one can take
+    longer to fail than a live one takes to answer, so it runs only on a
+    path that has already failed, never on an ordinary one. It does not
+    make the next checkout fresh: a replacement may still be connecting,
+    and the checkout waits for it; the database may still be down; and a
+    connection the sweep found alive can drop the moment after.
+
+    Best-effort: it runs while the caller handles an error, and whatever it
+    raises is dropped, so it can neither replace that error nor stop the
+    recovery that follows.
+    """
+    with suppress(Exception):
+        pool = _connection_pool(conn)
+        if pool is not None:
+            pool.check()
+
+
+def _close_lost_connection(conn: Any) -> None:
+    """
+    Close `conn`, which a lost connection to its database has left unusable,
+    then sweep its pool, _sweep_pool, when the alias is pooled.
+
+    Only for a connection outside any atomic block, which each caller
+    checks first: inside one, the transaction belongs to whoever opened the
+    block, not to the worker. close() drops its reference to the driver
+    connection even when closing it raises, and on a dead one it may.
+    """
+    with suppress(Error):
+        conn.close()
+    _sweep_pool(conn)
 
 
 def _reason(exc: BaseException) -> str:
@@ -1700,6 +1774,204 @@ class Worker:
             setattr(db_task, name, value)
         return True
 
+    def _write_outcome_reconnecting(
+        self,
+        db_task: OxTask,
+        *,
+        status: OxTask.Status,
+        duration_ms: int,
+        **fields: Any,
+    ) -> bool:
+        """
+        _write_outcome for an attempt's own record, written once more on
+        another connection when the first write finds this thread's
+        connection to the worker's database gone. Returns what _write_outcome
+        returns, or False, having logged it, when the second try fails as
+        well.
+
+        The drop before the write, _discard_unusable_connections, catches a
+        connection one of the task's statements failed on. It cannot see
+        one that died while the task was not using it: the server ended
+        the session while the task worked on after its last query, or
+        restarted between two tasks while this thread kept a persistent
+        connection and the next task made no query. The outcome write is
+        then the first statement on the dead connection, and it raised,
+        left the row RUNNING with its lease no longer renewed, and the
+        reaper ran a finished task again, or requeued a failure with
+        neither its error nor its backoff. A probe before every write would
+        cost a statement on every outcome and still race with the drop, so
+        the write is its own probe, and only its failure costs anything.
+
+        Only a lost connection earns the second try: an OperationalError or
+        InterfaceError, after which _outcome_connection_lost holds. A lock
+        or statement timeout, a serialization failure or SQLite's "database
+        is locked" leave a connection that still answers, which a reconnect
+        repairs nothing about, and they are raised as before; so is
+        anything inside a caller's transaction, which a close would end.
+        The task body never runs again, only the write, with the values
+        the caller computed once, run_after and the errors list included.
+
+        Between the two tries the dead connection is closed and, with
+        Django's PostgreSQL pool, the pool's idle connections are swept,
+        _close_lost_connection. After a restart they are all as dead as
+        this one, and the second try would otherwise check one of them out
+        and fail the same way. The sweep does not promise the second try a
+        fresh connection: a replacement may still be connecting, the
+        database may still be down, and a connection the sweep found alive
+        can drop the moment after. The second try then fails as the first
+        did. There is no third, and no wait before the second.
+
+        A write can commit and still raise, when the connection goes
+        between the commit and its reply. Writing it again records nothing
+        twice: every field is a value, not an increment, and the landed
+        write took the row out of WRITABLE_STATUSES, so the fence matches
+        nothing. The fence cannot say why it matched nothing, though, and
+        _write_outcome would log a lease loss, and the caller skip
+        task_finished, for an outcome that is on the row. So the second
+        try first asks whether the row already holds this write,
+        _outcome_already_written, and one that does is taken as written.
+        A first write the server is still running when the second try
+        asks, because the client gave up on a session the server has not
+        yet ended, is not seen: the second write waits on its row lock,
+        matches nothing once it commits, and the attempt logs a lease loss
+        for an outcome that is on the row, once.
+
+        A second failure is logged once, as task_outcome_unrecorded, and
+        not raised. The outcome is then unconfirmed, not necessarily
+        absent: the first write may have landed, or another recovery path,
+        the watchdog's stuck-attempt record or a reaper, may already have
+        fenced this attempt. A row that still awaits recovery is the
+        reaper's once its lease expires, as before. The line says as much,
+        which "Unhandled error executing task" did not. Nothing waits
+        between the two tries, so an outage of any length that spans both
+        ends here. Whatever the second try raises that is not a database
+        error is raised.
+        """
+        try:
+            return self._write_outcome(
+                db_task, status=status, duration_ms=duration_ms, **fields
+            )
+        except (InterfaceError, OperationalError) as exc:
+            if not self._outcome_connection_lost():
+                raise
+            lost = f"{type(exc).__qualname__}: {_reason(exc)}"
+        conn = connections[self._db_alias]
+        # Outside any atomic block, so the close forgets the dead connection
+        # and the next statement checks out or opens another. With Django's
+        # pool that other one would be one the pool held idle, which a
+        # restart left as dead as this one, so the pool is swept first; even
+        # so, the next one is not certain to be alive.
+        _close_lost_connection(conn)
+        try:
+            written = self._outcome_already_written(db_task, status, fields)
+            landed = written or self._write_outcome(
+                db_task, status=status, duration_ms=duration_ms, **fields
+            )
+        except Error as exc:
+            with suppress(Error):
+                conn.close()
+            logger.error(
+                "Task id=%s path=%s lost its connection to database %r writing "
+                "the %s outcome of attempt %d/%d (%s), and a new connection "
+                "failed too (%s: %s). The outcome is unconfirmed, not "
+                "necessarily absent: the first write may have landed, or "
+                "another recovery path may already have fenced this attempt. "
+                "If the row still awaits recovery, the reaper handles it once "
+                "its lease expires",
+                db_task.id,
+                db_task.task_path,
+                self._db_alias,
+                status,
+                db_task.attempts,
+                db_task.max_attempts,
+                lost,
+                type(exc).__qualname__,
+                _reason(exc),
+                exc_info=True,
+                extra=self._log_extra(
+                    "task_outcome_unrecorded",
+                    db_task,
+                    duration_ms=duration_ms,
+                    dropped_status=str(status),
+                ),
+            )
+            return False
+        if written:
+            db_task.status = status
+            for name, value in fields.items():
+                setattr(db_task, name, value)
+        if landed:
+            logger.warning(
+                "Task id=%s path=%s lost its connection to database %r writing "
+                "the %s outcome of attempt %d/%d (%s); %s",
+                db_task.id,
+                db_task.task_path,
+                self._db_alias,
+                status,
+                db_task.attempts,
+                db_task.max_attempts,
+                lost,
+                (
+                    "a new connection found it already written"
+                    if written
+                    else "wrote it on a new connection"
+                ),
+                extra=self._log_extra(
+                    "task_outcome_reconnected",
+                    db_task,
+                    duration_ms=duration_ms,
+                    outcome=str(status),
+                    already_written=written,
+                ),
+            )
+        return landed
+
+    def _outcome_connection_lost(self) -> bool:
+        """
+        Whether this thread's connection to the worker's database is gone,
+        and the worker's to replace, after an outcome write raised.
+
+        Inside an atomic block it belongs to whoever opened the block, an
+        inline run_once() in a caller's transaction, or an override of
+        _write_outcome that wraps it in one, and closing it would end their
+        transaction; the error is theirs. A connection a caller took out of
+        autocommit is theirs for the same reason. Otherwise it is gone when
+        there is none open, because the connect itself failed or the driver
+        dropped it, or when is_usable() fails: one probe, only here.
+        """
+        conn = connections[self._db_alias]
+        if conn.in_atomic_block:
+            return False
+        if conn.connection is None:
+            return True
+        return bool(conn.autocommit) and not conn.is_usable()
+
+    def _outcome_already_written(
+        self, db_task: OxTask, status: OxTask.Status, fields: dict[str, Any]
+    ) -> bool:
+        """
+        Whether the row already holds this outcome write: its status, at
+        the epoch the write leaves, with every column it set that compares
+        in SQL. The JSON columns are left out, because equality on them
+        differs by database, and the rest already pin the write down:
+        finished_at or run_after is this process's clock to the
+        microsecond, and nothing else writes it at this epoch.
+        """
+        match = {
+            name: value
+            for name, value in fields.items()
+            if not isinstance(OxTask._meta.get_field(name), JSONField)
+        }
+        return (
+            OxTask.objects.using(self._db_alias)
+            .filter(
+                pk=db_task.pk,
+                status=status,
+                **{"lease_epoch": db_task.lease_epoch, **match},
+            )
+            .exists()
+        )
+
     def execute(self, db_task: OxTask, *, inline: bool = False) -> None:
         """
         Run a claimed (RUNNING, locked) task to a terminal or retry state.
@@ -1800,7 +2072,16 @@ class Worker:
             self._handle_failure(db_task, exc, _elapsed_ms(started))
         else:
             duration_ms = _elapsed_ms(started)
-            if not self._write_outcome(
+            # A task that caught a database error which ended its connection
+            # still succeeded, and this write is the only record of it. On the
+            # dead connection it would raise, leave the row RUNNING with its
+            # lease no longer renewed, and the reaper would run the task
+            # again. Only connections an error left unusable are dropped, so
+            # an ordinary success costs no statement here. A connection that
+            # died unnoticed is found by the write itself, which then goes
+            # once more on another; _write_outcome_reconnecting says when.
+            self._discard_unusable_connections()
+            if not self._write_outcome_reconnecting(
                 db_task,
                 status=OxTask.Status.SUCCESSFUL,
                 duration_ms=duration_ms,
@@ -2032,6 +2313,51 @@ class Worker:
             # when closing it raises; a connection broken this way may.
             with suppress(Error):
                 conn.close()
+
+    def _discard_unusable_connections(self) -> None:
+        """
+        Close this thread's connections that an error has left unusable, so
+        the outcome write that follows checks out or opens another instead
+        of failing on the dead one.
+
+        A task can end its own connection and still reach an outcome: a
+        statement the server terminated, a failover, a network drop it
+        raised through or caught. Django notices only at the end of a
+        request, in close_old_connections(), and a worker's attempt is not
+        a request, so without this the write runs on the dead connection,
+        raises, and leaves the row RUNNING with its lease no longer renewed.
+
+        This is Django's own test from close_old_connections(), narrowed to
+        what is certain: a connection with an error since its last commit
+        that fails is_usable(). Checking only flagged connections keeps the
+        ordinary outcome free of any extra statement, and a flagged one that
+        still answers is kept. The price is that a connection that died with
+        no statement failing on it, while the task was not using it, is not
+        flagged, and the write is the first to find it dead; that write goes
+        once more on another connection, _write_outcome_reconnecting.
+
+        Closing a pooled connection hands it back for Django's pool to
+        discard, and the write then checks out one the pool held idle.
+        After a restart those are as dead as the one closed, so each close
+        here also sweeps its alias's pool, _close_lost_connection. That
+        does not make the write's connection certain to be alive: the
+        database may still be down, and a connection can drop after the
+        sweep found it alive. A connection that is kept, or that has no
+        pool, costs no sweep.
+
+        One inside an atomic block is left alone: it belongs to whoever
+        opened the block, and closing it would end their transaction; an
+        inline run_once() inside a caller's transaction is theirs. Every
+        alias this thread has opened is checked, not only the worker's: the
+        task_finished receivers after the write run on this thread too. Runs
+        on the attempt's own thread only, because Django's connections are
+        per thread and another thread's are not this one's to close.
+        """
+        for conn in connections.all(initialized_only=True):
+            if conn.connection is None or conn.in_atomic_block:
+                continue
+            if conn.errors_occurred and not conn.is_usable():
+                _close_lost_connection(conn)
 
     def _note_backstop_only(self, tracer: str) -> None:
         """
@@ -2445,6 +2771,24 @@ class Worker:
         """
         from .results import task_result_from_db
 
+        if not release:
+            # A task can end its own connection and then fail, often because
+            # of it: a statement the server terminated, a network drop it
+            # raised through. The write below runs on this thread's
+            # connection for the worker's alias, and on the dead one it
+            # raises: the row stays RUNNING with its lease no longer renewed,
+            # the error is never recorded, and the reaper later requeues the
+            # row with no backoff, or marks it LOST on its last attempt. The
+            # stuck-thread record, release=True, runs on the watchdog's own
+            # connection while the task's thread may still be using its
+            # own, which is not the watchdog's to close.
+            self._discard_unusable_connections()
+        # The attempt's own record goes once more on another connection
+        # when the write finds this thread's connection gone; the stuck-thread
+        # record is the watchdog's, on its own connection, and keeps the
+        # single write it always had.
+        write = self._write_outcome if release else self._write_outcome_reconnecting
+
         handover: dict[str, Any] = (
             {"lease_epoch": db_task.lease_epoch + 1} if release else {}
         )
@@ -2460,7 +2804,7 @@ class Worker:
         ]
 
         if db_task.attempts >= db_task.max_attempts:
-            if not self._write_outcome(
+            if not write(
                 db_task,
                 status=OxTask.Status.FAILED,
                 duration_ms=duration_ms,
@@ -2508,7 +2852,7 @@ class Worker:
             # configures and keeps the arithmetic in range.
             doublings = min(max(db_task.attempts - 1, 0), 64)
             delay = min(self.backoff_initial * (2**doublings), self.backoff_max)
-            if not self._write_outcome(
+            if not write(
                 db_task,
                 status=OxTask.Status.READY,
                 duration_ms=duration_ms,
@@ -3601,6 +3945,21 @@ class Worker:
                     # and it is what the attempt path already does. close_all
                     # would also tear down a connection the caller owns.
                     close_old_connections()
+                    # With Django's pool, a restart leaves every connection it
+                    # holds idle as dead as the one this pass failed on, and
+                    # without CONN_HEALTH_CHECKS it hands them out unchecked:
+                    # one to each pass, so the loop claimed and dispatched
+                    # nothing for a poll interval per dead connection. With
+                    # them, a checkout tests each in turn, waiting longer
+                    # after each, and could time out before it found a live
+                    # one. One sweep on the failed pass discards them all,
+                    # though the next pass can still fail: the database may
+                    # still be down, or a connection drop after the sweep.
+                    # It replays nothing: reap, dispatch and claim wait for
+                    # the next pass as before. A claim that raised may still
+                    # have committed, and its row waits out its lease as it
+                    # always did.
+                    _sweep_pool(connections[self._db_alias])
                     self._stop.wait(self.poll_interval)
                     continue
                 if self._limit_reached():

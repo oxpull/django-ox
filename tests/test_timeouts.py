@@ -27,8 +27,11 @@ from datetime import datetime, timedelta
 from inspect import iscoroutinefunction
 
 import pytest
+from django.contrib.auth.models import User
 from django.core.exceptions import ImproperlyConfigured
-from django.db import connection, connections
+from django.db import connection, connections, transaction
+from django.db.transaction import Atomic, TransactionManagementError
+from django.test import TestCase
 from django.utils import timezone
 
 import django_ox
@@ -42,6 +45,7 @@ from django_ox.worker import WATCHDOG_MAX_WAIT, Worker, _active_tracer
 
 from .conftest import start_worker_thread, wait_for
 from .tasks import (
+    TASK_ROW,
     add,
     async_catch_timeout,
     async_report_deadline,
@@ -56,6 +60,8 @@ from .tasks import (
     spin_in_atomic,
     swallow_then_run_on,
     swallow_timeout,
+    time_out_at_an_atomic_line,
+    time_out_in_its_own_block,
     write_loop,
     write_until_released,
 )
@@ -1131,6 +1137,407 @@ class TestReleasesWhatItHeld:
             else:
                 raise AssertionError(innermost)
         assert landed_in["task"] > 0, landed_in
+
+
+# -- inside a caller's transaction ------------------------------------------
+
+
+SEED = "the caller's row"
+AFTER = "written after the timeout"
+
+
+class _RolledBack(Exception):
+    """Raised at the end of a caller's block to roll it back."""
+
+
+def caller_state(alias="default"):
+    """A caller's transaction on `alias`, as Django's wrapper holds it."""
+    conn = connections[alias]
+    return {
+        "wrapper": conn,
+        "driver": conn.connection,
+        "blocks": list(conn.atomic_blocks),
+        "savepoints": list(conn.savepoint_ids),
+    }
+
+
+def assert_as_the_caller_left_it(before, alias="default"):
+    """
+    The same connection, still inside the caller's transaction, at the depth
+    the caller left it: the same blocks, by identity, and the same
+    savepoints.
+    """
+    conn = connections[alias]
+    assert conn is before["wrapper"]
+    assert conn.connection is before["driver"], "the caller's connection was replaced"
+    assert conn.in_atomic_block
+    assert not conn.get_autocommit()
+    assert len(conn.atomic_blocks) == len(before["blocks"])
+    assert all(
+        ours is theirs
+        for ours, theirs in zip(conn.atomic_blocks, before["blocks"], strict=True)
+    )
+    assert conn.savepoint_ids == before["savepoints"]
+
+
+@pytest.fixture
+def closed(monkeypatch):
+    """
+    The aliases whose connection this thread closed, in order. Only this
+    thread's: the caller's connections are this thread's, and run_once()'s
+    own threads close their own.
+    """
+    seen: list[str] = []
+    here = threading.get_ident()
+    for wrapper_class in {type(conn) for conn in connections.all()}:
+        original = wrapper_class.close
+
+        def close(self, original=original):
+            if threading.get_ident() == here:
+                seen.append(self.alias)
+            return original(self)
+
+        monkeypatch.setattr(wrapper_class, "close", close)
+    return seen
+
+
+def atomic_lines_run(block):
+    """
+    (where, lineno) of each line of Django's atomic() entry and exit that
+    `block` runs, in order: the lines a delivery could land on.
+    """
+    codes = {Atomic.__enter__.__code__: "enter", Atomic.__exit__.__code__: "exit"}
+    seen: list[tuple[str, int]] = []
+
+    def on_line(frame, event, arg):
+        place = (codes[frame.f_code], frame.f_lineno)
+        if event == "line" and place not in seen:
+            seen.append(place)
+        return on_line
+
+    def on_call(frame, event, arg):
+        return on_line if frame.f_code in codes else None
+
+    installed = sys.gettrace()
+    sys.settrace(on_call)
+    try:
+        block()
+    finally:
+        sys.settrace(installed)
+    return seen
+
+
+@pytest.mark.django_db(transaction=True, databases=["default", "alt"])
+class TestInsideACallersTransaction:
+    """
+    run_once() inside a caller's atomic(), with the attempt timing out.
+
+    The transaction is the caller's. A timeout leaves it open, at the depth
+    the caller left it, and the attempt's outcome is recorded inside it.
+    The reset a worker's own thread gets after a timeout closed it instead:
+    the caller's rows were gone, the connection was left in autocommit,
+    and every write after that committed for real.
+
+    Most of these tasks raise TaskTimeout themselves, in the state a
+    delivery leaves, so the path is the same under a coverage tool, where
+    nothing is delivered; test_a_real_timeout has the delivery.
+    """
+
+    @pytest.mark.parametrize("how", ["task", "body", "entered"])
+    def test_the_callers_transaction_survives(self, how, closed):
+        with pytest.raises(_RolledBack), transaction.atomic():
+            User.objects.create(username=SEED)
+            before = caller_state()
+            result = time_out_in_its_own_block.enqueue("default", how)
+            assert Worker(backoff_initial=60).run_once()
+
+            assert "default" not in closed
+            assert_as_the_caller_left_it(before)
+            assert not connection.needs_rollback
+            assert User.objects.filter(username=SEED).exists()
+            # The task's own block is undone, as it is on a worker. A write
+            # made outside one stays, as a worker's autocommit keeps it.
+            assert User.objects.filter(username=TASK_ROW).exists() == (how == "task")
+            db_task = row(result)
+            assert db_task.status == OxTask.Status.READY
+            assert db_task.attempts == 1
+            assert db_task.errors[-1]["exception_class_path"] == TIMEOUT_PATH
+            User.objects.create(username=AFTER)
+            raise _RolledBack
+        # The caller's rollback still takes all of it.
+        assert not User.objects.exists()
+        assert not OxTask.objects.exists()
+        assert connection.get_autocommit()
+        assert not connection.in_atomic_block
+
+    def test_a_block_without_a_savepoint_rolls_the_caller_back(self, closed):
+        """
+        A block the task opened without a savepoint cannot be undone apart
+        from the caller's, so their transaction is marked for rollback, as
+        Django's own exit marks it for a failed block like that. The
+        outcome cannot be written inside it, and run_once() raises that
+        rather than write it anywhere else. The connection is still the
+        caller's, and their block's exit rolls everything back.
+        """
+        with transaction.atomic():
+            User.objects.create(username=SEED)
+            before = caller_state()
+            time_out_in_its_own_block.enqueue("default", "no savepoint")
+            with pytest.raises(TransactionManagementError):
+                Worker(backoff_initial=60).run_once()
+            assert "default" not in closed
+            assert_as_the_caller_left_it(before)
+            assert connection.needs_rollback
+        assert not User.objects.exists()
+        assert not OxTask.objects.exists()
+        assert connection.get_autocommit()
+        User.objects.create(username=AFTER)
+        assert User.objects.filter(username=AFTER).exists()
+
+    def test_every_database_in_the_callers_transaction_is_theirs(self, closed):
+        """
+        The caller holds a transaction on both databases, and the block the
+        timeout cut short is the task's own on the second one, not the
+        worker's. Both stay the caller's. The second is put back at the
+        caller's depth, without the task's write.
+        """
+        with (
+            pytest.raises(_RolledBack),
+            transaction.atomic(),
+            transaction.atomic(using="alt"),
+        ):
+            User.objects.create(username=SEED)
+            User.objects.using("alt").create(username=SEED)
+            before, before_alt = caller_state(), caller_state("alt")
+            result = time_out_in_its_own_block.enqueue("alt", "entered")
+            assert Worker(backoff_initial=60).run_once()
+
+            assert closed == []
+            assert_as_the_caller_left_it(before)
+            assert_as_the_caller_left_it(before_alt, "alt")
+            assert User.objects.using("alt").filter(username=SEED).exists()
+            assert not User.objects.using("alt").filter(username=TASK_ROW).exists()
+            assert row(result).errors[-1]["exception_class_path"] == TIMEOUT_PATH
+            User.objects.using("alt").create(username=AFTER)
+            raise _RolledBack
+        assert not User.objects.exists()
+        assert not User.objects.using("alt").exists()
+        assert not OxTask.objects.exists()
+
+    def test_a_database_outside_it_is_reset_as_on_a_worker(self, closed):
+        """
+        Only what the caller holds is theirs. The worker's own database,
+        in autocommit here, gets the reset a worker's thread gets: its
+        connection is closed, and the outcome is written and committed on
+        a new one, whatever becomes of the caller's transaction.
+        """
+        with pytest.raises(_RolledBack), transaction.atomic(using="alt"):
+            User.objects.using("alt").create(username=SEED)
+            before_alt = caller_state("alt")
+            result = time_out_in_its_own_block.enqueue("default", "entered")
+            assert Worker(backoff_initial=60).run_once()
+
+            assert closed == ["default"]
+            assert_as_the_caller_left_it(before_alt, "alt")
+            assert User.objects.using("alt").filter(username=SEED).exists()
+            raise _RolledBack
+        assert not User.objects.using("alt").exists()
+        db_task = row(result)
+        assert db_task.status == OxTask.Status.READY
+        assert db_task.errors[-1]["exception_class_path"] == TIMEOUT_PATH
+        # The block the task left open went with the reset.
+        assert not User.objects.filter(username=TASK_ROW).exists()
+
+    def test_a_delivery_anywhere_in_the_tasks_own_atomic(self, task_state, monkeypatch):
+        """
+        TaskTimeout placed on each line of Django's atomic() entry and exit
+        in turn, in a block the task opens inside the caller's. Some lines
+        leave the task's block on Django's stacks with its savepoint open.
+        Every one must leave the caller's transaction at its depth, with
+        their row and the outcome in it, and their rollback must still
+        take everything.
+        """
+        depths: list[int] = []
+        discard = Worker._discard_connections
+
+        def discard_and_note_the_depth(self):
+            depths.append(len(connection.savepoint_ids))
+            discard(self)
+
+        monkeypatch.setattr(Worker, "_discard_connections", discard_and_note_the_depth)
+
+        def nested():
+            with transaction.atomic():
+                User.objects.count()
+
+        with transaction.atomic():
+            lines = atomic_lines_run(nested)
+        # Enough of the entry and the exit to mean something, whatever
+        # Django's version lays them out as.
+        assert len(lines) >= 10, lines
+
+        for where, lineno in lines:
+            place = f"atomic() {where} line {lineno}"
+            task_state.clear()
+            with pytest.raises(_RolledBack), transaction.atomic():
+                User.objects.create(username=SEED)
+                before = caller_state()
+                result = time_out_at_an_atomic_line.enqueue(where, lineno)
+                assert Worker(backoff_initial=60).run_once(), place
+                assert task_state.get("placed"), place
+
+                assert_as_the_caller_left_it(before)
+                assert not connection.needs_rollback, place
+                assert User.objects.filter(username=SEED).exists(), place
+                db_task = row(result)
+                assert db_task.status == OxTask.Status.READY, place
+                assert db_task.errors[-1]["exception_class_path"] == TIMEOUT_PATH, place
+                User.objects.create(username=AFTER)
+                raise _RolledBack
+            assert not User.objects.exists(), place
+            assert not OxTask.objects.exists(), place
+        # Some of the lines left the task's block open, so its undoing, not
+        # only Django's own exit, is what was tested.
+        assert max(depths) > min(depths), depths
+
+    def test_a_real_timeout(self, task_state, interruptible_attempts):
+        """
+        The delivery itself, inside a block the task opened on the row it
+        runs for. Django's exit undoes the block, and the caller's
+        transaction is untouched around it.
+        """
+        timeout, task_seconds = 0.2, 2.0
+        with pytest.raises(_RolledBack), transaction.atomic():
+            User.objects.create(username=SEED)
+            before = caller_state()
+            result = spin_in_atomic.enqueue(task_seconds)
+            started = time.monotonic()
+            assert Worker(task_timeout=timeout, backoff_initial=60).run_once()
+            assert_stopped_at_the_deadline(
+                time.monotonic() - started, timeout=timeout, task_seconds=task_seconds
+            )
+            assert task_state.get("writer_locked") is True
+
+            assert_as_the_caller_left_it(before)
+            assert User.objects.filter(username=SEED).exists()
+            db_task = row(result)
+            assert db_task.status == OxTask.Status.READY
+            assert db_task.priority == 0, "the task's own block rolled back"
+            assert db_task.errors[-1]["exception_class_path"] == TIMEOUT_PATH
+            assert "0.2s timeout" in db_task.errors[-1]["traceback"]
+            User.objects.create(username=AFTER)
+            raise _RolledBack
+        assert not User.objects.exists()
+        assert not OxTask.objects.exists()
+
+    def test_an_async_task_timing_out(self, task_state):
+        timeout, task_seconds = 0.2, 5.0
+        with pytest.raises(_RolledBack), transaction.atomic():
+            User.objects.create(username=SEED)
+            before = caller_state()
+            result = async_spin.enqueue(task_seconds)
+            started = time.monotonic()
+            assert Worker(task_timeout=timeout, backoff_initial=60).run_once()
+            assert_stopped_at_the_deadline(
+                time.monotonic() - started, timeout=timeout, task_seconds=task_seconds
+            )
+            assert task_state.get("cancelled") is True
+
+            assert_as_the_caller_left_it(before)
+            assert User.objects.filter(username=SEED).exists()
+            assert row(result).errors[-1]["exception_class_path"] == TIMEOUT_PATH
+            raise _RolledBack
+        assert not User.objects.exists()
+        assert not OxTask.objects.exists()
+
+
+class TestInsideATestCase(TestCase):
+    """
+    The same, where Django's TestCase opened the transaction: the class's
+    block around every test, and each test's own inside it, on every
+    database the class uses. A timeout that closed the connection ended
+    both, so the rest of the class ran in autocommit and what it wrote was
+    committed for real, for later tests to find.
+    """
+
+    databases = {"default", "alt"}
+
+    def test_1_the_test_transaction_survives(self):
+        User.objects.create(username=SEED)
+        User.objects.using("alt").create(username=SEED)
+        before, before_alt = caller_state(), caller_state("alt")
+        result = time_out_in_its_own_block.enqueue("default", "entered")
+        assert Worker(backoff_initial=60).run_once()
+
+        assert_as_the_caller_left_it(before)
+        assert_as_the_caller_left_it(before_alt, "alt")
+        assert User.objects.filter(username=SEED).exists()
+        assert User.objects.using("alt").filter(username=SEED).exists()
+        assert not User.objects.filter(username=TASK_ROW).exists()
+        db_task = row(result)
+        assert db_task.status == OxTask.Status.READY
+        assert db_task.errors[-1]["exception_class_path"] == TIMEOUT_PATH
+        User.objects.create(username=AFTER)
+
+    def test_2_the_next_test_starts_clean(self):
+        assert connection.in_atomic_block
+        assert connections["alt"].in_atomic_block
+        assert not User.objects.exists()
+        assert not User.objects.using("alt").exists()
+        assert not OxTask.objects.exists()
+
+
+@pytest.mark.usefixtures("task_state", "interruptible_attempts")
+class TestARealTimeoutInsideATestCase(TestCase):
+    def test_1_the_test_transaction_survives(self):
+        User.objects.create(username=SEED)
+        before = caller_state()
+        result = spin_in_atomic.enqueue(2.0)
+        assert Worker(task_timeout=0.2, backoff_initial=60).run_once()
+
+        assert_as_the_caller_left_it(before)
+        assert User.objects.filter(username=SEED).exists()
+        db_task = row(result)
+        assert db_task.status == OxTask.Status.READY
+        assert db_task.errors[-1]["exception_class_path"] == TIMEOUT_PATH
+        User.objects.create(username=AFTER)
+
+    def test_2_the_next_test_starts_clean(self):
+        assert connection.in_atomic_block
+        assert not User.objects.exists()
+        assert not OxTask.objects.exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_worker_thread_still_resets_a_block_the_task_left_open():
+    """
+    On a worker's own thread no connection is inside a block when an
+    attempt starts, so a block still open after a timeout is the task's
+    own, cut short inside atomic()'s entry or exit, and the reset closes
+    it. Left open, the outcome would be written inside a transaction
+    nothing commits, and the thread's next task would inherit it.
+    """
+    worker = Worker(concurrency=1, poll_interval=0.02, backoff_initial=60)
+    result = time_out_in_its_own_block.enqueue("default", "entered")
+    thread = start_worker_thread(worker)
+    try:
+        assert wait_for(
+            lambda: (
+                (row(result).status, row(result).attempts) == (OxTask.Status.READY, 1)
+            ),
+            timeout=10,
+        )
+        # The one pool thread runs this one too.
+        after = add.enqueue(1, 2)
+        assert wait_for(
+            lambda: row(after).status == OxTask.Status.SUCCESSFUL, timeout=10
+        )
+    finally:
+        worker.request_stop()
+        thread.join(timeout=15)
+    assert not thread.is_alive()
+    assert row(result).errors[-1]["exception_class_path"] == TIMEOUT_PATH
+    assert not User.objects.filter(username=TASK_ROW).exists()
 
 
 # -- async tasks ------------------------------------------------------------

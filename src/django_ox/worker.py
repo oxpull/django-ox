@@ -501,6 +501,101 @@ class _Watch:
 
 
 @dataclass(slots=True, frozen=True)
+class _CallerTransaction:
+    """
+    A connection that was already inside an atomic block when an attempt
+    started, and the depth it was at then: Django's stack of open blocks
+    and of their savepoints, as the caller left them.
+
+    Inline, that block is the caller's: run_once() inside their atomic(),
+    or inside a TestCase. The attempt did not open it and a timeout must
+    not end it. See _discard_connections.
+    """
+
+    connection: Any
+    atomic_blocks: tuple[Any, ...]
+    savepoint_ids: tuple[str | None, ...]
+
+
+def _caller_transactions() -> tuple[_CallerTransaction, ...]:
+    """
+    This thread's connections that are inside an atomic block now, each at
+    its current depth. Taken as an attempt starts: on a worker's own thread
+    there are none, and inline they are the caller's.
+    """
+    return tuple(
+        _CallerTransaction(
+            connection=conn,
+            atomic_blocks=tuple(conn.atomic_blocks),
+            savepoint_ids=tuple(conn.savepoint_ids),
+        )
+        for conn in connections.all(initialized_only=True)
+        if conn.in_atomic_block
+    )
+
+
+def _restore_caller_transaction(conn: Any, caller: _CallerTransaction) -> None:
+    """
+    Put `conn` back at the depth its caller's atomic block had when the
+    attempt started, after a TaskTimeout, and leave the caller's
+    transaction itself alone.
+
+    A delivery inside the task's own atomic() entry or exit can leave the
+    block the task opened on Django's stacks, with its savepoint still
+    open. That block belongs to the attempt: its savepoint is rolled back
+    and released, and its entries come off the stacks, so the caller's own
+    exit finds the entries it pushed and commits or rolls back what it
+    would have. Nothing else is touched. The connection is not closed, and
+    no flag is cleared: rollback state that an error left is the caller's
+    to act on.
+
+    The caller's transaction is marked for rollback only when the
+    attempt's levels cannot be undone apart from the caller's: the first
+    of them has no savepoint, the rollback to it fails, the connection is
+    already marked or closed, or the stacks no longer begin with the
+    caller's own entries. Django's own exit marks a failed block without a
+    savepoint the same way. The outcome write that follows is then
+    refused, and run_once() raises that to its caller rather than record
+    the attempt outside the caller's transaction.
+    """
+    if not conn.in_atomic_block:
+        # The caller's block is gone, which only the task can have done;
+        # there is nothing of the caller's left to put back.
+        return
+    depth = len(caller.atomic_blocks)
+    marks = len(caller.savepoint_ids)
+    if (
+        len(conn.atomic_blocks) < depth
+        or len(conn.savepoint_ids) < marks
+        or any(
+            ours is not theirs
+            for ours, theirs in zip(
+                conn.atomic_blocks[:depth], caller.atomic_blocks, strict=True
+            )
+        )
+        or tuple(conn.savepoint_ids[:marks]) != caller.savepoint_ids
+    ):
+        conn.needs_rollback = True
+        return
+    opened = conn.savepoint_ids[marks:]
+    if len(conn.atomic_blocks) == depth and not opened:
+        # Django's exit ran for every block the task opened, which is the
+        # usual case: the delivery landed in the task's own code.
+        return
+    del conn.atomic_blocks[depth:]
+    del conn.savepoint_ids[marks:]
+    sid = opened[0] if opened else None
+    if sid is None or conn.needs_rollback or conn.closed_in_transaction:
+        conn.needs_rollback = True
+        return
+    try:
+        conn.savepoint_rollback(sid)
+        conn.savepoint_commit(sid)
+    except Error:
+        conn.needs_rollback = True
+
+
+@dataclass(slots=True, frozen=True)
 class _AttemptPolicy:
     """
     The policy one attempt runs under, as _run_attempt resolved it.
@@ -525,6 +620,9 @@ class _AttemptPolicy:
     #: run_once() on the caller's own thread, where an interrupt from a
     #: backoff callback belongs to the caller, as one from the task does.
     inline: bool
+    #: The connections that were inside an atomic block when the attempt
+    #: started, which _discard_connections leaves to their caller.
+    caller_transactions: tuple[_CallerTransaction, ...] = ()
 
 
 def _backoff_seconds(
@@ -2306,8 +2404,15 @@ class Worker:
 
         started = time.monotonic()
         attempt = (db_task.pk, db_task.lease_epoch)
+        # Before the task can open a block of its own: what is inside one
+        # now is the caller's, and a timeout leaves it to them.
+        callers = _caller_transactions()
         self._attempt_local.policy = _AttemptPolicy(
-            attempt=attempt, task=None, backoff=None, inline=inline
+            attempt=attempt,
+            task=None,
+            backoff=None,
+            inline=inline,
+            caller_transactions=callers,
         )
         try:
             task = task_from_db(db_task)
@@ -2316,6 +2421,7 @@ class Worker:
                 task=task,
                 backoff=task_policy(task)[1],
                 inline=inline,
+                caller_transactions=callers,
             )
             task_result = task_result_from_db(db_task, task=task)
             # send_robust: these are an observability surface, and a
@@ -2616,8 +2722,29 @@ class Worker:
         transaction state first, so close() forgets the object. The lease
         epoch is unchanged, so the outcome write is the same write on
         either connection.
+
+        A connection that was already inside an atomic block when the
+        attempt started is not the attempt's to drop. It carries its
+        caller's transaction: run_once() inside their atomic(), or inside a
+        TestCase. Resetting and closing it rolled that transaction back and
+        left the connection in autocommit, so the caller's rows were gone
+        and every write after it committed for real. It stays open, with
+        its flags as they are, and is only put back at the caller's depth,
+        _restore_caller_transaction; the outcome write then lands inside
+        the caller's transaction. Which connections those are is recorded
+        as the attempt starts rather than read here. On a worker's own
+        thread no connection is inside a block when an attempt starts, and
+        one found inside a block now is there because the delivery cut
+        through the task's own atomic() entry or exit, the case the reset
+        above exists for.
         """
+        policy: _AttemptPolicy | None = getattr(self._attempt_local, "policy", None)
+        callers = () if policy is None else policy.caller_transactions
         for conn in connections.all(initialized_only=True):
+            caller = next((c for c in callers if c.connection is conn), None)
+            if caller is not None:
+                _restore_caller_transaction(conn, caller)
+                continue
             conn.in_atomic_block = False
             conn.savepoint_ids = []
             conn.atomic_blocks = []

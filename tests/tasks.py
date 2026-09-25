@@ -1,10 +1,13 @@
 """Module-level task functions; django.tasks requires module-level definitions."""
 
 import asyncio
+import sys
 import time
 from pathlib import Path
 
+from django.contrib.auth.models import User
 from django.db import transaction
+from django.db.transaction import Atomic
 
 import django_ox
 from django_ox.compat import task
@@ -243,6 +246,69 @@ async def async_catch_timeout(seconds):
         STATE["cancelled"] = True
         raise
     return "done"
+
+
+#: The row the tasks below write before they time out.
+TASK_ROW = "written by the task"
+
+
+@task
+def time_out_in_its_own_block(using, how):
+    """
+    Write a row on `using`, then raise TaskTimeout as a delivery would leave
+    it. `how` is where it leaves the task's own atomic block:
+
+    - "task": in the task's own code, with no block of its own open;
+    - "body": inside a block of its own, which Django's exit then undoes;
+    - "entered": in a block of its own whose exit never runs, the state a
+      delivery at the very start of atomic()'s exit leaves;
+    - "no savepoint": the same in a block opened with savepoint=False,
+      whose writes cannot be undone apart from the enclosing block's.
+    """
+    rows = User.objects.using(using)
+    if how == "task":
+        rows.create(username=TASK_ROW)
+    elif how == "body":
+        with transaction.atomic(using=using):
+            rows.create(username=TASK_ROW)
+            raise TaskTimeout("delivered inside the task's own block", timeout=1)
+    else:
+        block = transaction.atomic(using=using, savepoint=how != "no savepoint")
+        block.__enter__()
+        rows.create(username=TASK_ROW)
+    raise TaskTimeout(f"delivered with the task's block {how}", timeout=1)
+
+
+@task
+def time_out_at_an_atomic_line(where, lineno):
+    """
+    Write a row inside a block of the task's own, with TaskTimeout raised as
+    line `lineno` of Django's atomic() `where`, "enter" or "exit", is about
+    to run: the state a delivery landing on that line leaves. STATE["placed"]
+    says whether the line was reached.
+
+    The trace hook is this thread's for the length of the block. The one
+    installed before it, a coverage tool's for one, is put back afterwards.
+    """
+    code = (Atomic.__enter__ if where == "enter" else Atomic.__exit__).__code__
+
+    def on_line(frame, event, arg):
+        if event == "line" and frame.f_lineno == lineno and "placed" not in STATE:
+            STATE["placed"] = True
+            raise TaskTimeout(f"delivered at atomic() {where} line {lineno}", timeout=1)
+        return on_line
+
+    def on_call(frame, event, arg):
+        return on_line if frame.f_code is code else None
+
+    installed = sys.gettrace()
+    sys.settrace(on_call)
+    try:
+        with transaction.atomic():
+            User.objects.create(username=TASK_ROW)
+    finally:
+        sys.settrace(installed)
+    return "not placed"
 
 
 @task()

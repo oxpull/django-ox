@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `Worker.run_once()` timeout handling inside a caller's `transaction.atomic()`,
+  including Django's `TestCase`. From 0.3.0 through 1.5.0, an attempt ending in
+  `TaskTimeout` reset and closed the calling thread's database connections.
+  This rolled back caller rows and the task row, then left the connection
+  in autocommit. Later writes could commit and become visible to later
+  tests, followed by a teardown `TransactionManagementError`.
+
+  Connections already inside atomic blocks now remain under the caller's
+  transaction control. When the connection remains usable, the attempt's
+  outcome is recorded inside that transaction and rolls back with it. A
+  timeout during a database statement can prevent outcome recording
+  entirely. `run_once()` then raises `TransactionManagementError` or a
+  driver error, and the caller's transaction must roll back. During ORM
+  writes inside the caller's transaction, `run_once()` raised
+  `TransactionManagementError` in every measured run on SQLite, PostgreSQL
+  and MySQL; during reads, a driver error occurred in all 30 PyMySQL runs,
+  in 1 to 7 of 30 PostgreSQL runs, and in no SQLite run.
+
+  Upgrade if tests or other synchronous code call `run_once()` inside
+  atomic blocks. Worker pool behaviour is unchanged.
+  No settings changes or migrations are required.
+
 ## [1.5.0] - 2026-09-25
 
 **Upgrading to 1.5.0:** No database migration is required. Replace every

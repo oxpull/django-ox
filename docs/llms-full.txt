@@ -5081,6 +5081,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly-once execution or repair transaction state; recovery does not
   run inside a caller-owned transaction or with caller-disabled
   autocommit.
+- Without Django's PostgreSQL pool, close the timeout watchdog's connection
+  after every batch of stuck-attempt records, including failed batches.
+  This prevents stale-connection reuse after a database restart or other
+  disconnect between batches. Previously, a later batch could fail to record
+  `TaskTimeout` and backoff, leaving recovery to the reaper after lease
+  expiry. The pooled lifecycle is unchanged. An outage during a batch can
+  still prevent recording.
 
 ## [1.4.0] - 2026-09-23
 

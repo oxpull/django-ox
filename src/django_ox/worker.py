@@ -2538,11 +2538,26 @@ class Worker:
         sequence, whatever the batch's size, except that resolving a host
         name is not bounded by the deadline. The connection is closed, or
         given back to the pool, when the batch ends, however it ends; the
-        next batch acquires one again. Without a pool the batch runs on the
-        thread's ordinary connection, as Django opens it.
+        next batch acquires one again.
+
+        Without a pool the batch runs on the thread's ordinary connection,
+        as Django opens it, and that too is closed when the batch ends,
+        however it ends. The thread lives as long as any attempt is under a
+        timeout, and nothing else closes its connection until the thread
+        exits. Kept, a connection the server ended between two batches (a
+        restart, a failover) failed every record of the second, and each of
+        those rows stayed RUNNING until the reaper took it back, with no
+        TaskTimeout recorded and no backoff. A connection that breaks during
+        a batch still fails the records after it, as the pooled batch's does.
         """
         if own is None:
-            yield
+            try:
+                yield
+            finally:
+                # Quiet about a database error, as own.close() is; anything
+                # else reaches _record_stuck, which logs it and carries on.
+                with suppress(Error):
+                    connections[self._db_alias].close()
             return
         with ExitStack() as scope:
             scope.callback(own.close)

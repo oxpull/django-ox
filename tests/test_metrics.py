@@ -271,6 +271,30 @@ class TestCollector:
         assert 'django_ox_failure_rate{queue="default"} 0.25' in text
         assert 'django_ox_oldest_ready_age_seconds{queue="emails"}' not in text
 
+    def test_collector_forwards_a_custom_window(self):
+        """A 30s window must exclude the minute-old seed outcomes."""
+        pytest.importorskip("prometheus_client")
+        from prometheus_client import CollectorRegistry, generate_latest
+
+        seed()
+        registry = CollectorRegistry()
+        registry.register(metrics.collector(window=timedelta(seconds=30)))
+        text = generate_latest(registry).decode()
+        assert 'django_ox_throughput_per_minute{queue="default"} 0.0' in text
+        assert 'django_ox_failure_rate{queue="default"}' not in text
+
+    @pytest.mark.django_db(databases=["default", "alt"])
+    def test_collector_reads_from_the_given_alias(self):
+        """Seeded rows live on default, so a scrape of alt must not see them."""
+        pytest.importorskip("prometheus_client")
+        from prometheus_client import CollectorRegistry, generate_latest
+
+        seed()
+        registry = CollectorRegistry()
+        registry.register(metrics.collector(using="alt"))
+        text = generate_latest(registry).decode()
+        assert 'django_ox_tasks{queue="default"' not in text
+
 
 OTEL_SNIPPET = re.compile(r"```python\n(?P<code>from opentelemetry[^`]*)```")
 

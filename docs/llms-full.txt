@@ -6830,6 +6830,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ox_prune` now rejects cutoffs on the first day of year one before the
+  database binds them. With `USE_TZ=True` and a connection zone west of
+  UTC, SQLite and MySQL overflow on those values even though cutoff
+  subtraction succeeded. The command raises the existing out-of-range
+  `CommandError` on every engine, including PostgreSQL.
+
 - `Worker.run_once()` timeout handling inside a caller's `transaction.atomic()`,
   including Django's `TestCase`. From 0.3.0 through 1.5.0, an attempt ending in
   `TaskTimeout` reset and closed the calling thread's database connections.

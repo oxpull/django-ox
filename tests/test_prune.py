@@ -3,7 +3,8 @@ import re
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 
 import pytest
@@ -1392,3 +1393,121 @@ class TestOutOfRangeDuration:
         with pytest.raises(CommandError) as info:
             ManagementUtility(argv).execute()
         assert str(info.value) == "Invalid duration '3000000d'; it is out of range."
+
+
+def _cutoff_now():
+    """Fixed whole-second now; awareness follows settings.USE_TZ."""
+    now = datetime(2026, 9, 26, 12, 0, 0)
+    if settings.USE_TZ:
+        return now.replace(tzinfo=UTC)
+    return now
+
+
+def _match_awareness(value):
+    if settings.USE_TZ:
+        return value if timezone.is_aware(value) else timezone.make_aware(value, UTC)
+    return value.replace(tzinfo=None) if timezone.is_aware(value) else value
+
+
+def _seconds_before(now, cutoff):
+    return str(int((now - cutoff).total_seconds()))
+
+
+@contextmanager
+def connection_time_zone(alias, name):
+    """Point one connection at another zone, as DATABASES TIME_ZONE would."""
+    wrapper = connections[alias]
+    original = wrapper.settings_dict["TIME_ZONE"]
+
+    def reset():
+        for attr in ("timezone", "timezone_name"):
+            getattr(wrapper, attr)
+            delattr(wrapper, attr)
+        wrapper.ensure_timezone()
+
+    wrapper.settings_dict["TIME_ZONE"] = name
+    reset()
+    try:
+        yield
+    finally:
+        wrapper.settings_dict["TIME_ZONE"] = original
+        reset()
+
+
+@pytest.mark.django_db(transaction=True)
+class TestFirstDayCutoff:
+    """#104: cutoffs on the first day of year one are rejected before bind."""
+
+    @pytest.mark.skipif(not settings.USE_TZ, reason="Requires timezone-aware datetimes")
+    def test_year_one_morning_is_rejected_in_new_york(self, monkeypatch):
+        now = _cutoff_now()
+        monkeypatch.setattr(timezone, "now", lambda: now)
+        cutoff = _match_awareness(datetime(1, 1, 1, 1, 0, 0, tzinfo=UTC))
+        value = _seconds_before(now, cutoff)
+        make_old_rows(3, OxTask.Status.SUCCESSFUL)
+
+        with connection_time_zone("default", "America/New_York"):
+            for extra in ([], ["--dry-run"]):
+                with pytest.raises(CommandError) as info:
+                    prune(f"--older-than={value}", *extra)
+                assert str(info.value) == (
+                    f"Invalid duration {value!r}; it is out of range."
+                )
+        assert OxTask.objects.count() == 3
+
+    def test_one_second_below_the_floor_is_rejected(self, monkeypatch):
+        now = _cutoff_now()
+        monkeypatch.setattr(timezone, "now", lambda: now)
+        floor = _match_awareness(datetime.min + timedelta(days=1))
+        cutoff = floor - timedelta(seconds=1)
+        value = _seconds_before(now, cutoff)
+        make_old_rows(3, OxTask.Status.SUCCESSFUL)
+
+        with pytest.raises(CommandError) as info:
+            prune(f"--older-than={value}")
+        assert str(info.value) == f"Invalid duration {value!r}; it is out of range."
+        assert OxTask.objects.count() == 3
+
+    def test_cutoff_exactly_at_the_floor_succeeds(self, monkeypatch):
+        now = _cutoff_now()
+        monkeypatch.setattr(timezone, "now", lambda: now)
+        floor = _match_awareness(datetime.min + timedelta(days=1))
+        value = _seconds_before(now, floor)
+        make_old_rows(3, OxTask.Status.SUCCESSFUL)
+
+        prune(f"--older-than={value}")
+
+        assert OxTask.objects.count() == 3
+
+    def test_ordinary_seven_day_retention_is_unchanged(self):
+        old_ok = make_task(OxTask.Status.SUCCESSFUL, finished_days_ago=8)
+        young_ok = make_task(OxTask.Status.SUCCESSFUL, finished_days_ago=1)
+
+        prune("--older-than=7d")
+
+        assert not OxTask.objects.filter(pk=old_ok.pk).exists()
+        assert OxTask.objects.filter(pk=young_ok.pk).exists()
+
+    @pytest.mark.skipif(not settings.USE_TZ, reason="Requires timezone-aware datetimes")
+    def test_year_one_morning_exits_1_without_a_traceback(self, monkeypatch, capsys):
+        now = _cutoff_now()
+        monkeypatch.setattr(timezone, "now", lambda: now)
+        cutoff = datetime(1, 1, 1, 1, 0, 0, tzinfo=UTC)
+        value = _seconds_before(now, cutoff)
+        make_old_rows(3, OxTask.Status.SUCCESSFUL)
+        argv = [
+            "manage.py",
+            "ox_prune",
+            f"--older-than={value}",
+            "--skip-checks",
+        ]
+
+        with connection_time_zone("default", "America/New_York"):
+            with pytest.raises(SystemExit) as info:
+                ManagementUtility(argv).execute()
+
+        assert info.value.code == 1
+        err = capsys.readouterr().err
+        assert f"Invalid duration {value!r}; it is out of range." in err
+        assert "Traceback" not in err
+        assert OxTask.objects.count() == 3

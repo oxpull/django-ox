@@ -644,8 +644,9 @@ The same shape reads `oldest_ready_age()` or `failure_rate()` per queue.
 
 The worker logs through the standard library logger named `django_ox`. No
 logging dependency, no imposed format. Configure handlers and formatters in
-`LOGGING` as usual. The `django_ox.testing` backends also emit the
-`task_policy_inert` event below.
+`LOGGING` as usual. The `django_ox.testing` backends also emit
+`task_policy_inert`. The `run_tasks()` helper emits worker events,
+`run_tasks_timeout_inert` and `run_tasks_callback_failed` as described below.
 
 Lifecycle events carry an `extra` dictionary with stable keys, so a JSON
 formatter that serialises record attributes gets consistent fields to index.
@@ -666,6 +667,8 @@ The message text is not part of the contract. The keys are.
 | `task_failed` | ERROR | The task reached FAILED because its attempts are exhausted (`reason="attempts_exhausted"`) or its backoff callback returned `None` (`reason="backoff_declined"`). An attempt whose task cannot be rebuilt also logs this event on its final claim, without sending `task_finished`. |
 | `task_policy_error` | ERROR | A backoff callback raised or returned an invalid value. The worker uses its exponential backoff instead and records the task's original exception, not the callback error. |
 | `task_policy_inert` | WARNING | A `django_ox.testing` backend first enqueues a task with explicitly declared policy. Once per task path per backend instance. These backends accept and validate policy but do not retry, call backoff callbacks or enforce timeouts. |
+| `run_tasks_timeout_inert` | WARNING | `run_tasks()` runs a task with a configured timeout. Once per task path per call. The timeout is not enforced; `deadline()` and `remaining()` return `None`. Carries `event`, `task_path`, `backend` and `timeout_s`. |
+| `run_tasks_callback_failed` | ERROR | An emulated commit callback fails without becoming the attempt's recorded error. Applies to robust callbacks and non-robust body callbacks after the body has already failed. Includes callbacks that return with rollback marked. Logged with traceback and `event`, `task_id`, `task_path`, `queue`, `attempt` and `worker_id`. |
 | `task_reclaimed` | WARNING | The reaper took a task back from a worker that stopped refreshing its lock. One record per task. A pass whose stuck set changed while it ran (a lease renewed, or one more lease expired) instead emits a single record carrying `count` and no `task_id`, because it cannot say which tasks the reclaim covered. |
 | `task_lease_lost` | WARNING | A worker finished an attempt whose lease had already been reclaimed, so its write was dropped and no result was signalled. |
 | `task_outcome_reconnected` | WARNING | After a connection-level failure while recording an attempt's outcome, a new connection either recorded it or confirmed that the first write had already committed. Carries `outcome`, `already_written` and `duration_ms`; the usual outcome log follows. Recovery retries outcome persistence at most once, never the task body. Does not cover the watchdog's stuck-attempt records. |
@@ -728,15 +731,15 @@ A failed connect while recording a stuck attempt logs
 | Key | Present on | Meaning |
 | --- | --- | --- |
 | `event` | all events | The event name from the table above. |
-| `worker_id` | Worker events except `heartbeat_write_failed`, `schedule_source_unavailable`, `schedule_boundary_healed`, `schedule_boundary_heal_failed`, `schedule_row_skipped` and `schedule_lock_unavailable` for a stored schedule | Unique id of the worker emitting the record. With `--processes`, the slot number is the last part of the id. Settings-declared `schedule_lock_unavailable` events carry this key. The test-backend event `task_policy_inert` omits it. |
+| `worker_id` | Worker events except `heartbeat_write_failed`, `schedule_source_unavailable`, `schedule_boundary_healed`, `schedule_boundary_heal_failed`, `schedule_row_skipped` and `schedule_lock_unavailable` for a stored schedule; also `run_tasks_callback_failed` | Unique id of the worker emitting the record. With `--processes`, the slot number is the last part of the id. Settings-declared `schedule_lock_unavailable` events carry this key. Records from `run_tasks()` use the drain worker's hostname-pid-random id, created for each call. `task_policy_inert` and `run_tasks_timeout_inert` omit this key. |
 | `worker_class` | `claim_filter_sql_missing` | The Worker subclass's class name. |
 | `claimed` | `worker_batch_empty`, `worker_max_tasks_reached` | Task attempts this worker claimed in its run, failed attempts and retries included. |
-| `task_id` | worker task events | The task's UUID, as a string. Absent from `task_policy_inert`. |
+| `task_id` | worker task events; also `run_tasks_callback_failed`; absent from `run_tasks_timeout_inert` | The task's UUID, as a string. Absent from `task_policy_inert`. |
 | `task_path` | task events | Dotted path of the task function. |
-| `queue` | worker task events | Queue name. Absent from `task_policy_inert`. |
-| `attempt` | worker task events | Attempts consumed so far, including the current one. Absent from `task_policy_inert`. |
+| `queue` | worker task events; also `run_tasks_callback_failed`; absent from `run_tasks_timeout_inert` | Queue name. Absent from `task_policy_inert`. |
+| `attempt` | worker task events; also `run_tasks_callback_failed`; absent from `run_tasks_timeout_inert` | Attempts consumed so far, including the current one. Absent from `task_policy_inert`. |
 | `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_timed_out`, `task_stuck`, `task_lease_lost`, `task_outcome_reconnected`, `task_outcome_unrecorded` | Wall-clock duration of the attempt, in milliseconds. |
-| `timeout_s` | `task_timed_out`, `task_stuck` | The timeout that applied, in seconds. |
+| `timeout_s` | `task_timed_out`, `task_stuck`; also `run_tasks_timeout_inert` | The timeout that applied, in seconds. On `run_tasks_timeout_inert`, this is the configured timeout in seconds, which the helper does not enforce. |
 | `grace_s` | `task_stuck`, `timeouts_backstop_only` | `TASK_TIMEOUT_GRACE`, in seconds. |
 | `reason` | `timeouts_backstop_only` | Why the backstop is the whole enforcement: `interpreter` or `tracing_tool`. |
 | `reason` | `task_failed` | Why the task reached FAILED: `attempts_exhausted` or `backoff_declined`. |
@@ -745,7 +748,7 @@ A failed connect while recording a stuck attempt logs
 | `retry_in_s` | `task_retrying` | Retry delay in seconds, as a float. |
 | `policy` | `task_policy_error` | The policy field that failed; currently `backoff`. |
 | `error` | `task_policy_error` | What the callback did: raised, returned an awaitable, or returned an invalid value. A raised exception includes its traceback. |
-| `backend` | `task_policy_inert` | Test-backend alias. |
+| `backend` | `task_policy_inert`; also `run_tasks_timeout_inert` | Test-backend alias. On `run_tasks_timeout_inert`, this is the TASKS alias passed to `run_tasks()`. |
 | `declared` | `task_policy_inert` | Sorted list of explicitly declared policy field names. |
 | `status` | `task_reclaimed` | Status after reclaim: `READY` (requeued) or `LOST` (out of attempts). |
 | `count` | `task_reclaimed` without `task_id` | How many tasks that pass reclaimed. Present only on the batch record described above. |

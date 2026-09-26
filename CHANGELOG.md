@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Public, provisional `django_ox.testing.run_tasks()` helper for draining
+  due queued tasks in tests. Keep `OxBackend` in test settings to exercise
+  claiming, task outcomes, retries and backoff without a worker process.
+  `TestCase` uses savepoints and commit callback emulation. Use
+  `TransactionTestCase` when testing worker autocommit behaviour. The
+  helper does not enforce timeouts or dispatch schedules and reconcilers.
+  Use `run_tasks()` to run queued tasks inside a test's transaction and a
+  real worker for timeout tests.
+
 ### Fixed
 
 - `Worker.run_once()` timeout handling inside a caller's `transaction.atomic()`,

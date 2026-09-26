@@ -119,6 +119,7 @@ send_confirmation.enqueue(order_id=42)
 | `soft_time_limit`, `time_limit` | not a one-to-one mapping. A task's `timeout` sets its attempt deadline; `TASK_TIMEOUT_GRACE` and worker recycling remain worker-wide. See [Task timeouts](production.md#task-timeouts). |
 | Result backend | the same table, read through the standard result API. |
 | Flower | the [stats API, `ox_health`, the Prometheus endpoint and the admin page](monitoring.md) |
+| `task_always_eager` | Use `django_ox.testing.ImmediateBackend` to run once at enqueue. It runs even if the enclosing transaction later rolls back, and rejects `run_after`. To test queued execution, keep `OxBackend` and use the public, provisional [`run_tasks()`](patterns.md#run-queued-tasks-in-tests) helper. It runs due attempts with retry and backoff policy, without enforcing timeouts. |
 
 Per-task policy declarations require Django 6.1 or Django 5.2 with
 django-tasks 0.12+. They are not accepted by Django 6.0's `@task`
@@ -205,7 +206,7 @@ the admin today, see [Schedules in the database](stored-schedules.md).
 | `@periodic_task(crontab(...))` | a `SCHEDULES` entry, same five-field cron syntax |
 | `.schedule(delay=...)` | `run_after` |
 | `retries`, `retry_delay` | Backend defaults in `MAX_ATTEMPTS` and the backoff options, or per-task `max_attempts` and `backoff`. django-ox counts total claims, including the first. Per-task declarations require Django 6.1, or Django 5.2 with django-tasks 0.12+. |
-| `huey.immediate` in tests | `django_ox.testing.ImmediateBackend` or `django_ox.testing.DummyBackend`. They accept policy declarations but do not enforce retries, backoff or timeouts. Use a real worker to test enforcement. |
+| `huey.immediate` in tests | Use `django_ox.testing.ImmediateBackend` to run once at enqueue, or `DummyBackend` to record enqueues. Both accept policy declarations without enforcing retries, backoff or timeouts. For queued execution, keep `OxBackend` and use the public, provisional [`run_tasks()`](patterns.md#run-queued-tasks-in-tests) helper. It runs due attempts with retry and backoff policy. Test timeout enforcement against a real worker. |
 
 ## Switching over
 

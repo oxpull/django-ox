@@ -120,8 +120,11 @@ TASKS = {
   With `OxBackend`, Django 6.1 and Django 5.2 with django-tasks 0.12+ also
   accept provisional `max_attempts`, `backoff` and `timeout` keyword
   arguments. Django 6.0 rejects those arguments at import but supports
-  bare `@task`. Stock framework test backends also reject the extra fields
-  on fresh import; use `django_ox.testing` backends instead.
+  bare `@task`.
+  Stock framework test backends reject the extra fields on fresh import.
+  Use `django_ox.testing.ImmediateBackend` or `DummyBackend` for backend
+  substitution. Keep `OxBackend` and use the public, provisional
+  `django_ox.testing.run_tasks()` helper to test queued execution.
 - The worker imports a task by its dotted path, so the module must be
   importable in the worker process and the worker runs the same code as the
   producer; nothing is registered and there is no autodiscovery. `async def`
@@ -254,16 +257,24 @@ TASKS = {
 - A particular running task cannot be interrupted on demand. Each attempt
   can have a task, queue or backend execution timeout. Every table lives
   on the database your router sends `OxTask` to.
-- In tests use `django_ox.testing.ImmediateBackend` or
-  `django_ox.testing.DummyBackend` for `TASKS` on every supported Django
-  version. Both accept and validate `PolicyTask` fields. Immediate runs
-  each task once on the caller's thread; Dummy stores tasks without running
-  them. Neither retries, calls backoff callbacks or enforces timeouts.
-  Each backend instance logs `task_policy_inert` once per task path with
-  explicitly declared policy. Test policy enforcement against a real worker.
-  Stock framework backends reject policy declarations on fresh import.
-  A task built before switching to stock Immediate with `override_settings`
-  can instead retain fields that the backend silently ignores.
+- In tests, use `django_ox.testing.ImmediateBackend` to run once at enqueue,
+  or `django_ox.testing.DummyBackend` to record enqueues. Both accept and
+  validate `PolicyTask` fields on supported Django versions. Neither
+  retries, calls backoff callbacks or enforces timeouts. Immediate runs
+  even if the enclosing transaction later rolls back, and rejects
+  `run_after`. For queued execution, keep `OxBackend` and use the public,
+  provisional `django_ox.testing.run_tasks()` helper. It runs due attempts
+  through the configured worker class, including retries and backoff.
+  Pass `backend=` for the worker class you need, including the Pro alias
+  for workflows and rate limits. Rows are selected by queue, regardless
+  of which backend enqueued them. `TestCase` uses savepoints and commit
+  callback emulation. Use `TransactionTestCase` to test worker autocommit
+  behaviour. Exit caller callback-capture blocks before draining tasks
+  they enqueue. Advance time between calls to test delayed retries.
+  No timeouts, lease renewal, schedules or reconcilers run automatically.
+  Test timeout enforcement and worker infrastructure against a real
+  worker. See [Run queued tasks in tests](patterns.md#run-queued-tasks-in-tests)
+  for transaction and callback differences.
 - Batches, unique tasks, rate limiting and workflows are in
   [Oxpull Pro](pro.md), a paid add-on. `django_ox.stats` and `ox_health`
   are in django-ox.

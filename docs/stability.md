@@ -99,9 +99,12 @@ export names this page does not list; those names are not public.
 - **The structured-log contract**: the event names and stable `extra` keys
   documented on the [Monitoring](monitoring.md) page. This includes the
   policy events and keys, even though the declaration API is provisional.
-- **The test backends** `django_ox.testing.ImmediateBackend` and
-  `django_ox.testing.DummyBackend`. They accept policy declarations but do
-  not enforce retries, backoff or timeouts.
+- **The testing helpers** `django_ox.testing.ImmediateBackend`,
+  `django_ox.testing.DummyBackend` and `django_ox.testing.run_tasks`.
+  The backends accept policy declarations but do not enforce retries,
+  backoff or timeouts. `run_tasks()` drains due queued tasks through the
+  configured worker class, including retries and backoff. It does not
+  enforce timeouts. `run_tasks()` is public and provisional.
 - **The database schema** of `OxTask` and `OxScheduleTick`, evolved only
   through shipped migrations.
 - **`django_ox.__version__`.**
@@ -144,9 +147,11 @@ model's non-schema helper methods are not part of the contract.
 In `django_ox.tasks`, only `PolicyTask` and `BackoffCallback` are public,
 with the provisional status above. `MAX_ATTEMPTS_LIMIT` and
 `validate_policy` are implementation details. In `django_ox.testing`, only
-`ImmediateBackend` and `DummyBackend` are public. Timeout implementation
-classes and methods, including `TaskTimeouts.enabled` and
-`TaskTimeouts.for_attempt()`, are not public.
+`ImmediateBackend`, `DummyBackend` and `run_tasks` are public.
+`run_tasks` is provisional. `django_ox._run_tasks` and `Worker._task_body`
+are private implementation details. Timeout implementation classes and
+methods, including `TaskTimeouts.enabled` and `TaskTimeouts.for_attempt()`,
+are not public.
 
 ## Versioning
 

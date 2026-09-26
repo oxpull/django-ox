@@ -321,9 +321,118 @@ to stock Immediate can instead retain policy fields that the backend
 silently ignores. These test backends do not make policy declarations work
 on Django 6.0, whose decorator rejects the keyword arguments.
 
-Keep django-ox in the settings you use for integration tests, where the point is
-to exercise claiming and retries for real. Test retry decisions, backoff
-delays and timeout enforcement against a real worker.
+Keep `OxBackend` for tests that exercise claiming, retries and backoff.
+Use [`run_tasks()`](#run-queued-tasks-in-tests) to drain due tasks in test code.
+Test timeout enforcement and worker infrastructure against a real worker.
+
+## Run queued tasks in tests
+
+`django_ox.testing.run_tasks()` is public and provisional. Keep `OxBackend` in your test settings and create its tables through migrations. Use this helper to run queued tasks without a worker process.
+
+```python
+run_tasks(*, backend="default", queues=None, max_tasks=None, raise_failures=False) -> list[TaskResult]
+```
+
+All arguments are keyword-only. `backend` must name an `OxBackend` alias. It selects the worker class and its default queues, including a configured `WORKER_CLASS`. Rows are claimed by queue, regardless of which backend enqueued them. Aliases sharing queues share work. For Pro workflows and rate limits, pass the Pro alias as `backend`.
+
+`queues=None` uses the worker's queues. An empty list does the same. Empty backend `QUEUES` means every queue. An explicit list restricts claiming to those queues.
+
+Each attempt uses the configured worker's claim and execution methods on the caller's thread and database connection. It runs due `READY` rows that pass the worker's claim filters. Future `run_after` values, pending retry delays and other statuses are left alone. Tasks enqueued by tasks or their emulated commit callbacks can run in the same call. Async task bodies can see the test's uncommitted rows. Worker outcome recording, backoff and lifecycle signals apply.
+
+The return value is a list of framework `TaskResult` objects in attempt order. Each object captures that attempt's recorded state. Retries produce separate results. Failures are recorded without raising by default. With `raise_failures=True`, the same exception is raised after recording and attempt callbacks, including for retryable failures. Later tasks are left unclaimed. A retried attempt's result is `READY` (a retry is pending), and reading its `return_value` raises, following the framework's rule for unfinished results.
+
+By default, it claims until no task is claimable. `max_tasks=N` limits attempts, including retries, and returns quietly when the limit is reached. Zero makes no claim. Use a nonnegative integer, excluding booleans. It runs at most 1,000 attempts without an explicit limit. It raises `RuntimeError` if due `READY` work remains then, even if that work is gated or rate-limited. Attempt limits do not bound elapsed time.
+
+Call it from synchronous test code. Django's async `TestCase` methods can use `sync_to_async`. Do not call it from tasks, their callbacks or signal receivers. Nested drains are refused. Broken caller transactions are refused before any claim.
+
+### Enqueue, roll back and advance time
+
+These examples use Django 6.x imports. On Django 5.2, import `task` from `django_tasks` instead. Keep the task function at module scope so the worker can import it.
+
+```python
+from django.db import transaction
+from django.tasks import task
+from django.test import TestCase
+
+from django_ox.testing import run_tasks
+
+
+@task
+def add(a, b):
+    return a + b
+
+
+class TaskTests(TestCase):
+    def test_runs_queued_task(self):
+        add.enqueue(2, 3)
+        results = run_tasks(raise_failures=True)
+        self.assertEqual([result.return_value for result in results], [5])
+
+    def test_rolled_back_enqueue_never_runs(self):
+        with self.assertRaises(ValueError):
+            with transaction.atomic():
+                add.enqueue(2, 3)
+                raise ValueError("Cancel this transaction")
+
+        self.assertEqual(run_tasks(), [])
+```
+
+The rolled-back enqueue leaves no task row to claim. `ImmediateBackend` runs during enqueue, even if the transaction later rolls back, and rejects `run_after`.
+
+Patch `timezone.now()` to move the due cutoff. A task is due at its exact `run_after` time.
+
+```python
+from datetime import timedelta
+from unittest.mock import patch
+
+from django.utils import timezone
+
+
+class DelayedTaskTests(TestCase):
+    def test_run_after(self):
+        now = timezone.now()
+        due = now + timedelta(minutes=5)
+
+        with patch("django.utils.timezone.now", return_value=now):
+            add.using(run_after=due).enqueue(2, 3)
+            self.assertEqual(run_tasks(), [])
+
+        with patch("django.utils.timezone.now", return_value=due):
+            results = run_tasks(raise_failures=True)
+            self.assertEqual([result.return_value for result in results], [5])
+```
+
+For retries, advance time between calls by at least the configured backoff delay. Freezing a later time does not drain every retry. Each new retry is scheduled relative to that frozen instant. A zero backoff can retry within one call. Pro rate-limit windows use the database clock, which this patch does not advance.
+
+### Transactions and callbacks
+
+`TestCase` holds database transactions open. `run_tasks()` uses savepoints on every connection already inside an atomic block when an attempt starts. Task-owned atomic blocks still follow Django's rules. Under `TransactionTestCase` in autocommit, no savepoints or callback emulation are added. Writes and commit callbacks then follow worker autocommit behaviour. pytest-django equivalents are `transactional_db` and `django_db(transaction=True)`.
+
+In an atomic block, commit callbacks registered by the body run when the body finishes, before outcome recording. Callbacks registered during outcome handling run afterwards. This emulates a commit without committing the transaction. The caller's existing callbacks stay pending. If application code enqueues through `on_commit()`, exit `captureOnCommitCallbacks(execute=True)` before calling `run_tasks()`.
+
+Callbacks run in registration order, one database at a time. A callback registered by another callback runs after those already waiting. On a worker in autocommit, that new callback runs immediately. Callbacks discarded by a savepoint rollback do not run. A surrounding callback-capture context does not execute the task's callbacks twice.
+
+Each emulated callback has its own savepoints. If it raises, its writes and newly registered callbacks roll back. A worker in autocommit keeps writes made before the error. A callback returning with a transaction marked for rollback fails with `TransactionManagementError`, naming the task, callback and database.
+
+Robust callback failures are logged and leave the attempt's outcome unchanged. A non-robust body callback can fail an otherwise successful attempt. If the body already failed, its error is kept and the callback error is logged. Remaining callbacks are dropped after a non-robust failure. A non-robust outcome callback failure stops the drain without changing the recorded outcome.
+
+Do not edit Django's pending callback list directly. If its caller-owned prefix changes, `run_tasks()` raises `RuntimeError` and stops handling callbacks on that database. Detection during body callback emulation also records the attempt as failed.
+
+### Differences to test against a worker
+
+Inside a `TestCase` transaction:
+
+- A plain task-body exception keeps preceding writes. An ORM error that marks rollback discards the attempt's writes on that database. Other databases follow their own transaction state.
+- A body returning with rollback marked fails with `TransactionManagementError`. This includes caught ORM errors and `set_rollback(True)`. A worker in autocommit keeps preceding writes and can succeed. Put a statement whose database error you catch inside its own `atomic()` block.
+- PostgreSQL raw SQL errors can abort the transaction without Django marking rollback. The attempt's savepoint then rolls back, including when the body caught the error. A caught error then fails with `InternalError`. SQLite and MySQL undo only the failed statement and can keep preceding writes.
+- `select_for_update()` can succeed without a task-owned atomic block, hiding a production error on databases that require one. Test task transaction boundaries with `TransactionTestCase`.
+- Body callbacks wait until the body finishes, even if a task-owned block exits earlier. In autocommit, a callback registered outside an atomic block runs immediately. Code reading state set by its own callback can behave differently.
+- Other connections cannot see the test's uncommitted rows. Callback timing and cross-database order differ from production.
+- A later caller rollback removes database writes, but cannot undo external callback effects such as sent mail. A worker would wait for the enqueue to commit before claiming it.
+
+Use a real worker to test timeout enforcement and worker infrastructure. `run_tasks()` runs no poll loop, thread pool, lease renewal, timeout watchdog, reaper, schedule dispatcher or process recycling. It does not dispatch reconcilers. Enqueue scheduled tasks and reconcilers explicitly if the test needs their work.
+
+Timeouts are inert. `deadline()` and `remaining()` return `None`. A configured timeout produces `run_tasks_timeout_inert` once per task path per call. A hanging body or callback hangs the test.
 
 ## Not in the core
 

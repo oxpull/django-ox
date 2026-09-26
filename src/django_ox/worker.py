@@ -15,7 +15,15 @@ import time
 import uuid
 from collections.abc import Callable, Coroutine, Generator, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from contextlib import ExitStack, closing, contextmanager, suppress
+from contextlib import (
+    AbstractContextManager,
+    ExitStack,
+    closing,
+    contextmanager,
+    nullcontext,
+    suppress,
+)
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from inspect import iscoroutinefunction
@@ -129,6 +137,14 @@ MISSED_RENEWAL_REPORT_INTERVAL = 30.0
 # abandoned, the worker says so with a traceback the first time and after
 # that at most this often, with the number of failures since it last did.
 DISPATCH_FAILURE_REPORT_INTERVAL = 60.0
+
+# The task path of the attempt Worker.execute() is running in this context, or
+# None outside one. django_ox.testing.run_tasks() reads it to refuse a drain
+# started from inside a task. A context variable rather than a thread-local or
+# an attribute of the worker: an async task's coroutine runs where asgiref
+# puts it, with the caller's context copied across, and a task can reach code
+# that builds a worker of its own.
+_executing: ContextVar[str | None] = ContextVar("django_ox_executing", default=None)
 
 
 def _load_async_exc_injector() -> Callable[[int], None] | None:
@@ -2375,9 +2391,11 @@ class Worker:
         # that runs another inline finds its own restored afterwards.
         outer = getattr(self._attempt_local, "policy", None)
         self._attempt_local.policy = None
+        executing = _executing.set(db_task.task_path)
         try:
             self._run_attempt(db_task, inline=inline)
         finally:
+            _executing.reset(executing)
             self._attempt_local.policy = outer
             with self._in_flight_lock:
                 self._in_flight.discard(held)
@@ -2441,21 +2459,26 @@ class Worker:
             timeout = self.timeouts.for_attempt(
                 db_task.queue_name, task_policy(task)[2]
             )
-            if timeout is None:
-                # No timeout for this attempt: the call is the one the worker
-                # made directly, frame for frame, so the
-                # stored traceback of an ordinary failure is unchanged.
-                if task.takes_context:
-                    raw_return_value = task.call(
-                        TaskContext(task_result=task_result),
-                        *db_task.args,
-                        **db_task.kwargs,
-                    )
+            # A with statement adds no frame, so the seam leaves the stored
+            # traceback as it was; see _task_body.
+            with self._task_body(db_task):
+                if timeout is None:
+                    # No timeout for this attempt: the call is the one the
+                    # worker made directly, frame for frame, so the
+                    # stored traceback of an ordinary failure is unchanged.
+                    if task.takes_context:
+                        raw_return_value = task.call(
+                            TaskContext(task_result=task_result),
+                            *db_task.args,
+                            **db_task.kwargs,
+                        )
+                    else:
+                        raw_return_value = task.call(*db_task.args, **db_task.kwargs)
                 else:
-                    raw_return_value = task.call(*db_task.args, **db_task.kwargs)
-            else:
-                raw_return_value = self._call_task(task, db_task, task_result, timeout)
-            return_value = normalize_json(raw_return_value)
+                    raw_return_value = self._call_task(
+                        task, db_task, task_result, timeout
+                    )
+                return_value = normalize_json(raw_return_value)
         except TaskTimeout as exc:
             duration_ms = _elapsed_ms(started)
             logger.warning(
@@ -2535,6 +2558,24 @@ class Worker:
                 sender=type(self.backend),
                 task_result=task_result_from_db(db_task, task=task),
             )
+
+    def _task_body(self, db_task: OxTask) -> AbstractContextManager[None]:
+        """
+        The context an attempt's task body runs in: entered once the task is
+        rebuilt, its task_started signal sent and its timeout chosen, and left
+        when the call has returned and its value been converted for storage,
+        before the outcome is recorded. It encloses nothing else, so a
+        failure in the rebuild, a signal or the outcome write never passes
+        through it.
+
+        The worker's own is empty. django_ox.testing.run_tasks() gives the
+        body a savepoint and runs its commit callbacks here. An exception the
+        body raises reaches the failure handling as the same object with the
+        same traceback, unless the context raises one of its own in its
+        place; the with statement that enters it is in _run_attempt's frame
+        and adds none.
+        """
+        return nullcontext()
 
     # -- timeouts ----------------------------------------------------------
 

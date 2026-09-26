@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 from django.urls import reverse
+from django.utils import timezone
 
 from django_ox import metrics
 from django_ox.models import OxTask
@@ -270,6 +271,53 @@ class TestCollector:
         assert 'django_ox_tasks{queue="default",status="successful"} 3.0' in text
         assert 'django_ox_failure_rate{queue="default"} 0.25' in text
         assert 'django_ox_oldest_ready_age_seconds{queue="emails"}' not in text
+
+    def test_window_forwards_to_the_failure_rate_reading(self):
+        """collector(window=...) must reach failure_rate, not just throughput."""
+        from prometheus_client import CollectorRegistry, generate_latest
+
+        make_task(OxTask.Status.SUCCESSFUL, finished_minutes_ago=30)
+        make_task(OxTask.Status.FAILED, finished_minutes_ago=1)
+
+        def scrape(window=None):
+            registry = CollectorRegistry()
+            kwargs = {} if window is None else {"window": window}
+            registry.register(metrics.collector(**kwargs))
+            return generate_latest(registry).decode()
+
+        # Default (5-minute) window: only the FAILED task (1 min ago) is in range.
+        assert 'django_ox_failure_rate{queue="default"} 1.0' in scrape()
+        # 1-hour window: both finished tasks are in range -> 1 failed of 2.
+        assert 'django_ox_failure_rate{queue="default"} 0.5' in scrape(
+            window=timedelta(hours=1)
+        )
+
+    @pytest.mark.django_db(databases=["default", "alt"])
+    def test_using_reads_the_given_alias_not_default(self):
+        """
+        collector(using=...) must read the alias given, not whatever
+        db_for_write resolves to.
+        """
+        from prometheus_client import CollectorRegistry, generate_latest
+
+        OxTask.objects.using("alt").create(
+            task_path="tests.tasks.add",
+            backend_name="default",
+            queue_name="alias-only-queue",
+            status=OxTask.Status.READY,
+            enqueued_at=timezone.now(),
+        )
+
+        def scrape(using=None):
+            registry = CollectorRegistry()
+            kwargs = {} if using is None else {"using": using}
+            registry.register(metrics.collector(**kwargs))
+            return generate_latest(registry).decode()
+
+        assert 'queue="alias-only-queue"' not in scrape()
+        assert 'django_ox_tasks{queue="alias-only-queue",status="ready"} 1.0' in scrape(
+            using="alt"
+        )
 
 
 OTEL_SNIPPET = re.compile(r"```python\n(?P<code>from opentelemetry[^`]*)```")

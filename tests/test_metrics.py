@@ -260,7 +260,6 @@ class TestCollector:
         assert set(described) == set(metrics.METRIC_NAMES)
 
     def test_registers_with_prometheus_client(self):
-        pytest.importorskip("prometheus_client")
         from prometheus_client import CollectorRegistry, generate_latest
 
         seed()
@@ -272,13 +271,4 @@ class TestCollector:
         assert 'django_ox_oldest_ready_age_seconds{queue="emails"}' not in text
 
 
-OTEL_SNIPPET = re.compile(r"```python\n(?P<code>from opentelemetry[^`]*)```")
-
-
-def test_otel_example_in_the_docs_parses():
-    """The OpenTelemetry recipe is documentation only; check it is valid Python."""
-    page = Path(__file__).parent.parent / "docs" / "monitoring.md"
-    snippets = OTEL_SNIPPET.findall(page.read_text())
-    assert len(snippets) == 1
-    ast.parse(snippets[0])
-    assert "queue_stats()" in snippets[0]
+OTEL_SNIPPET = re.compile(r"

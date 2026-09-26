@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Scrape tests pinning that `metrics.collector()` forwards its `window` and
+  `using` arguments instead of silently using the defaults.
+
 - Public, provisional `django_ox.testing.run_tasks()` helper for draining
   due queued tasks in tests. Keep `OxBackend` in test settings to exercise
   claiming, task outcomes, retries and backoff without a worker process.

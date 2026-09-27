@@ -96,7 +96,7 @@ input by string formatting.
 
 | Version | Supported |
 | ------- | --------- |
-| 1.5.x   | yes       |
+| 1.6.x   | yes       |
 | older   | no        |
 
 ## Reporting a vulnerability

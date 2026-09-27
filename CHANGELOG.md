@@ -40,6 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PostgreSQL, with `USE_TZ=False`, and for later cutoffs on SQLite and MySQL.
   The same rejection applies with `--dry-run` and `--format json`.
 
+- Skip lease renewal for `Worker.run_once()` inside a caller's atomic block
+  on the worker's database. In 1.1.0 through 1.5.0, a task that outlived
+  `renew_interval` could delay return on SQLite and MySQL by up to
+  `renew_interval + 5 s` after the task ended. `renew_interval` is
+  `LOCK_TIMEOUT / 3`, so 100 s at the default 300 s. Outcome recording was
+  unaffected. Calls outside an atomic block on the worker's database still
+  renew their leases, including when autocommit is turned off. No caller
+  changes are required.
+
 - `Worker.run_once()` timeout handling inside a caller's `transaction.atomic()`,
   including Django's `TestCase`. From 0.3.0 through 1.5.0, an attempt ending in
   `TaskTimeout` reset and closed the calling thread's database connections.

@@ -1057,6 +1057,8 @@ With inline `run_once()`, a `KeyboardInterrupt` or `SystemExit` raised
 by the callback propagates to the caller. The row remains `RUNNING`
 for lease recovery, matching inline task-interrupt handling.
 
+Inside a caller's atomic block on the worker's database, `run_once()` does not start a lease-renewal thread: the claim and outcome are written in the caller's transaction. Renewal remains enabled outside an atomic block on that database, including when autocommit is turned off.
+
 A callback can still run after the attempt has lost its lease.
 The ownership check then drops its outcome write and logs
 `task_lease_lost`. A callback is not a safe place for external side

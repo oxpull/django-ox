@@ -99,6 +99,14 @@ export names this page does not list; those names are not public.
 - **The structured-log contract**: the event names and stable `extra` keys
   documented on the [Monitoring](monitoring.md) page. This includes the
   policy events and keys, even though the declaration API is provisional.
+  It also includes `worker_claim_released`,
+  `worker_claim_recovery_failed`, `worker_claim_recovery_expired` and
+  `worker_claim_release_refused`, and their documented keys. These are
+  stable, not provisional. The new keys include `claim_recovery`,
+  `old_epoch`, `new_epoch`, `refunded_attempts`, `attempts` and
+  `worker_ids`. On `worker_poll_failed`, `claim_recovery` is `"pending"`
+  while a recovery read is owed, or `null` otherwise. The recovery
+  events also use `"expired"` as documented.
 - **The testing helpers** `django_ox.testing.ImmediateBackend`,
   `django_ox.testing.DummyBackend` and `django_ox.testing.run_tasks`.
   The backends accept policy declarations but do not enforce retries,
@@ -152,6 +160,28 @@ with the provisional status above. `MAX_ATTEMPTS_LIMIT` and
 are private implementation details. Timeout implementation classes and
 methods, including `TaskTimeouts.enabled` and `TaskTimeouts.for_attempt()`,
 are not public.
+
+### Worker implementation details
+
+`Worker` internals remain **Not public**. This includes `_handed_off`,
+`_unsettled`, `_claimer`, `_claim`, `_claim_inline`, `_recover_claims`
+and `_release_claim`.
+
+`Worker._run_attempt` is also private. It now returns a `bool` indicating
+whether the outcome was recorded. A subclass override that returns
+`None` is treated as "outcome not recorded". This keeps its row excluded
+from claim recovery; it does not itself change the row's outcome.
+
+Subclass authors may notice two behaviour changes. The base
+`claim_one()` now holds a per-worker reentrant lock while claiming.
+Two threads claiming on the same `Worker` instance are serialised:
+the second waits rather than being refused. Recovery reads use the
+same lock.
+
+`Worker.run_once()` and `testing.run_tasks()` may raise a database error
+from a pending recovery read before making any new claim. After a new
+claim raises, an immediate recovery attempt does not replace the
+original claim error, which is still raised to the caller.
 
 ## Versioning
 

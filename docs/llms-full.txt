@@ -3609,7 +3609,81 @@ of date, open an issue with the link that shows it.
 Run `manage.py ox_worker` as a foreground process under your process
 supervisor. A worker started while the database refuses connections stays
 up and polls until it returns. Failed passes are logged as
-`worker_poll_failed`, and the connection is reopened.
+`worker_poll_failed`, and the connection is reopened. After a claim raises
+a database error, the next pass first reads the worker's own unconfirmed
+claims. It does not replay the failed claim or assume that it rolled back.
+
+A claim can commit on the database even though the worker receives an
+error instead of its reply. On a connection the worker owns, in
+autocommit, the worker checks for its own `RUNNING` rows that no claim
+returned. It excludes every epoch of a row that is in flight, has been
+handed off, or has an unsettled outcome. It never recovers another
+worker's rows.
+
+For each eligible row, recovery returns it to `READY`, clears its lease
+and owner, increments `lease_epoch` by 1 and refunds 1 attempt. It removes
+the worker's last entry from `worker_ids` and clears `started_at` only
+if `attempts` reaches 0. Each update is conditional on the row's primary
+key, `RUNNING` status, owner and the epoch read. Any worker can then claim
+the row afresh. A row whose history is inconsistent is not released:
+`attempts` must equal the number of `worker_ids`, and the last entry must
+be this worker. A refusal is logged at ERROR as
+`worker_claim_release_refused` and should be reported as a defect.
+
+Recovery is limited to `LOCK_TIMEOUT` after the latest failed claim.
+Each later failed claim refreshes that window, but does not extend any
+row's lease. Recovery also checks each row against the reaper's own
+lease-expiry predicate and clock. A row the reaper could already take
+is left to it, even within the recovery window.
+
+`Worker.run()` checks before claiming on the next poll pass. If the
+database is still unreachable, recovery stays pending and is retried on
+later passes until it succeeds or the window expires. A failed recovery
+read ends that pass with `worker_poll_failed`; no new claim is made.
+
+The worker makes at most one recovery attempt when stopping, without
+scheduling a recovery retry. On PostgreSQL with psycopg 3, pooled or not,
+this attempt waits at most five seconds, including connection
+establishment and every reply, then gives up.
+
+On MySQL, the attempt uses a private connection with five-second connect,
+read and write timeouts. A shorter configured timeout is raised to five
+seconds. These are per-operation limits, not one deadline for the whole
+attempt. mysqlclient may retry a read, extending its effective read limit
+to 15 seconds. Other configurations, including PostgreSQL with psycopg2
+and SQLite, have no recovery-specific deadline.
+
+A recovery error does not prevent shutdown. These limits apply only to the
+stop-time recovery attempt, not to shutdown as a whole. Existing waits
+elsewhere, including MySQL claim-path reconnection and pooled PostgreSQL
+health checks, can delay shutdown before this attempt is reached.
+
+`Worker.run_once()` and `testing.run_tasks()` instead attempt recovery
+once immediately after a claim raises, then re-raise the original claim
+error. A recovery error at that point is logged without replacing the
+claim error. After a successful release, the next call can claim and run
+the task normally. If recovery is still pending from an earlier call,
+the next call attempts it before claiming anything. A database error
+from that pending recovery read is raised to the caller.
+
+This recovery does not run inside a caller's transaction, including
+`atomic()` and Django `TestCase`, or when the caller has disabled
+autocommit. There, the claim belongs to the caller's transaction and
+rolls back with it.
+
+`--batch` does not finish while recovery is pending. `--max-tasks` counts
+only claims that returned; a claim that raised uses no slot. Oxpull Pro
+also counts admission only for a claim that returned, so a released row
+is counted when it is claimed again.
+
+No database statement is added to the ordinary task path. A recovery look
+uses one SELECT over `RUNNING` rows filtered to this worker. It may make
+follow-up SELECTs, by primary key, for rows belonging to excluded entries
+that the first read did not return, with one SELECT per chunk of up to 500
+primary keys. Recovery then uses one conditional UPDATE per eligible row.
+Failed recovery reads may be retried. If a release commits but its own
+reply is lost, there is no `worker_claim_released` event for that release;
+the next read finds the row already `READY`.
 
 With settings schedules, the worker opens its first connection during
 polling. With `DatabaseScheduleSource`, a refused startup read logs
@@ -4732,6 +4806,20 @@ in 1.4.0 and later, private connects that keep failing for about
 `LOCK_TIMEOUT`, with no pooled spare, can still do so.
 See [PostgreSQL pooling](#database-connections-and-postgresql-pooling).
 
+Before 1.7.0, a claim that committed while its reply was lost could also
+leave a row to lapse on its final attempt without the task body ever
+running. It became `LOST` with a `TaskAbandoned` record saying that the
+worker "stopped renewing its lease", although the worker had never
+started the task. From 1.7.0, upgraded workers recover their own
+unconfirmed claims within `LOCK_TIMEOUT`, before the row's lease
+expires, and return them to `READY` with the attempt refunded. The old
+outcome remains possible if the worker dies before it can check, the
+database remains unreachable past `LOCK_TIMEOUT`, or the claim was made
+by a worker that has not been upgraded. In a mixed fleet, an upgraded
+worker does not recover another worker's claims. Rows left to the reaper
+are still requeued with the attempt spent, or marked `LOST` on the final
+attempt with the same `TaskAbandoned` text.
+
 Raising `LOCK_TIMEOUT` gives delayed renewals more time, but does not fix
 connection starvation and delays recovery from dead workers. See
 [Tuning LOCK_TIMEOUT](#tuning-lock_timeout).
@@ -4753,6 +4841,15 @@ worker between the claim and the call has used an attempt without running,
 and a task that exhausts its stored budget this way reaches a terminal
 state having never executed. The window is small: a worker claims only
 when it has a free thread and hands the task straight to it. It is not zero.
+A claim the worker could not confirm is different: if the worker finds
+that it landed and can safely release it before its lease expires and
+within the recovery window, the attempt is refunded. For that claim,
+the attempt count then reflects claims that reached a worker, not the
+unconfirmed claim. This does not guarantee that every counted claim ran
+the task body. After a refund, `last_attempted_at` keeps the instant of
+the lost claim. A `READY` row can therefore have `attempts` equal to 0
+and `last_attempted_at` set. `started_at` is cleared only when the refund
+reduces `attempts` to 0.
 
 At enqueue, a task's declared `max_attempts` takes precedence over the
 backend's `MAX_ATTEMPTS`, which defaults to 3. That value is stored on the
@@ -5654,7 +5751,11 @@ The message text is not part of the contract. The keys are.
 | `schedule_boundary_healed` | INFO | A stored schedule's timing had changed without its activation boundary moving, so the boundary was moved onto the current timing. Expected after a bulk update; repeated for one schedule is not. |
 | `schedule_boundary_heal_failed` | WARNING | That move failed and will be retried. |
 | `worker_error` | ERROR | The execution wrapper itself raised (an internal worker error, not a task failure). A connection-level outcome-write failure whose recovery on a new connection also failed is reported as `task_outcome_unrecorded` instead. |
-| `worker_poll_failed` | WARNING | A database error ended one pass of the poll loop. The pass is abandoned and retried on the next one; the worker keeps running. A steady stream of it means the database is unreachable rather than slow. |
+| `worker_claim_released` | WARNING | A claim raised an error even though it had committed. This worker returned the row to `READY` and refunded 1 attempt. Includes `task_id`, `task_path`, `queue`, `attempt` after the refund, `worker_id`, `old_epoch`, `new_epoch`, `refunded_attempts` and `reason` set to `claim_outcome_unknown`. |
+| `worker_claim_recovery_failed` | WARNING | A recovery read could not run or finish after a claim error in `run_once()` or `run_tasks()`, or while stopping. Includes a traceback. `claim_recovery` is `pending` if recovery remains due, or `expired` when stopping without another retry or when `run_tasks()` will not retry recovery in that call. Any unrecovered row is then left to the reaper. |
+| `worker_claim_recovery_expired` | WARNING | The recovery window passed before recovery completed, or a recovery read found a row whose lease the reaper could already take. `claim_recovery` is `expired`. Window expiry has no task id; a row-specific event includes `task_id`, `task_path` and `queue`. The reaper handles the row with the attempt still charged. |
+| `worker_claim_release_refused` | ERROR | A row's history is inconsistent: `attempts` does not equal the number of `worker_ids`, or the last entry is not this worker. The row was not released and is left to the reaper. Includes `task_id`, `task_path`, `queue`, `attempts` and `worker_ids`. Report this as a defect. |
+| `worker_poll_failed` | WARNING | A database error ended one pass of the poll loop. The pass is abandoned and retried on the next one; the worker keeps running. `claim_recovery` is `pending` while a recovery read is owed, or `null` otherwise. A failed recovery read prevents new claims for that pass. A steady stream of this event means database operations are failing, not merely slow. |
 | `watchdog_error` | ERROR | The timeout watchdog failed while handling an armed attempt or cleaning up a batch's connection. Cleanup includes closing a private connection or returning a borrowed connection. A database error while closing the private connection is suppressed without this event. The watchdog thread continues. |
 | `task_stuck_unrecorded` | WARNING | A timed-out attempt could not be recorded as failed. The worker recycles regardless, so the row is recovered by the reaper rather than by this write. |
 | `watchdog_connection_unavailable` | WARNING | On a pooled PostgreSQL database, the timeout watchdog could get neither a private connection nor one from the pool. Logged once per batch. Every record in the batch fails and logs `task_stuck_unrecorded`. The worker recycles regardless. This event has no time-based rate limit. |
@@ -5695,18 +5796,19 @@ A failed connect while recording a stuck attempt logs
 | Key | Present on | Meaning |
 | --- | --- | --- |
 | `event` | all events | The event name from the table above. |
-| `worker_id` | Worker events except `heartbeat_write_failed`, `schedule_source_unavailable`, `schedule_boundary_healed`, `schedule_boundary_heal_failed`, `schedule_row_skipped` and `schedule_lock_unavailable` for a stored schedule; also `run_tasks_callback_failed` | Unique id of the worker emitting the record. With `--processes`, the slot number is the last part of the id. Settings-declared `schedule_lock_unavailable` events carry this key. Records from `run_tasks()` use the drain worker's hostname-pid-random id, created for each call. `task_policy_inert` and `run_tasks_timeout_inert` omit this key. |
+| `worker_id` | Worker events except `heartbeat_write_failed`, `schedule_source_unavailable`, `schedule_boundary_healed`, `schedule_boundary_heal_failed`, `schedule_row_skipped` and `schedule_lock_unavailable` for a stored schedule; also `run_tasks_callback_failed`; includes `worker_claim_released` | Unique id of the worker emitting the record. With `--processes`, the slot number is the last part of the id. Settings-declared `schedule_lock_unavailable` events carry this key. Records from `run_tasks()` use the drain worker's hostname-pid-random id, created for each call. `task_policy_inert` and `run_tasks_timeout_inert` omit this key. On `worker_claim_released`, identifies the worker that made the unconfirmed claim and released it. |
 | `worker_class` | `claim_filter_sql_missing` | The Worker subclass's class name. |
 | `claimed` | `worker_batch_empty`, `worker_max_tasks_reached` | Task attempts this worker claimed in its run, failed attempts and retries included. |
-| `task_id` | worker task events; also `run_tasks_callback_failed`; absent from `run_tasks_timeout_inert` | The task's UUID, as a string. Absent from `task_policy_inert`. |
-| `task_path` | task events | Dotted path of the task function. |
-| `queue` | worker task events; also `run_tasks_callback_failed`; absent from `run_tasks_timeout_inert` | Queue name. Absent from `task_policy_inert`. |
-| `attempt` | worker task events; also `run_tasks_callback_failed`; absent from `run_tasks_timeout_inert` | Attempts consumed so far, including the current one. Absent from `task_policy_inert`. |
+| `task_id` | Worker task events, including `worker_claim_released`, row-specific `worker_claim_recovery_expired` and `worker_claim_release_refused`; also `run_tasks_callback_failed`; absent from `run_tasks_timeout_inert` | The task's UUID primary key, as a string. Absent from `task_policy_inert`. Absent from `worker_claim_recovery_expired` when only the recovery window expired. |
+| `task_path` | Task events, including `worker_claim_released`, row-specific `worker_claim_recovery_expired` and `worker_claim_release_refused` | Dotted path of the task function. Absent from `worker_claim_recovery_expired` when only the recovery window expired. |
+| `queue` | Worker task events, including `worker_claim_released`, row-specific `worker_claim_recovery_expired` and `worker_claim_release_refused`; also `run_tasks_callback_failed`; absent from `run_tasks_timeout_inert` | Queue name. Absent from `task_policy_inert`. Absent from `worker_claim_recovery_expired` when only the recovery window expired. |
+| `attempt` | Worker task events, including `worker_claim_released`; also `run_tasks_callback_failed`; absent from `run_tasks_timeout_inert` | Attempts consumed so far, including the current one. On `worker_claim_released`, the count after the refund, which can be 0. Absent from `task_policy_inert`. |
 | `duration_ms` | `task_succeeded`, `task_retrying`, `task_failed`, `task_timed_out`, `task_stuck`, `task_lease_lost`, `task_outcome_reconnected`, `task_outcome_unrecorded` | Wall-clock duration of the attempt, in milliseconds. |
 | `timeout_s` | `task_timed_out`, `task_stuck`; also `run_tasks_timeout_inert` | The timeout that applied, in seconds. On `run_tasks_timeout_inert`, this is the configured timeout in seconds, which the helper does not enforce. |
 | `grace_s` | `task_stuck`, `timeouts_backstop_only` | `TASK_TIMEOUT_GRACE`, in seconds. |
 | `reason` | `timeouts_backstop_only` | Why the backstop is the whole enforcement: `interpreter` or `tracing_tool`. |
 | `reason` | `task_failed` | Why the task reached FAILED: `attempts_exhausted` or `backoff_declined`. |
+| `reason` | `worker_claim_released` | Why the unconfirmed claim was released: `claim_outcome_unknown`. |
 | `tracer` | `timeouts_backstop_only` with `reason=tracing_tool` | How the worker's threads are being watched: `sys.settrace` when a trace function is installed, which does not say which tool installed it, or `sys.monitoring (NAME)` for a registered tool, which names itself. |
 | `exception` | `task_retrying`, `task_failed`, `task_policy_error` | Exception class name of the task failure, not a callback failure. |
 | `retry_in_s` | `task_retrying` | Retry delay in seconds, as a float. |
@@ -5720,6 +5822,12 @@ A failed connect while recording a stuck attempt logs
 | `dropped_status` | `task_lease_lost`, `task_outcome_unrecorded` | The status the dropped write would have set: `SUCCESSFUL`, `FAILED` or `READY`. |
 | `outcome` | `task_outcome_reconnected` | Confirmed outcome status: `SUCCESSFUL`, `READY` or `FAILED`. `READY` means the failed attempt was recorded for retry with its backoff. |
 | `already_written` | `task_outcome_reconnected` | Boolean. `true` when the new connection found the first write already committed; `false` when recovery wrote the outcome on the new connection. |
+| `claim_recovery` | `worker_poll_failed`, `worker_claim_recovery_failed`, `worker_claim_recovery_expired` | Recovery state. On `worker_poll_failed`, `pending` means a recovery read is owed; otherwise `null`. On `worker_claim_recovery_failed`, `pending` means recovery remains due, and `expired` means the worker is stopping without another retry or `run_tasks()` will not retry recovery in that call. On `worker_claim_recovery_expired`, always `expired`. |
+| `old_epoch` | `worker_claim_released` | The row's lease epoch before release. |
+| `new_epoch` | `worker_claim_released` | The row's lease epoch after release: `old_epoch + 1`. |
+| `refunded_attempts` | `worker_claim_released` | Number of attempts refunded by this release. Always 1. |
+| `attempts` | `worker_claim_release_refused` | The stored attempt count on the row whose release was refused. No attempt was refunded. |
+| `worker_ids` | `worker_claim_release_refused` | The stored worker-id history on the row whose release was refused. It must contain one entry per attempt and end with the recovering worker's id. |
 | `schedule` | `schedule_dispatched`, `schedule_row_skipped` during a periodic full read, `schedule_dispatch_error`, `schedule_dispatch_recovered`, `schedule_dispatch_callback_failed`, `schedule_tick_dropped`, `schedule_lock_unavailable` for a settings-declared schedule | The schedule's name, from `SCHEDULES` or from its row. |
 | `schedule_pk` | `schedule_row_skipped`, `schedule_lock_unavailable` for a stored schedule, `schedule_boundary_healed` | The stored schedule's row id. Absent for a settings-declared schedule, which has no row. |
 | `scheduled_for`, `late_seconds` | `schedule_tick_dropped` | The tick that was dropped, and how late it was when the deadline rejected it. |
@@ -6168,6 +6276,14 @@ export names this page does not list; those names are not public.
 - **The structured-log contract**: the event names and stable `extra` keys
   documented on the [Monitoring](monitoring.md) page. This includes the
   policy events and keys, even though the declaration API is provisional.
+  It also includes `worker_claim_released`,
+  `worker_claim_recovery_failed`, `worker_claim_recovery_expired` and
+  `worker_claim_release_refused`, and their documented keys. These are
+  stable, not provisional. The new keys include `claim_recovery`,
+  `old_epoch`, `new_epoch`, `refunded_attempts`, `attempts` and
+  `worker_ids`. On `worker_poll_failed`, `claim_recovery` is `"pending"`
+  while a recovery read is owed, or `null` otherwise. The recovery
+  events also use `"expired"` as documented.
 - **The testing helpers** `django_ox.testing.ImmediateBackend`,
   `django_ox.testing.DummyBackend` and `django_ox.testing.run_tasks`.
   The backends accept policy declarations but do not enforce retries,
@@ -6221,6 +6337,28 @@ with the provisional status above. `MAX_ATTEMPTS_LIMIT` and
 are private implementation details. Timeout implementation classes and
 methods, including `TaskTimeouts.enabled` and `TaskTimeouts.for_attempt()`,
 are not public.
+
+### Worker implementation details
+
+`Worker` internals remain **Not public**. This includes `_handed_off`,
+`_unsettled`, `_claimer`, `_claim`, `_claim_inline`, `_recover_claims`
+and `_release_claim`.
+
+`Worker._run_attempt` is also private. It now returns a `bool` indicating
+whether the outcome was recorded. A subclass override that returns
+`None` is treated as "outcome not recorded". This keeps its row excluded
+from claim recovery; it does not itself change the row's outcome.
+
+Subclass authors may notice two behaviour changes. The base
+`claim_one()` now holds a per-worker reentrant lock while claiming.
+Two threads claiming on the same `Worker` instance are serialised:
+the second waits rather than being refused. Recovery reads use the
+same lock.
+
+`Worker.run_once()` and `testing.run_tasks()` may raise a database error
+from a pending recovery read before making any new claim. After a new
+claim raises, an immediate recovery attempt does not replace the
+original claim error, which is still raised to the caller.
 
 ## Versioning
 
@@ -6816,6 +6954,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Fixed
+
+- Recover claims that committed but whose reply was lost on MySQL,
+  PostgreSQL and SQLite. Previously, such a task stayed `RUNNING` until
+  the reaper requeued it with an attempt spent, or marked it `LOST` on
+  its final attempt even though its body never ran. Upgraded workers
+  now find their own unconfirmed claims and return them to `READY`
+  with the attempt refunded, within `LOCK_TIMEOUT` and before the
+  row's lease expires. `Worker.run_once()` and `testing.run_tasks()`
+  still raise the claim's original error; after a successful release,
+  the next call can claim and run the task normally. Recovery does not
+  cover claims made by workers that have not been upgraded, workers
+  that die before recovery, or database outages that outlast
+  `LOCK_TIMEOUT`. If the claim's commit becomes visible only after the
+  recovery look, it may escape recovery and be reaped normally,
+  consuming the attempt and becoming `LOST` on the final attempt.
+
+### Added
+
+- Stable structured-log events `worker_claim_released`,
+  `worker_claim_recovery_failed`, `worker_claim_recovery_expired` and
+  `worker_claim_release_refused`, with their documented extra keys.
+  `worker_poll_failed` now includes `claim_recovery`, set to `"pending"`
+  while a recovery read is owed, or `null` otherwise.
 
 ## [1.6.0] - 2026-09-27
 

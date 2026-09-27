@@ -113,7 +113,7 @@ each carrying a link and the date it was read on the
 | `django.tasks` backend | **Yes**, native | **Yes**, native | **No** | **Yes**, in `huey.contrib.djhuey` |
 | Broker to run | **None.** The queue is a table in the database you already run | **None.** Django ORM | RabbitMQ, Redis or SQS | Redis, SQLite, PostgreSQL, file or memory |
 | Transactional enqueue | **Yes.** Enqueue is one INSERT on your default database; a task written inside `atomic()` commits or rolls back with the rows beside it | Not claimed | **No.** Django's own docs name this as the case for `on_commit()` | Not claimed |
-| Worker killed mid-task | **Retried.** The lease expires and the task goes back on the queue | **Stuck.** The task stays `PROCESSING`, never retried and never failed. Open since 2024-06-11 | **Lost** when the child process is killed, even with `acks_late` | **Lost.** "will not be retried automatically" |
+| Worker killed mid-task | **Retried.** The lease expires and the task goes back on the queue | **Stuck.** The task stays `RUNNING`, never retried and never failed. Issue #5 has been open since 2024-06-11. | **Lost** when the child process is killed, even with `acks_late` | **Lost.** "will not be retried automatically" |
 | Retries and backoff | **Exponential by default**, keeping every attempt's traceback. Per-task budget and backoff on Django 6.1 or Django 5.2 with django-tasks 0.12+ | **None** | Yes | Yes |
 | Recurring schedules | **Cron or a fixed interval, and no scheduler process.** Editable in the Django admin, limited to the tasks your code exposes | **None** | `celery beat`, a separate process you must run exactly one of | Yes |
 

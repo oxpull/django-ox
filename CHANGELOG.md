@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.6.0] - 2026-09-27
+
+**Upgrading to 1.6.0:** No database migration is required. Update processes that call `run_once()`, and use the updated `ox_prune` command. `ox_worker` behavior is unchanged from 1.5.0. These fixes do not require replacing workers.
+
+This release preserves the caller's transaction when `run_once()` times out and avoids lease-renewal stalls inside a caller's atomic block. A timeout during a database statement can still make `run_once()` raise and force the caller's transaction to roll back. It adds the public, provisional `django_ox.testing.run_tasks()` helper for tests. The helper raises `RuntimeError` when the calling thread's connection to the worker's database is outside an atomic block and another thread's connection holds a `TestCase` transaction on that alias. The guard does not apply inside the caller's own atomic block, to another thread's plain `atomic()` block, or after `gc.freeze()`. Those cases can still return `[]` silently. `ox_prune` now rejects cutoffs on the first day of year one.
 
 ### Added
 
@@ -1662,6 +1666,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[1.6.0]: https://github.com/oxpull/django-ox/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/oxpull/django-ox/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/oxpull/django-ox/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/oxpull/django-ox/compare/v1.3.0...v1.3.1

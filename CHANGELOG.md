@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Use `run_tasks()` to run queued tasks inside a test's transaction and a
   real worker for timeout tests.
 
+  Outside an atomic block on the worker's database, `run_tasks()` raises
+  `RuntimeError` before claiming anything if another thread holds a
+  `TestCase` transaction on the same database alias. The guard does not
+  detect this transaction after `gc.freeze()`. That case can still return
+  `[]` silently. For independent event loops, use `TransactionTestCase` or
+  `django_db(transaction=True)`; Django's own async `TestCase` methods
+  remain supported.
+
 ### Fixed
 
 - `ox_prune` now rejects cutoffs on the entire first day of year one with

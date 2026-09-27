@@ -2865,7 +2865,7 @@ The return value is a list of framework `TaskResult` objects in attempt order. E
 
 By default, it claims until no task is claimable. `max_tasks=N` limits attempts, including retries, and returns quietly when the limit is reached. Zero makes no claim. Use a nonnegative integer, excluding booleans. It runs at most 1,000 attempts without an explicit limit. It raises `RuntimeError` if due `READY` work remains then, even if that work is gated or rate-limited. Attempt limits do not bound elapsed time.
 
-Call it from synchronous test code. Django's async `TestCase` methods can use `sync_to_async`. Do not call it from tasks, their callbacks or signal receivers. Nested drains are refused. Broken caller transactions are refused before any claim.
+Call it from synchronous test code. Django's own async `TestCase` methods can use `sync_to_async`. Outside an atomic block on the worker's database, `run_tasks()` raises `RuntimeError` before claiming anything if another thread's connection holds a `TestCase` transaction on the same database alias. This guards against draining with tasks hidden in another thread's test transaction or committed outside it, where they can outlive the test. For event loops not wrapped by `async_to_sync`, including pytest-asyncio and anyio, use `TransactionTestCase` or `django_db(transaction=True)` instead of a `TestCase` transaction. Transactions on other database aliases do not trigger this check. Do not call it from tasks, their callbacks or signal receivers. Nested drains are refused. Broken caller transactions are refused before any claim.
 
 ### Enqueue, roll back and advance time
 
@@ -6827,6 +6827,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   helper does not enforce timeouts or dispatch schedules and reconcilers.
   Use `run_tasks()` to run queued tasks inside a test's transaction and a
   real worker for timeout tests.
+
+  Outside an atomic block on the worker's database, `run_tasks()` raises
+  `RuntimeError` before claiming anything if another thread holds a
+  `TestCase` transaction on the same database alias. The guard does not
+  detect this transaction after `gc.freeze()`. That case can still return
+  `[]` silently. For independent event loops, use `TransactionTestCase` or
+  `django_db(transaction=True)`; Django's own async `TestCase` methods
+  remain supported.
 
 ### Fixed
 

@@ -172,11 +172,13 @@ def run_tasks(
     a task or a callback runs.
 
     Raises RuntimeError when called inside a running task, or from a
-    callback or signal receiver a run_tasks() call runs, and when the
-    caller's pending commit callbacks were changed during an attempt by
-    something other than on_commit() and a savepoint rollback, so the
-    attempt's own can no longer be told from them;
-    TransactionManagementError when a transaction on one of the caller's
+    callback or signal receiver a run_tasks() call runs, when the caller's
+    connection to the worker's database is outside an atomic block and
+    another thread's connection holds a TestCase transaction on the same
+    database alias, and when the caller's pending commit callbacks were
+    changed during an attempt by something other than on_commit() and a
+    savepoint rollback, so the attempt's own can no longer be told from
+    them; TransactionManagementError when a transaction on one of the caller's
     connections is already broken; ImproperlyConfigured for a backend that
     is not an OxBackend; TypeError or ValueError for an invalid argument. A
     KeyboardInterrupt or SystemExit reaches the caller with nothing

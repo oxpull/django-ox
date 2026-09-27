@@ -610,6 +610,56 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#run-queued-tasks-in-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run queued tasks in tests
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Run queued tasks in tests">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#enqueue-roll-back-and-advance-time" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Enqueue, roll back and advance time
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#transactions-and-callbacks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transactions and callbacks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#differences-to-test-against-a-worker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Differences to test against a worker
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#not-in-the-core" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1062,6 +1112,56 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#run-queued-tasks-in-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run queued tasks in tests
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Run queued tasks in tests">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#enqueue-roll-back-and-advance-time" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Enqueue, roll back and advance time
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#transactions-and-callbacks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transactions and callbacks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#differences-to-test-against-a-worker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Differences to test against a worker
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#not-in-the-core" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1338,9 +1438,89 @@ fields. A task built under <code>OxBackend</code> before <code>override_settings
 to stock Immediate can instead retain policy fields that the backend
 silently ignores. These test backends do not make policy declarations work
 on Django 6.0, whose decorator rejects the keyword arguments.</p>
-<p>Keep django-ox in the settings you use for integration tests, where the point is
-to exercise claiming and retries for real. Test retry decisions, backoff
-delays and timeout enforcement against a real worker.</p>
+<p>Keep <code>OxBackend</code> for tests that exercise claiming, retries and backoff.
+Use <a href="#run-queued-tasks-in-tests"><code>run_tasks()</code></a> to drain due tasks in test code.
+Test timeout enforcement and worker infrastructure against a real worker.</p>
+<h2 id="run-queued-tasks-in-tests">Run queued tasks in tests</h2>
+<p><code>django_ox.testing.run_tasks()</code> is public and provisional. Keep <code>OxBackend</code> in your test settings and create its tables through migrations. Use this helper to run queued tasks without a worker process.</p>
+<div class="highlight"><pre><span></span><code><span class="n">run_tasks</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">backend</span><span class="o">=</span><span class="s2">"default"</span><span class="p">,</span> <span class="n">queues</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">max_tasks</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">raise_failures</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">TaskResult</span><span class="p">]</span>
+</code></pre></div>
+<p>All arguments are keyword-only. <code>backend</code> must name an <code>OxBackend</code> alias. It selects the worker class and its default queues, including a configured <code>WORKER_CLASS</code>. Rows are claimed by queue, regardless of which backend enqueued them. Aliases sharing queues share work. For Pro workflows and rate limits, pass the Pro alias as <code>backend</code>.</p>
+<p><code>queues=None</code> uses the worker's queues. An empty list does the same. Empty backend <code>QUEUES</code> means every queue. An explicit list restricts claiming to those queues.</p>
+<p>Each attempt uses the configured worker's claim and execution methods on the caller's thread and database connection. It runs due <code>READY</code> rows that pass the worker's claim filters. Future <code>run_after</code> values, pending retry delays and other statuses are left alone. Tasks enqueued by tasks or their emulated commit callbacks can run in the same call. Async task bodies can see the test's uncommitted rows. Worker outcome recording, backoff and lifecycle signals apply.</p>
+<p>The return value is a list of framework <code>TaskResult</code> objects in attempt order. Each object captures that attempt's recorded state. Retries produce separate results. Failures are recorded without raising by default. With <code>raise_failures=True</code>, the same exception is raised after recording and attempt callbacks, including for retryable failures. Later tasks are left unclaimed. A retried attempt's result is <code>READY</code> (a retry is pending), and reading its <code>return_value</code> raises, following the framework's rule for unfinished results.</p>
+<p>By default, it claims until no task is claimable. <code>max_tasks=N</code> limits attempts, including retries, and returns quietly when the limit is reached. Zero makes no claim. Use a nonnegative integer, excluding booleans. It runs at most 1,000 attempts without an explicit limit. It raises <code>RuntimeError</code> if due <code>READY</code> work remains then, even if that work is gated or rate-limited. Attempt limits do not bound elapsed time.</p>
+<p>Call it from synchronous test code. Django's own async <code>TestCase</code> methods can use <code>sync_to_async</code>. Outside an atomic block on the worker's database, <code>run_tasks()</code> raises <code>RuntimeError</code> before claiming anything if another thread's connection holds a <code>TestCase</code> transaction on the same database alias. This guards against draining with tasks hidden in another thread's test transaction or committed outside it, where they can outlive the test. For event loops not wrapped by <code>async_to_sync</code>, including pytest-asyncio and anyio, use <code>TransactionTestCase</code> or <code>django_db(transaction=True)</code> instead of a <code>TestCase</code> transaction. Transactions on other database aliases do not trigger this check. Do not call it from tasks, their callbacks or signal receivers. Nested drains are refused. Broken caller transactions are refused before any claim.</p>
+<h3 id="enqueue-roll-back-and-advance-time">Enqueue, roll back and advance time</h3>
+<p>These examples use Django 6.x imports. On Django 5.2, import <code>task</code> from <code>django_tasks</code> instead. Keep the task function at module scope so the worker can import it.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django.db</span><span class="w"> </span><span class="kn">import</span> <span class="n">transaction</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.test</span><span class="w"> </span><span class="kn">import</span> <span class="n">TestCase</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">django_ox.testing</span><span class="w"> </span><span class="kn">import</span> <span class="n">run_tasks</span>
+
+
+<span class="nd">@task</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">add</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">a</span> <span class="o">+</span> <span class="n">b</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">TaskTests</span><span class="p">(</span><span class="n">TestCase</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_runs_queued_task</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">add</span><span class="o">.</span><span class="n">enqueue</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+        <span class="n">results</span> <span class="o">=</span> <span class="n">run_tasks</span><span class="p">(</span><span class="n">raise_failures</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">([</span><span class="n">result</span><span class="o">.</span><span class="n">return_value</span> <span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">results</span><span class="p">],</span> <span class="p">[</span><span class="mi">5</span><span class="p">])</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_rolled_back_enqueue_never_runs</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">assertRaises</span><span class="p">(</span><span class="ne">ValueError</span><span class="p">):</span>
+            <span class="k">with</span> <span class="n">transaction</span><span class="o">.</span><span class="n">atomic</span><span class="p">():</span>
+                <span class="n">add</span><span class="o">.</span><span class="n">enqueue</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"Cancel this transaction"</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">run_tasks</span><span class="p">(),</span> <span class="p">[])</span>
+</code></pre></div>
+<p>The rolled-back enqueue leaves no task row to claim. <code>ImmediateBackend</code> runs during enqueue, even if the transaction later rolls back, and rejects <code>run_after</code>.</p>
+<p>Patch <code>timezone.now()</code> to move the due cutoff. A task is due at its exact <code>run_after</code> time.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">timedelta</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">unittest.mock</span><span class="w"> </span><span class="kn">import</span> <span class="n">patch</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">timezone</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">DelayedTaskTests</span><span class="p">(</span><span class="n">TestCase</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_run_after</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">now</span> <span class="o">=</span> <span class="n">timezone</span><span class="o">.</span><span class="n">now</span><span class="p">()</span>
+        <span class="n">due</span> <span class="o">=</span> <span class="n">now</span> <span class="o">+</span> <span class="n">timedelta</span><span class="p">(</span><span class="n">minutes</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+
+        <span class="k">with</span> <span class="n">patch</span><span class="p">(</span><span class="s2">"django.utils.timezone.now"</span><span class="p">,</span> <span class="n">return_value</span><span class="o">=</span><span class="n">now</span><span class="p">):</span>
+            <span class="n">add</span><span class="o">.</span><span class="n">using</span><span class="p">(</span><span class="n">run_after</span><span class="o">=</span><span class="n">due</span><span class="p">)</span><span class="o">.</span><span class="n">enqueue</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">run_tasks</span><span class="p">(),</span> <span class="p">[])</span>
+
+        <span class="k">with</span> <span class="n">patch</span><span class="p">(</span><span class="s2">"django.utils.timezone.now"</span><span class="p">,</span> <span class="n">return_value</span><span class="o">=</span><span class="n">due</span><span class="p">):</span>
+            <span class="n">results</span> <span class="o">=</span> <span class="n">run_tasks</span><span class="p">(</span><span class="n">raise_failures</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">([</span><span class="n">result</span><span class="o">.</span><span class="n">return_value</span> <span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">results</span><span class="p">],</span> <span class="p">[</span><span class="mi">5</span><span class="p">])</span>
+</code></pre></div>
+<p>For retries, advance time between calls by at least the configured backoff delay. Freezing a later time does not drain every retry. Each new retry is scheduled relative to that frozen instant. A zero backoff can retry within one call. Pro rate-limit windows use the database clock, which this patch does not advance.</p>
+<h3 id="transactions-and-callbacks">Transactions and callbacks</h3>
+<p><code>TestCase</code> holds database transactions open. <code>run_tasks()</code> uses savepoints on every connection already inside an atomic block when an attempt starts. Task-owned atomic blocks still follow Django's rules. Under <code>TransactionTestCase</code> in autocommit, no savepoints or callback emulation are added. Writes and commit callbacks then follow worker autocommit behaviour. pytest-django equivalents are <code>transactional_db</code> and <code>django_db(transaction=True)</code>.</p>
+<p>In an atomic block, commit callbacks registered by the body run when the body finishes, before outcome recording. Callbacks registered during outcome handling run afterwards. This emulates a commit without committing the transaction. The caller's existing callbacks stay pending. If application code enqueues through <code>on_commit()</code>, exit <code>captureOnCommitCallbacks(execute=True)</code> before calling <code>run_tasks()</code>.</p>
+<p>Callbacks run in registration order, one database at a time. A callback registered by another callback runs after those already waiting. On a worker in autocommit, that new callback runs immediately. Callbacks discarded by a savepoint rollback do not run. A surrounding callback-capture context does not execute the task's callbacks twice.</p>
+<p>Each emulated callback has its own savepoints. If it raises, its writes and newly registered callbacks roll back. A worker in autocommit keeps writes made before the error. A callback returning with a transaction marked for rollback fails with <code>TransactionManagementError</code>, naming the task, callback and database.</p>
+<p>Robust callback failures are logged and leave the attempt's outcome unchanged. A non-robust body callback can fail an otherwise successful attempt. If the body already failed, its error is kept and the callback error is logged. Remaining callbacks are dropped after a non-robust failure. A non-robust outcome callback failure stops the drain without changing the recorded outcome.</p>
+<p>Do not edit Django's pending callback list directly. If its caller-owned prefix changes, <code>run_tasks()</code> raises <code>RuntimeError</code> and stops handling callbacks on that database. Detection during body callback emulation also records the attempt as failed.</p>
+<h3 id="differences-to-test-against-a-worker">Differences to test against a worker</h3>
+<p>Inside a <code>TestCase</code> transaction:</p>
+<ul>
+<li>A plain task-body exception keeps preceding writes. An ORM error that marks rollback discards the attempt's writes on that database. Other databases follow their own transaction state.</li>
+<li>A body returning with rollback marked fails with <code>TransactionManagementError</code>. This includes caught ORM errors and <code>set_rollback(True)</code>. A worker in autocommit keeps preceding writes and can succeed. Put a statement whose database error you catch inside its own <code>atomic()</code> block.</li>
+<li>PostgreSQL raw SQL errors can abort the transaction without Django marking rollback. The attempt's savepoint then rolls back, including when the body caught the error. A caught error then fails with <code>InternalError</code>. SQLite and MySQL undo only the failed statement and can keep preceding writes.</li>
+<li><code>select_for_update()</code> can succeed without a task-owned atomic block, hiding a production error on databases that require one. Test task transaction boundaries with <code>TransactionTestCase</code>.</li>
+<li>Body callbacks wait until the body finishes, even if a task-owned block exits earlier. In autocommit, a callback registered outside an atomic block runs immediately. Code reading state set by its own callback can behave differently.</li>
+<li>Other connections cannot see the test's uncommitted rows. Callback timing and cross-database order differ from production.</li>
+<li>A later caller rollback removes database writes, but cannot undo external callback effects such as sent mail. A worker would wait for the enqueue to commit before claiming it.</li>
+</ul>
+<p>Use a real worker to test timeout enforcement and worker infrastructure. <code>run_tasks()</code> runs no poll loop, thread pool, lease renewal, timeout watchdog, reaper, schedule dispatcher or process recycling. It does not dispatch reconcilers. Enqueue scheduled tasks and reconcilers explicitly if the test needs their work.</p>
+<p>Timeouts are inert. <code>deadline()</code> and <code>remaining()</code> return <code>None</code>. A configured timeout produces <code>run_tasks_timeout_inert</code> once per task path per call. A hanging body or callback hangs the test.</p>
 <h2 id="not-in-the-core">Not in the core</h2>
 <p>Batches, unique or deduplicated tasks, rate limiting and workflows are in
 <a href="../pro/">Oxpull Pro</a>, a paid add-on. Metrics are in the

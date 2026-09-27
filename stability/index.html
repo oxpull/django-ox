@@ -1004,9 +1004,12 @@ export names this page does not list; those names are not public.</p>
 <li><strong>The structured-log contract</strong>: the event names and stable <code>extra</code> keys
   documented on the <a href="../monitoring/">Monitoring</a> page. This includes the
   policy events and keys, even though the declaration API is provisional.</li>
-<li><strong>The test backends</strong> <code>django_ox.testing.ImmediateBackend</code> and
-  <code>django_ox.testing.DummyBackend</code>. They accept policy declarations but do
-  not enforce retries, backoff or timeouts.</li>
+<li><strong>The testing helpers</strong> <code>django_ox.testing.ImmediateBackend</code>,
+  <code>django_ox.testing.DummyBackend</code> and <code>django_ox.testing.run_tasks</code>.
+  The backends accept policy declarations but do not enforce retries,
+  backoff or timeouts. <code>run_tasks()</code> drains due queued tasks through the
+  configured worker class, including retries and backoff. It does not
+  enforce timeouts. <code>run_tasks()</code> is public and provisional.</li>
 <li><strong>The database schema</strong> of <code>OxTask</code> and <code>OxScheduleTick</code>, evolved only
   through shipped migrations.</li>
 <li><strong><code>django_ox.__version__</code>.</strong></li>
@@ -1041,9 +1044,11 @@ model's non-schema helper methods are not part of the contract.</p>
 <p>In <code>django_ox.tasks</code>, only <code>PolicyTask</code> and <code>BackoffCallback</code> are public,
 with the provisional status above. <code>MAX_ATTEMPTS_LIMIT</code> and
 <code>validate_policy</code> are implementation details. In <code>django_ox.testing</code>, only
-<code>ImmediateBackend</code> and <code>DummyBackend</code> are public. Timeout implementation
-classes and methods, including <code>TaskTimeouts.enabled</code> and
-<code>TaskTimeouts.for_attempt()</code>, are not public.</p>
+<code>ImmediateBackend</code>, <code>DummyBackend</code> and <code>run_tasks</code> are public.
+<code>run_tasks</code> is provisional. <code>django_ox._run_tasks</code> and <code>Worker._task_body</code>
+are private implementation details. Timeout implementation classes and
+methods, including <code>TaskTimeouts.enabled</code> and <code>TaskTimeouts.for_attempt()</code>,
+are not public.</p>
 <h2 id="versioning">Versioning</h2>
 <p>django-ox follows <a href="https://semver.org/">Semantic Versioning</a>:</p>
 <ul>
@@ -1062,7 +1067,7 @@ has no filter for it. Bulk discards skip it, and <code>queue_stats()</code>, the
 process that shares a database before anything writes the new status. The
 release notes name the value, say how it reads through <code>django.tasks</code>, and
 give the upgrade and rollback steps.</p>
-<p>Pin accordingly: <code>django-ox~=1.5.0</code> accepts patch releases only;
+<p>Pin accordingly: <code>django-ox~=1.6.0</code> accepts patch releases only;
 <code>django-ox~=1.3</code> accepts the current major line.</p>
 <h2 id="deprecation-policy">Deprecation policy</h2>
 <p>When a public surface is going to be removed or changed incompatibly, and

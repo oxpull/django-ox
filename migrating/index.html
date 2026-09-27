@@ -1111,6 +1111,10 @@ already have, so there is no broker to run.</p>
 <td>Flower</td>
 <td>the <a href="../monitoring/">stats API, <code>ox_health</code>, the Prometheus endpoint and the admin page</a></td>
 </tr>
+<tr>
+<td><code>task_always_eager</code></td>
+<td>Use <code>django_ox.testing.ImmediateBackend</code> to run once at enqueue. It runs even if the enclosing transaction later rolls back, and rejects <code>run_after</code>. To test queued execution, keep <code>OxBackend</code> and use the public, provisional <a href="../patterns/#run-queued-tasks-in-tests"><code>run_tasks()</code></a> helper. It runs due attempts with retry and backoff policy, without enforcing timeouts.</td>
+</tr>
 </tbody>
 </table>
 <p>Per-task policy declarations require Django 6.1 or Django 5.2 with
@@ -1203,7 +1207,7 @@ the admin today, see <a href="../stored-schedules/">Schedules in the database</a
 </tr>
 <tr>
 <td><code>huey.immediate</code> in tests</td>
-<td><code>django_ox.testing.ImmediateBackend</code> or <code>django_ox.testing.DummyBackend</code>. They accept policy declarations but do not enforce retries, backoff or timeouts. Use a real worker to test enforcement.</td>
+<td>Use <code>django_ox.testing.ImmediateBackend</code> to run once at enqueue, or <code>DummyBackend</code> to record enqueues. Both accept policy declarations without enforcing retries, backoff or timeouts. For queued execution, keep <code>OxBackend</code> and use the public, provisional <a href="../patterns/#run-queued-tasks-in-tests"><code>run_tasks()</code></a> helper. It runs due attempts with retry and backoff policy. Test timeout enforcement against a real worker.</td>
 </tr>
 </tbody>
 </table>

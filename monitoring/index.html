@@ -2145,8 +2145,9 @@ nothing in django-ox imports <code>opentelemetry</code>.</p>
 <h2 id="log-events">Log events</h2>
 <p>The worker logs through the standard library logger named <code>django_ox</code>. No
 logging dependency, no imposed format. Configure handlers and formatters in
-<code>LOGGING</code> as usual. The <code>django_ox.testing</code> backends also emit the
-<code>task_policy_inert</code> event below.</p>
+<code>LOGGING</code> as usual. The <code>django_ox.testing</code> backends also emit
+<code>task_policy_inert</code>. The <code>run_tasks()</code> helper emits worker events,
+<code>run_tasks_timeout_inert</code> and <code>run_tasks_callback_failed</code> as described below.</p>
 <p>Lifecycle events carry an <code>extra</code> dictionary with stable keys, so a JSON
 formatter that serialises record attributes gets consistent fields to index.
 The message text is not part of the contract. The keys are.</p>
@@ -2223,6 +2224,16 @@ The message text is not part of the contract. The keys are.</p>
 <td><code>task_policy_inert</code></td>
 <td>WARNING</td>
 <td>A <code>django_ox.testing</code> backend first enqueues a task with explicitly declared policy. Once per task path per backend instance. These backends accept and validate policy but do not retry, call backoff callbacks or enforce timeouts.</td>
+</tr>
+<tr>
+<td><code>run_tasks_timeout_inert</code></td>
+<td>WARNING</td>
+<td><code>run_tasks()</code> runs a task with a configured timeout. Once per task path per call. The timeout is not enforced; <code>deadline()</code> and <code>remaining()</code> return <code>None</code>. Carries <code>event</code>, <code>task_path</code>, <code>backend</code> and <code>timeout_s</code>.</td>
+</tr>
+<tr>
+<td><code>run_tasks_callback_failed</code></td>
+<td>ERROR</td>
+<td>An emulated commit callback fails without becoming the attempt's recorded error. Applies to robust callbacks and non-robust body callbacks after the body has already failed. Includes callbacks that return with rollback marked. Logged with traceback and <code>event</code>, <code>task_id</code>, <code>task_path</code>, <code>queue</code>, <code>attempt</code> and <code>worker_id</code>.</td>
 </tr>
 <tr>
 <td><code>task_reclaimed</code></td>
@@ -2460,8 +2471,8 @@ A failed connect while recording a stuck attempt logs
 </tr>
 <tr>
 <td><code>worker_id</code></td>
-<td>Worker events except <code>heartbeat_write_failed</code>, <code>schedule_source_unavailable</code>, <code>schedule_boundary_healed</code>, <code>schedule_boundary_heal_failed</code>, <code>schedule_row_skipped</code> and <code>schedule_lock_unavailable</code> for a stored schedule</td>
-<td>Unique id of the worker emitting the record. With <code>--processes</code>, the slot number is the last part of the id. Settings-declared <code>schedule_lock_unavailable</code> events carry this key. The test-backend event <code>task_policy_inert</code> omits it.</td>
+<td>Worker events except <code>heartbeat_write_failed</code>, <code>schedule_source_unavailable</code>, <code>schedule_boundary_healed</code>, <code>schedule_boundary_heal_failed</code>, <code>schedule_row_skipped</code> and <code>schedule_lock_unavailable</code> for a stored schedule; also <code>run_tasks_callback_failed</code></td>
+<td>Unique id of the worker emitting the record. With <code>--processes</code>, the slot number is the last part of the id. Settings-declared <code>schedule_lock_unavailable</code> events carry this key. Records from <code>run_tasks()</code> use the drain worker's hostname-pid-random id, created for each call. <code>task_policy_inert</code> and <code>run_tasks_timeout_inert</code> omit this key.</td>
 </tr>
 <tr>
 <td><code>worker_class</code></td>
@@ -2475,7 +2486,7 @@ A failed connect while recording a stuck attempt logs
 </tr>
 <tr>
 <td><code>task_id</code></td>
-<td>worker task events</td>
+<td>worker task events; also <code>run_tasks_callback_failed</code>; absent from <code>run_tasks_timeout_inert</code></td>
 <td>The task's UUID, as a string. Absent from <code>task_policy_inert</code>.</td>
 </tr>
 <tr>
@@ -2485,12 +2496,12 @@ A failed connect while recording a stuck attempt logs
 </tr>
 <tr>
 <td><code>queue</code></td>
-<td>worker task events</td>
+<td>worker task events; also <code>run_tasks_callback_failed</code>; absent from <code>run_tasks_timeout_inert</code></td>
 <td>Queue name. Absent from <code>task_policy_inert</code>.</td>
 </tr>
 <tr>
 <td><code>attempt</code></td>
-<td>worker task events</td>
+<td>worker task events; also <code>run_tasks_callback_failed</code>; absent from <code>run_tasks_timeout_inert</code></td>
 <td>Attempts consumed so far, including the current one. Absent from <code>task_policy_inert</code>.</td>
 </tr>
 <tr>
@@ -2500,8 +2511,8 @@ A failed connect while recording a stuck attempt logs
 </tr>
 <tr>
 <td><code>timeout_s</code></td>
-<td><code>task_timed_out</code>, <code>task_stuck</code></td>
-<td>The timeout that applied, in seconds.</td>
+<td><code>task_timed_out</code>, <code>task_stuck</code>; also <code>run_tasks_timeout_inert</code></td>
+<td>The timeout that applied, in seconds. On <code>run_tasks_timeout_inert</code>, this is the configured timeout in seconds, which the helper does not enforce.</td>
 </tr>
 <tr>
 <td><code>grace_s</code></td>
@@ -2545,8 +2556,8 @@ A failed connect while recording a stuck attempt logs
 </tr>
 <tr>
 <td><code>backend</code></td>
-<td><code>task_policy_inert</code></td>
-<td>Test-backend alias.</td>
+<td><code>task_policy_inert</code>; also <code>run_tasks_timeout_inert</code></td>
+<td>Test-backend alias. On <code>run_tasks_timeout_inert</code>, this is the TASKS alias passed to <code>run_tasks()</code>.</td>
 </tr>
 <tr>
 <td><code>declared</code></td>

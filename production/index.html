@@ -2472,6 +2472,7 @@ and logs <code>task_failed</code> with <code>reason="attempts_exhausted"</code>.
 <p>With inline <code>run_once()</code>, a <code>KeyboardInterrupt</code> or <code>SystemExit</code> raised
 by the callback propagates to the caller. The row remains <code>RUNNING</code>
 for lease recovery, matching inline task-interrupt handling.</p>
+<p>Inside a caller's atomic block on the worker's database, <code>run_once()</code> does not start a lease-renewal thread: the claim and outcome are written in the caller's transaction. Renewal remains enabled outside an atomic block on that database, including when autocommit is turned off.</p>
 <p>A callback can still run after the attempt has lost its lease.
 The ownership check then drops its outcome write and logs
 <code>task_lease_lost</code>. A callback is not a safe place for external side

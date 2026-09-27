@@ -4663,6 +4663,8 @@ With inline `run_once()`, a `KeyboardInterrupt` or `SystemExit` raised
 by the callback propagates to the caller. The row remains `RUNNING`
 for lease recovery, matching inline task-interrupt handling.
 
+Inside a caller's atomic block on the worker's database, `run_once()` does not start a lease-renewal thread: the claim and outcome are written in the caller's transaction. Renewal remains enabled outside an atomic block on that database, including when autocommit is turned off.
+
 A callback can still run after the attempt has lost its lease.
 The ownership check then drops its outcome write and logs
 `task_lease_lost`. A callback is not a safe place for external side
@@ -6849,6 +6851,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   First-day cutoffs that previously exited 0 now exit 1, including on
   PostgreSQL, with `USE_TZ=False`, and for later cutoffs on SQLite and MySQL.
   The same rejection applies with `--dry-run` and `--format json`.
+
+- Skip lease renewal for `Worker.run_once()` inside a caller's atomic block
+  on the worker's database. In 1.1.0 through 1.5.0, a task that outlived
+  `renew_interval` could delay return on SQLite and MySQL by up to
+  `renew_interval + 5 s` after the task ended. `renew_interval` is
+  `LOCK_TIMEOUT / 3`, so 100 s at the default 300 s. Outcome recording was
+  unaffected. Calls outside an atomic block on the worker's database still
+  renew their leases, including when autocommit is turned off. No caller
+  changes are required.
 
 - `Worker.run_once()` timeout handling inside a caller's `transaction.atomic()`,
   including Django's `TestCase`. From 0.3.0 through 1.5.0, an attempt ending in

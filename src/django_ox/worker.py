@@ -4555,17 +4555,32 @@ class Worker:
         """
         Claim and execute a single task inline. Returns True if one ran.
 
-        Renewal is attempted for the duration, as for a task on the worker's
-        thread pool: a renewal thread is started for this call and stopped
-        before it returns. A task that outlives LOCK_TIMEOUT keeps its lease
-        only while renewal reaches the database on time. With Django's
-        PostgreSQL pool, renewal needs a connection; 1.4.0 opens one outside
-        the pool with a bounded deadline and a short pooled fallback.
-        Sizing LOCK_TIMEOUT alone does not prevent a reclaim.
+        Unless the caller's connection to the worker's database is inside an
+        atomic block before the claim, renewal is attempted for the duration,
+        as for a task on the worker's thread pool. A renewal thread is started
+        for this call and stopped before it returns. A task that outlives
+        LOCK_TIMEOUT keeps its lease only while renewal reaches the database
+        on time. With Django's PostgreSQL pool, renewal needs a connection;
+        1.4.0 opens one outside the pool with a bounded deadline and a short
+        pooled fallback. Sizing LOCK_TIMEOUT alone does not prevent a reclaim.
+
+        Inside a caller's atomic block on the worker's database, no renewal
+        thread is started. The claim and outcome are written in the caller's
+        transaction. That transaction protects the uncommitted claim from
+        reclaim. Renewal from another connection adds no protection and can
+        wait on the caller's lock on SQLite and MySQL.
+
+        A connection taken out of autocommit without an atomic block still
+        gets renewal. The task can commit and make its lease visible while it
+        runs. An atomic block on a different database does not disable renewal.
         """
+        in_callers_transaction = connections[self._db_alias].in_atomic_block
         db_task = self.claim_one()
         if db_task is None:
             return False
+        if in_callers_transaction:
+            self.execute(db_task, inline=True)
+            return True
         stop = Event()
         renewer = Thread(
             target=self._renewal_loop,

@@ -9,6 +9,8 @@ TransactionTestCase classes at the end run the transaction-sensitive parts
 under Django's own test classes as well as under pytest-django's.
 """
 
+import asyncio
+import contextlib
 import logging
 import re
 import threading
@@ -16,6 +18,7 @@ from datetime import timedelta
 from unittest import mock
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.contrib.auth.models import Group
 from django.core.exceptions import ImproperlyConfigured
 from django.db import (
@@ -29,6 +32,7 @@ from django.db import (
 from django.db.transaction import TransactionManagementError
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
+from django.utils.functional import SimpleLazyObject
 
 from django_ox import _run_tasks, testing
 from django_ox.compat import TaskResultStatus, task_finished, task_started
@@ -1092,7 +1096,104 @@ class TestATaskThatRaisesTaskTimeoutItself:
 # -- what it refuses -------------------------------------------------------
 
 
+ELSEWHERE = (
+    "run_tasks() cannot safely drain tasks on database alias 'default': another "
+    "thread holds a TestCase transaction on that database"
+)
+
+
+def drain_on_an_event_loop():
+    """
+    run_tasks() through sync_to_async from an event loop that no
+    async_to_sync wraps, as pytest-asyncio and anyio run a test coroutine:
+    asgiref runs it on its own thread, with that thread's connections.
+    """
+
+    async def main():
+        try:
+            return await sync_to_async(run_tasks)()
+        finally:
+            await sync_to_async(connections.close_all)()
+
+    return asyncio.run(main())
+
+
+class ToAlt:
+    """Sends django_ox's models, and so the worker, to the alt database."""
+
+    def db_for_read(self, model, **hints):
+        return "alt" if model._meta.app_label == "django_ox" else None
+
+    def db_for_write(self, model, **hints):
+        return "alt" if model._meta.app_label == "django_ox" else None
+
+
+def abandon(wrapper):
+    """Drop a transaction another thread left open, and its connection."""
+    wrapper.inc_thread_sharing()
+    wrapper.atomic_blocks.clear()
+    wrapper.savepoint_ids.clear()
+    wrapper.in_atomic_block = False
+    wrapper.needs_rollback = False
+    wrapper.close()
+
+
+@contextlib.contextmanager
+def alive_beside():
+    """Another live thread for the duration, idle, holding no connection."""
+    done = threading.Event()
+    thread = threading.Thread(target=done.wait)
+    thread.start()
+    try:
+        yield
+    finally:
+        done.set()
+        thread.join()
+
+
+def drain_on_a_thread():
+    """run_tasks() on a thread of its own; returns its result or its error."""
+    out = {}
+
+    def target():
+        try:
+            out["results"] = run_tasks()
+        except Exception as exc:
+            out["error"] = exc
+        finally:
+            connections.close_all()
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join(timeout=30)
+    return out
+
+
 class TestRefusals:
+    def test_a_thread_that_cannot_see_the_test_transaction(self):
+        result = t.note.enqueue("unseen")
+        with pytest.raises(RuntimeError) as raised:
+            drain_on_an_event_loop()
+        assert str(raised.value).startswith(ELSEWHERE)
+        assert "pytest.mark.django_db(transaction=True)" in str(raised.value)
+        assert OxTask.objects.get(id=result.id).status == OxTask.Status.READY
+
+    def test_a_plain_thread_is_refused_the_same_way(self):
+        result = t.note.enqueue("unseen")
+        out = drain_on_a_thread()
+        assert isinstance(out.get("error"), RuntimeError), out
+        assert str(out["error"]).startswith(ELSEWHERE)
+        assert OxTask.objects.get(id=result.id).status == OxTask.Status.READY
+
+    def test_nothing_is_looked_for_inside_an_atomic_block(self, monkeypatch):
+        def refuse():
+            raise AssertionError("run_tasks() scanned the heap inside a TestCase")
+
+        monkeypatch.setattr(_run_tasks.gc, "get_objects", refuse)
+        t.note.enqueue("seen")
+        [result] = run_tasks()
+        assert result.return_value == "seen"
+
     def test_a_task_body_cannot_start_a_drain(self):
         t.calls_run_tasks.enqueue()
         [result] = run_tasks()
@@ -1225,6 +1326,14 @@ class RunTasksInATestCase(TestCase):
 
     def setUp(self):
         STATE.clear()
+
+    async def test_an_async_method_drains_through_sync_to_async(self):
+        # Django runs an async test method through async_to_sync, so
+        # sync_to_async sends run_tasks() back to the thread that holds the
+        # class transaction.
+        await sync_to_async(t.note.enqueue)("async")
+        [result] = await sync_to_async(run_tasks)()
+        assert result.return_value == "async"
 
     def test_it_sees_the_rows_and_keeps_the_class_transaction(self):
         Group.objects.create(name="seed")
@@ -1377,6 +1486,14 @@ class RunTasksInATransactionTestCase(TransactionTestCase):
     def setUp(self):
         STATE.clear()
 
+    def test_an_event_loop_thread_drains_committed_rows(self):
+        # What pytest-django asks of async tests that use the database: no
+        # test transaction, so the rows are committed and every thread sees
+        # them.
+        t.note.enqueue("committed")
+        [result] = drain_on_an_event_loop()
+        assert result.return_value == "committed"
+
     def test_autocommit_is_the_workers_own_behaviour(self):
         t.make_then_integrity_error.enqueue("ttc")
         [result] = run_tasks()
@@ -1416,3 +1533,104 @@ class RunTasksInATransactionTestCase(TransactionTestCase):
         assert STATE["thread"] == threading.get_ident()
         assert STATE["driver"] == id(driver)
         assert STATE["in_atomic_block"] is False
+
+
+@override_settings(TASKS=ox_tasks())
+class RunTasksBesideAnotherThreadsTransaction(TransactionTestCase):
+    databases = {"default", "alt"}
+
+    def held_like_a_testcase(self, using):
+        block = transaction.atomic(using=using)
+        block._from_testcase = True
+        block.__enter__()
+        self.addCleanup(block.__exit__, None, None, None)
+
+    def test_a_testcase_transaction_on_another_database_is_not_looked_at(self):
+        self.held_like_a_testcase("alt")
+        t.note.enqueue("default")
+        out = drain_on_a_thread()
+        assert "error" not in out, out
+        assert [r.return_value for r in out["results"]] == ["default"]
+
+    def test_a_testcase_transaction_on_the_workers_database_is(self):
+        t.note.enqueue("default")
+        self.held_like_a_testcase("default")
+        out = drain_on_a_thread()
+        assert isinstance(out.get("error"), RuntimeError), out
+        assert str(out["error"]).startswith(ELSEWHERE)
+
+    def test_the_look_sets_up_no_lazy_object(self):
+        # The look walks every object the garbage collector tracks, and one
+        # of Django's lazy objects answers isinstance() by setting up what
+        # it wraps: STATICFILES_STORAGE once failed that way.
+        made = []
+        lazy = SimpleLazyObject(lambda: made.append(1) or object())
+        t.note.enqueue("default")
+        out = drain_on_a_thread()
+        assert "error" not in out, out
+        assert made == []
+        del lazy
+
+    def test_the_workers_own_database_is_the_one_looked_at(self):
+        # The router sends the worker to alt: a TestCase transaction held on
+        # default is another database's, and the drain on alt goes ahead.
+        with override_settings(DATABASE_ROUTERS=[ToAlt()]):
+            t.note.enqueue("alt")
+            self.held_like_a_testcase("default")
+            out = drain_on_a_thread()
+            assert "error" not in out, out
+            assert [r.return_value for r in out["results"]] == ["alt"]
+
+    def test_the_refusal_names_the_workers_own_database(self):
+        with override_settings(DATABASE_ROUTERS=[ToAlt()]):
+            t.note.enqueue("alt")
+            self.held_like_a_testcase("alt")
+            out = drain_on_a_thread()
+        assert isinstance(out.get("error"), RuntimeError), out
+        assert str(out["error"]).startswith(
+            "run_tasks() cannot safely drain tasks on database alias 'alt'"
+        )
+
+    def test_nothing_is_looked_for_with_no_other_thread(self):
+        def refuse():
+            raise AssertionError("run_tasks() scanned the heap with one thread")
+
+        t.note.enqueue("alone")
+        with (
+            mock.patch.object(_run_tasks.gc, "get_objects", refuse),
+            mock.patch.object(_run_tasks.threading, "active_count", return_value=1),
+        ):
+            [result] = run_tasks()
+        assert result.return_value == "alone"
+
+    def test_a_transaction_left_by_a_thread_that_ended_is_not_looked_at(self):
+        # The idle thread starts first, so it cannot be handed the ident of
+        # the thread that ends: a thread's ident can be reused once it ends.
+        left = []
+
+        def ends_inside_a_testcase_block():
+            block = transaction.atomic()
+            block._from_testcase = True
+            block.__enter__()
+            left.append(connections["default"])
+
+        t.note.enqueue("after")
+        with alive_beside():
+            thread = threading.Thread(target=ends_inside_a_testcase_block)
+            thread.start()
+            thread.join()
+            [result] = run_tasks()
+        assert result.return_value == "after"
+        abandon(left[0])
+
+    def test_a_wrapper_built_only_in_part_is_passed_over(self):
+        class Unfinished(type(connections["default"])):
+            def __init__(self):
+                raise RuntimeError("stopped before BaseDatabaseWrapper.__init__")
+
+        unfinished = object.__new__(Unfinished)
+        t.note.enqueue("passed")
+        with alive_beside():
+            [result] = run_tasks()
+        assert result.return_value == "passed"
+        del unfinished

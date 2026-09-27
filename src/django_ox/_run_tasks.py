@@ -24,7 +24,9 @@ databases run one database after another.
 
 from __future__ import annotations
 
+import gc
 import logging
+import threading
 from collections.abc import Callable
 from contextlib import AbstractContextManager, ExitStack
 from contextvars import ContextVar
@@ -485,6 +487,69 @@ def _refuse_broken_transactions() -> None:
         )
 
 
+def _refuse_a_test_transaction_elsewhere(db_alias: str) -> None:
+    """
+    Refuse to drain from a thread that cannot see the test's transaction.
+
+    A TestCase holds its transaction on the connection of the thread that
+    runs the test. An event loop that no async_to_sync wraps, as
+    pytest-asyncio and anyio run a test coroutine, sends sync_to_async work
+    to another thread, whose connection sees none of the rows that
+    transaction holds uncommitted; the drain would find nothing and return
+    []. So when this thread's connection to the worker's database is
+    outside any atomic block, and another thread's connection to it holds a
+    TestCase's, the call raises before it claims anything.
+
+    Inside an atomic block nothing is looked for: the caller holds a
+    transaction of its own, which is every TestCase on its own thread. The
+    look is a scan of the garbage collector's objects, so it happens only
+    where it can find something: not with no other thread alive, and only
+    a live thread's connection counts. It does not catch every arrangement
+    of transactions across threads, only a TestCase's held by another
+    thread, and it does not see objects gc.freeze() has moved out of the
+    collector's reach.
+    """
+    if connections[db_alias].in_atomic_block:
+        return
+    if threading.active_count() == 1:
+        return
+    me = threading.get_ident()
+    others = {thread.ident for thread in threading.enumerate()} - {me}
+    for candidate in gc.get_objects():
+        # type(), not isinstance(): isinstance() asks for __class__, and on
+        # one of Django's lazy objects that sets up what it wraps.
+        if not issubclass(type(candidate), BaseDatabaseWrapper):
+            continue
+        try:
+            held = (
+                candidate.alias == db_alias
+                and candidate._thread_ident in others
+                and candidate.in_atomic_block
+                and any(
+                    getattr(block, "_from_testcase", False)
+                    for block in candidate.atomic_blocks
+                )
+            )
+        except AttributeError:
+            # A wrapper whose construction failed part way has no alias or
+            # stacks, and is nobody's transaction.
+            continue
+        if held:
+            raise RuntimeError(
+                f"run_tasks() cannot safely drain tasks on database alias "
+                f"'{db_alias}': another thread holds a TestCase transaction on "
+                "that database. Tasks enqueued in that transaction are invisible "
+                "here. Tasks enqueued outside it may commit and outlive the test. "
+                "Use pytest.mark.django_db(transaction=True) or "
+                "TransactionTestCase. Alternatively, enqueue tasks and run "
+                "run_tasks() on the thread that owns the test transaction. Inside "
+                "Django's async TestCase methods, await "
+                "sync_to_async(run_tasks)() routes execution back to that "
+                "thread. pytest-asyncio and anyio do not provide that routing "
+                "by themselves."
+            )
+
+
 def _drain_worker(backend: str, queues: list[str] | None) -> Worker:
     oxbackend = task_backends[backend]
     if not isinstance(oxbackend, OxBackend):
@@ -513,6 +578,7 @@ def drain(
     """run_tasks(), once its arguments are known to be valid."""
     _refuse_nesting()
     worker = _drain_worker(backend, queues)
+    _refuse_a_test_transaction_elsewhere(worker._db_alias)
     limit = SAFETY_LIMIT if max_tasks is None else max_tasks
     results: list[TaskResult[..., Any]] = []
     draining = _draining.set(True)

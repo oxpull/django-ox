@@ -72,7 +72,8 @@ from django_ox.worker import Worker
 from . import policy_tasks
 from .conftest import start_worker_thread
 from .dead_connection_tasks import (
-    end_every_other_session,
+    WORKER_SESSIONS,
+    end_the_workers_sessions,
     ends_its_connection_and_fails,
     ends_its_connection_and_succeeds,
     ends_its_connection_from_async_and_succeeds,
@@ -82,15 +83,15 @@ from .dead_connection_tasks import (
     loses_its_connection_unnoticed,
     loses_the_database,
     makes_no_query,
-    other_sessions,
     outcome_commits_then_connection_drops,
     pool_report,
     queries_after_a_restart,
     quick,
     ran,
     read_notes,
-    restart_every_other_session,
+    restart_the_workers_sessions,
     survives_a_statement_error,
+    the_workers_sessions,
     works_offline_through_a_restart,
 )
 from .tasks import STATE, echo, fail_always
@@ -176,10 +177,22 @@ def worker_project(
             f"_options = {{**_db.get('OPTIONS', {{}}), 'pool': {pool!r}}}",
             "DATABASES['default'] = {**_db, 'CONN_MAX_AGE': 0, 'OPTIONS': _options}",
         ]
+    if connection.vendor == "postgresql":
+        # Named, so that a restart ends the worker's sessions: WORKER_SESSIONS.
+        named = f"'application_name': {WORKER_SESSIONS!r}"
+        lines += [
+            "_db = DATABASES['default']",
+            f"_db['OPTIONS'] = {{**_db.get('OPTIONS', {{}}), {named}}}",
+        ]
     if second:
         lines.append("DATABASES['second'] = copy.deepcopy(DATABASES['default'])")
     if conn_max_age is not None:
-        lines.append(f"DATABASES['default']['CONN_MAX_AGE'] = {conn_max_age!r}")
+        # Persistent connections are unpooled ones: Django refuses both on one
+        # alias, and a run whose own database is pooled passes its pool on.
+        lines += [
+            "DATABASES['default'].get('OPTIONS', {}).pop('pool', None)",
+            f"DATABASES['default']['CONN_MAX_AGE'] = {conn_max_age!r}",
+        ]
     if health_checks:
         lines.append("DATABASES['default']['CONN_HEALTH_CHECKS'] = True")
     (project / "deadconnproj" / "settings.py").write_text("\n".join(lines) + "\n")
@@ -516,8 +529,8 @@ def wait_for(condition, what, proc, log):
 def test_a_task_with_no_query_after_a_restart_is_recorded(tmp_path):
     """
     Persistent connections: the pool thread keeps the connection its first
-    task's outcome was written on. The server then ends every session on
-    the database but the test's own, as a restart does, and the next task
+    task's outcome was written on. The server then ends every session the
+    worker has, as a restart does, and the next task
     makes no query, so its success write is the first statement on the
     dead connection the thread kept.
     """
@@ -538,7 +551,7 @@ def test_a_task_with_no_query_after_a_restart_is_recorded(tmp_path):
             proc,
             log,
         )
-        ended = end_every_other_session(connection)
+        ended = end_the_workers_sessions(connection)
         second = makes_no_query.enqueue(notes)
         output = finish_worker(proc, log)
     finally:
@@ -570,7 +583,10 @@ def test_when_the_database_stays_gone_the_row_is_left_for_the_reaper(tmp_path):
     result = loses_the_database.enqueue(notes)
     name = connection.settings_dict["NAME"]
     try:
-        output = run_worker(worker_project(tmp_path), tmp_path, "--max-tasks", "1")
+        # Unpooled: a pooled worker's second write takes one of the sessions
+        # its pool opened before the database closed, and lands.
+        project = worker_project(tmp_path, pool=False)
+        output = run_worker(project, tmp_path, "--max-tasks", "1")
     finally:
         with connection._nodb_cursor() as cursor:
             cursor.execute(f'ALTER DATABASE "{name}" WITH ALLOW_CONNECTIONS true')
@@ -698,7 +714,7 @@ def wait_for_a_full_pool(proc, log):
     longer for the last ones to finish connecting.
     """
     wait_for(
-        lambda: other_sessions(connection) >= RESTART_POOL["max_size"],
+        lambda: the_workers_sessions(connection) >= RESTART_POOL["max_size"],
         "a full pool",
         proc,
         log,
@@ -710,7 +726,7 @@ def through_a_restart(tmp_path, notes, *, health_checks):
     """
     Run a pooled worker for the one task enqueued, which queries and waits
     on its gate. Once it has queried and the pool is full, end every session
-    on the database at once, as a restart does, open the gate, and wait for
+    the worker has at once, as a restart does, open the gate, and wait for
     the worker to finish. Its output, and how many sessions were ended.
     """
     project = worker_project(tmp_path, pool=RESTART_POOL, health_checks=health_checks)
@@ -726,7 +742,7 @@ def through_a_restart(tmp_path, notes, *, health_checks):
     try:
         wait_for(lambda: events(notes, "ready"), "the task's first query", proc, log)
         wait_for_a_full_pool(proc, log)
-        ended = restart_every_other_session(connection)
+        ended = restart_the_workers_sessions(connection)
         gate(notes).touch()
         output = finish_worker(proc, log)
     finally:
@@ -850,7 +866,7 @@ def test_after_a_restart_the_poll_loop_does_not_spend_a_pass_per_dead_connection
 ):
     """
     A worker with a pool of ten idles at the default poll interval, and
-    every session on the database ends at once. Without a sweep the loop
+    every session it has ends at once. Without a sweep the loop
     got one dead idle connection back per pass, or, with health checks, a
     checkout that timed out working through them, and claimed nothing until
     they were gone. With it, a failed pass discards them all, and the task
@@ -878,7 +894,7 @@ def test_after_a_restart_the_poll_loop_does_not_spend_a_pass_per_dead_connection
             log,
         )
         wait_for_a_full_pool(proc, log)
-        ended = restart_every_other_session(connection)
+        ended = restart_the_workers_sessions(connection)
         second = quick.enqueue(notes)
         output = finish_worker(proc, log)
     finally:

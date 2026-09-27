@@ -146,13 +146,43 @@ class Workers:
         self.policy_log = policy_log
         self.started = []
 
-    def start(self, name, *args, options=None):
+    def settings_module(self, name, args):
+        """
+        This run's settings for a worker started with `args`, its pool sized
+        when this run pools its database: docs/production.md has max_size at
+        least --concurrency + 1, one connection per task thread and one for
+        the poll loop. psycopg_pool's default of 4 falls short from
+        --concurrency 4, and such a worker warns at startup and then starves
+        its own task threads, which is what the warning is for.
+        """
         from django.conf import settings
 
+        pool = connection.settings_dict["OPTIONS"].get("pool")
+        sized = pool if isinstance(pool, dict) else {}
+        concurrency = 1
+        if "--concurrency" in args:
+            concurrency = int(args[args.index("--concurrency") + 1])
+        if not pool or sized.get("max_size", sized.get("min_size", 4)) > concurrency:
+            return settings.SETTINGS_MODULE
+        module = f"hazard_settings_{name}"
+        (self.tmp_path / f"{module}.py").write_text(
+            f"from {settings.SETTINGS_MODULE} import *  # noqa: F403\n"
+            "_db = DATABASES['default']  # noqa: F405\n"
+            "_db['OPTIONS'] = {\n"
+            "    **_db['OPTIONS'],\n"
+            f"    'pool': {{**{sized!r}, 'max_size': {concurrency + 1}}},\n"
+            "}\n"
+        )
+        return module
+
+    def start(self, name, *args, options=None):
         # Coverage's hooks stay out of the child: a thread a tracer watches is
         # never interrupted, which would turn every timeout into the backstop.
         env = {k: v for k, v in os.environ.items() if not k.startswith("COV_CORE")}
-        env["DJANGO_SETTINGS_MODULE"] = settings.SETTINGS_MODULE
+        env["DJANGO_SETTINGS_MODULE"] = self.settings_module(name, args)
+        env["PYTHONPATH"] = os.pathsep.join(
+            p for p in [str(self.tmp_path), env.get("PYTHONPATH", "")] if p
+        )
         env["OX_TEST_DB_NAME"] = str(connection.settings_dict["NAME"])
         env["OX_TEST_LOG_LEVEL"] = "INFO"
         env["OX_TEST_POLICY_LOG"] = str(self.policy_log)

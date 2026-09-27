@@ -212,19 +212,31 @@ def end_session(conn, session):
             time.sleep(0.05)
 
 
-def end_every_other_session(conn):
+#: The application_name of a worker test_dead_connection starts on
+#: PostgreSQL. A restart there ends the sessions carrying it, not every other
+#: session on the database: when the test process pools its own connections,
+#: the idle ones in its pool are other sessions too, and ending them hands the
+#: test's next statement, and the flush at its teardown, a dead connection.
+#: MySQL has no pool in Django, so there the test holds no other session and
+#: every other session on the database is the worker's.
+WORKER_SESSIONS = "ox-dead-connection-worker"
+
+#: The worker's sessions on the database `conn` is on, other than `conn`'s.
+_WORKERS_SESSIONS_SQL = (
+    "SELECT pid FROM pg_stat_activity "
+    "WHERE datname = %s AND pid <> pg_backend_pid() AND application_name = %s"
+)
+
+
+def end_the_workers_sessions(conn):
     """
-    On `conn`, end every other session on its database, as a restart of
-    the server does; returns how many.
+    On `conn`, end every session of the worker on its database, as a restart
+    of the server does; returns how many.
     """
     name = conn.settings_dict["NAME"]
     with conn.cursor() as cursor:
         if conn.vendor == "postgresql":
-            cursor.execute(
-                "SELECT pid FROM pg_stat_activity "
-                "WHERE datname = %s AND pid <> pg_backend_pid()",
-                [name],
-            )
+            cursor.execute(_WORKERS_SESSIONS_SQL, [name, WORKER_SESSIONS])
         else:
             cursor.execute(
                 "SELECT id FROM information_schema.processlist "
@@ -398,32 +410,26 @@ def wait_for_the_gate(notes):
         time.sleep(0.02)
 
 
-def other_sessions(conn):
-    """How many sessions other than `conn`'s are on its database."""
+def the_workers_sessions(conn):
+    """How many sessions the worker has on the database `conn` is on."""
     with conn.cursor() as cursor:
         cursor.execute(
-            "SELECT COUNT(*) FROM pg_stat_activity "
-            "WHERE datname = %s AND pid <> pg_backend_pid()",
-            [conn.settings_dict["NAME"]],
+            _WORKERS_SESSIONS_SQL, [conn.settings_dict["NAME"], WORKER_SESSIONS]
         )
-        return int(cursor.fetchone()[0])
+        return len(cursor.fetchall())
 
 
-def restart_every_other_session(conn):
+def restart_the_workers_sessions(conn):
     """
-    On `conn`, PostgreSQL only: end every other session on its database in
-    one statement, as a restart of the server ends them all at once rather
-    than one after another, and return once they have all gone; returns
-    how many there were. Every connection Django's pool holds idle is one
-    of them.
+    On `conn`, PostgreSQL only: end every session of the worker on its
+    database in one statement, as a restart of the server ends them all at
+    once rather than one after another, and return once they have all
+    gone; returns how many there were. Every connection the worker's pool
+    holds idle is one of them.
     """
     name = conn.settings_dict["NAME"]
     with conn.cursor() as cursor:
-        cursor.execute(
-            "SELECT pid FROM pg_stat_activity "
-            "WHERE datname = %s AND pid <> pg_backend_pid()",
-            [name],
-        )
+        cursor.execute(_WORKERS_SESSIONS_SQL, [name, WORKER_SESSIONS])
         sessions = [row[0] for row in cursor.fetchall()]
         cursor.execute(
             "SELECT pg_terminate_backend(pid) FROM unnest(%s::integer[]) AS pid",

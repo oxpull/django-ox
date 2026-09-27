@@ -20,6 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ox_prune` now rejects cutoffs on the entire first day of year one with
+  the existing out-of-range `CommandError`, on every engine and with
+  `USE_TZ` on or off. With `USE_TZ=True`, early cutoffs could previously
+  raise an `OverflowError` during Django's datetime conversion on SQLite
+  and MySQL, after read-only queries had run, but before any statement
+  carrying the cutoff ran or any row was deleted. This depended on the
+  connection zone's UTC offset being negative in year one, not today.
+  Rejecting the whole day makes the answer independent of engine and zone.
+  First-day cutoffs that previously exited 0 now exit 1, including on
+  PostgreSQL, with `USE_TZ=False`, and for later cutoffs on SQLite and MySQL.
+  The same rejection applies with `--dry-run` and `--format json`.
+
 - `Worker.run_once()` timeout handling inside a caller's `transaction.atomic()`,
   including Django's `TestCase`. From 0.3.0 through 1.5.0, an attempt ending in
   `TaskTimeout` reset and closed the calling thread's database connections.

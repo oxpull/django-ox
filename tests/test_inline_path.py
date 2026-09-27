@@ -11,7 +11,7 @@ import threading
 import time
 
 import pytest
-from django.db import transaction
+from django.db import connections, transaction
 
 from django_ox.models import OxTask
 from django_ox.worker import Worker
@@ -49,9 +49,14 @@ class TestTheLeaseIsRenewedInline:
         def reap_while_it_runs():
             reaper = Worker(backoff_initial=0, lock_timeout=1)
             deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                reclaimed.append(reaper.reap())
-                time.sleep(0.2)
+            try:
+                while time.monotonic() < deadline:
+                    reclaimed.append(reaper.reap())
+                    time.sleep(0.2)
+            finally:
+                # Given back: on a pooled database, a thread that ends holding
+                # its connection keeps it out of this process's pool for good.
+                connections.close_all()
 
         reaper_thread = threading.Thread(target=reap_while_it_runs, daemon=True)
         reaper_thread.start()

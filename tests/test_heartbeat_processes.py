@@ -65,6 +65,12 @@ INTERVAL = "0.05"
 
 POLL_FAILED = "could not reach the database this pass"
 
+# On a pooled database a refused pass fails only once the pool's timeout runs
+# out, 30 s by default, which is as long as FRESH_AGE and as each wait below.
+# docs/monitoring.md has the freshness budget exceed the pool's timeout, so a
+# pooled worker behind a relay is given this one.
+RELAYED_POOL_TIMEOUT = 2.0
+
 
 # -- processes ----------------------------------------------------------------
 
@@ -72,7 +78,8 @@ POLL_FAILED = "could not reach the database this pass"
 def settings_module(tmp_path: Path) -> str:
     """
     The suite's settings, with two knobs a fault needs: the port the worker
-    reaches the database on, and SQLite's busy timeout.
+    reaches the database on, with RELAYED_POOL_TIMEOUT when it is pooled,
+    and SQLite's busy timeout.
     """
     (tmp_path / "hb_settings.py").write_text(
         "import os\n"
@@ -81,6 +88,13 @@ def settings_module(tmp_path: Path) -> str:
         "if os.environ.get('OX_TEST_DB_PORT'):\n"
         "    _db['HOST'] = '127.0.0.1'\n"
         "    _db['PORT'] = os.environ['OX_TEST_DB_PORT']\n"
+        "    _pool = _db.get('OPTIONS', {}).get('pool')\n"
+        "    if _pool:\n"
+        "        _pool = _pool if isinstance(_pool, dict) else {}\n"
+        "        _db['OPTIONS'] = {\n"
+        "            **_db['OPTIONS'],\n"
+        f"            'pool': {{**_pool, 'timeout': {RELAYED_POOL_TIMEOUT!r}}},\n"
+        "        }\n"
         "if os.environ.get('OX_TEST_SQLITE_TIMEOUT'):\n"
         "    _db['OPTIONS'] = {\n"
         "        **_db.get('OPTIONS', {}),\n"

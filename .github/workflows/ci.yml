@@ -89,6 +89,48 @@ jobs:
       # the sqlite job.
       - run: timeout -s ABRT 1500 python -m pytest -q
 
+  # PostgreSQL through Django's connection pool (OPTIONS["pool"] = True, at
+  # psycopg_pool's defaults), for the whole suite and every worker process it
+  # starts. Each worker process shares one pool between its poll loop, lease
+  # renewal and task threads, and a worker whose threads can take the whole
+  # pool starves the rest, which no unpooled leg can see. One combination,
+  # the newest, as test-postgres-naive has: the grid around it is covered by
+  # test-postgres.
+  test-postgres-pooled:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: postgres pooled
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ox
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DJANGO_SETTINGS_MODULE: tests.settings_postgres_pooled
+      PYTHONFAULTHANDLER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --group dev -e . "Django~=6.1.0"
+      # The dev group carries psycopg[binary,pool]. The next step requires psycopg_pool.
+      # If it is missing, the job fails. Django also requires it for pooled connections.
+      - run: python -c "import psycopg_pool"
+      # SIGABRT with thread stacks instead of a silent cancellation; see
+      # the sqlite job.
+      - run: timeout -s ABRT 1500 python -m pytest -q
+
   # USE_TZ off, on PostgreSQL. The one configuration where the lease can end up
   # on two clocks: the raw claim is a hand-written statement, and under this
   # setting it stamps locked_at from the worker rather than the server, because
@@ -402,7 +444,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [test-sqlite, test-postgres, test-postgres-naive, test-backport-floor, wagtail-smoke, test-mysql, lint, types, docs, packaging, zizmor]
+    needs: [test-sqlite, test-postgres, test-postgres-naive, test-postgres-pooled, test-backport-floor, wagtail-smoke, test-mysql, lint, types, docs, packaging, zizmor]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -261,7 +261,6 @@ class TestCollector:
         assert set(described) == set(metrics.METRIC_NAMES)
 
     def test_registers_with_prometheus_client(self):
-        pytest.importorskip("prometheus_client")
         from prometheus_client import CollectorRegistry, generate_latest
 
         seed()

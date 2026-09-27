@@ -495,3 +495,36 @@ def queries_after_a_restart(notes, *, catch=False):
         return "succeeded anyway"
     note(notes, "query-answered")
     return "succeeded anyway"
+
+
+def restart_every_other_session(conn):
+    """
+    On `conn`, PostgreSQL only: end every other session on its database in
+    one statement, as a restart of the server ends them all at once rather
+    than one after another, and return once they have all gone; returns
+    how many there were. Every connection Django's pool holds idle is one
+    of them.
+    """
+    name = conn.settings_dict["NAME"]
+    with conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT pid FROM pg_stat_activity "
+            "WHERE datname = %s AND pid <> pg_backend_pid()",
+            [name],
+        )
+        sessions = [row[0] for row in cursor.fetchall()]
+        cursor.execute(
+            "SELECT pg_terminate_backend(pid) FROM unnest(%s::integer[]) AS pid",
+            [sessions],
+        )
+        deadline = time.monotonic() + 10
+        while True:
+            cursor.execute(
+                "SELECT COUNT(*) FROM pg_stat_activity WHERE pid = ANY(%s)",
+                [sessions],
+            )
+            if not cursor.fetchone()[0]:
+                return len(sessions)
+            if time.monotonic() > deadline:
+                raise AssertionError(f"sessions {sessions} did not all end")
+            time.sleep(0.02)

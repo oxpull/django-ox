@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Recover claims that committed but whose reply was lost on MySQL,
+  PostgreSQL and SQLite. Previously, such a task stayed `RUNNING` until
+  the reaper requeued it with an attempt spent, or marked it `LOST` on
+  its final attempt even though its body never ran. Upgraded workers
+  now find their own unconfirmed claims and return them to `READY`
+  with the attempt refunded, within `LOCK_TIMEOUT` and before the
+  row's lease expires. `Worker.run_once()` and `testing.run_tasks()`
+  still raise the claim's original error; after a successful release,
+  the next call can claim and run the task normally. Recovery does not
+  cover claims made by workers that have not been upgraded, workers
+  that die before recovery, or database outages that outlast
+  `LOCK_TIMEOUT`. If the claim's commit becomes visible only after the
+  recovery look, it may escape recovery and be reaped normally,
+  consuming the attempt and becoming `LOST` on the final attempt.
+
+### Added
+
+- Stable structured-log events `worker_claim_released`,
+  `worker_claim_recovery_failed`, `worker_claim_recovery_expired` and
+  `worker_claim_release_refused`, with their documented extra keys.
+  `worker_poll_failed` now includes `claim_recovery`, set to `"pending"`
+  while a recovery read is owed, or `null` otherwise.
+
 ## [1.6.0] - 2026-09-27
 
 **Upgrading to 1.6.0:** No database migration is required. Update processes that call `run_once()`, and use the updated `ox_prune` command. `ox_worker` behavior is unchanged from 1.5.0. These fixes do not require replacing workers.

@@ -27,7 +27,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from inspect import iscoroutinefunction
-from threading import Barrier, BrokenBarrierError, Condition, Event, Lock, Thread
+from threading import Barrier, BrokenBarrierError, Condition, Event, Lock, RLock, Thread
 from traceback import format_exception
 from typing import Any, cast
 
@@ -46,6 +46,7 @@ from django.db import (
     transaction,
 )
 from django.db.models import (
+    BooleanField,
     DateTimeField,
     ExpressionWrapper,
     F,
@@ -112,8 +113,15 @@ WATCHDOG_MAX_WAIT = 3600.0
 
 # On a pooled PostgreSQL database, the longest lease renewal and the watchdog
 # wait to open a connection of their own. Renewal also waits no longer than
-# its interval, and a shorter connect_timeout in OPTIONS shortens both.
+# its interval, and a shorter connect_timeout in OPTIONS shortens both. On
+# PostgreSQL, pooled or not, it is also the whole of the look a stopping
+# worker makes for a claim that raised, connecting and every reply included.
 OWN_CONNECTION_DEADLINE = 5.0
+
+# On MySQL, the connect, read and write timeouts of the connection that look
+# opens, in whole seconds, as mysqlclient takes them. Each bounds one operation
+# rather than the look, and mysqlclient may retry a read that timed out.
+MYSQL_RECOVERY_TIMEOUT = 5
 
 # How long they wait for a connection from Django's pool instead, when their
 # own cannot be had in time. A connection the pool has spare is handed over
@@ -137,6 +145,24 @@ MISSED_RENEWAL_REPORT_INTERVAL = 30.0
 # abandoned, the worker says so with a traceback the first time and after
 # that at most this often, with the number of failures since it last did.
 DISPATCH_FAILURE_REPORT_INTERVAL = 60.0
+
+# The most rows a look for a claim that raised names in one read. SQLite
+# before 3.32 refuses a statement with more than 999 parameters.
+RECOVERY_READ_CHUNK = 500
+
+# What a worker_claim_recovery_failed record says will happen next, after a
+# claim error in run_once(), whose Worker the caller keeps, and in
+# run_tasks(), whose Worker lasts one call.
+CLAIM_RECOVERY_RETAINED = (
+    "Claim outcome is unknown. This Worker will look again before its next "
+    "claim while the LOCK_TIMEOUT recovery window remains open. Recovery is not "
+    "guaranteed; an unrecovered claim may be reaped with its attempt spent."
+)
+CLAIM_RECOVERY_NOT_RETAINED = (
+    "Claim outcome is unknown. Recovery looks are limited to this run_tasks() "
+    "call; pending recovery state is not retained for later calls. Recovery is "
+    "not guaranteed; an unrecovered claim may be reaped with its attempt spent."
+)
 
 # The task path of the attempt Worker.execute() is running in this context, or
 # None outside one. django_ox.testing.run_tasks() reads it to refuse a drain
@@ -928,6 +954,21 @@ def _close_lost_connection(conn: Any) -> None:
     _sweep_pool(conn)
 
 
+def _worker_may_use(conn: Any) -> bool:
+    """
+    Whether a look for a claim that raised may run on `conn`, and close it
+    if it has stopped answering: no atomic block open, and autocommit on, or
+    no connection open and the next to open in autocommit. Anything else may
+    hold a caller's transaction. Read from the wrapper alone, so it never
+    connects.
+    """
+    if conn.in_atomic_block:
+        return False
+    if conn.connection is None:
+        return bool(conn.settings_dict["AUTOCOMMIT"])
+    return bool(conn.autocommit)
+
+
 def _reason(exc: BaseException) -> str:
     """An exception as one line of a log message."""
     return " ".join(str(exc).split()) or type(exc).__name__
@@ -983,15 +1024,60 @@ def _connect_by(deadline: float, gen: Generator[Any, Any, Any]) -> Any:
         return done.value
 
 
+# The deadline by which every reply on one of _connection_by_deadline's
+# connections must arrive, for the thread whose `at` is set; unset, they wait
+# as psycopg waits. Only _answering_by sets it.
+_reply_deadline = threading.local()
+
+
+def _reply_by(deadline: float, gen: Generator[Any, Any, Any], pgconn: Any) -> Any:
+    """
+    Run one of psycopg's generators for a statement on `pgconn` to the end,
+    waiting on its socket here, and give up at `deadline`, on
+    time.monotonic().
+
+    psycopg waits for a reply for as long as it takes: a server that
+    accepted the statement and never answers holds the caller forever,
+    whatever connect_timeout says. Giving up leaves the connection part way
+    through the protocol, with a reply that may still arrive, so it is
+    finished here and cannot be used again.
+    """
+    import psycopg
+
+    fileno = pgconn.socket
+    try:
+        with selectors.DefaultSelector() as selector:
+            waiting_for = next(gen)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    with suppress(Exception):
+                        gen.close()
+                    pgconn.finish()
+                    raise psycopg.OperationalError(
+                        "no reply from the server by the deadline"
+                    )
+                selector.register(fileno, waiting_for)
+                ready = selector.select(remaining)
+                selector.unregister(fileno)
+                if ready:
+                    waiting_for = gen.send(ready[0][1])
+    except StopIteration as done:
+        return done.value
+
+
 @functools.cache
 def _connection_by_deadline() -> type[Any]:
     """
-    psycopg's Connection, opening by the calling thread's _connect_deadline.
+    psycopg's Connection, opening by the calling thread's _connect_deadline,
+    and waiting for each reply by its _reply_deadline when that is set.
 
     psycopg's connect() waits on the generator _connect_gen returns, one per
     attempt, on every version this package supports. This one does the
     waiting itself, through _connect_by, and hands psycopg's own wait a
-    generator that has already finished.
+    generator that has already finished. Every statement waits through the
+    connection's wait(), which _reply_by takes over while a reply deadline
+    is set.
     """
     import psycopg
 
@@ -1003,6 +1089,12 @@ def _connection_by_deadline() -> type[Any]:
             )
             yield from ()
             return conn
+
+        def wait(self, gen: Any, *args: Any, **kwargs: Any) -> Any:
+            deadline = getattr(_reply_deadline, "at", None)
+            if deadline is None:
+                return super().wait(gen, *args, **kwargs)
+            return _reply_by(deadline, gen, self.pgconn)
 
     return ConnectionByDeadline
 
@@ -1208,6 +1300,73 @@ def _outside_the_pool(
         else:
             del connections[alias]
         own.wrapper.close()
+
+
+@contextmanager
+def _answering_by(alias: str, deadline: float) -> Iterator[bool]:
+    """
+    Give the calling thread a connection to `alias` of its own for the
+    block, one that cannot wait on the server without limit; yield True.
+    Yield False on any other database, and the block runs on the thread's
+    ordinary connection.
+
+    On PostgreSQL with psycopg 3, pooled or not, the connection is
+    renewal's, _OwnConnection: outside Django's pool, and connecting by
+    `deadline` or by a shorter positive connect_timeout from OPTIONS, never
+    by none. A connection that opens is then held to the same deadline for
+    every reply, _reply_by, so a server that stops answering after the
+    connection is made cannot hold the block either.
+
+    On MySQL, it is a new connection whose settings are a copy with
+    connect_timeout, read_timeout and write_timeout at
+    MYSQL_RECOVERY_TIMEOUT. The drivers enforce those per operation, so
+    each wait is bounded but the block as a whole is not held to
+    `deadline`. Without them PyMySQL waits for a server's greeting, and for
+    every reply, as long as the socket stays open. The copy is the block's
+    alone: every other wrapper for the alias reads the same settings.
+
+    Resolving a host name is not covered. The thread's own connection is
+    never used, closed or changed, and is put back afterwards, however the
+    block ends; the block's is closed.
+    """
+    vendor = connections[alias].vendor
+    if vendor == "mysql":
+        wrapper = connections.create_connection(alias)
+        options = {
+            **wrapper.settings_dict["OPTIONS"],
+            "connect_timeout": MYSQL_RECOVERY_TIMEOUT,
+            "read_timeout": MYSQL_RECOVERY_TIMEOUT,
+            "write_timeout": MYSQL_RECOVERY_TIMEOUT,
+        }
+        wrapper.settings_dict = {**wrapper.settings_dict, "OPTIONS": options}
+    elif vendor == "postgresql":
+        from django.db.backends.postgresql.psycopg_any import is_psycopg3
+
+        if not is_psycopg3:
+            yield False
+            return
+        own = _OwnConnection(
+            connections.create_connection(alias),
+            max(deadline - time.monotonic(), 0.0),
+        )
+        own.connect_by(deadline)
+        wrapper = own.wrapper
+        _reply_deadline.at = deadline
+    else:
+        yield False
+        return
+    before = [c for c in connections.all(initialized_only=True) if c.alias == alias]
+    connections[alias] = wrapper
+    try:
+        yield True
+    finally:
+        _reply_deadline.at = None
+        if before:
+            connections[alias] = before[0]
+        else:
+            del connections[alias]
+        with suppress(Error):
+            wrapper.close()
 
 
 def _every(interval: float, stop: Event, tick: Callable[[], object]) -> None:
@@ -1580,6 +1739,39 @@ class Worker:
         # is gone stops being renewed and the reaper can still recover it.
         self._in_flight: set[tuple[Any, int]] = set()
         self._in_flight_lock = Lock()
+        # Two more sets of (pk, lease_epoch), under the same lock, which
+        # together with _in_flight name every claim of this worker that
+        # returned and may still be RUNNING under its id. _recover_claims
+        # releases a row of this worker's only when it is in none of them.
+        #
+        # _handed_off: a claim that returned and whose execution has not
+        # registered yet. Added on the claiming thread before the row is
+        # submitted, and moved into _in_flight by execute() in one step,
+        # because a pool thread registers only after a thread handoff and
+        # its own connection setup, and a row in neither set there would
+        # look exactly like one whose claim raised.
+        #
+        # _unsettled: an execution that ended without its outcome recorded,
+        # or that the watchdog took off its thread. Its body ran, or may
+        # have, so its row must never be released as a claim that did not
+        # happen.
+        #
+        # A look drops an entry of either only when it reads that the claim
+        # is over, which can never become untrue: _recover_claims. An entry
+        # whose row no look can see stays, however long.
+        self._handed_off: set[tuple[Any, int]] = set()
+        self._unsettled: set[tuple[Any, int]] = set()
+        # One claimer per worker at a time: every claim, and every look for
+        # a claim that raised, holds it. A look that ran while another claim
+        # was on its way back would find that claim's row RUNNING under this
+        # worker's id and in none of the sets above. Reentrant, because
+        # claim_one() takes it too and the entry points call claim_one()
+        # holding it.
+        self._claimer = RLock()
+        # time.monotonic() of the most recent claim_one() that raised a
+        # database error on a connection the worker owned, while no look
+        # since has settled it; None otherwise. See _recover_claims.
+        self._claim_unconfirmed_at: float | None = None
         # Thread ident -> the attempt running on that thread under a
         # timeout. The lock is the injection lock: the watchdog injects only
         # while it holds the lock and the entry is present, and the runner
@@ -1793,7 +1985,13 @@ class Worker:
 
     def claim_one(self) -> OxTask | None:
         """Atomically claim the next runnable task, or return None."""
-        db_task = self._claim_one()
+        # Under the claimer lock, and registered before it is released, so a
+        # caller that claims here directly and executes the row later is
+        # never taken for a claim that raised; see _recover_claims.
+        with self._claimer:
+            db_task = self._claim_one()
+            if db_task is not None:
+                self._hand_off(db_task)
         if db_task is not None:
             logger.debug(
                 "Claimed task id=%s path=%s (attempt %d/%d)",
@@ -1893,6 +2091,470 @@ class Worker:
             .filter(pk=pk, lease_epoch=granted_epoch)
             .first()
         )
+
+    # -- a claim that raised -----------------------------------------------
+
+    def _hand_off(self, db_task: OxTask) -> None:
+        """
+        Register a claim that returned, until execute() moves it into
+        _in_flight.
+        """
+        with self._in_flight_lock:
+            self._handed_off.add((db_task.pk, db_task.lease_epoch))
+
+    def _claim(self, *, owned: bool | None = None) -> OxTask | None:
+        """
+        claim_one() as run(), run_once() and run_tasks() call it.
+
+        A claim can commit and still raise: the connection goes after the
+        server has applied it and before its reply arrives. The row is then
+        RUNNING under this worker's id with an attempt charged, nothing runs
+        it and nothing renews it, and it waits out its lease until a reaper
+        takes it back with the attempt spent, or marks it LOST on its last.
+        Nothing here replays the claim or takes the error for a rollback. The
+        failure is noted, and _recover_claims later reads what the database
+        holds.
+
+        Noted only for a connection the worker owned when the claim began,
+        _owns_connection. `owned` is that decision when the caller has made it
+        already, as _claim_inline does; otherwise it is made here, before the
+        claim. Every database error out of claim_one() is noted, whichever
+        statement raised it: an override may make reads of its own first, and
+        a look that finds nothing costs one read on a path that has already
+        failed.
+
+        The row a claim returns is registered before the claimer lock is
+        released, here as well as in the base claim_one(), so an override that
+        claims without calling it is covered too.
+        """
+        if owned is None:
+            owned = self._owns_connection()
+        with self._claimer:
+            try:
+                db_task = self.claim_one()
+            except Error:
+                if owned:
+                    self._claim_unconfirmed_at = time.monotonic()
+                raise
+            if db_task is not None:
+                self._hand_off(db_task)
+            return db_task
+
+    def _owns_connection(self) -> bool:
+        """
+        Whether a claim made now would be the worker's own: autocommit on and
+        no atomic block open on its database's connection. Inside a caller's
+        transaction, an atomic block or a connection the caller took out of
+        autocommit, the claim belongs to that transaction and commits or
+        rolls back with it. Decided before the claim, never from what an
+        error leaves behind.
+        """
+        conn = connections[self._db_alias]
+        return not conn.in_atomic_block and conn.get_autocommit()
+
+    def _claim_inline(self, *, retained: bool = True) -> OxTask | None:
+        """
+        _claim() for run_once() and run_tasks(), on the caller's thread.
+
+        A look still pending from an earlier call comes first, as run() makes
+        it before a claim pass, and a database error from it is raised: no
+        claim is made until it has been answered or its window has passed.
+
+        Whether the claim is the worker's own is decided before it starts,
+        and the error path acts on that decision. When the claim raises on a
+        connection the worker owned, one look is made there and then, and the
+        claim's own error is raised whatever the look did. When it did not,
+        no look is made: the connection, and any transaction open on it, are
+        the caller's, and a look already pending stays pending. A look that
+        fails is logged and stays pending; it never takes the place of the
+        error the caller has to see. A row it releases is claimed by a later
+        call, here or anywhere else.
+
+        `retained` is False for run_tasks(), whose worker lasts one call, and
+        selects what that log says about a later look.
+        """
+        self._recover_claims()
+        owned = self._owns_connection()
+        try:
+            return self._claim(owned=owned)
+        except Error:
+            if owned:
+                self._recover_claims_once(stopping=False, retained=retained)
+            raise
+
+    def _claim_recovery(self) -> str | None:
+        """For log records: "pending" while a look is owed, else None."""
+        return None if self._claim_unconfirmed_at is None else "pending"
+
+    def _recover_claims_once(self, *, stopping: bool, retained: bool = True) -> None:
+        """
+        _recover_claims(), with anything it raises logged rather than raised:
+        after a claim error that must reach the caller unchanged, and as the
+        worker stops. Stopping, the look is the bounded one,
+        _recover_claims_by; otherwise it follows a claim the worker owned
+        that raised, _claim_inline. `retained` is False when this worker
+        will not be asked to claim again, and so will not look again:
+        run_tasks().
+        """
+        if self._claim_unconfirmed_at is None:
+            return
+        try:
+            if stopping:
+                self._recover_claims_by(time.monotonic() + OWN_CONNECTION_DEADLINE)
+            else:
+                self._recover_claims(after_own_claim=True)
+        except Exception as exc:
+            conn = connections[self._db_alias]
+            if not stopping and _worker_may_use(conn):
+                # The next statement on this thread reconnects rather than
+                # failing on the same dead connection. A connection out of
+                # autocommit or inside an atomic block may hold a caller's
+                # transaction, and is left exactly as it is. Stopping, there
+                # is no next statement, and a pool sweep could wait on the
+                # very server the deadline gave up on.
+                _close_lost_connection(conn)
+            if stopping:
+                then = (
+                    "It is stopping, so a row that did land is the reaper's once "
+                    "its lease expires, with the attempt charged"
+                )
+            elif retained:
+                then = CLAIM_RECOVERY_RETAINED
+            else:
+                then = CLAIM_RECOVERY_NOT_RETAINED
+            # run_tasks() makes no later look, so none is pending.
+            state = "pending" if retained and not stopping else "expired"
+            logger.warning(
+                "Worker %s could not look for a claim of its own that raised "
+                "and may have committed (%s: %s). %s",
+                self.worker_id,
+                type(exc).__qualname__,
+                _reason(exc),
+                then,
+                exc_info=True,
+                extra={
+                    "event": "worker_claim_recovery_failed",
+                    "worker_id": self.worker_id,
+                    "claim_recovery": state,
+                },
+            )
+
+    def _recover_claims_by(self, deadline: float) -> None:
+        """
+        _recover_claims() as a stopping worker makes it: done by `deadline`,
+        on time.monotonic(), or given up, on PostgreSQL with psycopg 3; with
+        each wait on the server bounded, on MySQL.
+
+        The wait for the claimer lock ends at the deadline, and the look runs
+        on a connection of the thread's own, _answering_by. On PostgreSQL it
+        opens by the deadline, or by a shorter positive connect_timeout, and
+        every reply is held to the deadline, so a database that is gone, or
+        that stops answering once connected, costs the stop no more than
+        that. On MySQL its connect, read and write timeouts bound each
+        operation instead, not the look as a whole. A look given up is a
+        look that failed: nothing is inferred from it and nothing is
+        refunded, and a row that did land is the reaper's. It is not made
+        while the thread's connection may hold a caller's transaction, as
+        _recover_claims says.
+
+        On any other database, and with psycopg2, the look runs on the
+        thread's connection, as _recover_claims does, bounded only by the
+        driver's own timeouts.
+        """
+        if not _worker_may_use(connections[self._db_alias]):
+            return
+        if not self._claimer.acquire(timeout=max(deadline - time.monotonic(), 0.0)):
+            raise TimeoutError("another claim of this worker's held the claimer lock")
+        try:
+            with _answering_by(self._db_alias, deadline):
+                self._recover_claims()
+        finally:
+            self._claimer.release()
+
+    def _recovery_connection(self, conn: Any, *, after_own_claim: bool) -> None:
+        """
+        Leave `conn`, which is outside any atomic block, with no connection
+        open, or with one that answers and is in autocommit, so the look runs
+        on a connection that answers rather than the one a claim just failed
+        on. One that is not is closed and, with Django's PostgreSQL pool, the
+        pool's idle connections are swept, _close_lost_connection: after a
+        restart they are as dead as this one. With none open, the look's read
+        opens one.
+
+        Only on the recovery path, where the probe's round trip is paid once
+        per look. A connection out of autocommit reaches this only with
+        `after_own_claim`, as _recover_claims says: whatever it still holds is
+        the claim's. Any other that is closed here is in autocommit and holds
+        no transaction.
+        """
+        if conn.connection is None:
+            return
+        if conn.autocommit and conn.is_usable():
+            return
+        if conn.autocommit or after_own_claim:
+            _close_lost_connection(conn)
+
+    def _recover_claims(self, *, after_own_claim: bool = False) -> None:
+        """
+        Look for a claim of this worker's that raised and may have committed,
+        and put each one found back on the queue with its attempt refunded.
+
+        Only while one is pending, as _claim noted it; only within
+        LOCK_TIMEOUT of the latest claim that raised, after which it stops
+        looking, says so, and the reaper owns such a row as it always did;
+        and only on a connection _worker_may_use passes, checked again here
+        whoever asks: never inside an atomic block or on a connection out of
+        autocommit, which may hold a caller's transaction. Returns at once
+        when nothing is pending, so the ordinary path pays nothing.
+
+        One exception, `after_own_claim`: the look _claim_inline makes at
+        once when a claim raised that began on a connection the worker owned,
+        autocommit on and no atomic block open, decided before the claim. If
+        that connection is now out of autocommit outside any atomic block,
+        the claim's own block failed to put autocommit back, as when the
+        reply lost was the one to SET autocommit=1 after the COMMIT, and
+        nothing else has run on it since, so whatever it holds is the
+        claim's. It is closed and the look runs on a new connection.
+
+        The look is one read on a usable connection: every row RUNNING under
+        this worker's id, less those in _in_flight, _handed_off and
+        _unsettled, taken as one snapshot under their lock before the read.
+        The claimer lock is held throughout, so no claim is on its way back
+        while it runs, and every claim that returned is in one of those sets
+        until its outcome is recorded. The worker id belongs to this Worker
+        instance alone, so no other worker's row can match. What is left is a
+        claim that raised. Absence from _in_flight alone is never taken as
+        that: a claim still being handed to a pool thread, and an execution
+        whose outcome could not be recorded, are absent from it too.
+
+        A row whose lease the reaper would already take is left to the
+        reaper: the read carries the reaper's own test of the lease, on the
+        same clock. A row whose history does not hold one entry per attempt,
+        ending with this worker, is not released and is logged: that is a
+        defect to report, not something a refund may paper over.
+
+        The release is one UPDATE per row, pinned on (pk, RUNNING, this
+        worker, the epoch read): READY, the lease and ownership fields
+        cleared, the epoch moved on as the reaper moves it, the attempt taken
+        back, the history entry this claim appended removed, and started_at
+        cleared when no attempt is left on the row, since the claim that set
+        it never began. Every value comes from the read. The row is then as it
+        was before the claim but for the epoch, which fences the lost claim
+        the way a reaper's requeue fences a lease, and last_attempted_at,
+        which keeps the instant of the claim. A pinned update that
+        matches nothing is not a release: a reaper requeued the row (the
+        epoch moved) or marked it LOST (it is not RUNNING), and that decision
+        stands. Only a release that landed is logged, as
+        worker_claim_released.
+
+        An entry of _handed_off or _unsettled is dropped only on positive
+        evidence that its claim is over: its row read at a later epoch, or at
+        the same epoch in another state or under another owner. Every claim
+        moves the epoch, so neither can be undone. A row the look cannot see,
+        or sees at an earlier epoch, keeps its entry: a claim made inside a
+        caller's atomic block is registered at once and invisible to this
+        connection until the caller commits. The rows of entries the first
+        read did not return are read for this, and only then, which costs
+        the recovery path a second read and the ordinary path nothing. Only
+        entries in the snapshot are judged; one registered since stays.
+
+        A database error ends the look with it still pending, and is raised,
+        so run() handles it as a failed pass. A release that committed but
+        whose reply was lost is not logged, and the next look finds the row
+        READY and has nothing to do. That look is never a claim: a released
+        row is claimed afresh, by this worker or another, and charged then.
+        """
+        with self._claimer:
+            since = self._claim_unconfirmed_at
+            if since is None:
+                return
+            if time.monotonic() - since > self.lock_timeout:
+                self._claim_unconfirmed_at = None
+                logger.warning(
+                    "Worker %s stopped looking for a claim of its own that "
+                    "raised and may have committed: %gs have passed since it "
+                    "raised. A row that did land is the reaper's once its "
+                    "lease expires, with the attempt charged",
+                    self.worker_id,
+                    self.lock_timeout,
+                    extra={
+                        "event": "worker_claim_recovery_expired",
+                        "worker_id": self.worker_id,
+                        "claim_recovery": "expired",
+                    },
+                )
+                return
+            conn = connections[self._db_alias]
+            if conn.in_atomic_block or not (after_own_claim or _worker_may_use(conn)):
+                return
+            self._recovery_connection(conn, after_own_claim=after_own_claim)
+            with self._in_flight_lock:
+                known = self._in_flight | self._handed_off | self._unsettled
+                examined = self._handed_off | self._unsettled
+            cutoff = _lease_now() - timedelta(seconds=self.lock_timeout)
+            rows = list(
+                OxTask.objects.using(self._db_alias)
+                .filter(status=OxTask.Status.RUNNING, locked_by=self.worker_id)
+                .annotate(
+                    ox_lease_abandoned=ExpressionWrapper(
+                        self._abandoned_lease_q(cutoff), output_field=BooleanField()
+                    )
+                )
+                .values_list(
+                    "pk",
+                    "lease_epoch",
+                    "attempts",
+                    "worker_ids",
+                    "task_path",
+                    "queue_name",
+                    "ox_lease_abandoned",
+                )
+            )
+            # Positive evidence only, as the docstring says: absence from
+            # the read above is not evidence, since an uncommitted claim is
+            # absent from it too.
+            state: dict[Any, tuple[int, str, str | None]] = {
+                pk: (epoch, OxTask.Status.RUNNING, self.worker_id)
+                for pk, epoch, *_ in rows
+            }
+            unseen = list({pk for pk, _ in examined} - state.keys())
+            for start in range(0, len(unseen), RECOVERY_READ_CHUNK):
+                for pk, epoch, status, owner in (
+                    OxTask.objects.using(self._db_alias)
+                    .filter(pk__in=unseen[start : start + RECOVERY_READ_CHUNK])
+                    .values_list("pk", "lease_epoch", "status", "locked_by")
+                ):
+                    state[pk] = (epoch, status, owner)
+            over: set[tuple[Any, int]] = set()
+            for pk, epoch in examined:
+                if pk not in state:
+                    continue
+                row_epoch, status, owner = state[pk]
+                if row_epoch > epoch or (
+                    row_epoch == epoch
+                    and (status != OxTask.Status.RUNNING or owner != self.worker_id)
+                ):
+                    over.add((pk, epoch))
+            with self._in_flight_lock:
+                self._handed_off -= over
+                self._unsettled -= over
+            known_pks = {pk for pk, _ in known}
+            for pk, epoch, attempts, history, task_path, queue, abandoned in rows:
+                if pk in known_pks:
+                    continue
+                if abandoned:
+                    logger.warning(
+                        "Worker %s found task id=%s path=%s RUNNING under its "
+                        "own id though no claim of it returned. Its lease has "
+                        "expired, so it is the reaper's, with the attempt "
+                        "charged",
+                        self.worker_id,
+                        pk,
+                        task_path,
+                        extra={
+                            "event": "worker_claim_recovery_expired",
+                            "task_id": str(pk),
+                            "task_path": task_path,
+                            "queue": queue,
+                            "worker_id": self.worker_id,
+                            "claim_recovery": "expired",
+                        },
+                    )
+                    continue
+                if not (
+                    isinstance(history, list)
+                    and attempts >= 1
+                    and len(history) == attempts
+                    and history[-1] == self.worker_id
+                ):
+                    logger.error(
+                        "Worker %s found task id=%s path=%s RUNNING under its "
+                        "own id though no claim of it returned, and did not "
+                        "release it: its history does not hold one entry per "
+                        "attempt ending with this worker (attempts %s, "
+                        "worker_ids %r). The reaper takes it back once its "
+                        "lease expires",
+                        self.worker_id,
+                        pk,
+                        task_path,
+                        attempts,
+                        history,
+                        extra={
+                            "event": "worker_claim_release_refused",
+                            "task_id": str(pk),
+                            "task_path": task_path,
+                            "queue": queue,
+                            "worker_id": self.worker_id,
+                            "attempts": attempts,
+                            "worker_ids": history,
+                        },
+                    )
+                    continue
+                self._release_claim(pk, epoch, attempts, history, task_path, queue)
+            self._claim_unconfirmed_at = None
+
+    def _release_claim(
+        self,
+        pk: Any,
+        epoch: int,
+        attempts: int,
+        history: list[str],
+        task_path: str,
+        queue: str,
+    ) -> bool:
+        """
+        The pinned release _recover_claims describes, for one row read as
+        (`epoch`, `attempts`, `history`). True when it landed.
+        """
+        refunded = attempts - 1
+        fields: dict[str, Any] = {
+            "status": OxTask.Status.READY,
+            "locked_by": None,
+            "locked_at": None,
+            "lease_expires_at": None,
+            "lease_epoch": epoch + 1,
+            "attempts": refunded,
+            "worker_ids": history[:-1],
+        }
+        if refunded == 0:
+            fields["started_at"] = None
+        released = (
+            OxTask.objects.using(self._db_alias)
+            .filter(
+                pk=pk,
+                status=OxTask.Status.RUNNING,
+                locked_by=self.worker_id,
+                lease_epoch=epoch,
+            )
+            .update(**fields)
+        )
+        if not released:
+            return False
+        logger.warning(
+            "Worker %s released task id=%s path=%s: a claim of it raised, "
+            "though it had committed. It is READY again with the attempt "
+            "refunded (attempts %d -> %d, lease epoch %d -> %d)",
+            self.worker_id,
+            pk,
+            task_path,
+            attempts,
+            refunded,
+            epoch,
+            epoch + 1,
+            extra={
+                "event": "worker_claim_released",
+                "task_id": str(pk),
+                "task_path": task_path,
+                "queue": queue,
+                "attempt": refunded,
+                "worker_id": self.worker_id,
+                "old_epoch": epoch,
+                "new_epoch": epoch + 1,
+                "refunded_attempts": 1,
+                "reason": "claim_outcome_unknown",
+            },
+        )
+        return True
 
     # -- lease renewal -----------------------------------------------------
 
@@ -2381,10 +3043,16 @@ class Worker:
         while this execution runs. The lease holds only while renewal
         reaches the database on time. The pair leaves the set when this
         execution ends.
+
+        It joins the set in the same step that takes it out of _handed_off,
+        and leaves it for _unsettled unless the attempt's outcome was
+        recorded, so at no instant is a claim that returned in none of the
+        three; _recover_claims depends on that.
         """
         held = (db_task.pk, db_task.lease_epoch)
         ident = threading.get_ident()
         with self._in_flight_lock:
+            self._handed_off.discard(held)
             self._in_flight.add(held)
             self._running_on[ident] = held
         # The policy _run_attempt resolves lives for this attempt only. A task
@@ -2392,19 +3060,32 @@ class Worker:
         outer = getattr(self._attempt_local, "policy", None)
         self._attempt_local.policy = None
         executing = _executing.set(db_task.task_path)
+        recorded = False
         try:
-            self._run_attempt(db_task, inline=inline)
+            recorded = self._run_attempt(db_task, inline=inline)
         finally:
             _executing.reset(executing)
             self._attempt_local.policy = outer
             with self._in_flight_lock:
                 self._in_flight.discard(held)
+                # Only an outcome that landed settles the row. False is a
+                # lease lost or an outcome that could not be written, and an
+                # override may answer False for either; a raise says nothing.
+                # Short of a landed outcome the row stays excluded, because
+                # its body ran, or may have, and a look must never refund it.
+                # After a lost lease that costs an entry the next look drops.
+                if recorded is True:
+                    self._unsettled.discard(held)
+                else:
+                    self._unsettled.add(held)
                 if self._running_on.get(ident) == held:
                     del self._running_on[ident]
 
-    def _run_attempt(self, db_task: OxTask, *, inline: bool = False) -> None:
+    def _run_attempt(self, db_task: OxTask, *, inline: bool = False) -> bool:
         """
-        One attempt: rebuild the task, call it, record what happened.
+        One attempt: rebuild the task, call it, record what happened. Returns
+        True when the attempt's outcome was written to the row, and False when
+        it was not: the lease was lost, or the write failed.
 
         The task is rebuilt from the row for every attempt, so the policy it
         runs under is the one the code declares now, with the row's stored
@@ -2497,7 +3178,7 @@ class Worker:
                 ),
             )
             self._discard_connections()
-            self._handle_failure(db_task, exc, duration_ms)
+            return self._handle_failure(db_task, exc, duration_ms)
         except (KeyboardInterrupt, SystemExit) as exc:
             # Aimed at the process, not at this task. On the pool it is
             # recorded as a failed attempt and kept there deliberately: one
@@ -2510,9 +3191,9 @@ class Worker:
             # against the work.
             if inline:
                 raise
-            self._handle_failure(db_task, exc, _elapsed_ms(started))
+            return self._handle_failure(db_task, exc, _elapsed_ms(started))
         except BaseException as exc:
-            self._handle_failure(db_task, exc, _elapsed_ms(started))
+            return self._handle_failure(db_task, exc, _elapsed_ms(started))
         else:
             duration_ms = _elapsed_ms(started)
             # A task that caught a database error which ended its connection
@@ -2544,7 +3225,7 @@ class Worker:
                 locked_at=None,
                 lease_expires_at=None,
             ):
-                return
+                return False
             logger.info(
                 "Task id=%s path=%s succeeded in %dms",
                 db_task.id,
@@ -2558,6 +3239,7 @@ class Worker:
                 sender=type(self.backend),
                 task_result=task_result_from_db(db_task, task=task),
             )
+            return True
 
     def _task_body(self, db_task: OxTask) -> AbstractContextManager[None]:
         """
@@ -3135,7 +3817,11 @@ class Worker:
         db_task = watch.db_task
         duration_ms = _elapsed_ms(watch.started)
         with self._in_flight_lock:
-            self._in_flight.discard((db_task.pk, db_task.lease_epoch))
+            self._in_flight.discard(watch.attempt)
+            # Its thread is still inside the body, so its row must never be
+            # released as a claim that did not happen, whatever the record
+            # below manages; see _recover_claims.
+            self._unsettled.add(watch.attempt)
         logger.error(
             "Task id=%s path=%s did not stop %gs after its %gs timeout on "
             "attempt %d/%d; recording the attempt as failed and recycling "
@@ -4573,9 +5259,17 @@ class Worker:
         A connection taken out of autocommit without an atomic block still
         gets renewal. The task can commit and make its lease visible while it
         runs. An atomic block on a different database does not disable renewal.
+
+        A claim that raises is raised, but on a connection the worker owns
+        (autocommit, no atomic block of the caller's) it may have committed
+        all the same. One look for such a row is made before the error is
+        raised, and a row it finds goes back to READY with its attempt
+        refunded, for a later call to run; the claim's own error is what the
+        caller gets either way.
+        See _claim_inline.
         """
         in_callers_transaction = connections[self._db_alias].in_atomic_block
-        db_task = self.claim_one()
+        db_task = self._claim_inline()
         if db_task is None:
             return False
         if in_callers_transaction:
@@ -4789,6 +5483,14 @@ class Worker:
                             dispatch_owed = False
                             self._dispatch_report.pass_completed()
                         last_dispatch = time.monotonic()
+                    # Before any claim of this pass, and so before --batch or
+                    # --max-tasks can decide the worker is done: a claim that
+                    # raised may have left a row RUNNING under this worker's
+                    # id that nothing will run. A look that fails raises into
+                    # the handler below like any failed pass, still pending,
+                    # and this pass claims nothing. _recover_claims says when
+                    # it looks and what it releases.
+                    self._recover_claims()
                     in_flight = {f for f in in_flight if not f.done()}
                     # Read before claiming, not after: a task still running
                     # when the claim finds nothing can enqueue work and
@@ -4811,7 +5513,7 @@ class Worker:
                         # returns still stops the updates.
                         self._beat()
                         self._claim_contended = False
-                        db_task = self.claim_one()
+                        db_task = self._claim()
                         if db_task is None:
                             # A claim that lost every race found a busy
                             # queue rather than an empty one, so --batch
@@ -4847,6 +5549,9 @@ class Worker:
                         extra={
                             "event": "worker_poll_failed",
                             "worker_id": self.worker_id,
+                            # "pending" when a claim raised, now or on an
+                            # earlier pass, and has not been looked for.
+                            "claim_recovery": self._claim_recovery(),
                         },
                     )
                     # close_old_connections rather than close_all: it drops
@@ -4867,8 +5572,11 @@ class Worker:
                     # still be down, or a connection drop after the sweep.
                     # It replays nothing: reap, dispatch and claim wait for
                     # the next pass as before. A claim that raised may still
-                    # have committed, and its row waits out its lease as it
-                    # always did.
+                    # have committed. It is not claimed again: the next pass
+                    # reads, before it claims, whether a row is RUNNING under
+                    # this worker's id that no claim returned, and releases
+                    # it; past LOCK_TIMEOUT its row waits out its lease as it
+                    # always did. _recover_claims.
                     _sweep_pool(connections[self._db_alias])
                     self._stop.wait(self.poll_interval)
                     continue
@@ -4903,6 +5611,12 @@ class Worker:
                     else:
                         self._stop.wait(self.poll_interval)
         finally:
+            # A claim that raised on the last pass is looked for once more
+            # before the worker goes, with a failure logged and not raised,
+            # on PostgreSQL given up after OWN_CONNECTION_DEADLINE and on
+            # MySQL with each wait bounded, _recover_claims_by: whatever is
+            # left is the reaper's.
+            self._recover_claims_once(stopping=True)
             pending = sum(1 for f in in_flight if not f.done())
             if pending:
                 logger.info(

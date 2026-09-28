@@ -90,12 +90,18 @@ Operational facts to get right:
   so a live worker that cannot get one can still lose the lease.
 - With Django's PostgreSQL pool, use at least `concurrency + 1` pooled
   connections per worker process. Budget two additional server connections
-  outside the pool per worker as a worst case: one for lease renewal and
+  outside the pool per worker and database alias as a worst case in normal
+  operation: one for lease renewal and
   one possible timeout-watchdog connection. This gives `max_size + 2`
-  per worker for capacity planning, not a count of open connections or a
+  per worker and database alias in normal operation for capacity planning,
+  not a count of open connections or a
   startup requirement. A worker whose tasks never use timeouts needs only
-  the baseline extra connection; absent OPTIONS timeouts do not prove
+  the baseline extra connection, for `max_size + 1` in normal operation;
+  absent OPTIONS timeouts do not prove
   that, because a task can declare its own timeout.
+  A worker stopping with recovery pending opens one more private connection
+  for its stop-time recovery look: budget up to `max_size + 3` during that
+  look, or `max_size + 2` if its tasks never use timeouts.
   Include all processes, aliases, other clients, and reserved slots.
   Pool fallback needs a spare pooled connection; add and budget one if
   fallback must work under full load.

@@ -2341,9 +2341,29 @@ The message text is not part of the contract. The keys are.</p>
 <td>The execution wrapper itself raised (an internal worker error, not a task failure). A connection-level outcome-write failure whose recovery on a new connection also failed is reported as <code>task_outcome_unrecorded</code> instead.</td>
 </tr>
 <tr>
+<td><code>worker_claim_released</code></td>
+<td>WARNING</td>
+<td>A claim raised an error even though it had committed. This worker returned the row to <code>READY</code> and refunded 1 attempt. Includes <code>task_id</code>, <code>task_path</code>, <code>queue</code>, <code>attempt</code> after the refund, <code>worker_id</code>, <code>old_epoch</code>, <code>new_epoch</code>, <code>refunded_attempts</code> and <code>reason</code> set to <code>claim_outcome_unknown</code>.</td>
+</tr>
+<tr>
+<td><code>worker_claim_recovery_failed</code></td>
+<td>WARNING</td>
+<td>A recovery read could not run or finish while <code>Worker.run()</code> was stopping, including when another claim of the same Worker remained in flight past the five-second claim-wait budget or began during the look. Includes a traceback; the exception text identifies claim interference. <code>claim_recovery</code> is always <code>expired</code>: the worker is stopping without another recovery retry. Rows the look released before giving up are <code>READY</code>, each logged as <code>worker_claim_released</code>. Any unrecovered row is then left to the reaper.</td>
+</tr>
+<tr>
+<td><code>worker_claim_recovery_expired</code></td>
+<td>WARNING</td>
+<td>The recovery window passed before recovery completed, or a recovery read found a row whose lease the reaper could already take. <code>claim_recovery</code> is <code>expired</code>. Window expiry has no task id; a row-specific event includes <code>task_id</code>, <code>task_path</code> and <code>queue</code>. The reaper handles the row with the attempt still charged.</td>
+</tr>
+<tr>
+<td><code>worker_claim_release_refused</code></td>
+<td>ERROR</td>
+<td>A row's history is inconsistent: <code>attempts</code> does not equal the number of <code>worker_ids</code>, or the last entry is not this worker. The row was not released and is left to the reaper. Includes <code>task_id</code>, <code>task_path</code>, <code>queue</code>, <code>attempts</code> and <code>worker_ids</code>. Report this as a defect.</td>
+</tr>
+<tr>
 <td><code>worker_poll_failed</code></td>
 <td>WARNING</td>
-<td>A database error ended one pass of the poll loop. The pass is abandoned and retried on the next one; the worker keeps running. A steady stream of it means the database is unreachable rather than slow.</td>
+<td>A database error ended one pass of the poll loop. The pass is abandoned and retried on the next one; the worker keeps running. <code>claim_recovery</code> is <code>pending</code> while a recovery read is owed, or <code>null</code> otherwise. A failed recovery read prevents new claims for that pass. A steady stream of this event means database operations are failing, not merely slow.</td>
 </tr>
 <tr>
 <td><code>watchdog_error</code></td>
@@ -2471,8 +2491,8 @@ A failed connect while recording a stuck attempt logs
 </tr>
 <tr>
 <td><code>worker_id</code></td>
-<td>Worker events except <code>heartbeat_write_failed</code>, <code>schedule_source_unavailable</code>, <code>schedule_boundary_healed</code>, <code>schedule_boundary_heal_failed</code>, <code>schedule_row_skipped</code> and <code>schedule_lock_unavailable</code> for a stored schedule; also <code>run_tasks_callback_failed</code></td>
-<td>Unique id of the worker emitting the record. With <code>--processes</code>, the slot number is the last part of the id. Settings-declared <code>schedule_lock_unavailable</code> events carry this key. Records from <code>run_tasks()</code> use the drain worker's hostname-pid-random id, created for each call. <code>task_policy_inert</code> and <code>run_tasks_timeout_inert</code> omit this key.</td>
+<td>Worker events except <code>heartbeat_write_failed</code>, <code>schedule_source_unavailable</code>, <code>schedule_boundary_healed</code>, <code>schedule_boundary_heal_failed</code>, <code>schedule_row_skipped</code> and <code>schedule_lock_unavailable</code> for a stored schedule; also <code>run_tasks_callback_failed</code>; includes <code>worker_claim_released</code></td>
+<td>Unique id of the worker emitting the record. With <code>--processes</code>, the slot number is the last part of the id. A Worker used in a process forked after its creation takes a new id in the child, retaining any <code>-&lt;slot&gt;</code> suffix; the parent keeps its id. An at-fork hook re-identifies the child. If the fork runs no at-fork hook, as with uWSGI's default, a pid check re-identifies it at its first <code>claim_one()</code>, claim, recovery look or <code>run()</code>; until then, the child's copy can still report the parent's id. Fork before claiming: handing an already-claimed row to a child for execution is unsupported, because the child's new id cannot renew the parent's lease and the reaper can requeue the row while the child runs it. This identity handling does not make arbitrary native forks safe. <code>ox_worker --processes</code> starts fresh children rather than forking them. Settings-declared <code>schedule_lock_unavailable</code> events carry this key. Records from <code>run_tasks()</code> use the drain worker's hostname-pid-random id, created for each call. <code>task_policy_inert</code> and <code>run_tasks_timeout_inert</code> omit this key. On <code>worker_claim_released</code>, identifies the worker that made the unconfirmed claim and released it.</td>
 </tr>
 <tr>
 <td><code>worker_class</code></td>
@@ -2486,23 +2506,23 @@ A failed connect while recording a stuck attempt logs
 </tr>
 <tr>
 <td><code>task_id</code></td>
-<td>worker task events; also <code>run_tasks_callback_failed</code>; absent from <code>run_tasks_timeout_inert</code></td>
-<td>The task's UUID, as a string. Absent from <code>task_policy_inert</code>.</td>
+<td>Worker task events, including <code>worker_claim_released</code>, row-specific <code>worker_claim_recovery_expired</code> and <code>worker_claim_release_refused</code>; also <code>run_tasks_callback_failed</code>; absent from <code>run_tasks_timeout_inert</code></td>
+<td>The task's UUID primary key, as a string. Absent from <code>task_policy_inert</code>. Absent from <code>worker_claim_recovery_expired</code> when only the recovery window expired.</td>
 </tr>
 <tr>
 <td><code>task_path</code></td>
-<td>task events</td>
-<td>Dotted path of the task function.</td>
+<td>Task events, including <code>worker_claim_released</code>, row-specific <code>worker_claim_recovery_expired</code> and <code>worker_claim_release_refused</code></td>
+<td>Dotted path of the task function. Absent from <code>worker_claim_recovery_expired</code> when only the recovery window expired.</td>
 </tr>
 <tr>
 <td><code>queue</code></td>
-<td>worker task events; also <code>run_tasks_callback_failed</code>; absent from <code>run_tasks_timeout_inert</code></td>
-<td>Queue name. Absent from <code>task_policy_inert</code>.</td>
+<td>Worker task events, including <code>worker_claim_released</code>, row-specific <code>worker_claim_recovery_expired</code> and <code>worker_claim_release_refused</code>; also <code>run_tasks_callback_failed</code>; absent from <code>run_tasks_timeout_inert</code></td>
+<td>Queue name. Absent from <code>task_policy_inert</code>. Absent from <code>worker_claim_recovery_expired</code> when only the recovery window expired.</td>
 </tr>
 <tr>
 <td><code>attempt</code></td>
-<td>worker task events; also <code>run_tasks_callback_failed</code>; absent from <code>run_tasks_timeout_inert</code></td>
-<td>Attempts consumed so far, including the current one. Absent from <code>task_policy_inert</code>.</td>
+<td>Worker task events, including <code>worker_claim_released</code>; also <code>run_tasks_callback_failed</code>; absent from <code>run_tasks_timeout_inert</code></td>
+<td>Attempts consumed so far, including the current one. On <code>worker_claim_released</code>, the count after the refund, which can be 0. Absent from <code>task_policy_inert</code>.</td>
 </tr>
 <tr>
 <td><code>duration_ms</code></td>
@@ -2528,6 +2548,11 @@ A failed connect while recording a stuck attempt logs
 <td><code>reason</code></td>
 <td><code>task_failed</code></td>
 <td>Why the task reached FAILED: <code>attempts_exhausted</code> or <code>backoff_declined</code>.</td>
+</tr>
+<tr>
+<td><code>reason</code></td>
+<td><code>worker_claim_released</code></td>
+<td>Why the unconfirmed claim was released: <code>claim_outcome_unknown</code>.</td>
 </tr>
 <tr>
 <td><code>tracer</code></td>
@@ -2595,6 +2620,36 @@ A failed connect while recording a stuck attempt logs
 <td>Boolean. <code>true</code> when the new connection found the first write already committed; <code>false</code> when recovery wrote the outcome on the new connection.</td>
 </tr>
 <tr>
+<td><code>claim_recovery</code></td>
+<td><code>worker_poll_failed</code>, <code>worker_claim_recovery_failed</code>, <code>worker_claim_recovery_expired</code></td>
+<td>Recovery state. On <code>worker_poll_failed</code>, <code>pending</code> means a recovery read is owed; otherwise <code>null</code>. With psycopg2, it is always <code>null</code> on <code>worker_poll_failed</code>. On <code>worker_claim_recovery_failed</code>, always <code>expired</code>: <code>Worker.run()</code> is stopping without another recovery retry. On <code>worker_claim_recovery_expired</code>, always <code>expired</code>.</td>
+</tr>
+<tr>
+<td><code>old_epoch</code></td>
+<td><code>worker_claim_released</code></td>
+<td>The row's lease epoch before release.</td>
+</tr>
+<tr>
+<td><code>new_epoch</code></td>
+<td><code>worker_claim_released</code></td>
+<td>The row's lease epoch after release: <code>old_epoch + 1</code>.</td>
+</tr>
+<tr>
+<td><code>refunded_attempts</code></td>
+<td><code>worker_claim_released</code></td>
+<td>Number of attempts refunded by this release. Always 1.</td>
+</tr>
+<tr>
+<td><code>attempts</code></td>
+<td><code>worker_claim_release_refused</code></td>
+<td>The stored attempt count on the row whose release was refused. No attempt was refunded.</td>
+</tr>
+<tr>
+<td><code>worker_ids</code></td>
+<td><code>worker_claim_release_refused</code></td>
+<td>The stored worker-id history on the row whose release was refused. It must contain one entry per attempt and end with the recovering worker's id.</td>
+</tr>
+<tr>
 <td><code>schedule</code></td>
 <td><code>schedule_dispatched</code>, <code>schedule_row_skipped</code> during a periodic full read, <code>schedule_dispatch_error</code>, <code>schedule_dispatch_recovered</code>, <code>schedule_dispatch_callback_failed</code>, <code>schedule_tick_dropped</code>, <code>schedule_lock_unavailable</code> for a settings-declared schedule</td>
 <td>The schedule's name, from <code>SCHEDULES</code> or from its row.</td>
@@ -2642,7 +2697,7 @@ A failed connect while recording a stuck attempt logs
 <tr>
 <td><code>unpooled_connections</code></td>
 <td><code>connection_pool_too_small</code></td>
-<td>Worst-case additional private-connection budget per worker process, not a count of open connections. Always 2: one for lease renewal and one possible timeout-watchdog connection. A worker whose tasks never use timeouts needs only the first. An absent timeout in <code>OPTIONS</code> alone does not establish that, because a task can declare its own.</td>
+<td>Worst-case additional private-connection budget per worker process in normal operation, not a count of open connections. Always 2: one for lease renewal and one possible timeout-watchdog connection. This does not count the additional private connection used for a stop-time recovery look. A worker whose tasks never use timeouts needs only the first. An absent timeout in <code>OPTIONS</code> alone does not establish that, because a task can declare its own.</td>
 </tr>
 <tr>
 <td><code>pending</code></td>

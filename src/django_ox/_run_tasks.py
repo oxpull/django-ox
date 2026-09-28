@@ -585,12 +585,7 @@ def drain(
     try:
         while len(results) < limit:
             _refuse_broken_transactions()
-            # claim_one(), through the path run_once() takes: on a connection
-            # the worker owns, a claim that raised is looked for before the
-            # error is raised. Inside a TestCase there is no such connection
-            # and it is claim_one() alone. This worker lasts one call, so no
-            # later look is promised.
-            db_task = worker._claim_inline(retained=False)
+            db_task = worker.claim_one()
             if db_task is None:
                 return results
             results.append(_run_one(worker, db_task, raise_failures=raise_failures))

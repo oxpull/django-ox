@@ -18,22 +18,25 @@ row is left READY with no attempt charged.
 
 The loop asserts the outcome: the task's body runs once, the row ends
 SUCCESSFUL, and the attempts it records are the attempts that ran. The inline
-calls raise the claim's error, which is theirs to raise, and the contract is
-that the next call runs the released task.
+calls raise the claim's error at once and do nothing else, as in 1.6.0: a
+claim that landed is the reaper's once its lease expires, with the attempt
+spent.
 """
 
 import logging
+import traceback
 
 import pytest
 from django.db import DatabaseError, close_old_connections, connections
 
+from django_ox.actions import expire_lease
 from django_ox.models import OxTask
 from django_ox.testing import run_tasks
 from django_ox.worker import Worker
 
 from . import tasks
 from .conftest import start_worker_thread, wait_for
-from .lost_reply import WINDOWS, Seams
+from .lost_reply import WINDOWS, LookReads, Seams
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -74,6 +77,13 @@ def lose_the_reply():
     seams = Seams()
     yield seams.arm
     seams.remove_all()
+
+
+@pytest.fixture
+def look_reads():
+    looks = LookReads()
+    yield looks.reads
+    looks.remove()
 
 
 def _budget(settings, attempts):
@@ -166,65 +176,102 @@ def test_run_a_claim_whose_reply_is_lost_runs_once_uncharged(
     assert len(released) == (1 if seam.landed else 0), messages
 
 
-def _call_raises_then_the_next_runs_it(seam, worker, result, call, caplog):
+RECOVERY_EVENTS = {
+    "worker_claim_released",
+    "worker_claim_recovery_failed",
+    "worker_claim_recovery_expired",
+}
+
+
+def _recovery_records(caplog):
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if getattr(r, "event", None) in RECOVERY_EVENTS
+    ]
+
+
+def _call_raised_at_once(seam, worker, raised, caplog, look_reads, result):
     """
-    The inline contract. The call whose claim lost its reply raises the
-    claim's own error; the row is then READY with nothing charged, released
-    if the claim had landed and untouched if it had not; and the next call
-    runs it, once.
+    The inline contract. The call whose claim lost its reply raised the
+    claim's own error, and made no look for it: nothing read, released or
+    logged, and nothing left pending. A claim that had landed leaves its row
+    RUNNING under the worker, the attempt charged; one that had not leaves
+    it as it was.
     """
-    with pytest.raises(DatabaseError):
-        call()
-    # As any caller does after a database error: drop a connection that died.
-    close_old_connections()
+    frames = "".join(traceback.format_exception(raised))
+    assert "claim_one" in frames, "the error raised is not the claim's"
     _assert_the_seam_fired_where_intended(seam, worker)
+    assert look_reads == [], "a look was made for the claim that raised"
+    assert _recovery_records(caplog) == []
+    assert worker._claim_unconfirmed_at is None
     row = OxTask.objects.get(id=result.id)
     if seam.landed:
-        expected = (OxTask.Status.READY, None, 0, 2, [], None)
+        expected = (OxTask.Status.RUNNING, worker.worker_id, 1, 1, [worker.worker_id])
     else:
-        expected = (OxTask.Status.READY, None, 0, 0, [], None)
+        expected = (OxTask.Status.READY, None, 0, 0, [])
     assert (
         row.status,
         row.locked_by,
         row.attempts,
         row.lease_epoch,
         row.worker_ids,
-        row.started_at,
-    ) == expected, "the failed call left the row as it was not before the claim"
-    assert len(_released_records(caplog, worker)) == (1 if seam.landed else 0)
+    ) == expected
     assert _runs() == 0
 
-    call()
+
+def _the_reaper_takes_it_back(result):
+    """Once its lease expires, the reaper puts the row back, the attempt spent."""
+    assert expire_lease(result.id)
+    assert Worker(lock_timeout=INLINE_LOCK_TIMEOUT).reap() == 1
     row = OxTask.objects.get(id=result.id)
-    assert (row.status, row.attempts, _runs()) == (OxTask.Status.SUCCESSFUL, 1, 1)
-    assert row.worker_ids == [worker.worker_id]
+    assert (row.status, row.attempts, row.lease_epoch) == (OxTask.Status.READY, 1, 2)
+
+
+def _ran_once(result, attempts):
+    row = OxTask.objects.get(id=result.id)
+    assert (row.status, row.attempts, _runs()) == (
+        OxTask.Status.SUCCESSFUL,
+        attempts,
+        1,
+    )
 
 
 @pytest.mark.parametrize("window", CLAIM_WINDOWS)
-def test_run_once_raises_and_the_next_call_runs_the_task(
-    window, settings, caplog, lose_the_reply
+def test_run_once_raises_at_once_and_leaves_the_row_to_the_reaper(
+    window, settings, caplog, lose_the_reply, look_reads
 ):
     """
     run_once() on the test's own thread and connection, which is in
-    autocommit: nothing reaps, so a row the failed call did not release would
-    still be RUNNING when the next call looks for work, and that call would
-    find none.
+    autocommit. Nothing looks for a claim of run_once()'s that raised: a row
+    that landed is still RUNNING when the next call looks for work, which
+    finds none, and runs once the reaper has put it back.
     """
     seam = lose_the_reply(window, on=connections["default"])
     caplog.set_level(logging.WARNING, logger="django_ox")
-    _budget(settings, 1)
+    _budget(settings, 2)
     worker = Worker(
         lock_timeout=INLINE_LOCK_TIMEOUT, poll_interval=0.05, backoff_initial=0
     )
     result = tasks.record.enqueue("lost-reply")
-    _call_raises_then_the_next_runs_it(
-        seam, worker, result, lambda: worker.run_once(), caplog
-    )
+
+    with pytest.raises(DatabaseError) as raised:
+        worker.run_once()
+    # As any caller does after a database error: drop a connection that died.
+    close_old_connections()
+    _call_raised_at_once(seam, worker, raised.value, caplog, look_reads, result)
+
+    if seam.landed:
+        assert worker.run_once() is False
+        _the_reaper_takes_it_back(result)
+    assert worker.run_once() is True
+    _ran_once(result, 2 if seam.landed else 1)
+    assert look_reads == []
 
 
 @pytest.mark.parametrize("window", CLAIM_WINDOWS)
-def test_run_tasks_raises_and_the_next_call_runs_the_task(
-    window, settings, caplog, monkeypatch, lose_the_reply
+def test_run_tasks_raises_at_once_and_leaves_the_row_to_the_reaper(
+    window, settings, caplog, monkeypatch, lose_the_reply, look_reads
 ):
     """
     run_tasks() in autocommit, as from a TransactionTestCase: the same
@@ -232,7 +279,7 @@ def test_run_tasks_raises_and_the_next_call_runs_the_task(
     """
     seam = lose_the_reply(window, on=connections["default"])
     caplog.set_level(logging.WARNING, logger="django_ox")
-    _budget(settings, 1)
+    _budget(settings, 2)
     result = tasks.record.enqueue("lost-reply")
     workers = []
     real_init = Worker.__init__
@@ -242,18 +289,17 @@ def test_run_tasks_raises_and_the_next_call_runs_the_task(
         workers.append(self)
 
     monkeypatch.setattr(Worker, "__init__", remember)
-    with pytest.raises(DatabaseError):
+    with pytest.raises(DatabaseError) as raised:
         run_tasks()
     close_old_connections()
     monkeypatch.undo()
     (worker,) = workers
-    _assert_the_seam_fired_where_intended(seam, worker)
-    row = OxTask.objects.get(id=result.id)
-    assert (row.status, row.attempts, row.worker_ids) == (OxTask.Status.READY, 0, [])
-    assert len(_released_records(caplog, worker)) == (1 if seam.landed else 0)
-    assert _runs() == 0
+    _call_raised_at_once(seam, worker, raised.value, caplog, look_reads, result)
 
+    if seam.landed:
+        assert run_tasks() == []
+        _the_reaper_takes_it_back(result)
     (ran,) = run_tasks()
-    row = OxTask.objects.get(id=result.id)
     assert ran.status == "SUCCESSFUL"
-    assert (row.status, row.attempts, _runs()) == (OxTask.Status.SUCCESSFUL, 1, 1)
+    _ran_once(result, 2 if seam.landed else 1)
+    assert look_reads == []

@@ -9,6 +9,7 @@ does when its own statements fail. tests/lost_reply.py loses the replies.
 
 import copy
 import logging
+import sqlite3
 import threading
 import time
 import traceback
@@ -45,7 +46,7 @@ from django_ox.worker import (
 from . import tasks
 from .conftest import start_worker_thread, wait_for
 from .dead_connection_tasks import from_another_connection, restart_every_other_session
-from .lost_reply import COMMITTED_CLAIM_WINDOWS, Seams, is_the_release
+from .lost_reply import COMMITTED_CLAIM_WINDOWS, LookReads, Seams, is_the_release
 from .unanswering import Unanswering
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -162,6 +163,20 @@ def _orphan(worker, label="orphan"):
         worker._handed_off.clear()
     worker._claim_unconfirmed_at = time.monotonic()
     return result
+
+
+def _a_failed_pass_then_its_look(worker):
+    """
+    What run() does, on the test's thread: a claim that raises, the failed
+    pass's handling of the connection, and the look at the head of the next
+    pass. The claim's error is returned.
+    """
+    with pytest.raises(DatabaseError) as raised:
+        worker._claim()
+    close_old_connections()
+    _sweep_pool(connections[worker._db_alias])
+    worker._recover_claims()
+    return raised.value
 
 
 # -- which rows a look may release ----------------------------------------------
@@ -533,61 +548,6 @@ def test_a_claim_returned_by_claim_one_directly_is_never_released():
     )
 
 
-def test_a_look_waits_for_a_claim_on_its_way_back(monkeypatch):
-    """
-    One claimer per worker. A claim has committed on one thread and is on
-    its way back, not yet registered; a look started on another thread must
-    wait for it, and then leaves its row alone.
-    """
-    worker = Worker(lock_timeout=LOCK_TIMEOUT)
-    result = tasks.record.enqueue("in-transit")
-    committed = threading.Event()
-    go_on = threading.Event()
-    real = worker._claim_one
-
-    def claim_then_pause():
-        db_task = real()
-        committed.set()
-        go_on.wait(timeout=LIMIT)
-        return db_task
-
-    monkeypatch.setattr(worker, "_claim_one", claim_then_pause)
-    reads = []
-
-    def count(execute, sql, params, many, context):
-        if "ox_lease_abandoned" in sql:
-            reads.append(sql)
-        return execute(sql, params, many, context)
-
-    def install(sender, connection, **kwargs):
-        connection.execute_wrappers.append(count)
-
-    claimed = []
-    claimer = threading.Thread(
-        target=lambda: (claimed.append(worker._claim()), connections.close_all())
-    )
-    connection_created.connect(install, weak=False)
-    try:
-        claimer.start()
-        assert committed.wait(timeout=LIMIT)
-        worker._claim_unconfirmed_at = time.monotonic()
-        looker = threading.Thread(
-            target=lambda: (worker._recover_claims(), connections.close_all())
-        )
-        looker.start()
-        looker.join(timeout=3)
-        assert reads == [], "the look read while a claim was on its way back"
-        go_on.set()
-        claimer.join(timeout=LIMIT)
-        looker.join(timeout=LIMIT)
-    finally:
-        go_on.set()
-        connection_created.disconnect(install)
-    assert len(reads) == 1
-    assert str(claimed[0].id) == str(result.id)
-    assert _row(result).status == OxTask.Status.RUNNING
-
-
 def test_a_look_drops_entries_whose_rows_are_no_longer_this_workers():
     """
     An entry excludes a row only while that row is RUNNING under this worker
@@ -616,10 +576,9 @@ def test_a_look_drops_entries_whose_rows_are_no_longer_this_workers():
 # -- the release ----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("entry", ["loop", "run_once"])
 @pytest.mark.parametrize("release_window", ["before", "statement"])
 def test_a_release_whose_reply_is_lost_refunds_once(
-    release_window, entry, settings, caplog, lose_the_reply
+    release_window, settings, caplog, lose_the_reply
 ):
     """
     The look's own write loses its reply. Whether it landed or not, the next
@@ -633,32 +592,12 @@ def test_a_release_whose_reply_is_lost_refunds_once(
     claim_window = {"mysql": "commit", "postgresql": "statement"}.get(
         connection.vendor, "statement"
     )
-    on = connections["default"] if entry == "run_once" else None
-    claim = lose_the_reply(claim_window, on=on)
-    release = lose_the_reply(release_window, statement="release", on=on)
+    claim = lose_the_reply(claim_window)
+    release = lose_the_reply(release_window, statement="release")
     worker = Worker(lock_timeout=LOCK_TIMEOUT, poll_interval=0.05)
     result = tasks.record.enqueue("once")
 
-    if entry == "loop":
-        _run_until(worker, lambda: _row(result).status == OxTask.Status.SUCCESSFUL)
-    else:
-        with pytest.raises(DatabaseError) as raised:
-            worker.run_once()
-        # As any caller does after a database error: drop a connection that
-        # died.
-        close_old_connections()
-        # The claim's own error, never the look's.
-        frames = traceback.format_exception(raised.value)
-        assert "_release_claim" not in "".join(frames)
-        assert "claim_one" in "".join(frames)
-        assert _row(result).status == (
-            OxTask.Status.READY if release.landed else OxTask.Status.RUNNING
-        )
-        failed = _events(caplog, "worker_claim_recovery_failed", worker)
-        assert failed
-        # Recovery stays due: the next call looks again before claiming.
-        assert {event.claim_recovery for event in failed} == {"pending"}
-        assert worker.run_once() is True
+    _run_until(worker, lambda: _row(result).status == OxTask.Status.SUCCESSFUL)
 
     assert claim.fired and release.fired
     if release.landed:
@@ -714,13 +653,20 @@ def test_a_reaper_that_gets_there_first_keeps_its_decision(
         Worker(lock_timeout=LOCK_TIMEOUT).reap()
 
     race = RaceTheRelease(reap_first)
-    connections["default"].execute_wrappers.append(race)
+
+    def install(sender, connection, **kwargs):
+        # The look reconnects the thread's wrapper after the failed pass.
+        if race not in connection.execute_wrappers:
+            connection.execute_wrappers.append(race)
+
+    install(None, connections["default"])
+    connection_created.connect(install, weak=False)
     try:
-        with pytest.raises(DatabaseError):
-            worker.run_once()
+        _a_failed_pass_then_its_look(worker)
     finally:
-        connections["default"].execute_wrappers.remove(race)
-    close_old_connections()
+        connection_created.disconnect(install)
+        if race in connections["default"].execute_wrappers:
+            connections["default"].execute_wrappers.remove(race)
 
     assert seam.fired and race.fired
     assert _events(caplog, "worker_claim_released", worker) == []
@@ -773,9 +719,7 @@ def test_a_refund_leaves_an_earlier_attempts_record_as_it_was(
     assert before.started_at is not None
     seam = lose_the_reply(window, on=connections["default"])
 
-    with pytest.raises(DatabaseError):
-        worker.run_once()
-    close_old_connections()
+    _a_failed_pass_then_its_look(worker)
 
     assert seam.fired
     row = _row(result)
@@ -1109,9 +1053,8 @@ def _read_after_the_restart(read):
 
 
 @pooled_postgresql
-@pytest.mark.parametrize("entry", ["loop", "run_once"])
 def test_after_every_pooled_connection_died_the_look_still_lands(
-    entry, settings, caplog, lose_the_reply
+    settings, caplog, lose_the_reply
 ):
     """
     The claim's reply is lost as the server restarts: every session ends,
@@ -1123,31 +1066,23 @@ def test_after_every_pooled_connection_died_the_look_still_lands(
     _budget(settings, 1)
     result = tasks.record.enqueue("pooled")
     _fill_the_pool()
-    on = connections["default"] if entry == "run_once" else None
-    seam = lose_the_reply("statement", on=on, also=restart_every_other_session)
+    seam = lose_the_reply("statement", also=restart_every_other_session)
     worker = Worker(lock_timeout=LOCK_TIMEOUT, poll_interval=0.05)
 
-    if entry == "loop":
-        thread = start_worker_thread(worker)
-        try:
-            wait_for(
-                lambda: _released_ids(caplog, worker) == [str(result.id)],
-                timeout=LIMIT,
-            )
-            _read_after_the_restart(lambda: None)
-            wait_for(
-                lambda: _row(result).status == OxTask.Status.SUCCESSFUL,
-                timeout=LIMIT,
-            )
-        finally:
-            worker.request_stop()
-            thread.join(timeout=60)
-    else:
-        with pytest.raises(DatabaseError):
-            worker.run_once()
-        row = _read_after_the_restart(lambda: _row(result))
-        assert (row.status, row.attempts) == (OxTask.Status.READY, 0)
-        assert worker.run_once() is True
+    thread = start_worker_thread(worker)
+    try:
+        wait_for(
+            lambda: _released_ids(caplog, worker) == [str(result.id)],
+            timeout=LIMIT,
+        )
+        _read_after_the_restart(lambda: None)
+        wait_for(
+            lambda: _row(result).status == OxTask.Status.SUCCESSFUL,
+            timeout=LIMIT,
+        )
+    finally:
+        worker.request_stop()
+        thread.join(timeout=60)
 
     assert seam.fired
     assert _released_ids(caplog, worker) == [str(result.id)], (
@@ -1220,10 +1155,9 @@ def test_a_claim_in_a_callers_manual_transaction_starts_no_look():
     assert _row(orphan).status == OxTask.Status.READY
 
 
-@pytest.mark.parametrize("stopping", [False, True])
 @pytest.mark.parametrize("block", ["manual", "atomic"])
 def test_a_look_that_fails_leaves_a_callers_transaction_alone(
-    block, stopping, monkeypatch, caplog
+    block, monkeypatch, caplog
 ):
     """
     Whatever makes a look fail, the connection it would close is left as it
@@ -1241,7 +1175,7 @@ def test_a_look_that_fails_leaves_a_callers_transaction_alone(
 
     def the_callers(write):
         driver = connection.connection
-        worker._recover_claims_once(stopping=stopping)
+        worker._recover_claims_once()
         assert connection.connection is driver
         assert OxTask.objects.filter(id=write.id).exists()
 
@@ -1736,72 +1670,84 @@ def test_a_stopping_look_given_up_closes_nothing(monkeypatch, caplog):
     monkeypatch.setattr(worker, "_recover_claims_by", gave_up)
     driver = connection.connection
     assert driver is not None
-    worker._recover_claims_once(stopping=True)
+    worker._recover_claims_once()
     assert connection.connection is driver
     _given_up(caplog, worker, result)
 
 
-def test_a_stopping_look_does_not_wait_past_its_deadline_for_the_claimer(caplog):
+def test_a_stopping_look_does_not_wait_past_its_deadline_for_a_claim_in_flight(
+    monkeypatch, caplog
+):
     """
-    Another thread sharing the Worker holds the claimer lock, as a claim on
-    its way back does. The stopping look waits for it no longer than its
-    deadline, and gives up.
+    Another thread sharing the Worker has a claim in flight, on its way
+    back. The stopping look waits for it no longer than its deadline, and
+    gives up.
     """
     caplog.set_level(logging.WARNING, logger="django_ox")
     worker = Worker(lock_timeout=LOCK_TIMEOUT)
     result = _orphan(worker)
-    holding = threading.Event()
+    in_flight = threading.Event()
     release = threading.Event()
 
-    def hold():
-        with worker._claimer:
-            holding.set()
-            release.wait(LIMIT)
+    def claim_in_flight():
+        in_flight.set()
+        release.wait(LIMIT)
 
-    holder = threading.Thread(target=hold)
-    holder.start()
+    monkeypatch.setattr(worker, "_claim_one", claim_in_flight)
+    claimer = threading.Thread(
+        target=lambda: (worker.claim_one(), connections.close_all())
+    )
+    claimer.start()
     try:
-        assert holding.wait(LIMIT)
+        assert in_flight.wait(LIMIT)
         took = _stop(worker)
     finally:
         release.set()
-        holder.join(LIMIT)
+        claimer.join(LIMIT)
 
     assert 4.5 <= took < 8.0
     _given_up(caplog, worker, result)
 
 
-# -- what a failed look says next --------------------------------------------------
+# -- run_once() and run_tasks() make no look -----------------------------------------
 
 
-LOOKS_AGAIN = (
-    "Claim outcome is unknown. This Worker will look again before its next claim "
-    "while the LOCK_TIMEOUT recovery window remains open. Recovery is not "
-    "guaranteed; an unrecovered claim may be reaped with its attempt spent."
+@pytest.fixture
+def look_reads():
+    looks = LookReads()
+    yield looks.reads
+    looks.remove()
+
+
+def _call(call, worker):
+    return worker.run_once() if call == "run_once" else run_tasks()
+
+
+RECOVERY_EVENTS = (
+    "worker_claim_released",
+    "worker_claim_recovery_failed",
+    "worker_claim_recovery_expired",
 )
-NO_LATER_LOOK = (
-    "Claim outcome is unknown. Recovery looks are limited to this run_tasks() "
-    "call; pending recovery state is not retained for later calls. Recovery is "
-    "not guaranteed; an unrecovered claim may be reaped with its attempt spent."
-)
 
 
-@pytest.mark.parametrize("caller", ["run_once", "run_tasks"])
-def test_a_failed_look_says_what_happens_next_for_its_caller(
-    caller, monkeypatch, caplog
-):
+def _recovery_events(caplog):
+    return [r for name in RECOVERY_EVENTS for r in _events(caplog, name)]
+
+
+@pytest.mark.parametrize("call", ["run_once", "run_tasks"])
+def test_an_inline_claim_error_makes_no_look(call, monkeypatch, caplog, look_reads):
     """
-    run_once()'s Worker is the caller's and looks again before its next
-    claim, so recovery is still pending; run_tasks() builds one per call,
-    and nothing looks later, so it has expired.
+    A claim of run_once()'s or run_tasks()'s raises on a connection the
+    worker owns. The error is raised at once and nothing looks for the
+    claim, then or later: a look would have raised here.
     """
     caplog.set_level(logging.WARNING, logger="django_ox")
     tasks.record.enqueue("never claimed")
+    looks = []
     real_look = Worker._recover_claims
 
     def look(self, **kwargs):
-        if self._claim_unconfirmed_at is not None:
-            raise OperationalError("the database is still gone")
+        looks.append(self.worker_id)
         return real_look(self, **kwargs)
 
     def claim(self):
@@ -1809,20 +1755,446 @@ def test_a_failed_look_says_what_happens_next_for_its_caller(
 
     monkeypatch.setattr(Worker, "_recover_claims", look)
     monkeypatch.setattr(Worker, "claim_one", claim)
+    worker = Worker(lock_timeout=LOCK_TIMEOUT)
     with pytest.raises(OperationalError, match="reply to the claim was lost"):
-        if caller == "run_once":
-            Worker(lock_timeout=LOCK_TIMEOUT).run_once()
-        else:
-            run_tasks()
+        _call(call, worker)
 
-    (failed,) = _events(caplog, "worker_claim_recovery_failed")
-    message = failed.getMessage()
-    said, not_said = (
-        (LOOKS_AGAIN, NO_LATER_LOOK)
-        if caller == "run_once"
-        else (NO_LATER_LOOK, LOOKS_AGAIN)
+    assert looks == []
+    assert look_reads == []
+    assert _recovery_events(caplog) == []
+    assert worker._claim_unconfirmed_at is None
+
+
+def test_run_once_makes_no_look_that_run_noted(caplog, look_reads):
+    """
+    A look run() noted is pending on the Worker when run_once() is called
+    on it. run_once() neither makes it nor clears it: the orphan's row stays
+    RUNNING and the next task is claimed and run. run()'s next pass is where
+    the look is made.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    worker = Worker(lock_timeout=LOCK_TIMEOUT)
+    orphan = _orphan(worker)
+    pending = worker._claim_unconfirmed_at
+    after = tasks.record.using(priority=-1).enqueue("after")
+
+    assert worker.run_once() is True
+
+    assert look_reads == []
+    assert worker._claim_unconfirmed_at == pending
+    assert _row(orphan).status == OxTask.Status.RUNNING
+    assert _row(after).status == OxTask.Status.SUCCESSFUL
+    worker._recover_claims()
+    assert _row(orphan).status == OxTask.Status.READY
+    assert _released_ids(caplog, worker) == [str(orphan.id)]
+
+
+#: What each database's session keeps, and how a claim is made to fail on a
+#: connection that still answers: another session holds the task table, and
+#: the caller's session waits for it no longer than a moment.
+_SESSION = {
+    "postgresql": {
+        "setup": [
+            "SELECT pg_try_advisory_lock(4242)",
+            "CREATE TEMPORARY TABLE ox_callers_scratch (x integer)",
+            "SET lock_timeout = '300ms'",
+        ],
+        "checks": {
+            "session": "SELECT pg_backend_pid()",
+            "advisory lock": (
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                "AND objid = 4242 AND pid = pg_backend_pid() AND granted"
+            ),
+            "temporary table": "SELECT count(*) FROM ox_callers_scratch",
+            "setting": "SHOW lock_timeout",
+        },
+        "teardown": [
+            "SELECT pg_advisory_unlock(4242)",
+            "DROP TABLE ox_callers_scratch",
+            "RESET lock_timeout",
+        ],
+    },
+    "mysql": {
+        "setup": [
+            "SELECT GET_LOCK('ox_callers_lock', 0)",
+            "CREATE TEMPORARY TABLE ox_callers_scratch (x integer)",
+            "SET SESSION lock_wait_timeout = 1",
+        ],
+        "checks": {
+            "session": "SELECT CONNECTION_ID()",
+            "advisory lock": "SELECT IS_USED_LOCK('ox_callers_lock') = CONNECTION_ID()",
+            "temporary table": "SELECT count(*) FROM ox_callers_scratch",
+            "setting": "SELECT @@SESSION.lock_wait_timeout",
+        },
+        "teardown": [
+            "SELECT RELEASE_LOCK('ox_callers_lock')",
+            "DROP TEMPORARY TABLE ox_callers_scratch",
+            "SET SESSION lock_wait_timeout = DEFAULT",
+        ],
+    },
+    "sqlite": {
+        "setup": [
+            "CREATE TEMPORARY TABLE ox_callers_scratch (x integer)",
+            "PRAGMA busy_timeout = 300",
+        ],
+        "checks": {
+            "temporary table": "SELECT count(*) FROM ox_callers_scratch",
+            "setting": "PRAGMA busy_timeout",
+        },
+        "teardown": ["DROP TABLE ox_callers_scratch"],
+    },
+}
+
+
+def _session_state():
+    state = {}
+    with connection.cursor() as cursor:
+        for name, sql in _SESSION[connection.vendor]["checks"].items():
+            cursor.execute(sql)
+            state[name] = cursor.fetchone()[0]
+    return state
+
+
+class _TableHeld:
+    """Another session holds the task table, as a migration that alters it does."""
+
+    def __init__(self):
+        table = OxTask._meta.db_table
+        if connection.vendor == "sqlite":
+            self._other = sqlite3.connect(
+                connection.settings_dict["NAME"], isolation_level=None
+            )
+            self._other.execute("BEGIN EXCLUSIVE")
+            return
+        self._other = connections.create_connection("default")
+        if connection.vendor == "postgresql":
+            self._other.set_autocommit(False)
+            with self._other.cursor() as cursor:
+                cursor.execute(f"LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE")
+        else:
+            with self._other.cursor() as cursor:
+                cursor.execute(f"LOCK TABLES {table} WRITE")
+
+    def release(self):
+        if connection.vendor == "sqlite":
+            self._other.execute("ROLLBACK")
+            self._other.close()
+            return
+        if connection.vendor == "postgresql":
+            self._other.rollback()
+            self._other.set_autocommit(True)
+        else:
+            with self._other.cursor() as cursor:
+                cursor.execute("UNLOCK TABLES")
+        self._other.close()
+
+
+@pytest.mark.parametrize("call", ["run_once", "run_tasks"])
+def test_an_inline_claim_error_keeps_the_callers_session(
+    call, settings, monkeypatch, caplog, look_reads
+):
+    """
+    The caller's session holds what a session can: an advisory lock, a
+    temporary table, a setting. A claim of run_once()'s or run_tasks()'s
+    then fails on that connection while it still answers: another session
+    holds the task table, and the caller waits for it no longer than its
+    own setting allows. The claim's error is raised at once, and the
+    caller's connection is the one it had, with all of that still on it.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 1)
+    claim_errors = _claim_errors(monkeypatch)
+    result = tasks.record.enqueue("held")
+    worker = Worker(lock_timeout=LOCK_TIMEOUT)
+    session = _SESSION[connection.vendor]
+    with connection.cursor() as cursor:
+        for sql in session["setup"]:
+            cursor.execute(sql)
+            if "LOCK(" in sql.upper():
+                assert cursor.fetchone()[0], "another session holds the lock"
+    driver = connection.connection
+    before = _session_state()
+    try:
+        held = _TableHeld()
+        try:
+            with pytest.raises(DatabaseError) as raised:
+                _call(call, worker)
+        finally:
+            held.release()
+        assert raised.value is claim_errors[0]
+        assert connection.connection is driver, "the caller's connection was closed"
+        assert _session_state() == before
+    finally:
+        if connection.connection is driver:
+            with connection.cursor() as cursor:
+                for sql in session["teardown"]:
+                    cursor.execute(sql)
+        connection.close()
+        if connection.vendor == "postgresql" and _pool_options("default"):
+            # A connection closed with the session on it went back to the
+            # pool, its advisory lock and temporary table with it.
+            connection.close_pool()
+
+    assert look_reads == []
+    assert _recovery_events(caplog) == []
+    assert _row(result).status == OxTask.Status.READY
+
+
+@pytest.mark.skipif(
+    connection.vendor != "postgresql", reason="psycopg2 is PostgreSQL's driver"
+)
+def test_with_psycopg2_the_loop_leaves_a_claim_that_raised_to_the_reaper(
+    settings, monkeypatch, caplog, lose_the_reply, look_reads
+):
+    """
+    psycopg2, emulated: psycopg_any.is_psycopg3 reads False when the worker
+    asks, as with psycopg2 installed, while Django's backend, which read it
+    at import, goes on with psycopg 3. The loop's claim commits and loses
+    its reply. It is not noted: no pass looks for it and nor does the stop,
+    and the row is RUNNING under the worker, the attempt charged, for the
+    reaper. The loop goes on claiming.
+    """
+    from django.db.backends.postgresql import psycopg_any
+
+    monkeypatch.setattr(psycopg_any, "is_psycopg3", False)
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 1)
+    seam = lose_the_reply("statement")
+    lost, after = _enqueue("lost", "after")
+    worker = Worker(lock_timeout=LOCK_TIMEOUT, poll_interval=0.05)
+
+    _run_until(worker, lambda: _row(after).status == OxTask.Status.SUCCESSFUL)
+
+    assert seam.fired
+    assert look_reads == []
+    assert _recovery_events(caplog) == []
+    assert worker._claim_unconfirmed_at is None
+    (poll,) = _events(caplog, "worker_poll_failed", worker)
+    assert poll.claim_recovery is None
+    row = _row(lost)
+    assert (row.status, row.locked_by, row.attempts) == (
+        OxTask.Status.RUNNING,
+        worker.worker_id,
+        1,
     )
-    assert message.endswith(". " + said)
-    assert not_said not in message
-    assert "the database is still gone" in message
-    assert failed.claim_recovery == ("pending" if caller == "run_once" else "expired")
+    assert (_runs("lost"), _runs("after")) == (0, 1)
+
+
+# -- a database that stops answering -----------------------------------------------
+
+
+postgresql_relay = pytest.mark.skipif(
+    connection.vendor != "postgresql",
+    reason="a relay in front of PostgreSQL; on MySQL the claim itself can wait on "
+    "a server that stopped answering, in its transaction's exit, as it always "
+    "could",
+)
+
+#: Before, the look after a claim error waited at least 40 s on a server that
+#: had stopped answering; an inline call makes no look now.
+BOUNDED_WELL_UNDER = 20.0
+
+
+@pytest.fixture
+def relay(monkeypatch):
+    """
+    Every connection to the test database opened from here on, Django's
+    pool's included, goes through a relay that can stop answering
+    (tests/unanswering.py). go_dark() stops it, and detach() puts
+    everything back, for reading the outcome afterwards.
+    """
+    conn = connections["default"]
+    pooled = conn.vendor == "postgresql" and _pool_options("default") is not None
+    relay = Unanswering(
+        conn.settings_dict["HOST"] or "127.0.0.1", conn.settings_dict["PORT"] or 5432
+    )
+    conn.close()
+    if pooled:
+        conn.close_pool()
+    monkeypatch.setitem(conn.settings_dict, "HOST", "127.0.0.1")
+    monkeypatch.setitem(conn.settings_dict, "PORT", str(relay.port))
+    receivers = []
+    detached = []
+
+    def go_dark(dark):
+        """
+        "gone": the connections open now, the pool's idle ones among them,
+        never answer again, and a new one is accepted and never answered.
+        "hung": the same for the connections open now, and a new one is
+        set up and stops answering as soon as Django has it.
+        """
+        if dark == "gone":
+            relay.stall()
+            relay.black_hole()
+            return
+        relay.stall_open()
+
+        def stall_it(sender, connection, **kwargs):
+            relay.stall_open()
+
+        connection_created.connect(stall_it, weak=False)
+        receivers.append(stall_it)
+
+    def detach():
+        if detached:
+            return
+        detached.append(True)
+        for receiver in receivers:
+            connection_created.disconnect(receiver)
+        relay.close()
+        conn.close()
+        if pooled:
+            conn.close_pool()
+        monkeypatch.undo()
+        conn.close()
+
+    relay.pooled = pooled
+    relay.go_dark = go_dark
+    relay.detach = detach
+    yield relay
+    detach()
+
+
+class Caller:
+    """
+    A caller of run_once() or run_tasks() on a thread of its own, as a
+    request handler would be. `setup` runs there first, so the connection
+    the call starts with is that thread's and already open; the call waits
+    for start().
+    """
+
+    def __init__(self, setup, call):
+        self.ready = threading.Event()
+        self._go = threading.Event()
+        self.outcome = {}
+        self.thread = threading.Thread(target=self._run, args=(setup, call))
+        self.thread.daemon = True
+        self.thread.start()
+        assert self.ready.wait(LIMIT), "the caller's setup did not finish"
+        assert "setup_error" not in self.outcome, self.outcome["setup_error"]
+
+    def _run(self, setup, call):
+        try:
+            try:
+                setup()
+            except BaseException as exc:
+                self.outcome["setup_error"] = exc
+                return
+            finally:
+                self.ready.set()
+            self._go.wait(LIMIT)
+            started = time.monotonic()
+            try:
+                self.outcome["value"] = call()
+            except BaseException as exc:
+                self.outcome["error"] = exc
+            finally:
+                self.outcome["took"] = time.monotonic() - started
+        finally:
+            connections.close_all()
+
+    def start(self):
+        self._go.set()
+
+    def returned_within(self, seconds):
+        self.thread.join(seconds)
+        return not self.thread.is_alive()
+
+
+def _claim_errors(monkeypatch):
+    """Every exception a claim raises, as raised."""
+    raised = []
+    real = Worker.claim_one
+
+    def claim_one(self):
+        try:
+            return real(self)
+        except BaseException as exc:
+            raised.append(exc)
+            raise
+
+    monkeypatch.setattr(Worker, "claim_one", claim_one)
+    return raised
+
+
+def _open_a_connection():
+    OxTask.objects.exists()
+
+
+@postgresql_relay
+@pytest.mark.parametrize("dark", ["gone", "hung"])
+@pytest.mark.parametrize("call", ["run_once", "run_tasks"])
+def test_an_inline_claim_error_on_a_stalled_database_raises_at_once(
+    call, dark, relay, settings, monkeypatch, caplog, lose_the_reply
+):
+    """
+    The database stops answering right after a claim's reply is lost: every
+    connection already open, the pool's idle ones included, never answers
+    again, and a new one is either never answered or set up and then never
+    answered. The call raises the claim's own error without waiting on the
+    server: no look, so no connection opened for one and no test of the
+    pool's idle connections. The row is RUNNING, the attempt charged, for
+    the reaper. Before, the call made a look first and waited on it.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 1)
+    claim_errors = _claim_errors(monkeypatch)
+    if relay.pooled:
+        _fill_the_pool()
+    untouched = tasks.record.using(priority=-1).enqueue("never claimed")
+    result = tasks.record.enqueue("dark")
+    worker = Worker(lock_timeout=LOCK_TIMEOUT)
+    seam = lose_the_reply("statement", also=lambda other: relay.go_dark(dark))
+    caller = Caller(_open_a_connection, lambda: _call(call, worker))
+    caller.start()
+    returned = caller.returned_within(BOUNDED_WELL_UNDER)
+    relay.detach()
+    caller.thread.join(LIMIT)
+
+    assert returned, f"the call was still waiting after {BOUNDED_WELL_UNDER:g}s"
+    assert seam.fired
+    assert caller.outcome.get("error") is claim_errors[0], caller.outcome
+    assert _recovery_events(caplog) == []
+    assert worker._claim_unconfirmed_at is None
+    row = _row(result)
+    assert (row.status, row.attempts) == (OxTask.Status.RUNNING, 1)
+    row = _row(untouched)
+    assert (row.status, row.attempts) == (OxTask.Status.READY, 0)
+
+
+@pooled_postgresql
+@pytest.mark.parametrize("call", ["run_once", "run_tasks"])
+def test_an_inline_claim_error_never_checks_the_pool(
+    call, settings, monkeypatch, caplog, lose_the_reply
+):
+    """
+    Nothing on the caller's thread tests the connections Django's pool
+    holds idle after a claim error: pool.check() waits on each of them, and
+    on a server that stopped answering, for as long as the kernel does. The
+    loop's failed pass still sweeps the pool.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 1)
+    tasks.record.enqueue("checked")
+    pool = connections["default"].pool
+    checks = []
+    real_check = pool.check
+
+    def check(*args, **kwargs):
+        checks.append(threading.current_thread().name)
+        return real_check(*args, **kwargs)
+
+    monkeypatch.setattr(pool, "check", check)
+    # The instrument sees a sweep.
+    _sweep_pool(connections["default"])
+    assert checks == [threading.current_thread().name]
+    checks.clear()
+    seam = lose_the_reply("statement", on=connections["default"])
+    worker = Worker(lock_timeout=LOCK_TIMEOUT)
+
+    with pytest.raises(DatabaseError):
+        _call(call, worker)
+
+    assert seam.fired
+    assert checks == []
+    assert _recovery_events(caplog) == []

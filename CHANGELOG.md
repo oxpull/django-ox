@@ -9,20 +9,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Recover claims that committed but whose reply was lost on MySQL,
-  PostgreSQL and SQLite. Previously, such a task stayed `RUNNING` until
-  the reaper requeued it with an attempt spent, or marked it `LOST` on
-  its final attempt even though its body never ran. Upgraded workers
-  now find their own unconfirmed claims and return them to `READY`
-  with the attempt refunded, within `LOCK_TIMEOUT` and before the
-  row's lease expires. `Worker.run_once()` and `testing.run_tasks()`
-  still raise the claim's original error; after a successful release,
-  the next call can claim and run the task normally. Recovery does not
-  cover claims made by workers that have not been upgraded, workers
-  that die before recovery, or database outages that outlast
-  `LOCK_TIMEOUT`. If the claim's commit becomes visible only after the
-  recovery look, it may escape recovery and be reaped normally,
+- Recover claims that committed but whose reply was lost, only in
+  `Worker.run()` (the loop used by `ox_worker`), on PostgreSQL with
+  psycopg 3, pooled or not, MySQL and SQLite. In 1.6.0, such a task stayed
+  `RUNNING` until the reaper requeued it with an attempt spent, or marked
+  it `LOST` on its final attempt even though its body never ran. Upgraded
+  workers running this loop look for their own unconfirmed claims on
+  later poll passes, or once at stop, and return eligible rows to `READY`
+  with the attempt refunded, within `LOCK_TIMEOUT` and before the row's
+  lease expires.
+
+  A pending recovery look runs at the head of a poll pass unless another
+  claim of the same Worker is in flight. In that case it makes no read;
+  if a claim begins before the look compares the claim generation, it
+  releases nothing. If a claim begins after that comparison, the look
+  still releases the orphans it read, but not that claim's row. Either way,
+  recovery stays pending, that pass claims as usual, and the next pass
+  looks again. Claims on a shared Worker remain concurrent, as in 1.6.0;
+  recovery bookkeeping uses a short lock never held across a database
+  call. A claim made through `run()`, `run_once()` or the base `claim_one()`
+  counts as in flight until its returned row is
+  registered, including subclass work after the base claim returns.
+  `ox_worker` is unaffected by shared-Worker deferrals: its Worker is not
+  shared, and its loop claims and checks recovery on one thread.
+
+  A failed recovery read ends that pass with `worker_poll_failed` and
+  `claim_recovery` set to `"pending"`; no new claim is made and no error
+  is raised to a caller. Recovery is retried on later passes until it
+  succeeds or the window expires. Continuous claims on a shared Worker
+  can keep recovery pending beyond `LOCK_TIMEOUT`; the next look that
+  passes the in-flight check expires the window and releases nothing.
+  The rows remain subject to the reaper throughout.
+
+  PostgreSQL with psycopg2 retains 1.6.0's behaviour, with no recovery.
+  `Worker.run_once()` and `testing.run_tasks()` also retain 1.6.0's
+  behaviour: they raise the claim's original error at once, with no
+  immediate or pending recovery attempt. A claim that landed stays
+  `RUNNING` for the reaper, and the next call does not find it while it
+  remains `RUNNING`. It is requeued with the attempt spent or marked
+  `LOST` on the final attempt.
+
+  Recovery does not cover claims made by workers that have not been
+  upgraded, workers that die before recovery, or database outages that
+  outlast `LOCK_TIMEOUT`. If the claim's commit becomes visible only
+  after the recovery look, it may escape recovery and be reaped normally,
   consuming the attempt and becoming `LOST` on the final attempt.
+
+  The loop makes at most one recovery attempt when stopping, without
+  scheduling a recovery retry. Only this stop-time look has
+  recovery-specific waiting limits. It waits up to five seconds for
+  claims in flight on the same Worker. If that budget runs out, or a
+  claim begins during the look, it gives up with
+  `worker_claim_recovery_failed`. A look given up because a claim began
+  after its claim-generation comparison may already have released rows,
+  each logged as `worker_claim_released`, before logging
+  `worker_claim_recovery_failed`.
+
+  On PostgreSQL with psycopg 3, pooled or not, the stop-time look uses a
+  private connection and a five-second budget covering that claim wait,
+  connection establishment and every reply. Host name resolution is
+  outside that bound and can exceed it. The private connection does not
+  inherit a session-level `lock_timeout` from the worker's existing
+  connection and can use its whole budget waiting on a locked table.
+  With Django's PostgreSQL pool, this connection is outside `max_size`;
+  budget up to `max_size + 3` server connections during the stop-time
+  look, including the private renewal and timeout-watchdog connections.
+
+  On MySQL, the stop-time look uses a private connection with five-second
+  connect, read and write timeouts; a shorter configured timeout is
+  raised to five seconds. These are per-operation limits, not one
+  deadline for the whole attempt. Host name resolution is outside these
+  timeout bounds, and mysqlclient may extend a read to 15 seconds.
+  On SQLite, database waiting during the stop-time look is bounded by
+  the busy timeout, not by an overall recovery deadline. The five-second
+  claim wait applies on MySQL and SQLite too. psycopg2 makes no stop-time
+  recovery attempt.
+
+  A recovery error does not prevent shutdown. These limits do not bound
+  shutdown as a whole. The pool health checks that the `run()` loop makes
+  after a failed pass and MySQL's pre-existing wait for Django's
+  reconnection during the claim's atomic-block exit can delay shutdown
+  before the stop-time recovery look is reached.
+
+### Changed
+
+- Give a Worker used in a process forked after its creation a new worker
+  id in the child, retaining any `-<slot>` suffix, so that
+  `Worker.run()`'s recovery looks in one process cannot release the
+  other's running task. An at-fork hook re-identifies the child. For
+  forks that run no at-fork hook, such as uWSGI's default, a pid check
+  re-identifies it at its first `claim_one()`, claim, recovery look or
+  `run()`. Until that check, the child's copy can still report the
+  parent's id.
+
+  The child starts with empty claim bookkeeping and fresh locks; the
+  parent keeps its id. As in 1.6.0, the child keeps touching the inherited
+  heartbeat path. It does so under its new id, and its heartbeat warning
+  names that id. A shared heartbeat path proves that one writer is alive,
+  not that every child is alive.
+
+  This identity handling applies, for example, to a module-level Worker
+  used for `run_once()` under gunicorn `--preload` or uWSGI without
+  `lazy-apps`, or to a launcher that forks before the Worker claims
+  anything. Handing an already-claimed row to a child for execution is
+  unsupported: the row retains the parent's id, so the child with its
+  new id cannot renew the lease, and the reaper can requeue it while the
+  child runs it.
+
+  This identity handling does not make arbitrary native forks safe or
+  establish that inherited database connections, threads or other
+  resources are safe to use. `ox_worker --processes` starts fresh
+  children rather than forking them.
+  Version 1.6.0 shared the id after a fork without a recovery-release
+  risk, because it had no recovery look.
 
 ### Added
 
@@ -30,7 +129,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `worker_claim_recovery_failed`, `worker_claim_recovery_expired` and
   `worker_claim_release_refused`, with their documented extra keys.
   `worker_poll_failed` now includes `claim_recovery`, set to `"pending"`
-  while a recovery read is owed, or `null` otherwise.
+  while a recovery read is owed, or `null` otherwise; with psycopg2 it
+  is always `null`. `worker_claim_recovery_failed` is emitted only for
+  a failed stop-time recovery look in `Worker.run()`, with
+  `claim_recovery` always set to `"expired"`.
 
 ## [1.6.0] - 2026-09-27
 

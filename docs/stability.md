@@ -33,13 +33,17 @@ export names this page does not list; those names are not public.
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   `128 + the signal number`, following the shell convention.
-- **The heartbeat-file protocol**: one process writes `PATH`; above one
-  process, the supervisor writes `PATH.supervisor` and slot i writes
-  `PATH.i`. The modification time is the signal; file contents are not
-  read or written. Every expected file must be regular and have an age
-  between zero and the configured maximum, inclusive. A passing check
-  means the expected controlling loops have advanced recently, not that
-  tasks are progressing. The documented
+- **The heartbeat-file protocol**: with `ox_worker`, one process writes
+  `PATH`; above one process, the supervisor writes `PATH.supervisor` and
+  slot i writes `PATH.i`. The modification time is the signal; file
+  contents are not read or written. Every expected file must be regular
+  and have an age between zero and the configured maximum, inclusive.
+  A passing check means the expected controlling loops have advanced
+  recently, not that tasks are progressing. A launcher that constructs
+  one Worker with `heartbeat_file` and then forks it leaves the children
+  touching the same inherited path under their own worker ids. A fresh
+  shared path proves that one writer is alive, not that every child is
+  alive. The documented
   [file-mode JSON fields](monitoring.md#file-mode-json) are public too.
 - **The system check IDs**, including the `django_ox.E0xx` and
   `django_ox.W0xx` identifiers, which you may list in
@@ -102,11 +106,12 @@ export names this page does not list; those names are not public.
   It also includes `worker_claim_released`,
   `worker_claim_recovery_failed`, `worker_claim_recovery_expired` and
   `worker_claim_release_refused`, and their documented keys. These are
-  stable, not provisional. The new keys include `claim_recovery`,
+  stable, not provisional. The recovery keys include `claim_recovery`,
   `old_epoch`, `new_epoch`, `refunded_attempts`, `attempts` and
   `worker_ids`. On `worker_poll_failed`, `claim_recovery` is `"pending"`
-  while a recovery read is owed, or `null` otherwise. The recovery
-  events also use `"expired"` as documented.
+  while a recovery read is owed, or `null` otherwise; with psycopg2 it
+  is always `null`. On `worker_claim_recovery_failed` and
+  `worker_claim_recovery_expired`, it is always `"expired"`.
 - **The testing helpers** `django_ox.testing.ImmediateBackend`,
   `django_ox.testing.DummyBackend` and `django_ox.testing.run_tasks`.
   The backends accept policy declarations but do not enforce retries,
@@ -164,24 +169,107 @@ are not public.
 ### Worker implementation details
 
 `Worker` internals remain **Not public**. This includes `_handed_off`,
-`_unsettled`, `_claimer`, `_claim`, `_claim_inline`, `_recover_claims`
-and `_release_claim`.
+`_unsettled`, `_fence`, `_claims_in_flight`, `_claim_generation`,
+`_claiming`, `_claim`, `_claim_inline`, `_recover_claims` and
+`_release_claim`.
 
-`Worker._run_attempt` is also private. It now returns a `bool` indicating
+`Worker._run_attempt` is also private. It returns a `bool` indicating
 whether the outcome was recorded. A subclass override that returns
 `None` is treated as "outcome not recorded". This keeps its row excluded
 from claim recovery; it does not itself change the row's outcome.
 
-Subclass authors may notice two behaviour changes. The base
-`claim_one()` now holds a per-worker reentrant lock while claiming.
-Two threads claiming on the same `Worker` instance are serialised:
-the second waits rather than being refused. Recovery reads use the
-same lock.
+Threads sharing a Worker can claim concurrently. No lock is held across
+`claim_one()` or an override of it, including subclass statements after
+the base claim returns. A database wait in one claim does not block
+another claim through a Worker lock. A claim made through `run()`,
+`run_once()` or the base `claim_one()` counts as in flight until its
+returned row is registered. A short per-Worker lock protects this
+bookkeeping and is never held across a database call.
 
-`Worker.run_once()` and `testing.run_tasks()` may raise a database error
-from a pending recovery read before making any new claim. After a new
-claim raises, an immediate recovery attempt does not replace the
-original claim error, which is still raised to the caller.
+`Worker.run_once()` and `testing.run_tasks()` raise a claim's original
+error at once. They make no immediate recovery attempt and no pending
+recovery read before a later claim, whether inside or outside a caller's
+transaction. A claim that committed stays `RUNNING` and is left to the
+reaper, which requeues it with the attempt spent or marks it `LOST` on
+the final attempt. The next call does not find that landed claim while
+it remains `RUNNING`.
+
+Neither `run_once()` nor `run_tasks()` closes the failed claim's connection
+for recovery or tests idle connections in Django's PostgreSQL pool.
+The caller's connection and session, including advisory locks, temporary
+tables and `SET` values, are left as the claim left them. The `run()` loop
+tests the pool after a failed pass.
+
+Recovery runs only in `Worker.run()`, the loop used by `ox_worker`, on
+PostgreSQL with psycopg 3, pooled or not, MySQL and SQLite. Pending recovery
+is checked at the head of a poll pass unless another claim of the same
+Worker is in flight. In that case it makes no recovery read; if a claim
+begins before the look compares the claim generation, it releases nothing.
+If a claim begins after that comparison, the look still releases the
+orphans it read, but not that claim's row. Either way, recovery stays
+pending, that pass claims as usual, and the next pass looks again.
+Continuous claims on a shared Worker can keep recovery pending beyond
+`LOCK_TIMEOUT`; the next look that passes the in-flight check expires
+the window and releases nothing. The rows remain subject to the reaper.
+
+A failed recovery read ends that pass with `worker_poll_failed` and
+`claim_recovery` set to `"pending"`; no new claim is made and no error is
+raised to a caller. PostgreSQL with psycopg2 makes no recovery attempt.
+`ox_worker` does not share its Worker: its loop claims and checks recovery
+on one thread.
+
+The loop makes at most one recovery attempt when stopping. Only this
+stop-time look has recovery-specific waiting limits. It waits up to five
+seconds for claims in flight on the same Worker. If that budget runs out,
+or a claim begins during the look, it gives up with
+`worker_claim_recovery_failed`. A look given up because a claim began
+after its claim-generation comparison may already have released rows,
+each logged as `worker_claim_released`, before logging
+`worker_claim_recovery_failed`.
+
+On PostgreSQL with psycopg 3, pooled or not, the stop-time look uses a
+private connection and a five-second budget covering that claim wait,
+connection establishment and every reply. Host name resolution is outside
+that bound and can exceed it. The private connection does not inherit a
+session-level `lock_timeout` from the worker's existing connection and
+can use its whole budget waiting on a locked table.
+
+On MySQL, the stop-time look uses a private connection with five-second
+connect, read and write timeouts, raising any shorter configured timeout
+to five seconds. These limits are per operation, not an overall deadline,
+and host name resolution is outside them. mysqlclient may extend a read
+to 15 seconds. On SQLite, database waiting during the stop-time look is
+bounded by the busy timeout, not by an overall recovery deadline. The
+five-second claim wait applies on MySQL and SQLite too. A recovery error
+does not prevent shutdown, and these limits do not bound shutdown as a
+whole.
+
+A Worker used in a process forked after the Worker was created takes a
+new worker id in the child, retaining any `-<slot>` suffix. An at-fork
+hook re-identifies the child. For forks that run no at-fork hook, such as
+uWSGI's default, a pid check does so at the child's first `claim_one()`,
+claim, recovery look or `run()`. Until that check, the child's copy can
+still report the parent's id. The parent keeps its id.
+
+The child starts with empty claim bookkeeping and fresh locks. It keeps
+the inherited heartbeat path and continues touching it under its new id;
+a heartbeat warning names the child's id. If several children share that
+path, a fresh heartbeat proves that one writer is alive, not that every
+child is alive.
+
+This identity handling applies, for example, to a module-level Worker used
+for `run_once()` under gunicorn `--preload` or uWSGI without `lazy-apps`,
+or to a launcher that forks before the Worker claims anything. Handing an
+already-claimed row to a child for execution is unsupported: the row
+retains the parent's id, so the child with its new id cannot renew the
+lease, and the reaper can requeue it while the child runs it.
+
+This identity handling does not make arbitrary native forks safe or
+establish that inherited database connections, threads or other resources
+are safe to use. Separate worker identities prevent `Worker.run()`'s
+recovery looks in one process from releasing the other's running task and
+causing its body to run twice. `ox_worker --processes` starts fresh
+children rather than forking them.
 
 ## Versioning
 

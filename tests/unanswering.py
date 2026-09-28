@@ -7,7 +7,10 @@ answered, as by a server that has gone away behind a live address. stall():
 connections already open stop relaying, in both directions, as a server
 that stops answering once connected; what a client sends from then on is
 counted and dropped, so a test can tell its statement went out and was
-never answered.
+never answered. stall_open(): the same for the connections open at the
+call only; one made later is relayed until it is stalled in turn, as a
+server that accepts and sets up a session and then answers nothing, or a
+pool's idle connections to a host that went away without resetting them.
 """
 
 import socket
@@ -24,6 +27,8 @@ class Unanswering:
         self._stalled = threading.Event()
         self._lock = threading.Lock()
         self._sockets = []
+        #: One flag per relayed connection, set by stall_open().
+        self._each_stalled = []
         #: Connections accepted and never answered.
         self.unanswered_connects = 0
         #: Bytes a client sent while relaying was stalled, none of them passed on.
@@ -35,6 +40,11 @@ class Unanswering:
 
     def stall(self):
         self._stalled.set()
+
+    def stall_open(self):
+        with self._lock:
+            for stalled in self._each_stalled:
+                stalled.set()
 
     def close(self):
         """Reset every connection, which wakes whatever waits on one."""
@@ -71,15 +81,20 @@ class Unanswering:
                 client.close()
                 continue
             self._keep(upstream)
+            stalled = threading.Event()
+            with self._lock:
+                self._each_stalled.append(stalled)
             for source, sink, from_client in (
                 (client, upstream, True),
                 (upstream, client, False),
             ):
                 threading.Thread(
-                    target=self._pipe, args=(source, sink, from_client), daemon=True
+                    target=self._pipe,
+                    args=(source, sink, from_client, stalled),
+                    daemon=True,
                 ).start()
 
-    def _pipe(self, source, sink, from_client):
+    def _pipe(self, source, sink, from_client, stalled):
         while True:
             try:
                 data = source.recv(65536)
@@ -89,7 +104,7 @@ class Unanswering:
                 with suppress(OSError):
                     sink.shutdown(socket.SHUT_WR)
                 return
-            if self._stalled.is_set():
+            if self._stalled.is_set() or stalled.is_set():
                 if from_client:
                     with self._lock:
                         self.unanswered_bytes += len(data)

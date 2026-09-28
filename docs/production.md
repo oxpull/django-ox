@@ -3,13 +3,19 @@
 Run `manage.py ox_worker` as a foreground process under your process
 supervisor. A worker started while the database refuses connections stays
 up and polls until it returns. Failed passes are logged as
-`worker_poll_failed`, and the connection is reopened. After a claim raises
-a database error, the next pass first reads the worker's own unconfirmed
-claims. It does not replay the failed claim or assume that it rolled back.
+`worker_poll_failed`, and the connection is reopened.
+
+Claim recovery runs only in `Worker.run()`, the loop used by `ox_worker`,
+on PostgreSQL with psycopg 3, pooled or not, MySQL and SQLite. After a
+claim raises a database error, the loop checks the worker's own
+unconfirmed claims before claiming on a later pass, subject to the
+shared-Worker rules below. It does not replay the failed claim or assume
+that it rolled back. PostgreSQL with psycopg2 makes no recovery attempt;
+a claim that committed without returning is left to the reaper.
 
 A claim can commit on the database even though the worker receives an
 error instead of its reply. On a connection the worker owns, in
-autocommit, the worker checks for its own `RUNNING` rows that no claim
+autocommit, recovery checks for its own `RUNNING` rows that no claim
 returned. It excludes every epoch of a row that is in flight, has been
 handed off, or has an unsettled outcome. It never recovers another
 worker's rows.
@@ -30,54 +36,99 @@ row's lease. Recovery also checks each row against the reaper's own
 lease-expiry predicate and clock. A row the reaper could already take
 is left to it, even within the recovery window.
 
-`Worker.run()` checks before claiming on the next poll pass. If the
-database is still unreachable, recovery stays pending and is retried on
-later passes until it succeeds or the window expires. A failed recovery
-read ends that pass with `worker_poll_failed`; no new claim is made.
+`Worker.run()` checks before claiming on the next poll pass unless
+another claim of the same Worker is in flight. In that case it makes no
+recovery read; if a claim begins before the look compares the claim
+generation, it releases nothing. If a claim begins after that comparison,
+the look still releases the orphans it read, but not that claim's row.
+Either way, recovery stays pending, that pass claims as usual, and the
+next pass looks again. Continuous claims on a shared Worker can keep
+recovery pending beyond `LOCK_TIMEOUT`; the next look that passes the
+in-flight check expires the window and releases nothing. The rows remain
+subject to the reaper throughout.
+
+If the database is still unreachable, recovery stays pending and is
+retried on later passes until it succeeds or the window expires. A failed
+recovery read ends that pass with `worker_poll_failed` and
+`claim_recovery` set to `"pending"`; no new claim is made and no error is
+raised to a caller.
 
 The worker makes at most one recovery attempt when stopping, without
-scheduling a recovery retry. On PostgreSQL with psycopg 3, pooled or not,
-this attempt waits at most five seconds, including connection
-establishment and every reply, then gives up.
+scheduling a recovery retry. It waits up to five seconds for claims in
+flight on the same Worker. If that budget runs out, or a claim begins
+during the look, it gives up with `worker_claim_recovery_failed`.
+A look given up because a claim began after its claim-generation
+comparison may already have released rows, each logged as
+`worker_claim_released`, before logging `worker_claim_recovery_failed`.
 
-On MySQL, the attempt uses a private connection with five-second connect,
-read and write timeouts. A shorter configured timeout is raised to five
-seconds. These are per-operation limits, not one deadline for the whole
-attempt. mysqlclient may retry a read, extending its effective read limit
-to 15 seconds. Other configurations, including PostgreSQL with psycopg2
-and SQLite, have no recovery-specific deadline.
+On PostgreSQL with psycopg 3, pooled or not, the stop-time attempt uses a
+private connection and a five-second budget covering that claim wait,
+connection establishment and every reply. Host name resolution is outside
+that bound and can exceed it. The private connection does not inherit a
+session-level `lock_timeout` from the worker's existing connection and
+can use its whole budget waiting on a locked table.
 
-A recovery error does not prevent shutdown. These limits apply only to the
-stop-time recovery attempt, not to shutdown as a whole. Existing waits
-elsewhere, including MySQL claim-path reconnection and pooled PostgreSQL
-health checks, can delay shutdown before this attempt is reached.
+On MySQL, the stop-time attempt uses a private connection with five-second
+connect, read and write timeouts. A shorter configured timeout is raised
+to five seconds. These are per-operation limits, not one deadline for the
+whole attempt. Host name resolution is outside these timeout bounds.
+mysqlclient may retry a read, extending its effective read limit to 15
+seconds. On SQLite, database waiting during the stop-time look is bounded
+by the busy timeout, not by an overall recovery deadline. The five-second
+claim wait applies on MySQL and SQLite too. PostgreSQL with psycopg2 makes
+no stop-time recovery attempt.
 
-`Worker.run_once()` and `testing.run_tasks()` instead attempt recovery
-once immediately after a claim raises, then re-raise the original claim
-error. A recovery error at that point is logged without replacing the
-claim error. After a successful release, the next call can claim and run
-the task normally. If recovery is still pending from an earlier call,
-the next call attempts it before claiming anything. A database error
-from that pending recovery read is raised to the caller.
+A recovery error does not prevent shutdown. These recovery limits apply
+only to the stop-time attempt. They do not bound shutdown as a whole.
+Existing waits elsewhere can delay shutdown before the stop-time attempt
+is reached, including MySQL claim-path reconnection and the pooled
+PostgreSQL health checks that `Worker.run()` makes after a failed pass.
 
-This recovery does not run inside a caller's transaction, including
-`atomic()` and Django `TestCase`, or when the caller has disabled
-autocommit. There, the claim belongs to the caller's transaction and
-rolls back with it.
+`Worker.run_once()` and `testing.run_tasks()` raise the claim's original
+error at once, without an immediate recovery attempt or a pending recovery
+read on the next call. A claim that committed stays `RUNNING` and is left
+to the reaper, which requeues it with the attempt spent or marks it `LOST`
+on the final attempt. The next call does not find that landed claim while
+it remains `RUNNING`.
 
-`--batch` does not finish while recovery is pending. `--max-tasks` counts
-only claims that returned; a claim that raised uses no slot. Oxpull Pro
-also counts admission only for a claim that returned, so a released row
-is counted when it is claimed again.
+Threads sharing a Worker can claim concurrently. No lock is held across
+a claim, including a subclass's statements after the base `claim_one()`
+returns, so a database wait in one claim does not block another claim
+through a Worker lock. A claim made through `run()`, `run_once()` or the
+base `claim_one()` counts as in flight until its returned row is
+registered. A short per-Worker lock protects this bookkeeping and is
+never held across a database call. `ox_worker` does not share its Worker:
+its loop claims and checks recovery on one thread.
+
+Neither `run_once()` nor `run_tasks()` closes the failed claim's
+connection for recovery or tests idle connections in Django's PostgreSQL
+pool. The caller's connection and session, including advisory locks,
+temporary tables and `SET` values, are left as the claim left them.
+The `run()` loop tests the pool after a failed pass.
+
+`run_once()` and `run_tasks()` perform no recovery either inside or
+outside a caller's transaction. Inside `atomic()` or Django `TestCase`,
+or when the caller has disabled autocommit, the claim belongs to the
+caller's transaction and rolls back with it.
+
+`ox_worker --batch` does not finish while recovery is pending. On a shared
+Worker, recovery deferred by another thread's claim does not hold the
+batch open; the stop-time look waits up to five seconds for that claim.
+If the claim is still in flight then, the look gives up with
+`worker_claim_recovery_failed` and a row that landed is left to the reaper.
+`--max-tasks` counts only claims
+that returned; a claim that raised uses no slot. Oxpull Pro also counts
+admission only for a claim that returned, so a released row is counted
+when it is claimed again.
 
 No database statement is added to the ordinary task path. A recovery look
 uses one SELECT over `RUNNING` rows filtered to this worker. It may make
 follow-up SELECTs, by primary key, for rows belonging to excluded entries
 that the first read did not return, with one SELECT per chunk of up to 500
 primary keys. Recovery then uses one conditional UPDATE per eligible row.
-Failed recovery reads may be retried. If a release commits but its own
-reply is lost, there is no `worker_claim_released` event for that release;
-the next read finds the row already `READY`.
+Failed recovery reads may be retried on later passes. If a release commits
+but its own reply is lost, there is no `worker_claim_released` event for
+that release; the next read finds the row already `READY`.
 
 With settings schedules, the worker opens its first connection during
 polling. With `DatabaseScheduleSource`, a refused startup read logs
@@ -510,12 +561,17 @@ With Django's PostgreSQL pool, lease renewal uses a connection outside the
 pool, in addition to `max_size`. The timeout watchdog can use a second
 private connection whenever an attempt has a timeout. That timeout can
 come from the task declaration, not just `TASK_TIMEOUT` or `TASK_TIMEOUTS`.
+With psycopg 3, a worker stopping with recovery pending opens one more
+private connection outside the pool for its stop-time recovery look.
 
-Budget up to `max_size + 2` server connections per worker process. This is
-a worst-case budget, not a count of open connections. A worker whose tasks
-never use a timeout needs only the baseline private connection, for
-`max_size + 1`. An absent timeout in `OPTIONS` alone does not establish that.
-Check PostgreSQL `max_connections` and role connection limits before upgrading.
+Budget up to `max_size + 2` server connections per worker process during
+normal operation, and `max_size + 3` during a stop-time recovery look.
+These are worst-case budgets, not counts of open connections. A worker
+whose tasks never use a timeout needs only the baseline private connection
+during normal operation, for `max_size + 1`, and up to `max_size + 2`
+during a stop-time recovery look. An absent timeout in `OPTIONS` alone
+does not establish that tasks never use a timeout. Check PostgreSQL
+`max_connections` and role connection limits before upgrading.
 
 Lease renewal normally uses a private connection outside the pool. The stock
 worker opens it on the first renewal tick with work in flight. It reuses the
@@ -537,8 +593,10 @@ PostgreSQL's reserved slots and role connection limits. Reserved slots
 that the worker's role cannot use are not worker capacity.
 
 For example, two worker processes with `max_size=5` need a worst-case budget
-of 14 worker connections. If no task either worker runs has a timeout,
-12 suffice for the workers. These totals exclude all other clients and
+of 14 worker connections in normal operation and 16 while both make a
+stop-time recovery look. If no task either worker runs has a timeout,
+12 suffice for the workers in normal operation, and 14 during that look.
+These totals exclude all other clients and
 unusable reserved slots. A separate database alias needs its own budget,
 even when it connects to the same PostgreSQL server.
 
@@ -1200,19 +1258,22 @@ in 1.4.0 and later, private connects that keep failing for about
 `LOCK_TIMEOUT`, with no pooled spare, can still do so.
 See [PostgreSQL pooling](#database-connections-and-postgresql-pooling).
 
-Before 1.7.0, a claim that committed while its reply was lost could also
-leave a row to lapse on its final attempt without the task body ever
-running. It became `LOST` with a `TaskAbandoned` record saying that the
-worker "stopped renewing its lease", although the worker had never
-started the task. From 1.7.0, upgraded workers recover their own
-unconfirmed claims within `LOCK_TIMEOUT`, before the row's lease
-expires, and return them to `READY` with the attempt refunded. The old
-outcome remains possible if the worker dies before it can check, the
-database remains unreachable past `LOCK_TIMEOUT`, or the claim was made
-by a worker that has not been upgraded. In a mixed fleet, an upgraded
-worker does not recover another worker's claims. Rows left to the reaper
-are still requeued with the attempt spent, or marked `LOST` on the final
-attempt with the same `TaskAbandoned` text.
+A claim that commits while its reply is lost can leave a row to lapse on
+its final attempt without the task body ever running. It becomes `LOST`
+with a `TaskAbandoned` record saying that the worker "stopped renewing its
+lease", although the worker never started the task. `Worker.run()`, the
+loop used by `ox_worker`, recovers its own unconfirmed claims on PostgreSQL
+with psycopg 3, pooled or not, MySQL and SQLite. Within `LOCK_TIMEOUT` and
+before the row's lease expires, it returns eligible rows to `READY` with
+the attempt refunded.
+
+A claim can still be left to the reaper if the worker dies before it can
+check, the database remains unreachable past `LOCK_TIMEOUT`, or the claim
+was made by `Worker.run_once()`, `testing.run_tasks()`, a worker using
+psycopg2, or a worker without recovery support. In a mixed fleet, a worker
+with recovery support does not recover another worker's claims. Rows left
+to the reaper are requeued with the attempt spent, or marked `LOST` on the
+final attempt with the same `TaskAbandoned` text.
 
 Raising `LOCK_TIMEOUT` gives delayed renewals more time, but does not fix
 connection starvation and delays recovery from dead workers. See
@@ -1235,15 +1296,17 @@ worker between the claim and the call has used an attempt without running,
 and a task that exhausts its stored budget this way reaches a terminal
 state having never executed. The window is small: a worker claims only
 when it has a free thread and hands the task straight to it. It is not zero.
-A claim the worker could not confirm is different: if the worker finds
-that it landed and can safely release it before its lease expires and
-within the recovery window, the attempt is refunded. For that claim,
-the attempt count then reflects claims that reached a worker, not the
-unconfirmed claim. This does not guarantee that every counted claim ran
-the task body. After a refund, `last_attempted_at` keeps the instant of
-the lost claim. A `READY` row can therefore have `attempts` equal to 0
-and `last_attempted_at` set. `started_at` is cleared only when the refund
-reduces `attempts` to 0.
+A claim the worker could not confirm can be different: in `Worker.run()`
+on PostgreSQL with psycopg 3, pooled or not, MySQL or SQLite, if the worker
+finds that it landed and can safely release it before its lease expires
+and within the recovery window, the attempt is refunded. This recovery
+does not run with psycopg2 or in `Worker.run_once()` or
+`testing.run_tasks()`. For a refunded claim, the attempt count reflects
+claims that reached a worker, not the unconfirmed claim. This does not
+guarantee that every counted claim ran the task body. After a refund,
+`last_attempted_at` keeps the instant of the lost claim. A `READY` row can
+therefore have `attempts` equal to 0 and `last_attempted_at` set.
+`started_at` is cleared only when the refund reduces `attempts` to 0.
 
 At enqueue, a task's declared `max_attempts` takes precedence over the
 backend's `MAX_ATTEMPTS`, which defaults to 3. That value is stored on the

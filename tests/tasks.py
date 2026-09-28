@@ -1,6 +1,7 @@
 """Module-level task functions; django.tasks requires module-level definitions."""
 
 import asyncio
+import os
 import sys
 import time
 from pathlib import Path
@@ -59,6 +60,30 @@ def flaky(succeed_on):
 @task
 def record(label):
     STATE.setdefault("order", []).append(label)
+    return label
+
+
+@task
+def append_line(path, label, seconds=0):
+    """
+    Append `label` and the pid to the file at `path`, then sleep `seconds`:
+    a record of every execution that another process can read.
+    """
+    with Path(path).open("a") as runs:
+        runs.write(f"{label} {os.getpid()}\n")
+    time.sleep(seconds)
+    return label
+
+
+@task
+def claim_on_a_shared_worker(label):
+    """
+    run_once() on the Worker in STATE["shared_worker"], which a test shares
+    between tasks as a module-level Worker is shared.
+    """
+    STATE.setdefault("shared_began", []).append(label)
+    STATE["shared_worker"].run_once()
+    STATE.setdefault("shared_done", []).append(label)
     return label
 
 

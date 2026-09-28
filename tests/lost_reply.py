@@ -29,7 +29,7 @@ import sqlite3
 from weakref import WeakSet
 
 import pytest
-from django.db import connection
+from django.db import connection, connections
 from django.db.backends.signals import connection_created
 
 from django_ox.models import OxTask
@@ -291,3 +291,33 @@ class Seams:
         for seam in self.installed:
             connection_created.disconnect(seam.install)
             seam.uninstall()
+
+
+class LookReads:
+    """
+    Every read a look for a claim that raised makes, on the test thread's
+    connection and on every connection opened while installed, a look's
+    own included. A test module's fixture yields reads and calls remove().
+    """
+
+    def __init__(self):
+        self.reads = []
+        self._installed = WeakSet()
+        connection_created.connect(self._install, weak=False)
+        self._install(sender=None, connection=connections["default"])
+
+    def _count(self, execute, sql, params, many, context):
+        if "ox_lease_abandoned" in sql:
+            self.reads.append(sql)
+        return execute(sql, params, many, context)
+
+    def _install(self, sender, connection, **kwargs):
+        if connection not in self._installed:
+            self._installed.add(connection)
+            connection.execute_wrappers.append(self._count)
+
+    def remove(self):
+        connection_created.disconnect(self._install)
+        for conn in list(self._installed):
+            if self._count in conn.execute_wrappers:
+                conn.execute_wrappers.remove(self._count)

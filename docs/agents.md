@@ -166,9 +166,14 @@ TASKS = {
 - With Django's PostgreSQL pool, provide at least `concurrency + 1` pooled
   connections per worker process; add a spare pooled connection if fallback
   must work under full load. Budget up to `max_size + 2` server connections
-  per process, including any added spare: one private renewal connection
+  per process and database alias in normal operation, including any added spare:
+  one private renewal connection
   and one possible watchdog connection. A worker whose tasks never use
-  timeouts needs only the first. An absent timeout in `OPTIONS` does not
+  timeouts needs only the first, for `max_size + 1` in normal operation.
+  A worker stopping with recovery pending opens one more private connection
+  for its stop-time recovery look: budget up to `max_size + 3` during that
+  look, or `max_size + 2` if its tasks never use timeouts.
+  An absent timeout in `OPTIONS` does not
   establish that, because tasks can declare their own. Account for all
   processes, aliases, other clients and reserved slots.
 - The worker polls; `--interval` (default 1.0 s) is the idle sleep, so a task

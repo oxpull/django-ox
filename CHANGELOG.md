@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.0] - 2026-09-28
+
+**Upgrading to 1.7.0:** No database migration is required. Upgrade workers to recover their own unconfirmed claims. Recovery runs only in `Worker.run()`, the loop used by `ox_worker`, on PostgreSQL with psycopg 3, MySQL and SQLite. `Worker.run_once()`, `testing.run_tasks()` and PostgreSQL with psycopg2 retain 1.6.0 behavior on claim errors. A mixed fleet with 1.5.0 and 1.6.0 workers was tested; recovery applies only to upgraded workers' own claims.
+
+If a claim commits but its reply is lost, the loop looks for eligible rows on later poll passes, or once at stop, and returns them to `READY` with the attempt refunded within `LOCK_TIMEOUT` and before lease expiry. Recovery is not guaranteed: worker death, prolonged outages, late commit visibility or continuous shared-Worker claims can leave rows for the reaper, consuming the attempt and becoming `LOST` on the final attempt. Stop-time recovery has backend-specific waiting limits, not a shutdown deadline. With Django's PostgreSQL pool, budget up to `max_size + 3` server connections per worker process during that look, rather than `max_size + 2`.
+
+A Worker inherited across a fork takes a new child id. Fork before the Worker claims anything; handing an already-claimed row to a child is unsupported. This does not make inherited connections or arbitrary native forks safe. An inherited shared heartbeat path proves only that one writer is alive. The recovery log events join the stable log contract.
 
 ### Fixed
 
@@ -1795,6 +1801,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[1.7.0]: https://github.com/oxpull/django-ox/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/oxpull/django-ox/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/oxpull/django-ox/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/oxpull/django-ox/compare/v1.3.1...v1.4.0

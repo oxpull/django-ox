@@ -18,9 +18,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextvars import ContextVar
 from datetime import datetime, timedelta
+from functools import partial
 from typing import Any, cast
 
 from django.conf import settings
@@ -31,7 +32,7 @@ from django.core.exceptions import (
     ValidationError,
 )
 from django.core.validators import MaxValueValidator, MinValueValidator
-from django.db import DatabaseError, connections, router, transaction
+from django.db import DatabaseError, DataError, connections, router, transaction
 from django.db.models import F, Field, IntegerField
 from django.utils import timezone
 
@@ -39,13 +40,16 @@ from . import registry
 from .compat import normalize_json
 from .cron import CronExpression
 from .models import OxSchedule, OxScheduleChange, validate_against, validation_alias
-from .schedules import STORED_KEY_PREFIX, lock_contention
+from .schedules import MAX_INTERVAL, STORED_KEY_PREFIX, lock_contention
 
 logger = logging.getLogger("django_ox")
 
 #: The marker value has never been read. Distinct from None, which is what
 #: an install with no schedule changes yet legitimately reads.
 _UNREAD = object()
+
+#: The marker was read and holds a value that could not be converted.
+_UNREADABLE = object()
 
 TIMING_FIELDS = frozenset({"trigger", "cron", "every_seconds", "phase_seconds"})
 
@@ -90,6 +94,24 @@ _NOT_CLEANED = ("boundary_for", "boundary_generation", "created_at", "updated_at
 #: the values it calls empty only None is one the column can hold.
 _MAY_BE_BLANK = ("every_seconds", "starting_deadline_seconds", "end_time")
 
+#: The most seconds a phase or a starting deadline may be: what a timedelta
+#: holds. Dispatch makes a timedelta of each, and one second past this,
+#: that raises. The row was skipped at every read then, so a schedule that
+#: had validated and been stored never fired, and nothing refused it. Only
+#: SQLite's integer column is wide enough to take such a number;
+#: PostgreSQL's and MySQL's refuse it for their own range.
+_LONGEST_SECONDS = timedelta.max // timedelta(seconds=1)
+
+#: The most seconds an interval may be: the longest whose ticks dispatch can
+#: derive, `schedules.MAX_INTERVAL`, which is far less than a timedelta
+#: holds. One second past it, with a phase the clock had not reached, the
+#: trigger raised in the dispatch pass before the pass came to any one
+#: schedule's handling. That ended the pass and the worker with it, for
+#: every worker reading the row and again after each restart, so the tasks
+#: queued beside it never ran. Only SQLite's integer column takes a number
+#: this size.
+_LONGEST_INTERVAL_SECONDS = MAX_INTERVAL // timedelta(seconds=1)
+
 #: Whether `validate_schedule` holds a row's task_key to the registry.
 #: False only while `_export_preflight` runs: the importer prints the
 #: registry entries and the rows that name them together, so when it
@@ -102,8 +124,9 @@ _registry_decides: ContextVar[bool] = ContextVar(
 
 # Messages, all of them in this block. Down to the separator it is
 # how `create_schedules` reports a refused batch, where every other message
-# is the one `create_schedule` gives for the same row. The two after it are
-# `validate_schedule`'s own, and reach every path that validates.
+# is the one `create_schedule` gives for the same row. The three after it
+# are `validate_schedule`'s own, and reach every path that validates. The
+# last is the reason a worker logs for a row it will not build.
 
 #: One entry of the flat list. `index` is the row's position in the list the
 #: caller passed and `name` is the name as that row supplied it, because a
@@ -133,6 +156,196 @@ _TIME_WITH_A_ZONE = (
     "This time has a time zone. The schedule's other time bound has none, so "
     "they cannot be compared."
 )
+#: An interval, a phase or a starting deadline of more seconds than a
+#: schedule can run on. `limit` is the field's own: for an interval
+#: `_LONGEST_INTERVAL_SECONDS`, for the other two `_LONGEST_SECONDS`.
+_TOO_LONG_FOR_A_SCHEDULE = "Enter a value of %(limit)s seconds or less."
+#: A stored interval row whose tick cannot be derived, written around
+#: `validate_schedule` or stored before it refused such a row. The
+#: `reason` of the `schedule_row_skipped` line, after the row's name.
+_TICKS_BEFORE_YEAR_ONE = (
+    "this row's interval or phase can put a tick before year 1 when "
+    "counting ticks from 1970"
+)
+
+# Messages for row isolation, all of them in this block.
+# The first two are `validate_schedule`'s and reach every path that
+# validates. The rest are what a worker logs about a stored row it leaves
+# out, and about the change marker.
+
+#: A start or an end the database at the row's destination would keep
+#: outside the years 1 to 9999: PostgreSQL stores it and cannot read it
+#: back, SQLite and MySQL refuse it at the write. Said of that bound.
+_OUTSIDE_THE_STORABLE_YEARS = (
+    "This time must fall within years 1 to 9999 in the database's time zone."
+)
+#: A start or an end with a time zone while USE_TZ is off, where a
+#: schedule's times have none. Said of that bound.
+_TIME_ZONE_WHILE_USE_TZ_IS_OFF = "This time must have no time zone when USE_TZ is off."
+#: The reason a worker gives for leaving out a stored row whose start or
+#: end its clock cannot be compared with. `field` is the column's name.
+_BOUND_HAS_A_ZONE = "its {field} has a time zone, and USE_TZ is off"
+#: The same, the other way about.
+_BOUND_HAS_NO_ZONE = "its {field} has no time zone, and USE_TZ is on"
+#: The same, for a bound that is not a time at all.
+_BOUND_IS_NOT_A_TIME = "its {field} is not a date and time"
+#: The reason for a row a value of which could not be read from the
+#: database. `columns` names them, `error` is what the reading raised.
+_COLUMNS_UNREADABLE = "its {columns} could not be read: {error}"
+#: The same, when no single column could be named.
+_A_VALUE_UNREADABLE = "a value in it could not be read: {error}"
+#: The first line about a row left out. The row's name, made safe to print,
+#: then its primary key, then the reason.
+_SKIPPING = "Skipping stored schedule %s: %s"
+#: A later line about the same row, at most once a ROW_REPORT_INTERVAL.
+_STILL_SKIPPING = (
+    "Still skipping stored schedule %s (%d unreported skips since the last report): %s"
+)
+#: The change marker holds a value that could not be read. `%s` is the
+#: error. Rows are then read in full every SCHEDULE_RECONCILE_INTERVAL, and
+#: at once after the next write through this module, which replaces it.
+_MARKER_UNREADABLE = (
+    "The schedule change marker contains an unreadable value (%s). Stored schedules "
+    "are read in full every SCHEDULE_RECONCILE_INTERVAL until a schedule is written "
+    "through django_ox.stored."
+)
+#: The note `create_schedules` adds to the database's own error when a row
+#: of the batch is refused at the write. `index` is the row's position in
+#: the rows passed, `name` the name it supplied, escaped and cut to length.
+_ROW_REFUSED_AT_THE_WRITE = (
+    "The database refused rows[{index}] (name {name}) during the write."
+)
+#: The same note, when the database raises in the check before the write:
+#: validation's own query for names already taken carries the row's name,
+#: and PostgreSQL refuses a NUL in it there. Added to whatever the database
+#: raises in the check, a lost connection too. `index` and `name` as above.
+_ROW_REFUSED_AT_THE_CHECK = (
+    "The database raised this error while checking rows[{index}] (name {name}). No "
+    "rows in this batch have been written."
+)
+
+
+#: While a stored row keeps being left out, or the change marker keeps
+#: being unreadable, a worker says so in full the first time and after that
+#: at most this often, with the number of times since the last line.
+ROW_REPORT_INTERVAL = 60.0
+
+#: The most characters of a row's name or of a reason a line carries.
+_PRINTABLE_LIMIT = 200
+
+
+def _unreadable_value(exc: BaseException) -> bool:
+    """
+    Whether a read failed on a value rather than on the database.
+
+    A value the driver or Django's converters could not turn into Python:
+    a timestamp PostgreSQL holds and a datetime does not (DataError), a date
+    SQLite was given that does not exist, text in an integer column, a zero
+    date PyMySQL hands back as text. Those belong to the row that holds
+    them. Every other database error belongs to the database: a lost
+    connection, a missing table, a lock, a statement refused. Those are
+    raised, never put down to a row.
+
+    One exception to the classes: SQLite's driver reports text it cannot
+    decode as UTF-8 as an OperationalError, which is a value in one row
+    and not the database failing. Read off its message, as lock_contention
+    reads SQLite's.
+    """
+    if isinstance(exc, DataError) or not isinstance(exc, DatabaseError):
+        return True
+    return "Could not decode to UTF-8 column" in str(exc)
+
+
+def _printable(value: Any, limit: int = _PRINTABLE_LIMIT) -> str:
+    """
+    Text a log line can carry whatever the database held.
+
+    A name or a message is kept as it is when every character prints, and
+    otherwise escaped the way `ascii()` escapes it, so a control character,
+    an escape sequence or a line break in a stored name cannot reach a
+    terminal or start a new line in a log file. Then cut to `limit`.
+    """
+    text = value if isinstance(value, str) else repr(value)
+    if not text.isprintable():
+        text = ascii(text)[1:-1]
+    if len(text) > limit:
+        text = text[: limit - 3] + "..."
+    return text
+
+
+def _row_label(pk: Any, name: Any) -> str:
+    """A stored row as a log line names it: its name when it has one, and its key."""
+    if not isinstance(name, str) or not name:
+        return f"pk {pk}"
+    return f"{_printable(name)} (pk {pk})"
+
+
+def _outside_the_storable_years(value: datetime, alias: str) -> bool:
+    """
+    Whether a time falls outside the years 1 to 9999 where the database at
+    `alias` keeps it.
+
+    With USE_TZ on, a time is stored in the connection's time zone: UTC on
+    PostgreSQL, and on SQLite and MySQL UTC unless the database names a zone
+    of its own. A naive time is first read in the default time zone, as the
+    field reads it when it saves. PostgreSQL stores an instant past year
+    9999 in UTC and then cannot read it back, which stopped every worker;
+    SQLite and MySQL raise OverflowError at the write. Asked before the
+    write, and with the arithmetic that raises caught rather than run.
+
+    With USE_TZ off a naive time is kept as it is, and PostgreSQL reads it
+    back in the zone it was written in, so it always fits. A time with a
+    zone is refused before this is asked.
+    """
+    if not settings.USE_TZ:
+        return False
+    if timezone.is_naive(value):
+        value = timezone.make_aware(value, timezone.get_default_timezone())
+    try:
+        value.astimezone(connections[alias].timezone)
+    except OverflowError:
+        return True
+    return False
+
+
+class _RowReport:
+    """
+    What a schedule source logs about something it keeps failing to use: in
+    full the first time, then at most every ROW_REPORT_INTERVAL seconds with
+    how many times it went unsaid.
+
+    Keyed on what failed: a stored row by its primary key, or the change
+    marker. A row that is read and built again is forgotten, so if it breaks
+    once more it is reported in full. `clock` is time.monotonic outside
+    tests.
+    """
+
+    def __init__(self, clock: Any = time.monotonic) -> None:
+        self.clock = clock
+        #: When the last line was written, and the times since then unsaid.
+        self._failing: dict[Any, list[float]] = {}
+
+    def due(self, key: Any) -> tuple[bool, bool, int]:
+        """Whether a line is due, whether it is the first, and how many went unsaid."""
+        now = self.clock()
+        state = self._failing.get(key)
+        if state is None:
+            self._failing[key] = [now, 0]
+            return True, True, 0
+        if now - state[0] >= ROW_REPORT_INTERVAL:
+            unsaid = int(state[1])
+            state[0], state[1] = now, 0
+            return True, False, unsaid
+        state[1] += 1
+        return False, False, 0
+
+    def forget(self, key: Any) -> None:
+        self._failing.pop(key, None)
+
+    def keep_rows(self, pks: set[Any]) -> None:
+        """Forget every row that is not among `pks`."""
+        for key in [k for k in self._failing if k[0] == "row" and k[1] not in pks]:
+            del self._failing[key]
 
 
 def _only_writable(
@@ -198,6 +411,17 @@ def boundary_digest(schedule: OxSchedule) -> str:
     return hashlib.sha256(material.encode()).hexdigest()[:32]
 
 
+def _unconvertible_fields(schedule: OxSchedule) -> list[str]:
+    """The columns of a row the digest reads that hold what their field refuses."""
+    found = []
+    for field in sorted(BOUNDARY_FIELDS):
+        try:
+            stored_value(schedule, field)
+        except Exception:
+            found.append(field)
+    return found
+
+
 def _number(schedule: OxSchedule, name: str) -> int | None:
     """
     A whole-number column as the rules can compare it, or None if they cannot.
@@ -222,21 +446,25 @@ def _number(schedule: OxSchedule, name: str) -> int | None:
     return value if isinstance(value, int) else None
 
 
-def _column_range_errors(
-    schedule: OxSchedule, alias: str
-) -> dict[str, list[ValidationError]]:
+def _range_errors(schedule: OxSchedule, alias: str) -> dict[str, list[ValidationError]]:
     """
-    Hold each integer column to the range the database at `alias` gives it.
+    Hold each number of seconds to what has to hold it.
 
-    Django builds an integer field's range validators from the default
-    connection, so a field's own cleaning judges `every_seconds` by the
-    default database's column whichever alias the row is bound for. On one
-    vendor the two agree. Routed to another they need not: the cleaning
-    passes on the default's wider range, and the value goes on to a write
-    the narrower column refuses.
+    The column, first. Django builds an integer field's range validators
+    from the default connection, so a field's own cleaning judges
+    `every_seconds` by the default database's column whichever alias the
+    row is bound for. On one vendor the two agree. Routed to another they
+    need not: the cleaning passes on the default's wider range, and the
+    value goes on to a write the narrower column refuses. So each column is
+    held to the range the database at `alias` gives it, built the way the
+    field builds its own: the message is the field's own, and a bound the
+    field already holds is not reported twice.
 
-    Built the way the field builds its own, so the message is the field's
-    own, and a bound the field already holds is not reported twice.
+    Then what dispatch does with the number, which holds less than SQLite's
+    column does: the tick arithmetic for an interval, and for a phase or a
+    deadline the timedelta made of it. Said once as well: not of a value a
+    column's range has already kept out, the destination's here or the
+    field's own in its cleaning.
     """
     errors: dict[str, list[ValidationError]] = {}
     ops = connections[alias].ops
@@ -257,7 +485,47 @@ def _column_range_errors(
                 validator(limit)(value)
             except ValidationError as exc:
                 errors.setdefault(field.name, []).extend(exc.error_list)
+        longest = (
+            _LONGEST_INTERVAL_SECONDS
+            if field.name == "every_seconds"
+            else _LONGEST_SECONDS
+        )
+        if value <= longest or field.name in errors:
+            continue
+        try:
+            field.run_validators(value)
+        except ValidationError:
+            # Past the field's own range, which its cleaning has said.
+            continue
+        errors[field.name] = [
+            ValidationError(
+                _TOO_LONG_FOR_A_SCHEDULE,
+                code="max_value",
+                params={"limit": longest},
+            )
+        ]
     return errors
+
+
+def _ticks_overflow(every: int, phase: int) -> bool:
+    """
+    Whether deriving this interval's tick can reach back past year 1.
+
+    `IntervalTrigger.previous()` steps back from the epoch by as much of
+    the phase as the clock has not reached, rounded up to whole intervals.
+    At the epoch that is the whole phase and a later clock only shortens
+    it, so a row that passes here derives its tick at every clock reading
+    from the epoch on.
+
+    `validate_schedule` keeps a phase under its interval, where the step
+    is one interval and this is the interval's own limit. A row written
+    around it need not, and a phase of many intervals reaches as far back
+    as a long interval does.
+    """
+    return (
+        every > _LONGEST_INTERVAL_SECONDS
+        or -(-phase // every) * every > _LONGEST_INTERVAL_SECONDS
+    )
 
 
 def validate_schedule(schedule: OxSchedule) -> None:
@@ -271,7 +539,9 @@ def validate_schedule(schedule: OxSchedule) -> None:
     destination: an integer column is held to the range the alias this row
     is validated against gives it, where Django's own field validators know
     only the default connection's. Asked here so that creating, updating,
-    the admin and the importer's preflight all get the one answer.
+    the admin and the importer's preflight all get the one answer. A number
+    of seconds is held to what a timedelta holds as well, since that is
+    what dispatch makes of it.
 
     A value a field's own cleaning has refused is left to the field. It is
     not compared with anything, and it is not reported a second time. A
@@ -330,22 +600,38 @@ def validate_schedule(schedule: OxSchedule) -> None:
     # Compare the bounds only when both are datetime instances. Any other
     # value is an absent bound or one that validation rejects elsewhere.
     start, end = schedule.start_time, schedule.end_time
-    if isinstance(start, datetime) and isinstance(end, datetime):
-        if timezone.is_aware(start) != timezone.is_aware(end):
-            # Python will not order a time that has a zone against one that
-            # has none, and no field's cleaning objects to either on its
-            # own. Reported against the one the USE_TZ setting does not
-            # expect, which is the one the caller can put right.
-            stray = (
-                "end_time"
-                if timezone.is_aware(end) != settings.USE_TZ
-                else "start_time"
-            )
-            errors[stray] = (
-                _TIME_WITHOUT_A_ZONE if settings.USE_TZ else _TIME_WITH_A_ZONE
-            )
-        elif end <= start:
-            errors["end_time"] = "The end time must be after the start time."
+    if (
+        isinstance(start, datetime)
+        and isinstance(end, datetime)
+        and timezone.is_aware(start) != timezone.is_aware(end)
+    ):
+        # Python will not order a time that has a zone against one that
+        # has none, and no field's cleaning objects to either on its own.
+        # Reported against the one the USE_TZ setting does not expect,
+        # which is the one the caller can put right.
+        stray = (
+            "end_time" if timezone.is_aware(end) != settings.USE_TZ else "start_time"
+        )
+        errors[stray] = _TIME_WITHOUT_A_ZONE if settings.USE_TZ else _TIME_WITH_A_ZONE
+    # Then each on its own, as the database will hold it. A worker reads
+    # every stored row, so a time it cannot read back, or cannot compare
+    # with its clock, stopped the source for every schedule rather than
+    # this one; refused here, it never reaches the table.
+    alias = validation_alias(type(schedule))
+    for name, value in (("start_time", start), ("end_time", end)):
+        if name in errors or not isinstance(value, datetime):
+            continue
+        if not settings.USE_TZ and timezone.is_aware(value):
+            errors[name] = _TIME_ZONE_WHILE_USE_TZ_IS_OFF
+        elif _outside_the_storable_years(value, alias):
+            errors[name] = _OUTSIDE_THE_STORABLE_YEARS
+    if (
+        isinstance(start, datetime)
+        and isinstance(end, datetime)
+        and not {"start_time", "end_time"} & errors.keys()
+        and end <= start
+    ):
+        errors["end_time"] = "The end time must be after the start time."
 
     kind = registry.kinds().get(schedule.task_key)
     if not isinstance(schedule.arguments, dict):
@@ -371,9 +657,9 @@ def validate_schedule(schedule: OxSchedule) -> None:
                     f"carry: {exc}. Use a field whose cleaned value is JSON."
                 )
 
-    # The destination's ranges first and in column order, then the rules:
-    # where the field's own cleaning would have put a range it held itself.
-    found = _column_range_errors(schedule, validation_alias(type(schedule)))
+    # What the numbers can be held in first and in column order, then the
+    # rules: where the field's own cleaning would have put a range it held.
+    found = _range_errors(schedule, validation_alias(type(schedule)))
     for field, message in errors.items():
         found.setdefault(field, []).append(ValidationError(message))
     # Last, an empty value no column can hold and no field looked at. Not
@@ -439,9 +725,21 @@ def schedule_db_alias() -> str:
 def _touch_change_row(using: str | None = None) -> None:
     """Tell every worker that the stored schedules moved."""
     alias = using or schedule_db_alias()
-    OxScheduleChange.objects.using(alias).update_or_create(
-        id=1, defaults={"changed_at": timezone.now()}
-    )
+    now = timezone.now()
+    try:
+        OxScheduleChange.objects.using(alias).update_or_create(
+            id=1, defaults={"changed_at": now}
+        )
+    except Exception as exc:
+        # The marker holds a value that cannot be read back, written around
+        # this module. update_or_create reads it first, in a savepoint of its
+        # own, so the read is what raised and nothing was written. Written
+        # over without reading it: a marker no write can move is one no
+        # worker learns anything from, and every write through this module
+        # would fail on it.
+        if not _unreadable_value(exc):
+            raise
+        OxScheduleChange.objects.using(alias).filter(id=1).update(changed_at=now)
 
 
 def _unsaved(
@@ -585,6 +883,11 @@ def create_schedules(
     Checking the names does not reserve them. A schedule someone else
     creates between the check and the write is caught by the unique index,
     and that IntegrityError is raised with nothing of the batch left behind.
+    So is any other error the database raises at the write, a value it
+    refuses that validation could not know of; each carries a note naming
+    the row by its index and the name it supplied. A value the database
+    refuses in the check itself, a NUL in a name on PostgreSQL, raises its
+    error there, before anything is written, with the same kind of note.
     """
     batch = list(rows)
     if not batch:
@@ -598,7 +901,21 @@ def create_schedules(
         if not isinstance(row, Mapping):
             raise TypeError(_NOT_A_MAPPING.format(index=index, kind=type(row).__name__))
         schedule = _unsaved(row, now, "create_schedules", _IN_ROW.format(index=index))
-        errors = _creation_errors(schedule, alias)
+        try:
+            errors = _creation_errors(schedule, alias)
+        except DatabaseError as exc:
+            # A value the database refuses in validation's own query, the
+            # one for names already taken, before anything is written: a
+            # NUL in a name on PostgreSQL. Each row is checked by itself, so
+            # the query that failed was this row's. Raised as the write
+            # raises one below, with its class and its cause, and a note
+            # naming the row.
+            exc.add_note(
+                _ROW_REFUSED_AT_THE_CHECK.format(
+                    index=index, name=_printable(repr(row.get("name")))
+                )
+            )
+            raise
         found = _flat(errors)
         # Among the names that are otherwise acceptable. A name the clean
         # refused is reported for that already, and two rows with no name
@@ -644,8 +961,23 @@ def create_schedules(
     # reserve a name on PostgreSQL or MySQL, and on every database the
     # unique index has the last word.
     with transaction.atomic(using=alias):
-        for schedule in schedules:
-            schedule.save(using=alias)
+        for index, (row, schedule) in enumerate(zip(batch, schedules, strict=True)):
+            try:
+                schedule.save(using=alias)
+            except DatabaseError as exc:
+                # What validation cannot know: a name someone else took
+                # since the check, or a value this database refuses, a NUL
+                # in PostgreSQL text or a name equal to another under
+                # MySQL's collation. The database's own error, raised as it
+                # is, with its class and its cause, and the transaction takes
+                # back the rows before it. A note says which row, which the
+                # error itself cannot: it knows only the statement.
+                exc.add_note(
+                    _ROW_REFUSED_AT_THE_WRITE.format(
+                        index=index, name=_printable(repr(row.get("name")))
+                    )
+                )
+                raise
         _touch_change_row(alias)
     return schedules
 
@@ -691,8 +1023,14 @@ def update_schedule(
     `start_time` is not a field this takes: writing it directly would move
     activation without counting the write, and the count is what tells a
     worker holding a pending heal that its sighting has been superseded.
+
+    `enabled=False` given alone pauses the schedule without validating the
+    rest of it (`_disable`), so a row that no longer validates can still be
+    stopped. Anything else, enabling it again included, is validated.
     """
     _only_writable(fields, WRITABLE_FIELDS, "update_schedule")
+    if _disables_only(fields):
+        return _disable(schedule, user=user)
     # From the database, not from the instance. The admin hands this function
     # form.instance, which ModelForm._post_clean has already updated, so the
     # in-memory value is the new one and a re-enable through the change form
@@ -761,6 +1099,66 @@ def update_schedule(
     # db_for_read, and a replica that is behind either hands the caller the
     # values it has just replaced or, for a row younger than its snapshot,
     # raises DoesNotExist on a write that succeeded.
+    schedule.refresh_from_db(using=alias)
+    return schedule
+
+
+def _disables_only(fields: Mapping[str, Any]) -> bool:
+    """Whether an update asks for nothing but `enabled=False`."""
+    if set(fields) != {"enabled"}:
+        return False
+    column = cast("Field[Any, Any]", OxSchedule._meta.get_field("enabled"))
+    try:
+        return column.to_python(fields["enabled"]) is False
+    except ValidationError:
+        return False
+
+
+def _disable(schedule: OxSchedule, *, user: Any = None) -> OxSchedule:
+    """
+    Pause a stored schedule without asking whether the rest of it is valid.
+
+    Disabling is how an operator stops a schedule, and a schedule that no
+    longer validates is the one most likely to need stopping: a row stored
+    before a rule existed, or written around this module. Validating the
+    whole row first refused exactly those, so the one way to stop them was
+    to delete them. Nothing else changes here, so nothing else is checked;
+    enabling the row again, or any other change, is validated in full.
+
+    Otherwise as `update_schedule`: under the row's lock, authorized by the
+    task's registry permission, the boundary handled the way a pause
+    handles it, and the workers told.
+    """
+    alias = schedule_db_alias()
+    with transaction.atomic(using=alias):
+        current = _lock_row(schedule.pk, alias)
+        if current is None:
+            raise OxSchedule.DoesNotExist(f"Schedule {schedule.pk} no longer exists.")
+        check_permission(current, user)
+        now = timezone.now()
+        written = ["enabled", "updated_at"]
+        try:
+            # The digest over values the field cannot convert raises; such
+            # a row cannot be built, so its boundary is left as it stands.
+            stale_boundary = current.boundary_for != boundary_digest(current)
+            current.enabled = False
+            digest: str | None = boundary_digest(current)
+        except (ValidationError, ArithmeticError, TypeError, ValueError):
+            current.enabled = False
+            stale_boundary, digest = False, None
+        if stale_boundary:
+            # As update_schedule does: the timing had moved by a route that
+            # did not move the boundary, so it is stale whatever this
+            # changes, and the write moves it.
+            current.start_time = now
+            current.boundary_generation = F("boundary_generation") + 1
+            written += ["start_time", "boundary_generation"]
+        if digest is not None:
+            current.boundary_for = digest
+            written.append("boundary_for")
+        current.updated_at = now
+        current.save(using=alias, update_fields=written)
+        _touch_change_row(alias)
     schedule.refresh_from_db(using=alias)
     return schedule
 
@@ -869,6 +1267,9 @@ class DatabaseScheduleSource:
         #: When the rows were last read in full, on the monotonic clock.
         #: None means never.
         self._last_read: float | None = None
+        #: What this source says about rows it leaves out and about a
+        #: marker it cannot read: once in full, then in summary.
+        self._report = _RowReport()
         self._db_alias = schedule_db_alias()
         #: How often to read every row regardless of the change marker.
         raw_interval = options.get("SCHEDULE_RECONCILE_INTERVAL", 60.0)
@@ -917,6 +1318,7 @@ class DatabaseScheduleSource:
         """The enabled rows as schedules, re-read when the marker moves."""
         if self._needs_heal:
             self._heal()
+        changed_at: Any
         try:
             changed_at = (
                 OxScheduleChange.objects.using(self._db_alias)
@@ -924,26 +1326,24 @@ class DatabaseScheduleSource:
                 .values_list("changed_at", flat=True)
                 .first()
             )
-        except DatabaseError as exc:
-            # Reading the marker failed. An empty list would read as "no
-            # schedules are configured", which is a different and much
-            # worse claim, so the last known set stands until the database
-            # answers again.
-            #
-            # The cause in the message and no traceback, the way
-            # schedule_lock_unavailable already reports. This is one
-            # statement on one small table once a dispatch pass, so while
-            # it keeps failing it is reported about once a second per
-            # worker, and the traceback is byte-identical every time: it
-            # carries nothing the message does not and costs about 3.4 KB
-            # a record, which is enough to crowd out the reports that do.
-            logger.warning(
-                "Could not read the schedule change marker (%s); using the "
-                "last known schedules",
-                exc,
-                extra={"event": "schedule_source_unavailable"},
-            )
-            return self._cached
+        except Exception as exc:
+            if not _unreadable_value(exc):
+                return self._marker_unavailable(cast(DatabaseError, exc))
+            # The marker holds a value that cannot be read: written around
+            # this module, since every write here replaces it. It says
+            # nothing about whether the rows moved, so they are read in full
+            # at the reconcile interval, and the next write through this
+            # module replaces it with one that reads, which moves it.
+            due, _, _ = self._report.due(("marker",))
+            if due:
+                logger.warning(
+                    _MARKER_UNREADABLE,
+                    _printable(f"{type(exc).__name__}: {exc}"),
+                    extra={"event": "schedule_source_unavailable"},
+                )
+            changed_at = _UNREADABLE
+        else:
+            self._report.forget(("marker",))
         if changed_at == self._seen_change and not self._due_for_a_full_read():
             return self._cached
         self._cached = self._build()
@@ -958,6 +1358,30 @@ class DatabaseScheduleSource:
             self._cached = self._build()
         self._seen_change = changed_at
         self._last_read = time.monotonic()
+        return self._cached
+
+    def _marker_unavailable(self, exc: DatabaseError) -> list[Any]:
+        """
+        The database did not answer the marker read: the last known set.
+
+        An empty list would read as "no schedules are configured", which is
+        a different and much worse claim, so the last known set stands
+        until the database answers again.
+
+        The cause in the message and no traceback, the way
+        schedule_lock_unavailable already reports. This is one statement on
+        one small table once a dispatch pass, so while it keeps failing it
+        is reported about once a second per worker, and the traceback is
+        byte-identical every time: it carries nothing the message does not
+        and costs about 3.4 KB a record, which is enough to crowd out the
+        reports that do.
+        """
+        logger.warning(
+            "Could not read the schedule change marker (%s); using the "
+            "last known schedules",
+            exc,
+            extra={"event": "schedule_source_unavailable"},
+        )
         return self._cached
 
     def _due_for_a_full_read(self) -> bool:
@@ -1047,7 +1471,24 @@ class DatabaseScheduleSource:
                     )
                     _touch_change_row(self._db_alias)
                     self._settled(pk, healed=True)
-            except DatabaseError:
+            except Exception as exc:
+                if _unreadable_value(exc):
+                    # The row holds a value that cannot be read, or one its
+                    # digest cannot be taken over, so its boundary cannot be
+                    # moved and it cannot be built either. The sighting goes:
+                    # kept, it would be retried under the row's lock on every
+                    # pass. The full read reports the row and leaves it out,
+                    # and finds the boundary stale again once it reads.
+                    self._needs_heal.pop(pk, None)
+                    self._row_failed(
+                        pk,
+                        self._identify(pk)[0],
+                        exc,
+                        columns=partial(self._unreadable_columns, pk),
+                    )
+                    continue
+                if not isinstance(exc, DatabaseError):
+                    raise
                 logger.warning(
                     "Could not move schedule %s onto its current timing",
                     pk,
@@ -1090,6 +1531,7 @@ class DatabaseScheduleSource:
     def _build(self) -> list[Any]:
         built = []
         keys = set()
+        failing = set()
         # Every row, the disabled ones included. A disabled row is not
         # dispatched, but its boundary can be stale: a pause made outside
         # the write API leaves the boundary set for the enabled state, and
@@ -1097,15 +1539,37 @@ class DatabaseScheduleSource:
         # came due inside the pause. This is the only read that sees a
         # disabled row at all, which is also why it is the one that says
         # which rows exist (`_stored_keys`).
-        for row in OxSchedule.objects.using(self._db_alias).order_by("pk"):
-            keys.add(f"{STORED_KEY_PREFIX}{row.pk}")
+        for pk, row, unreadable in self._read_every_row():
+            # A row that cannot be read is still a row: it exists, so it
+            # keeps its key and its failure report, and it is named by the
+            # key it has rather than dropped as if it were gone.
+            keys.add(f"{STORED_KEY_PREFIX}{pk}")
+            if row is None:
+                name, enabled = self._identify(pk)
+                if enabled is not False:
+                    failing.add(pk)
+                    self._row_failed(
+                        pk,
+                        name,
+                        cast(BaseException, unreadable),
+                        columns=partial(self._unreadable_columns, pk),
+                    )
+                continue
             # Checked here, where every row is read whether or not a tick
             # of it is due. At dispatch it would sit behind the snapshot's
             # own filters, so a row whose cached copy said "not due" would
             # never reach it: an expired end_time, a boundary in the
             # future, or a period long enough that the next tick is months
             # away would each hide that the row had changed.
-            if row.boundary_for != boundary_digest(row):
+            refused: BaseException | None = None
+            try:
+                digest: str | None = boundary_digest(row)
+            except Exception as exc:
+                # A column holding what its field cannot convert. Inside
+                # this row's handling: raised from here it ended the read,
+                # and with it every schedule this source answers.
+                digest, refused = None, exc
+            if digest is not None and row.boundary_for != digest:
                 self._needs_heal[row.pk] = (
                     row.boundary_for,
                     row.start_time,
@@ -1113,28 +1577,186 @@ class DatabaseScheduleSource:
                 )
             if not row.enabled:
                 continue
+            if refused is not None:
+                failing.add(pk)
+                self._row_failed(
+                    pk, row.name, refused, columns=partial(_unconvertible_fields, row)
+                )
+                continue
             try:
                 built.append(self._to_schedule(row))
             except Exception as exc:
-                # Every exception, not a chosen list. A row is input from
-                # a person, and the guarantee that one bad row cannot stop
-                # the others cannot rest on predicting how a row goes
-                # wrong.
-                logger.warning(
-                    "Skipping stored schedule %s: %s",
-                    row.name,
-                    exc,
-                    extra={
-                        "event": "schedule_row_skipped",
-                        "schedule": row.name,
-                        "schedule_pk": row.pk,
-                        "reason": str(exc),
-                    },
-                )
+                # Every exception from the row, not a chosen list. A row is
+                # input from a person, and the guarantee that one bad row
+                # cannot stop the others cannot rest on predicting how a
+                # row goes wrong. The database's own failures are not the
+                # row's: one raised while building it (a form that queries)
+                # goes up, and the read is abandoned as any other is.
+                if isinstance(exc, DatabaseError) and not isinstance(exc, DataError):
+                    raise
+                failing.add(pk)
+                self._row_failed(pk, row.name, exc)
         # Once the read has gone through. One that raises part way leaves
         # the last complete answer, as it leaves the cached schedules.
+        self._report.keep_rows(failing)
         self._row_keys = keys
         return built
+
+    def _read_every_row(
+        self,
+    ) -> list[tuple[int, OxSchedule | None, BaseException | None]]:
+        """
+        Every row in primary-key order, each with its key, or with the error
+        that reading it raised.
+
+        One statement, as before, while every value converts. A value that
+        does not (a PostgreSQL timestamp outside the years a datetime holds,
+        a date SQLite was given that does not exist, a MySQL zero date)
+        raised from the driver or a converter in the middle of the result,
+        and took every row of it with it. Then the keys are read, which
+        always convert, and the rows again in ranges of keys, halving a range
+        that does not read until each row that fails is alone. The rows that
+        read are used, and each one that does not is named by its key.
+        """
+        rows = OxSchedule.objects.using(self._db_alias).order_by("pk")
+        try:
+            return [(row.pk, row, None) for row in rows]
+        except Exception as exc:
+            if not _unreadable_value(exc):
+                raise
+        pks = list(
+            OxSchedule.objects.using(self._db_alias)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
+        return self._read_between(pks)
+
+    def _read_between(
+        self, pks: list[int]
+    ) -> list[tuple[int, OxSchedule | None, BaseException | None]]:
+        """The rows from the first of `pks` to the last, or the row that fails."""
+        if not pks:
+            return []
+        rows = (
+            OxSchedule.objects.using(self._db_alias)
+            .filter(pk__gte=pks[0], pk__lte=pks[-1])
+            .order_by("pk")
+        )
+        try:
+            # Each in a savepoint of its own, or a transaction where none is
+            # open. A failure that is the driver's or a converter's leaves
+            # the session as it was, but one the server raised would leave
+            # a transaction the caller owns unusable for every read after it.
+            with transaction.atomic(using=self._db_alias):
+                return [(row.pk, row, None) for row in rows]
+        except Exception as exc:
+            if not _unreadable_value(exc):
+                raise
+            if len(pks) == 1:
+                return [(pks[0], None, exc)]
+        middle = len(pks) // 2
+        return self._read_between(pks[:middle]) + self._read_between(pks[middle:])
+
+    def _identify(self, pk: int) -> tuple[Any, Any]:
+        """The name and the enabled flag of a row whose other values may not read."""
+        try:
+            with transaction.atomic(using=self._db_alias):
+                found = (
+                    OxSchedule.objects.using(self._db_alias)
+                    .filter(pk=pk)
+                    .values_list("name", "enabled")
+                    .first()
+                )
+        except Exception as exc:
+            if not _unreadable_value(exc):
+                raise
+            return None, None
+        return found if found is not None else (None, None)
+
+    def _unreadable_columns(self, pk: int) -> list[str]:
+        """
+        Which of a row's columns do not read, one at a time.
+
+        Asked only when a line about the row is about to be written, which
+        is once and then at most once a ROW_REPORT_INTERVAL, so the cost of
+        a statement per column is paid that often and not on every read.
+        """
+        found = []
+        for field in OxSchedule._meta.concrete_fields:
+            try:
+                with transaction.atomic(using=self._db_alias):
+                    (
+                        OxSchedule.objects.using(self._db_alias)
+                        .filter(pk=pk)
+                        .values_list(field.attname, flat=True)
+                        .first()
+                    )
+            except Exception as exc:
+                if not _unreadable_value(exc):
+                    raise
+                found.append(field.name)
+        return found
+
+    def _row_failed(
+        self,
+        pk: int,
+        name: Any,
+        exc: BaseException,
+        *,
+        columns: Callable[[], list[str]] | None = None,
+        traceback: bool = False,
+    ) -> None:
+        """
+        Log a stored row left out: in full the first time, then in summary.
+
+        Named by its primary key, which cannot be anything but a number, and
+        by its name made safe to print, since the name is whatever was
+        stored. The reason is cut to a length and escaped the same way: an
+        error message can quote the value that caused it. `columns`, for a
+        row a value of which did not convert, names the columns that did not,
+        and is asked only when a line is written.
+        """
+        due, first, unsaid = self._report.due(("row", pk))
+        if not due:
+            return
+        if columns is not None:
+            error = _printable(f"{type(exc).__name__}: {exc}")
+            named = columns()
+            reason = (
+                _COLUMNS_UNREADABLE.format(columns=", ".join(named), error=error)
+                if named
+                else _A_VALUE_UNREADABLE.format(error=error)
+            )
+        else:
+            reason = _printable(str(exc))
+        label = _row_label(pk, name)
+        safe_name = _printable(name) if isinstance(name, str) else None
+        if first:
+            logger.warning(
+                _SKIPPING,
+                label,
+                reason,
+                exc_info=exc if traceback else None,
+                extra={
+                    "event": "schedule_row_skipped",
+                    "schedule": safe_name,
+                    "schedule_pk": pk,
+                    "reason": reason,
+                },
+            )
+            return
+        logger.warning(
+            _STILL_SKIPPING,
+            label,
+            unsaid,
+            reason,
+            extra={
+                "event": "schedule_row_skipped",
+                "schedule": safe_name,
+                "schedule_pk": pk,
+                "reason": reason,
+            },
+        )
 
     def _to_schedule(self, row: OxSchedule) -> Any:
         from .schedules import IntervalTrigger, Schedule
@@ -1164,10 +1786,28 @@ class DatabaseScheduleSource:
                     "has none, and building a trigger from it would divide by "
                     "zero on the dispatch path"
                 )
+            if _ticks_overflow(row.every_seconds, row.phase_seconds):
+                # Raised here for the same reason. The trigger would raise
+                # where the dispatch pass plans every schedule's tick,
+                # which is outside any one schedule's handling.
+                raise ValueError(_TICKS_BEFORE_YEAR_ONE)
             trigger = IntervalTrigger(
                 every=timedelta(seconds=row.every_seconds),
                 phase=timedelta(seconds=row.phase_seconds),
             )
+        # The bounds as the dispatch pass will compare them with its clock:
+        # a time, with a zone exactly when USE_TZ is on. A row that holds
+        # anything else was written around validate_schedule, and compared
+        # there it raised outside any one schedule's handling.
+        for field in ("start_time", "end_time"):
+            bound = getattr(row, field)
+            if bound is None:
+                continue
+            if not isinstance(bound, datetime):
+                raise ValueError(_BOUND_IS_NOT_A_TIME.format(field=field))
+            if timezone.is_aware(bound) != settings.USE_TZ:
+                mismatch = _BOUND_HAS_NO_ZONE if settings.USE_TZ else _BOUND_HAS_A_ZONE
+                raise ValueError(mismatch.format(field=field))
         pk, alias = row.pk, self._db_alias
         # Bound to this backend, exactly as schedules_from_options binds a
         # settings-declared schedule: the schedule is dispatched by this
@@ -1214,14 +1854,27 @@ class DatabaseScheduleSource:
         """
         try:
             row = _lock_row(pk, db_alias)
-        except DatabaseError as exc:
+        except Exception as exc:
+            if _unreadable_value(exc):
+                # The row holds a value that cannot be read: changed around
+                # this module since the snapshot was taken. Left out as the
+                # full read leaves it out, from the snapshot as well, so it
+                # is not locked again on every pass until that read.
+                self._row_failed(
+                    pk,
+                    self._identify(pk)[0],
+                    exc,
+                    columns=partial(self._unreadable_columns, pk),
+                )
+                self._leave_out(pk)
+                return None
             # A lock-wait timeout, or SQLite reporting the database busy.
             # One schedule's contention must not end the pass for the rest,
             # and it is contention, so no traceback. Anything else goes to
             # the dispatch loop, which rolls this schedule back and decides
             # from the connection, not the class, whether the rest of the
             # pass can go on.
-            if not lock_contention(exc):
+            if not isinstance(exc, DatabaseError) or not lock_contention(exc):
                 raise
             logger.warning(
                 "Could not lock stored schedule %s this pass, the database gave "
@@ -1231,8 +1884,21 @@ class DatabaseScheduleSource:
                 extra={"event": "schedule_lock_unavailable", "schedule_pk": pk},
             )
             return None
+        digest = None
+        if row is not None:
+            try:
+                digest = boundary_digest(row)
+            except Exception as exc:
+                # A column its field cannot convert. A paused row is left as
+                # a paused row is, below; its boundary cannot be checked.
+                if row.enabled:
+                    self._row_failed(
+                        pk, row.name, exc, columns=partial(_unconvertible_fields, row)
+                    )
+                    self._leave_out(pk)
+                    return None
         if row is None or not row.enabled:
-            if row is not None and row.boundary_for != boundary_digest(row):
+            if row is not None and digest is not None and row.boundary_for != digest:
                 # A pause made outside the write API, met at dispatch
                 # before any full read found it. Healed on the next pass,
                 # so the boundary sits at the pause and a raw resume cannot
@@ -1246,8 +1912,7 @@ class DatabaseScheduleSource:
             # Drop it from the snapshot too. Returning None alone would
             # leave the row in the cache, so every later pass would plan its
             # tick and take its lock again for a schedule that cannot fire.
-            key = f"{STORED_KEY_PREFIX}{pk}"
-            self._cached = [s for s in self._cached if s.dispatch_key != key]
+            key = self._leave_out(pk)
             if row is None:
                 # Gone, deleted without the write API or before the marker
                 # read saw it: its failure report can go now rather than at
@@ -1255,7 +1920,7 @@ class DatabaseScheduleSource:
                 # it is paused, not gone.
                 self._row_keys.discard(key)
             return None
-        if row.boundary_for != boundary_digest(row):
+        if row.boundary_for != digest:
             # The timing changed without the boundary moving, so the tick
             # this worker planned belongs to a definition that no longer
             # applies. Refuse it, and heal on the next pass: the refusal
@@ -1268,11 +1933,17 @@ class DatabaseScheduleSource:
             return None
         try:
             return self._to_schedule(row)
-        except Exception:
-            logger.warning(
-                "Stored schedule %s could not be read at dispatch",
-                pk,
-                exc_info=True,
-                extra={"event": "schedule_row_skipped", "schedule_pk": pk},
-            )
+        except Exception as exc:
+            # As at the full read: the database's own failure is the
+            # dispatch loop's to judge, from the connection.
+            if isinstance(exc, DatabaseError) and not isinstance(exc, DataError):
+                raise
+            self._row_failed(pk, row.name, exc, traceback=True)
+            self._leave_out(pk)
             return None
+
+    def _leave_out(self, pk: int) -> str:
+        """Drop a row from the snapshot until the next full read; its key."""
+        key = f"{STORED_KEY_PREFIX}{pk}"
+        self._cached = [s for s in self._cached if s.dispatch_key != key]
+        return key

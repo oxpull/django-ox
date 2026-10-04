@@ -9,7 +9,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Upgrading:** No database migration is required.
 
+Upgrade workers so invalid stored schedules cannot stop other schedules or
+queued tasks. On SQLite, look for interval schedules with `every_seconds`
+above 62,135,596,800. Check stored start and end times against years 1 to
+9999 in the database's time zone, and check `SCHEDULES` entries too.
+Correct readable invalid rows in the admin change form or with
+`update_schedule`, pause them, or delete them. Pausing does not repair a
+row; enabling it again is refused until it is corrected.
+
+For the unreadable PostgreSQL year-10000 row, the admin changelist returns
+HTTP 500 and lists no rows, including healthy ones. The change form and
+Disable action also return HTTP 500. `update_schedule(row, enabled=False)`
+raises `DataError`. Delete this row with
+`delete_schedule(OxSchedule(pk=schedule_pk))` or a plain SQL `DELETE`.
+
+### Security
+
+- Fixed worker termination from an uncaught overflow in interval tick
+  calculation (CWE-248). Versions 1.2.0-1.7.0 are affected. An interval
+  above 62,135,596,800 seconds, combined with certain phases, ends every
+  worker reading it on its first dispatch pass and after each restart. Queued tasks do not run,
+  and other schedules do not fire.
+
+  Stored rows can trigger this on SQLite through `create_schedule`,
+  `update_schedule`, admin add or change access, or direct table writes.
+  PostgreSQL, MySQL and MariaDB columns reject intervals this large.
+  A person who can edit `SCHEDULES` can trigger the settings path, which
+  fails before database access and is not limited to SQLite. The overflow
+  was reproduced on SQLite; the other database conclusions for this
+  interval value come from code inspection.
+
+  Every write path now limits `every_seconds` to 62,135,596,800.
+  `SCHEDULES` entries whose `every` exceeds the limit are refused by
+  `manage.py check` and at worker start with `django_ox.E002`.
+
+  On 1.7.0 with SQLite, disabling the triggering interval row through the
+  admin Disable action or `update_schedule(row, enabled=False)` is a
+  working workaround. A worker never builds a disabled row.
+
+- Fixed worker startup and dispatch failures caused by stored schedule
+  bounds outside the supported date range. On PostgreSQL, an
+  out-of-range stored bound could prevent every worker from starting
+  and stop every dispatch pass of a running worker, leaving other
+  schedules unprocessed. Tasks already queued still ran.
+
+  This failure was reproduced on every release from 1.2.0 through 1.7.0.
+  The per-release runs used `create_schedule` with an end time late on
+  9999-12-31 in a zone west of UTC, stored in year 10000 UTC. Constructing any `Worker()` then raised
+  `DataError`. These runs used PostgreSQL, Django 6.0.8 and Python 3.12,
+  not each release's own support matrix.
+  `create_schedule`, `update_schedule` and `create_schedules` now reject
+  these bounds before writing them.
+
+  Writers now reject schedule bounds outside years 1 to 9999 in the
+  database's time zone. They also reject times with a time zone when
+  `USE_TZ` is off.
+
 ### Fixed
+
+- Skip and log stored rows that the worker cannot read or compare,
+  rather than allowing one row to stop the worker. This includes values
+  the database driver cannot convert, impossible dates, bounds outside
+  years 1 to 9999, PostgreSQL infinity or BC dates, and MySQL zero dates.
+  Stored intervals above the ceiling, or with a phase that could put a
+  tick before year 1, are also skipped. Other schedules and queued tasks
+  continue to run.
+
+  A tick that cannot be derived, or bounds that cannot be compared, are
+  reported per schedule as `schedule_dispatch_error` for any schedule
+  source. Database outages still stop the pass; they are not treated as
+  bad rows. An unreadable change marker makes the worker read the table
+  in full at each `SCHEDULE_RECONCILE_INTERVAL` (default 60 seconds).
+  Skipped rows are logged once, then at most once a minute per row per
+  worker while they remain skipped.
+
+- Allow readable stored schedules that fail validation to be paused with
+  `update_schedule(row, enabled=False)` and no other changes. This does
+  not repair the row; enabling it again is refused until it is corrected.
+  The admin's Disable action also works on these rows. In 1.7.0, it
+  returned HTTP 500 for any row that failed validation.
+  These operations do not work on the unreadable PostgreSQL year-10000
+  row.
 
 - Validate stored schedule integers against the range of the database
   that stores schedules. If that database has a narrower integer range
@@ -32,6 +112,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an earlier step; that behavior is unchanged.
 
 
+### Changed
+
+- The interval ceiling also rejects previously harmless schedules, such
+  as an interval above the limit with phase 0. Such a schedule fired at
+  most once, with its next tick after the year 3939. "Run once now" now
+  reports an invalid stored row as not runnable instead of enqueueing it.
+
+- Limit phase and starting deadline values to 86,399,999,999,999 seconds
+  in `phase_seconds` and `starting_deadline_seconds`. SQLite previously
+  accepted larger values that were then skipped at every read.
+  A `SCHEDULES` `every` or `phase` outside the range of Python's
+  `timedelta` now produces `django_ox.E002` instead of `OverflowError`.
+
+
 ### Added
 
 - Add the public, stable batch creation API
@@ -44,6 +138,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PermissionDenied` naming every denied row. The batch shares one clock
   reading and tells workers once. A concurrent name conflict raises
   `IntegrityError` and rolls back the whole batch.
+
+- Annotate database errors from batch creation with the row concerned,
+  both during the database check and at the write, so callers can
+  identify the failing input to `create_schedules`.
 
 ## [1.7.0] - 2026-09-28
 

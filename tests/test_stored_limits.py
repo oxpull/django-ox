@@ -29,6 +29,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 
+from django_ox import stored
 from django_ox.models import OxSchedule, OxScheduleChange, validate_against
 from django_ox.registry import ScheduleKind, register
 from django_ox.stored import (
@@ -256,6 +257,31 @@ class TestEveryPathAsksTheDestination:
             "every_seconds": [too_big()],
             "phase_seconds": [too_big(), "The phase must be less than the interval."],
         }
+
+    def test_a_number_no_timedelta_holds_is_refused_for_the_column_and_only_that(
+        self,
+    ):
+        # 10**15 seconds is past the routed column and past what a schedule
+        # can run on. The column's range is the refusal, and the other is
+        # not said on top of it: one reason is enough to keep the value out.
+        with pytest.raises(ValidationError) as caught:
+            create_schedule(**an_interval(every_seconds=10**15))
+        said = caught.value.message_dict["every_seconds"]
+        assert too_big() in said
+        too_long = {
+            stored._TOO_LONG_FOR_A_SCHEDULE % {"limit": limit}
+            for limit in (stored._LONGEST_INTERVAL_SECONDS, stored._LONGEST_SECONDS)
+        }
+        assert not too_long & set(said)
+        _, highest = connection.ops.integer_field_range("PositiveIntegerField")
+        if highest >= 10**15:
+            # SQLite as the default database: the routed column is the only
+            # range the value is past, so it is the only thing said.
+            assert said == [too_big()]
+        else:
+            # PostgreSQL or MySQL as the default database: its own range is
+            # passed too, and Django's field validator says that first.
+            assert said == [too_big(highest), too_big()]
 
     def test_the_largest_value_the_column_holds_goes_through_on_every_path(
         self, operator

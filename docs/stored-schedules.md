@@ -317,8 +317,67 @@ validation is also skipped and logged as `schedule_row_skipped`.
 Database acceptance is determined at dispatch; a schedule-scoped dispatch
 failure is reported as `schedule_dispatch_error`.
 
-`update_schedule` and `create_schedule` take an optional `user=`, and enforce any
-per-entry permission when you pass one.
+`create_schedule`, `create_schedules` and `update_schedule` take an optional
+`user=`, and enforce any per-entry permission when you pass one.
+
+Use `create_schedules(rows, *, user=None)` for several schedules that should
+exist together, such as schedules added by a migration or the importer's
+output. Pass a list of mappings with the keyword fields that `create_schedule`
+takes:
+
+```python
+from django_ox.stored import create_schedules
+
+schedules = create_schedules(
+    [
+        {
+            "name": "morning-report",
+            "task_key": "reports.daily",
+            "trigger": "cron",
+            "cron": "0 8 * * *",
+        },
+        {
+            "name": "evening-report",
+            "task_key": "reports.daily",
+            "trigger": "cron",
+            "cron": "0 18 * * *",
+        },
+    ]
+)
+```
+
+The function returns a list of `OxSchedule` instances. An empty list returns
+`[]`. The batch is all or nothing: nothing is written unless every row passes
+validation and any permission check.
+
+The batch uses one clock reading for every row's `created_at` and `updated_at`,
+and for any `start_time` that is not supplied. Each row receives the same
+validation as `create_schedule`. Names must also be unique within the batch.
+Only after the whole batch validates does the function check `user`'s
+permission for every row, if `user` is supplied.
+
+Validation and permission checks happen before the write transaction. The
+transaction runs on the database that stores the schedules and contains only
+writes: every schedule save and one change-row touch. Workers are told once
+for the whole batch.
+
+The function raises:
+
+- `TypeError` immediately if a row is not a mapping or a key is not a writable
+  field. The message identifies the row.
+- One `ValidationError` with a flat list of every validation failure across
+  the batch. Each entry's `params` contains `index`, the zero-based position
+  in `rows`; `name`, as supplied; `field`, or `""` for a failure that belongs
+  to no one field; and `message`. Each message identifies its row and field,
+  where there is one.
+- `PermissionDenied` naming every denied row, after the whole batch validates
+  and before any write.
+- `IntegrityError` from the unique index if another writer takes a name
+  between validation and the write. The whole batch is rolled back.
+
+On SQLite, inside a caller's `transaction.atomic()` that has already read,
+`create_schedule` and `create_schedules` fail immediately with
+"database is locked" if another connection holds the write lock.
 
 ## Coming from django-celery-beat
 

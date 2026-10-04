@@ -2393,8 +2393,67 @@ validation is also skipped and logged as `schedule_row_skipped`.
 Database acceptance is determined at dispatch; a schedule-scoped dispatch
 failure is reported as `schedule_dispatch_error`.
 
-`update_schedule` and `create_schedule` take an optional `user=`, and enforce any
-per-entry permission when you pass one.
+`create_schedule`, `create_schedules` and `update_schedule` take an optional
+`user=`, and enforce any per-entry permission when you pass one.
+
+Use `create_schedules(rows, *, user=None)` for several schedules that should
+exist together, such as schedules added by a migration or the importer's
+output. Pass a list of mappings with the keyword fields that `create_schedule`
+takes:
+
+```python
+from django_ox.stored import create_schedules
+
+schedules = create_schedules(
+    [
+        {
+            "name": "morning-report",
+            "task_key": "reports.daily",
+            "trigger": "cron",
+            "cron": "0 8 * * *",
+        },
+        {
+            "name": "evening-report",
+            "task_key": "reports.daily",
+            "trigger": "cron",
+            "cron": "0 18 * * *",
+        },
+    ]
+)
+```
+
+The function returns a list of `OxSchedule` instances. An empty list returns
+`[]`. The batch is all or nothing: nothing is written unless every row passes
+validation and any permission check.
+
+The batch uses one clock reading for every row's `created_at` and `updated_at`,
+and for any `start_time` that is not supplied. Each row receives the same
+validation as `create_schedule`. Names must also be unique within the batch.
+Only after the whole batch validates does the function check `user`'s
+permission for every row, if `user` is supplied.
+
+Validation and permission checks happen before the write transaction. The
+transaction runs on the database that stores the schedules and contains only
+writes: every schedule save and one change-row touch. Workers are told once
+for the whole batch.
+
+The function raises:
+
+- `TypeError` immediately if a row is not a mapping or a key is not a writable
+  field. The message identifies the row.
+- One `ValidationError` with a flat list of every validation failure across
+  the batch. Each entry's `params` contains `index`, the zero-based position
+  in `rows`; `name`, as supplied; `field`, or `""` for a failure that belongs
+  to no one field; and `message`. Each message identifies its row and field,
+  where there is one.
+- `PermissionDenied` naming every denied row, after the whole batch validates
+  and before any write.
+- `IntegrityError` from the unique index if another writer takes a name
+  between validation and the write. The whole batch is rolled back.
+
+On SQLite, inside a caller's `transaction.atomic()` that has already read,
+`create_schedule` and `create_schedules` fail immediately with
+"database is locked" if another connection holds the write lock.
 
 ## Coming from django-celery-beat
 
@@ -6273,6 +6332,9 @@ export names this page does not list; those names are not public.
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   `128 + the signal number`, following the shell convention.
+- **The stored-schedule write functions** `django_ox.stored.create_schedule`,
+  `django_ox.stored.create_schedules`, `django_ox.stored.update_schedule` and
+  `django_ox.stored.delete_schedule`.
 - **The heartbeat-file protocol**: with `ox_worker`, one process writes
   `PATH`; above one process, the supervisor writes `PATH.supervisor` and
   slot i writes `PATH.i`. The modification time is the signal; file
@@ -6976,11 +7038,12 @@ TASKS = {
   A row names a key registered with `@schedulable`, never an import path, so
   admin access does not become permission to run arbitrary code. The decorator
   takes effect only when its module is imported, and django-ox imports each
-  installed app's `tasks` module. Write rows
-  with `django_ox.stored.create_schedule` and `update_schedule`, not
-  `objects.create()`: `save()` runs no validation and leaves the activation
-  boundary stale. Retiming a stored schedule reschedules it from the moment of
-  the change, and re-enabling a paused one does not replay what it missed.
+  installed app's `tasks` module. Write rows with
+  `django_ox.stored.create_schedule`, `create_schedules` or
+  `update_schedule`; `objects.create()` skips validation and leaves the
+  activation boundary stale. Retiming a stored schedule reschedules it from
+  the moment of the change, and re-enabling a paused one does not replay what
+  it missed.
 - `ox_prune --older-than 7d` deletes finished rows; FAILED rows stay unless
   `--include-failed`. READY, WAITING and RUNNING rows are never deleted.
 - For per-container loop-liveness, pair `ox_worker --heartbeat-file PATH`
@@ -7110,6 +7173,46 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+**Upgrading:** No database migration is required.
+
+### Fixed
+
+- Validate stored schedule integers against the range of the database
+  that stores schedules. If that database has a narrower integer range
+  than the default database, out-of-range `every_seconds`,
+  `phase_seconds` and `starting_deadline_seconds` now produce field
+  errors in the creation APIs, `update_schedule` and the admin form.
+  Previously, validation could pass and the database write could fail.
+  Database integer-range validation is unchanged for schedules on the
+  default database.
+
+- Report field validation errors for non-numeric values in
+  `every_seconds`, `phase_seconds` or `starting_deadline_seconds`,
+  `phase_seconds=None`, mixed naive and aware values in `start_time` and `end_time`,
+  or empty values (`""`, `[]`, `()` or `{}`) in `every_seconds`,
+  `starting_deadline_seconds` or `end_time`. These inputs previously
+  raised `TypeError` in `create_schedule` and at the validation step
+  in `update_schedule`. Callers handling those errors should now handle
+  `ValidationError`. In `update_schedule`, non-numeric `every_seconds`
+  and `phase_seconds` still raise a `ValidationError` with no field at
+  an earlier step; that behavior is unchanged.
+
+
+### Added
+
+- Add the public, stable batch creation API
+  `django_ox.stored.create_schedules(rows, *, user=None)`. Pass a list of
+  mappings with the fields accepted by `create_schedule`. Creation is
+  all-or-nothing: the function returns a list of `OxSchedule` instances,
+  or `[]` for an empty batch. Names must be unique within the batch.
+  One `ValidationError` reports every validation failure by row index,
+  name, field and message. Permission checks follow validation, with
+  `PermissionDenied` naming every denied row. The batch shares one clock
+  reading and tells workers once. A concurrent name conflict raises
+  `IntegrityError` and rolls back the whole batch.
 
 ## [1.7.0] - 2026-09-28
 

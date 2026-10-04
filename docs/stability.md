@@ -33,6 +33,9 @@ export names this page does not list; those names are not public.
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   `128 + the signal number`, following the shell convention.
+- **The stored-schedule write functions** `django_ox.stored.create_schedule`,
+  `django_ox.stored.create_schedules`, `django_ox.stored.update_schedule` and
+  `django_ox.stored.delete_schedule`.
 - **The heartbeat-file protocol**: with `ox_worker`, one process writes
   `PATH`; above one process, the supervisor writes `PATH.supervisor` and
   slot i writes `PATH.i`. The modification time is the signal; file

@@ -18,22 +18,27 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from datetime import timedelta
+from collections.abc import Iterable, Mapping
+from contextvars import ContextVar
+from datetime import datetime, timedelta
 from typing import Any, cast
 
+from django.conf import settings
 from django.core.exceptions import (
+    NON_FIELD_ERRORS,
     ImproperlyConfigured,
     PermissionDenied,
     ValidationError,
 )
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import DatabaseError, connections, router, transaction
-from django.db.models import F, Field
+from django.db.models import F, Field, IntegerField
 from django.utils import timezone
 
 from . import registry
 from .compat import normalize_json
 from .cron import CronExpression
-from .models import OxSchedule, OxScheduleChange, validate_against
+from .models import OxSchedule, OxScheduleChange, validate_against, validation_alias
 from .schedules import STORED_KEY_PREFIX, lock_contention
 
 logger = logging.getLogger("django_ox")
@@ -75,13 +80,69 @@ WRITABLE_FIELDS = frozenset(
 #: schedules page documents choosing the boundary a schedule starts from.
 CREATABLE_FIELDS = frozenset(WRITABLE_FIELDS | {"start_time"})
 
+#: What the clean of a new row is not asked about: the columns this module
+#: fills in itself, which a caller cannot have got wrong.
+_NOT_CLEANED = ("boundary_for", "boundary_generation", "created_at", "updated_at")
 
-def _only_writable(fields: dict[str, Any], allowed: frozenset[str], func: str) -> None:
+#: The columns the rules read that may be left blank. Django's field
+#: cleaning passes over an empty value in such a column without looking at
+#: it, so "", [], () and {} reach the rules as the caller gave them, and of
+#: the values it calls empty only None is one the column can hold.
+_MAY_BE_BLANK = ("every_seconds", "starting_deadline_seconds", "end_time")
+
+#: Whether `validate_schedule` holds a row's task_key to the registry.
+#: False only while `_export_preflight` runs: the importer prints the
+#: registry entries and the rows that name them together, so when it
+#: validates a row the key is not registered yet, and that is the expected
+#: state rather than a finding. A context variable for the reason
+#: `validate_against` is one: the frame in between is Django's.
+_registry_decides: ContextVar[bool] = ContextVar(
+    "django_ox_registry_decides", default=True
+)
+
+# Messages, all of them in this block. Down to the separator it is
+# how `create_schedules` reports a refused batch, where every other message
+# is the one `create_schedule` gives for the same row. The two after it are
+# `validate_schedule`'s own, and reach every path that validates.
+
+#: One entry of the flat list. `index` is the row's position in the list the
+#: caller passed and `name` is the name as that row supplied it, because a
+#: name can be missing, or the same in two rows, and the position cannot.
+_ROW_FAILURE = "rows[%(index)s] (name %(name)r), %(field)s: %(message)s"
+#: The same, for a failure that belongs to no one field.
+_ROW_FAILURE_WITHOUT_FIELD = "rows[%(index)s] (name %(name)r): %(message)s"
+#: A name an earlier row of the same batch already carries.
+_REPEATED_NAME = "rows[%(first)s] has the same name."
+#: A row that is not a mapping of field to value.
+_NOT_A_MAPPING = "create_schedules() requires a mapping at rows[{index}]; got {kind}."
+#: Which row a keyword `_only_writable` refuses came from.
+_IN_ROW = " in rows[{index}]"
+#: One row `user` may not schedule, in the PermissionDenied a batch raises.
+#: `message` is what `check_permission` says about that row.
+_ROW_DENIED = "rows[{index}] (name {name!r}): {message}"
+#: What stands between two such rows in the one message.
+_ROWS_DENIED_SEPARATOR = " "
+#: A start or an end given without a time zone, beside one that has a zone:
+#: what a naive datetime is while USE_TZ is on. Said of the one without.
+_TIME_WITHOUT_A_ZONE = (
+    "This time has no time zone. The schedule's other time bound has one, so "
+    "they cannot be compared."
+)
+#: The same the other way about, with USE_TZ off. Said of the one with.
+_TIME_WITH_A_ZONE = (
+    "This time has a time zone. The schedule's other time bound has none, so "
+    "they cannot be compared."
+)
+
+
+def _only_writable(
+    fields: Mapping[str, Any], allowed: frozenset[str], func: str, where: str = ""
+) -> None:
     """Refuse a keyword this function does not write."""
     refused = sorted(set(fields) - allowed)
     if refused:
         raise TypeError(
-            f"{func}() does not take {', '.join(refused)}. It writes "
+            f"{func}() does not take {', '.join(refused)}{where}. It writes "
             f"{', '.join(sorted(allowed))}. The activation boundary, the "
             "count of writes to it and the timestamps are written by "
             "django_ox.stored."
@@ -137,23 +198,99 @@ def boundary_digest(schedule: OxSchedule) -> str:
     return hashlib.sha256(material.encode()).hexdigest()[:32]
 
 
+def _number(schedule: OxSchedule, name: str) -> int | None:
+    """
+    A whole-number column as the rules can compare it, or None if they cannot.
+
+    The rules run after each field's own cleaning, which is what puts the
+    number on the instance. But Django runs them whether or not that
+    cleaning passed, and where it did not, the instance still holds what the
+    caller gave: "soon", or nothing at all in a column that needs something.
+    Put to a comparison, such a value raises TypeError out of the whole
+    validation, which loses the field's report and, in a batch, the row.
+
+    Read through the field's own `to_python`, as `stored_value` reads, so a
+    value the field would take is compared as the number it would store.
+    One it would not take is reported elsewhere: by the field, or for a
+    value the field passed over as empty, at the end of `validate_schedule`.
+    """
+    field = cast("Field[Any, Any]", OxSchedule._meta.get_field(name))
+    try:
+        value = field.to_python(getattr(schedule, name))
+    except ValidationError:
+        return None
+    return value if isinstance(value, int) else None
+
+
+def _column_range_errors(
+    schedule: OxSchedule, alias: str
+) -> dict[str, list[ValidationError]]:
+    """
+    Hold each integer column to the range the database at `alias` gives it.
+
+    Django builds an integer field's range validators from the default
+    connection, so a field's own cleaning judges `every_seconds` by the
+    default database's column whichever alias the row is bound for. On one
+    vendor the two agree. Routed to another they need not: the cleaning
+    passes on the default's wider range, and the value goes on to a write
+    the narrower column refuses.
+
+    Built the way the field builds its own, so the message is the field's
+    own, and a bound the field already holds is not reported twice.
+    """
+    errors: dict[str, list[ValidationError]] = {}
+    ops = connections[alias].ops
+    for field in OxSchedule._meta.concrete_fields:
+        if field.name not in CREATABLE_FIELDS or not isinstance(field, IntegerField):
+            continue
+        # None is a column left empty, or a value that is not a number.
+        value = _number(schedule, field.name)
+        if value is None:
+            continue
+        low, high = ops.integer_field_range(field.get_internal_type())
+        for limit, validator in ((low, MinValueValidator), (high, MaxValueValidator)):
+            # A backend may leave a side of the range open. A bound the
+            # field holds already is one its cleaning has just applied.
+            if limit is None or validator(limit) in field.validators:
+                continue
+            try:
+                validator(limit)(value)
+            except ValidationError as exc:
+                errors.setdefault(field.name, []).extend(exc.error_list)
+    return errors
+
+
 def validate_schedule(schedule: OxSchedule) -> None:
     """
     Everything a stored schedule must satisfy, whoever is writing it.
 
     Raises ValidationError with per-field messages, so the admin renders
     them against the fields that caused them.
+
+    What the destination will hold is part of that, and it is asked of the
+    destination: an integer column is held to the range the alias this row
+    is validated against gives it, where Django's own field validators know
+    only the default connection's. Asked here so that creating, updating,
+    the admin and the importer's preflight all get the one answer.
+
+    A value a field's own cleaning has refused is left to the field. It is
+    not compared with anything, and it is not reported a second time. A
+    value the cleaning never looked at, because the column may be blank and
+    the value is empty, is refused here in the words the field would use.
     """
     errors: dict[str, str] = {}
 
-    try:
-        registry.get(schedule.task_key)
-    except KeyError:
-        known = ", ".join(sorted(registry.kinds())) or "none"
-        errors["task_key"] = (
-            f"{schedule.task_key!r} is not a schedulable task. "
-            f"Registered keys: {known}."
-        )
+    # Every writer but the importer's preflight, which asks before the key
+    # can have been registered.
+    if _registry_decides.get():
+        try:
+            registry.get(schedule.task_key)
+        except KeyError:
+            known = ", ".join(sorted(registry.kinds())) or "none"
+            errors["task_key"] = (
+                f"{schedule.task_key!r} is not a schedulable task. "
+                f"Registered keys: {known}."
+            )
 
     if schedule.trigger == OxSchedule.Trigger.CRON:
         if not schedule.cron:
@@ -166,36 +303,49 @@ def validate_schedule(schedule: OxSchedule) -> None:
         if schedule.every_seconds is not None:
             errors["every_seconds"] = "A cron schedule has no interval."
     elif schedule.trigger == OxSchedule.Trigger.INTERVAL:
+        every = _number(schedule, "every_seconds")
+        phase = _number(schedule, "phase_seconds")
         if schedule.every_seconds is None:
             errors["every_seconds"] = "An interval schedule needs an interval."
-        elif schedule.every_seconds < 1:
+        elif every is not None and every < 1:
             errors["every_seconds"] = (
                 "An interval below one second cannot be honoured: the dispatch "
                 "loop looks about once a second and only the latest due tick "
                 "fires, so faster ticks would be coalesced rather than run."
             )
-        elif schedule.phase_seconds >= schedule.every_seconds:
+        elif every is not None and phase is not None and phase >= every:
             errors["phase_seconds"] = "The phase must be less than the interval."
         if schedule.cron:
             errors["cron"] = "An interval schedule has no cron expression."
     else:
         errors["trigger"] = f"Unknown trigger {schedule.trigger!r}."
 
-    if (
-        schedule.starting_deadline_seconds is not None
-        and schedule.starting_deadline_seconds < 1
-    ):
+    deadline = _number(schedule, "starting_deadline_seconds")
+    if deadline is not None and deadline < 1:
         errors["starting_deadline_seconds"] = (
             "A deadline below one second drops every tick, because a tick is "
             "already later than that by the time a worker sees it."
         )
 
-    if (
-        schedule.end_time is not None
-        and schedule.start_time is not None
-        and schedule.end_time <= schedule.start_time
-    ):
-        errors["end_time"] = "The end time must be after the start time."
+    # Compare the bounds only when both are datetime instances. Any other
+    # value is an absent bound or one that validation rejects elsewhere.
+    start, end = schedule.start_time, schedule.end_time
+    if isinstance(start, datetime) and isinstance(end, datetime):
+        if timezone.is_aware(start) != timezone.is_aware(end):
+            # Python will not order a time that has a zone against one that
+            # has none, and no field's cleaning objects to either on its
+            # own. Reported against the one the USE_TZ setting does not
+            # expect, which is the one the caller can put right.
+            stray = (
+                "end_time"
+                if timezone.is_aware(end) != settings.USE_TZ
+                else "start_time"
+            )
+            errors[stray] = (
+                _TIME_WITHOUT_A_ZONE if settings.USE_TZ else _TIME_WITH_A_ZONE
+            )
+        elif end <= start:
+            errors["end_time"] = "The end time must be after the start time."
 
     kind = registry.kinds().get(schedule.task_key)
     if not isinstance(schedule.arguments, dict):
@@ -221,8 +371,29 @@ def validate_schedule(schedule: OxSchedule) -> None:
                     f"carry: {exc}. Use a field whose cleaned value is JSON."
                 )
 
-    if errors:
-        raise ValidationError(errors)
+    # The destination's ranges first and in column order, then the rules:
+    # where the field's own cleaning would have put a range it held itself.
+    found = _column_range_errors(schedule, validation_alias(type(schedule)))
+    for field, message in errors.items():
+        found.setdefault(field, []).append(ValidationError(message))
+    # Last, an empty value no column can hold and no field looked at. Not
+    # where a rule has refused the field already: one refusal keeps the
+    # value out, and the rule's is the one that says what to do instead.
+    for name in _MAY_BE_BLANK:
+        column = cast("Field[Any, Any]", OxSchedule._meta.get_field(name))
+        value = getattr(schedule, name)
+        if name in found or value is None:
+            continue
+        if column.blank and value in column.empty_values:
+            found[name] = [
+                ValidationError(
+                    column.error_messages["invalid"],
+                    code="invalid",
+                    params={"value": value},
+                )
+            ]
+    if found:
+        raise ValidationError(found)
 
 
 def check_permission(schedule: OxSchedule, user: Any) -> None:
@@ -273,6 +444,90 @@ def _touch_change_row(using: str | None = None) -> None:
     )
 
 
+def _unsaved(
+    fields: Mapping[str, Any], now: datetime, func: str, where: str = ""
+) -> OxSchedule:
+    """
+    A new schedule from a caller's fields, before anything is checked.
+
+    `start_time` defaults to `now`, on a copy: the mapping is the caller's,
+    and a batch gives every row the one reading of the clock.
+    """
+    _only_writable(fields, CREATABLE_FIELDS, func, where)
+    return OxSchedule(created_at=now, updated_at=now, **{"start_time": now, **fields})
+
+
+def _creation_errors(
+    schedule: OxSchedule, alias: str, *, exporting: bool = False
+) -> dict[str, list[ValidationError]]:
+    """
+    Everything that stops this new schedule being written to `alias`, by field.
+
+    The one validation `create_schedule`, `create_schedules` and
+    `_export_preflight` share, so a batch refuses exactly what a single
+    call would, and a row the importer lets through is a row a paste
+    accepts. Returned rather than raised because two of the three go on
+    collecting: a batch reports every row at once, and the importer lists.
+
+    It is the model's own `full_clean` and nothing beside it, so there is
+    no rule here that `update_schedule` or the admin could be without.
+
+    `exporting` is the importer's reading, taken before the registry entries
+    it prints have been applied and possibly before the table exists. It
+    leaves out what cannot be known then, the registry's word on task_key
+    and whether the name is taken, and it makes no query. The check
+    constraint goes with them, because Django validates one by having the
+    database evaluate it. Nothing is lost by that: `validate_schedule`
+    already refuses every row the constraint would.
+    """
+    errors: dict[str, list[ValidationError]] = {}
+    token = _registry_decides.set(not exporting)
+    try:
+        with validate_against(alias):
+            schedule.full_clean(
+                exclude=_NOT_CLEANED,
+                validate_unique=not exporting,
+                validate_constraints=not exporting,
+            )
+    except ValidationError as exc:
+        errors = exc.update_error_dict(errors)
+    finally:
+        _registry_decides.reset(token)
+    return errors
+
+
+def _flat(
+    errors: dict[str, list[ValidationError]],
+) -> list[tuple[str, str, str | None]]:
+    """
+    Each error as (field, message, code), in the order the clean found them.
+
+    A failure that belongs to no one field has "" for its field.
+    """
+    return [
+        ("" if field == NON_FIELD_ERRORS else field, message, error.code)
+        for field, found in errors.items()
+        for error in found
+        for message in error.messages
+    ]
+
+
+def _row_failure(
+    index: int, row: Mapping[str, Any], field: str, message: str, code: str | None
+) -> ValidationError:
+    """One entry of the error a refused batch raises."""
+    return ValidationError(
+        _ROW_FAILURE if field else _ROW_FAILURE_WITHOUT_FIELD,
+        code=code,
+        params={
+            "index": index,
+            "name": row.get("name"),
+            "field": field,
+            "message": message,
+        },
+    )
+
+
 def create_schedule(*, user: Any = None, **fields: Any) -> OxSchedule:
     """
     Create a stored schedule, validated.
@@ -281,18 +536,14 @@ def create_schedule(*, user: Any = None, **fields: Any) -> OxSchedule:
     the boundary belongs to the moment the schedule came into existence,
     not to the moment a worker first happens to notice it.
     """
-    _only_writable(fields, CREATABLE_FIELDS, "create_schedule")
-    now = timezone.now()
-    fields.setdefault("start_time", now)
-    schedule = OxSchedule(created_at=now, updated_at=now, **fields)
+    schedule = _unsaved(fields, timezone.now(), "create_schedule")
     # Once, before the first statement, and the validation below reads it
     # too: a name checked against one database and written to another is
     # not checked at all.
     alias = schedule_db_alias()
-    with validate_against(alias):
-        schedule.full_clean(
-            exclude=["boundary_for", "boundary_generation", "created_at", "updated_at"]
-        )
+    errors = _creation_errors(schedule, alias)
+    if errors:
+        raise ValidationError(errors)
     # After the clean, so the digest is over the values that will be stored.
     schedule.boundary_for = boundary_digest(schedule)
     check_permission(schedule, user)
@@ -300,6 +551,126 @@ def create_schedule(*, user: Any = None, **fields: Any) -> OxSchedule:
         schedule.save(using=alias)
         _touch_change_row(alias)
     return schedule
+
+
+def create_schedules(
+    rows: Iterable[Mapping[str, Any]], *, user: Any = None
+) -> list[OxSchedule]:
+    """
+    Create several stored schedules, all of them or none.
+
+    Each row holds the keyword fields `create_schedule` takes and is held
+    to what `create_schedule` holds it to. On top of that the names must
+    differ within the batch.
+
+    Every row is checked before any row is written. A non-mapping row or
+    unsupported key raises TypeError immediately. Otherwise a batch with an
+    invalid row in it writes nothing and raises one ValidationError listing
+    every failure of every row, so two hundred rows are corrected in one
+    pass rather than one refusal at a time. The list is flat rather than keyed
+    by name, because a name can be missing or repeated and a position
+    cannot: each entry's `params` carry the row's `index` in `rows`, the
+    `name` it supplied, the `field` ("" when the failure belongs to no one
+    field) and the `message`.
+
+    `user`, when given, needs each row's registry permission, and is asked
+    once the whole batch validates, as `create_schedule` asks after its
+    clean. PermissionDenied names every row that was refused, and again
+    nothing has been written.
+
+    The rows share one reading of the clock, which is their `created_at`,
+    their `updated_at` and the `start_time` of any row that does not bring
+    its own, and the workers are told once.
+
+    Checking the names does not reserve them. A schedule someone else
+    creates between the check and the write is caught by the unique index,
+    and that IntegrityError is raised with nothing of the batch left behind.
+    """
+    batch = list(rows)
+    if not batch:
+        return []
+    alias = schedule_db_alias()
+    now = timezone.now()
+    schedules: list[OxSchedule] = []
+    failures: list[ValidationError] = []
+    first_named: dict[str, int] = {}
+    for index, row in enumerate(batch):
+        if not isinstance(row, Mapping):
+            raise TypeError(_NOT_A_MAPPING.format(index=index, kind=type(row).__name__))
+        schedule = _unsaved(row, now, "create_schedules", _IN_ROW.format(index=index))
+        errors = _creation_errors(schedule, alias)
+        found = _flat(errors)
+        # Among the names that are otherwise acceptable. A name the clean
+        # refused is reported for that already, and two rows with no name
+        # at all are not each other's duplicate.
+        if "name" not in errors:
+            first = first_named.setdefault(schedule.name, index)
+            if first != index:
+                found.append(
+                    ("name", _REPEATED_NAME % {"first": first}, "repeated_name")
+                )
+        failures.extend(_row_failure(index, row, *entry) for entry in found)
+        schedules.append(schedule)
+    if failures:
+        raise ValidationError(failures)
+    # Permission after validation, as `create_schedule` orders the two, and
+    # only for a batch that validates whole: a permission backend is never
+    # handed a row that does not, and a refusal is PermissionDenied here as
+    # it is there, rather than one more entry among the validation errors.
+    denied = []
+    for index, (row, schedule) in enumerate(zip(batch, schedules, strict=True)):
+        # After the clean, so the digest is over the values that will be
+        # stored.
+        schedule.boundary_for = boundary_digest(schedule)
+        try:
+            check_permission(schedule, user)
+        except PermissionDenied as exc:
+            denied.append(
+                _ROW_DENIED.format(index=index, name=row.get("name"), message=exc)
+            )
+    if denied:
+        raise PermissionDenied(_ROWS_DENIED_SEPARATOR.join(denied))
+    # Everything above only reads, and is done before the transaction is
+    # opened, so the transaction holds nothing but the writes. On SQLite
+    # that order is the difference between waiting and being refused. A
+    # transaction that has already read is not made to wait for the write
+    # lock there, so a batch that checked its rows inside its own
+    # transaction would be refused at once with "database is locked" whenever
+    # another connection was writing, a worker beside it for one. Opened to
+    # write, it takes its turn on the busy timeout, as `create_schedule`
+    # does.
+    #
+    # Nothing is given up for it. Reading inside the transaction does not
+    # reserve a name on PostgreSQL or MySQL, and on every database the
+    # unique index has the last word.
+    with transaction.atomic(using=alias):
+        for schedule in schedules:
+            schedule.save(using=alias)
+        _touch_change_row(alias)
+    return schedules
+
+
+def _export_preflight(fields: dict[str, Any]) -> list[tuple[str, str]]:
+    """
+    What a paste would refuse in one row, asked before the row is printed.
+
+    For `ox_import_beat_schedules`, which prints rows for `create_schedules`
+    and must not print one that call will refuse. This is the validation
+    that call runs, against the database the row will be written to, less
+    the two things the importer cannot know: whether task_key is registered,
+    because the registry entries are printed alongside the rows, and whether
+    the name is taken, because the table need not exist yet. For the same
+    reason it makes no query.
+
+    Returns `(field, message)` pairs, "" for a failure of no one field, and
+    an empty list for a row that would pass. Only a refusal is returned. A
+    keyword that is not a field is the importer's own mistake rather than
+    the row's and raises TypeError, and anything else the validation itself
+    raises on, it raises here, as it would at the paste.
+    """
+    schedule = _unsaved(fields, timezone.now(), "_export_preflight")
+    errors = _creation_errors(schedule, schedule_db_alias(), exporting=True)
+    return [(field, message) for field, message, _code in _flat(errors)]
 
 
 def update_schedule(

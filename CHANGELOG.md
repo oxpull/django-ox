@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+**Upgrading:** No database migration is required.
+
+### Fixed
+
+- Validate stored schedule integers against the range of the database
+  that stores schedules. If that database has a narrower integer range
+  than the default database, out-of-range `every_seconds`,
+  `phase_seconds` and `starting_deadline_seconds` now produce field
+  errors in the creation APIs, `update_schedule` and the admin form.
+  Previously, validation could pass and the database write could fail.
+  Database integer-range validation is unchanged for schedules on the
+  default database.
+
+- Report field validation errors for non-numeric values in
+  `every_seconds`, `phase_seconds` or `starting_deadline_seconds`,
+  `phase_seconds=None`, mixed naive and aware values in `start_time` and `end_time`,
+  or empty values (`""`, `[]`, `()` or `{}`) in `every_seconds`,
+  `starting_deadline_seconds` or `end_time`. These inputs previously
+  raised `TypeError` in `create_schedule` and at the validation step
+  in `update_schedule`. Callers handling those errors should now handle
+  `ValidationError`. In `update_schedule`, non-numeric `every_seconds`
+  and `phase_seconds` still raise a `ValidationError` with no field at
+  an earlier step; that behavior is unchanged.
+
+
+### Added
+
+- Add the public, stable batch creation API
+  `django_ox.stored.create_schedules(rows, *, user=None)`. Pass a list of
+  mappings with the fields accepted by `create_schedule`. Creation is
+  all-or-nothing: the function returns a list of `OxSchedule` instances,
+  or `[]` for an empty batch. Names must be unique within the batch.
+  One `ValidationError` reports every validation failure by row index,
+  name, field and message. Permission checks follow validation, with
+  `PermissionDenied` naming every denied row. The batch shares one clock
+  reading and tells workers once. A concurrent name conflict raises
+  `IntegrityError` and rolls back the whole batch.
+
 ## [1.7.0] - 2026-09-28
 
 **Upgrading to 1.7.0:** No database migration is required. Upgrade workers to recover their own unconfirmed claims. Recovery runs only in `Worker.run()`, the loop used by `ox_worker`, on PostgreSQL with psycopg 3, MySQL and SQLite. `Worker.run_once()`, `testing.run_tasks()` and PostgreSQL with psycopg2 retain 1.6.0 behavior on claim errors. A mixed fleet with 1.5.0 and 1.6.0 workers was tested; recovery applies only to upgraded workers' own claims.

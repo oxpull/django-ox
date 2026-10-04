@@ -197,6 +197,24 @@ def validate_against(alias: str) -> Iterator[None]:
         _validating_on.reset(token)
 
 
+def validation_alias(model: type[models.Model]) -> str:
+    """
+    The alias a validation of `model` answers to.
+
+    The one `validate_against` named, for as long as its block runs.
+    Outside one it is the alias the model is written to. That is where the
+    admin stands: Django calls `full_clean()` on the form's instance itself
+    with no alias named, and the row it cleans is written through the write
+    alias whatever the router says about reads.
+
+    Everything in a validation that depends on the database asks here, so
+    the name and the column ranges cannot be checked against two different
+    ones, and neither is checked against the default connection just
+    because no alias was named.
+    """
+    return _validating_on.get() or router.db_for_write(model)
+
+
 class OxScheduleManager(models.Manager["OxSchedule"]):
     """
     The default manager, which answers a validation's alias while one runs.
@@ -330,8 +348,7 @@ class OxSchedule(models.Model):
         the write, wherever it reads; what asking the right database buys
         is that the ordinary duplicate is a field error again.
         """
-        alias = _validating_on.get() or router.db_for_write(type(self))
-        with validate_against(alias):
+        with validate_against(validation_alias(type(self))):
             super().validate_unique(exclude=exclude)
 
 

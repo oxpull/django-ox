@@ -571,6 +571,42 @@ class TestTheRouterContract:
         assert OxSchedule.objects.using(PRIMARY).get(pk=row.pk).name == "nightly"
         assert OxSchedule.objects.using(REPLICA).count() == 0
 
+    def test_creating_a_batch_of_schedules_reads_the_primary(self, armed, registry):
+        with armed():
+            rows = stored.create_schedules(
+                [schedule_fields(), schedule_fields(name="hourly", cron="0 * * * *")]
+            )
+        assert [row.name for row in rows] == ["nightly", "hourly"]
+        assert OxSchedule.objects.using(PRIMARY).count() == 2
+        assert OxSchedule.objects.using(REPLICA).count() == 0
+
+    def test_a_batch_checks_its_names_against_the_primary(self, armed, registry):
+        """
+        The name that is taken is taken on the primary and nowhere else.
+        Checked anywhere else the batch passes its own checks and the
+        refusal is the INSERT's, an IntegrityError in place of the one
+        error that lists every row.
+        """
+        stored.create_schedule(**schedule_fields())
+        with armed(), pytest.raises(ValidationError) as caught:
+            stored.create_schedules(
+                [schedule_fields(name="hourly"), schedule_fields(cron="0 4 * * *")]
+            )
+        assert [
+            (entry.params["index"], entry.params["field"])
+            for entry in caught.value.error_list
+        ] == [(1, "name")]
+        assert OxSchedule.objects.using(PRIMARY).count() == 1
+
+    def test_the_export_preflight_reads_neither_database(self, armed):
+        """
+        The importer asks this before the table need exist, so a budget of
+        no statements at all, on either alias.
+        """
+        with armed(budget=0):
+            assert stored._export_preflight(schedule_fields()) == []
+            assert stored._export_preflight(schedule_fields(cron="banana"))
+
     def test_updating_a_schedule_reads_the_primary(self, armed, registry):
         row = stored.create_schedule(**schedule_fields())
         with armed():
@@ -1375,6 +1411,18 @@ class TestTheInventory:
         # -- stored schedules, and the dispatch that reads them --------
         with armed("stored.create_schedule"):
             created = stored.create_schedule(**schedule_fields())
+        with armed("stored.create_schedules"):
+            batch = stored.create_schedules(
+                [schedule_fields(name="batched"), schedule_fields(name="with-it")]
+            )
+        assert len(batch) == 2
+        # Taken back out, so the dispatch and the admin below meet the rows
+        # they were written against.
+        OxSchedule.objects.using(PRIMARY).filter(
+            pk__in=[row.pk for row in batch]
+        ).delete()
+        with armed("stored._export_preflight"):
+            assert stored._export_preflight(schedule_fields(name="asked")) == []
         with armed("stored.update_schedule"):
             assert stored.update_schedule(created, cron="0 3 * * *").cron == "0 3 * * *"
         with armed("the stored source"):

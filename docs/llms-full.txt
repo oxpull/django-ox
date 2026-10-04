@@ -4039,8 +4039,18 @@ no stop-time recovery attempt.
 A recovery error does not prevent shutdown. These recovery limits apply
 only to the stop-time attempt. They do not bound shutdown as a whole.
 Existing waits elsewhere can delay shutdown before the stop-time attempt
-is reached, including MySQL claim-path reconnection and the pooled
-PostgreSQL health checks that `Worker.run()` makes after a failed pass.
+is reached, including MySQL claim-path reconnection. With psycopg_pool
+3.3.0 or later, the pooled PostgreSQL recovery sweep runs no statements on
+idle connections. The next pass can still wait for the pool's checkout
+`timeout`, which defaults to 30 seconds. Lowering that timeout shortens
+the checkout wait, but stopping can still wait for the stop-time recovery
+look.
+
+The legacy sweep on psycopg_pool 3.2.x is excluded from this improvement.
+It still tests idle connections after every failed pass, and a test can
+wait as long as a connection stays open without answering. Statements
+elsewhere can also wait without limit. This change adds no shutdown
+deadline.
 
 `Worker.run_once()` and `testing.run_tasks()` raise the claim's original
 error at once, without an immediate recovery attempt or a pending recovery
@@ -4062,10 +4072,14 @@ does not hold up lease renewal for the Worker's other tasks; see the SQLite
 write-lock limit below.
 
 Neither `run_once()` nor `run_tasks()` closes the failed claim's
-connection for recovery or tests idle connections in Django's PostgreSQL
-pool. The caller's connection and session, including advisory locks,
-temporary tables and `SET` values, are left as the claim left them.
-The `run()` loop tests the pool after a failed pass.
+connection for recovery or tests or discards idle connections in Django's
+PostgreSQL pool. The caller's connection and session, including advisory
+locks, temporary tables and `SET` values, are left as the claim left them.
+With psycopg_pool 3.3.0 or later, the `run()` loop discards idle pooled
+connections without testing them after a failed pass in which the driver
+reports a connection held or opened by that pass as lost. Any other failed
+pass leaves the pool alone. With psycopg_pool 3.2.x, the loop still tests
+idle connections after every failed pass.
 
 `run_once()` and `run_tasks()` perform no recovery either inside or
 outside a caller's transaction. Inside `atomic()` or Django `TestCase`,
@@ -4361,6 +4375,20 @@ the drain heartbeat stale.
 The heartbeat does not bound shutdown. If the main loop is wedged in a
 claim or another call that never returns, the first signal sets the drain
 flag but the loop cannot act on it. A second signal or SIGKILL is needed.
+
+For PostgreSQL connections that stay open without answering, use libpq's
+socket-level timeout settings as mitigation: `keepalives`,
+`keepalives_idle`, `keepalives_interval`, `keepalives_count` and
+`tcp_user_timeout`. Set them through the database alias's `OPTIONS`.
+They apply to every connection opened for that alias, pooled or not.
+
+Their effectiveness depends on the failure mode and platform support.
+They do not impose a statement or shutdown deadline. A proxy or load
+balancer that continues acknowledging traffic at the TCP level can
+defeat this mitigation even when the database never answers. In a local
+test with such a relay, waits remained in place after 40 seconds with
+keepalive settings and with `tcp_user_timeout`. Those tests do not
+establish how quickly either setting detects real packet loss.
 
 A second signal forces an immediate exit, code 130. Whatever was running
 is abandoned mid-flight. The reaper on a surviving worker reclaims it
@@ -4739,6 +4767,22 @@ The check accepts only an `int` of at least 1, excluding booleans. Other
 values receive no sizing warning. This includes whole-valued floats such
 as `10.0`, which psycopg_pool accepts. Pool validation remains separate.
 
+The worker also emits `connection_pool_cannot_drain` at WARNING level
+when its PostgreSQL pool has no `ConnectionPool.drain()` method. This
+method requires psycopg_pool 3.3.0 or later. The startup check runs once
+per `Worker.run()`, after `worker_started` and the pool-size check, before
+threads start. Each `--processes` child checks separately.
+
+This warning does not refuse startup or change the pool. The worker
+keeps django-ox 1.7.0's sweep, testing each idle connection. Recovery after
+a database restart is preserved, but a test of a connection that stays open without answering does
+not return, and the worker cannot read a stop until it does.
+
+Upgrade psycopg_pool to 3.3.3 or newer. A caller that does not use
+`Worker.run()` receives the warning only when a sweep first encounters
+such a pool in a process, for each database alias. Concurrent first
+sweeps may emit duplicate warnings.
+
 An undersized pool can still cause task-query and task-thread outcome-write
 timeouts. Retries can exhaust the row's stored attempt budget. Failed
 outcome writes can leave attempts for the reaper to reclaim after the task
@@ -4781,6 +4825,37 @@ workers.
 
 Unpooled renewal and watchdog connects do not gain these local deadlines.
 PgBouncer and third-party pools have not been tested.
+
+### psycopg_pool versions and recovery
+
+Use psycopg_pool 3.3.3 or newer with Django's PostgreSQL pool. Version
+3.3.0 is the minimum for django-ox's drain-based recovery fix; it added
+`ConnectionPool.drain()`. django-ox does not declare a psycopg dependency,
+so its package metadata does not enforce this minimum.
+
+With psycopg_pool 3.3.0 or later, a recovery sweep closes idle connections
+without testing them, and the pool opens replacements. Connections
+checked out when the drain begins are not interrupted. They are closed
+and replaced when returned to the pool. The sweep runs only when the
+driver reports a connection as lost, not merely because a statement or
+pool checkout failed.
+
+On psycopg_pool 3.2.x, the worker starts, emits
+`connection_pool_cannot_drain`, and keeps the sweep used in django-ox
+1.7.0. That sweep tests idle connections. It preserves restart recovery,
+but a test of a connection that stays open without answering can still
+hold up the worker and prevent it from reading a stop.
+
+There is a separate reason to upgrade if tasks have timeouts.
+psycopg_pool versions before 3.3.1 can lose a pooled connection when a
+task timeout interrupts a thread waiting for a connection just as the
+pool hands it one. Repeated losses can leave the pool with no connections
+available. This also affects django-ox 1.7.0 and is not introduced by the
+drain-based fix.
+
+psycopg_pool 3.3.3 also fixes pool maintenance threads terminating after
+24 hours without work. A drain relies on those threads to open
+replacement connections.
 
 ### Rolling out per-task policy
 
@@ -5607,12 +5682,20 @@ restart trigger if that tradeoff is unacceptable.
 
 The worker updates its file on the main thread at the head of each poll
 pass, before database work, and at the head of each drain pass. Updates
-resume when database work returns control to the loop. On a pooled
-PostgreSQL alias, a `worker_poll_failed` pass is followed by a synchronous
-test of each idle pooled connection on the main thread, then the polling
-wait, before the next update. Include pool acquisition and these connection
-tests in the freshness budget. A connection test that never returns stalls
-updates just as a hung statement does.
+resume when database work returns control to the loop.
+On a pooled PostgreSQL alias with psycopg_pool 3.3.0 or later, a
+`worker_poll_failed` pass that lost a connection has the pool discard its
+idle connections without testing them, then enters the polling wait.
+Discarding those connections runs no statement and waits for no server
+reply. Other failed passes leave the pool alone. Include pool acquisition
+in the freshness budget; there are no idle-connection tests in this
+recovery sweep.
+
+With psycopg_pool 3.2.x, every `worker_poll_failed` pass is still followed
+by a synchronous test of each idle pooled connection on the main thread,
+then the polling wait, before the next update. Include pool acquisition
+and these tests in the freshness budget. A connection test that never
+returns stalls updates just as a hung statement does.
 
 Startup work before `Worker.run()` writes no heartbeat. This includes
 Django setup and configured startup work such as reading stored schedules
@@ -5733,9 +5816,12 @@ one per claim attempt.
 Size `--max-heartbeat-age` above those expected gaps. With Django's
 PostgreSQL connection pool, a refused database can hold a pass for the
 pool's `timeout`, which defaults to 30 seconds, before the error returns
-control to the loop. The freshness budget must exceed the pool timeout,
-idle-connection testing after a failed pass, `--interval` and scheduling
-margin, with further allowance for other reap, dispatch and claim work.
+control to the loop.
+The freshness budget must exceed the pool timeout, `--interval` and
+scheduling margin, with further allowance for other reap, dispatch and
+claim work. With psycopg_pool 3.2.x, it must also allow for idle-connection
+testing after every failed pass; a test that never returns can exhaust
+any finite budget.
 
 A file passes only if it is regular and:
 
@@ -5904,9 +5990,10 @@ A configured `OPTIONS["connect_timeout"]` bounds connects; PyMySQL defaults
 to 10 seconds. PostgreSQL statements are unbounded by default. MySQL
 row-lock waits use `innodb_lock_wait_timeout`, 50 seconds by default, while
 PyMySQL's client read timeout is unbounded by default. SQLite's busy timeout,
-5 seconds by default, bounds each lock wait. With Django's PostgreSQL pool,
-include its acquisition `timeout`, 30 seconds by default, and the time
-spent testing idle connections after a failed pass.
+5 seconds by default, bounds each lock wait.
+With Django's PostgreSQL pool, include its acquisition `timeout`,
+30 seconds by default. With psycopg_pool 3.2.x, also include the time
+spent testing idle connections after every failed pass.
 
 Choose `--max-heartbeat-age` above the polling interval (`--interval`,
 default 1 second), expected loop latency and a scheduling margin. The
@@ -6144,6 +6231,7 @@ The message text is not part of the contract. The keys are.
 | --- | --- | --- |
 | `worker_started` | INFO | The run loop starts. |
 | `connection_pool_too_small` | WARNING | Once per `Worker.run()`, after `worker_started` and before threads start: the worker alias's effective PostgreSQL pool maximum is below `concurrency + 1`. Each `--processes` child checks separately. The warning does not resize the pool, refuse startup, measure available server slots, or reserve fallback capacity. |
+| `connection_pool_cannot_drain` | WARNING | Pooled PostgreSQL only. The installed psycopg_pool has no `ConnectionPool.drain()` method, which was added in 3.3.0. Emitted once per `Worker.run()`, after `worker_started` and the `connection_pool_too_small` check, before threads start. Each `--processes` child checks separately. Also emitted at the first sweep of such a pool in a process, for each database alias, unless startup already emitted it in that process. Concurrent first sweeps may emit duplicate warnings. The sweep record is the only notice available to callers of `run_once()` or `run_tasks()`. Idle connections are still tested as in django-ox 1.7.0, preserving restart recovery but also the wait on a connection that stays open without answering. A stop is not read until that test returns. Upgrade psycopg_pool to 3.3.3 or newer. This warning does not refuse startup or change the pool. No traceback. Keys: `event` and `database` always; `worker_id` only on the startup record. |
 | `task_claimed` | DEBUG | A task was claimed from the queue. |
 | `task_started` | DEBUG | Execution of an attempt begins. |
 | `task_succeeded` | INFO | The task reached SUCCESSFUL. |
@@ -6206,6 +6294,15 @@ The message text is not part of the contract. The keys are.
 The four renewal connection events and `watchdog_connection_unavailable`
 include `worker_id` and no traceback. They apply only to Django's
 PostgreSQL pool.
+
+`connection_pool_cannot_drain` is also specific to pooled PostgreSQL and
+carries no traceback.
+
+For `connection_pool_cannot_drain`, `worker_id` is present only on the
+startup record. The record emitted by a sweep has no `worker_id`.
+
+`database` is always present on `connection_pool_cannot_drain`, both at
+startup and when emitted by a sweep.
 
 `heartbeat_write_failed` and `heartbeat_invalidate_failed` also have no
 traceback. Neither carries a `worker_id` key, including when a worker emits
@@ -6805,11 +6902,15 @@ reaper, which requeues it with the attempt spent or marks it `LOST` on
 the final attempt. The next call does not find that landed claim while
 it remains `RUNNING`.
 
-Neither `run_once()` nor `run_tasks()` closes the failed claim's connection
-for recovery or tests idle connections in Django's PostgreSQL pool.
-The caller's connection and session, including advisory locks, temporary
-tables and `SET` values, are left as the claim left them. The `run()` loop
-tests the pool after a failed pass.
+Neither `run_once()` nor `run_tasks()` closes the failed claim's
+connection for recovery or tests or discards idle connections in Django's
+PostgreSQL pool. The caller's connection and session, including advisory
+locks, temporary tables and `SET` values, are left as the claim left them.
+With psycopg_pool 3.3.0 or later, the `run()` loop discards idle pooled
+connections without testing them after a failed pass in which the driver
+reports a connection held or opened by that pass as lost. Any other failed
+pass leaves the pool alone. With psycopg_pool 3.2.x, the loop still tests
+idle connections after every failed pass.
 
 Recovery runs only in `Worker.run()`, the loop used by `ox_worker`, on
 PostgreSQL with psycopg 3, pooled or not, MySQL and SQLite. Pending recovery
@@ -7669,6 +7770,12 @@ this version to see these rows by name.
   implicitly committing DDL, since that exposes a claim whose lease is
   not renewed.
 
+- django-ox's PostgreSQL pool recovery sweep no longer runs statements on
+  idle connections when using psycopg_pool 3.3.0 or later. In django-ox
+  1.5.0 through 1.7.0, the sweep tested every idle connection and waited
+  without limit for each reply. A connection that stayed open without
+  answering could hold the poll loop before it read a stop, or hold a
+  task thread before it wrote its outcome.
 
 ### Changed
 
@@ -7719,6 +7826,62 @@ this version to see these rows by name.
   Run the command with beat's Python environment, timezone data and
   Django settings; the command cannot verify that they match.
 
+- With psycopg_pool 3.3.0 or later, recovery drains the pool only when the
+  driver reports a connection as lost. Idle connections are closed
+  without testing them, and the pool opens replacements. Connections
+  already checked out are closed and replaced when returned. A failed
+  pass or outcome-write attempt in which no connection was lost leaves
+  the pool alone, including one that could not get a connection or
+  failed with its connection still answering.
+
+- In repeated tests of the real `manage.py ox_worker`, every connection
+  was made silent and SIGTERM was sent one second later. With
+  psycopg_pool 3.3.3 and the default 30-second pool timeout, the fixed
+  worker exited 0 after 34.4 seconds. With a 2-second pool timeout, it
+  exited 0 after 6.4 seconds. django-ox 1.7.0 was still running after
+  40 seconds and needed a second SIGTERM, exiting 130. The fixed worker
+  on psycopg_pool 3.2.8 also remained running after 40 seconds and exited
+  130 after a second SIGTERM.
+
+  These are observations, not shutdown bounds. The tests ran on one
+  shared machine through a local relay that acknowledged traffic at the
+  TCP level, not a network blackhole.
+
+  This change adds no shutdown deadline. On the drain-capable path, the
+  sweep no longer runs statements on idle connections, but stopping can
+  still wait for the pool's checkout `timeout` and the stop-time recovery
+  look. Lowering the pool's `timeout` shortens that checkout wait.
+  Statements in the poll loop, renewal, outcome writes and task-thread
+  connection probes can still wait without limit.
+
+- Draining replaces healthy idle connections as well as lost ones. It
+  can open more connections and take longer to resume work than the old
+  sweep. These are observations from pooled PostgreSQL tests on
+  2026-10-04, not bounds:
+
+  | Scenario | django-ox 1.7.0 | Now |
+  |---|---|---|
+  | One lost connection, pool of 10 | 1 connection opened | 9 connections opened |
+  | Every session ended with `pg_terminate_backend`, four tasks in flight, pool of 10 | 9 connections opened | 31 connections opened |
+  | Pool too small, outcome writes time out on checkout | 0 connections opened | 0 connections opened; identical outcomes |
+  | `CONN_HEALTH_CHECKS` enabled, loop holds no connection when every session ends, pool timeout 3 seconds | Back at work in 7.0 seconds | Back at work in 12.0 seconds |
+
+  All four task outcomes were written once in the session-termination
+  test on both versions. The additional connection opens do not increase
+  the configured pool size or change the worker's connection budget.
+
+- psycopg_pool 3.2.x keeps the sweep used in django-ox 1.7.0 and is
+  explicitly excluded from the drain-based stop-hang fix. It still tests
+  idle connections and can wait indefinitely for a silent connection.
+  Tests on psycopg_pool 3.2.8 opened 1, 9 and 0 connections in the first
+  three scenarios above, matching 1.7.0 with identical outcomes.
+
+- psycopg_pool 3.3.3 or newer is recommended. The drain-based fix requires
+  3.3.0 or later. Separately, versions before 3.3.1 can lose pooled
+  connections when task timeouts interrupt pool checkout, eventually
+  leaving none available. That issue also affects django-ox 1.7.0.
+  Version 3.3.3 also fixes pool maintenance threads terminating after
+  24 hours without work.
 
 ### Added
 
@@ -7743,6 +7906,14 @@ this version to see these rows by name.
   `DJANGO_CELERY_BEAT_TZ_AWARE=False`. When the option was given but
   was not needed, print a comment directly under the header explaining
   why. Print it only when at least one crontab row was read.
+
+- Add a warning for unavailable pool draining:
+  `connection_pool_cannot_drain`, at WARNING level, for pooled
+  PostgreSQL when the installed psycopg_pool lacks
+  `ConnectionPool.drain()`. It reports that restart recovery is preserved
+  through the legacy sweep but the drain-based stop-hang fix is not in
+  effect. It does not refuse startup or change the pool. It includes
+  `event` and `database`; startup records also include `worker_id`.
 
 ## [1.7.0] - 2026-09-28
 

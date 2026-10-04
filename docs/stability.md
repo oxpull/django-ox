@@ -201,11 +201,15 @@ reaper, which requeues it with the attempt spent or marks it `LOST` on
 the final attempt. The next call does not find that landed claim while
 it remains `RUNNING`.
 
-Neither `run_once()` nor `run_tasks()` closes the failed claim's connection
-for recovery or tests idle connections in Django's PostgreSQL pool.
-The caller's connection and session, including advisory locks, temporary
-tables and `SET` values, are left as the claim left them. The `run()` loop
-tests the pool after a failed pass.
+Neither `run_once()` nor `run_tasks()` closes the failed claim's
+connection for recovery or tests or discards idle connections in Django's
+PostgreSQL pool. The caller's connection and session, including advisory
+locks, temporary tables and `SET` values, are left as the claim left them.
+With psycopg_pool 3.3.0 or later, the `run()` loop discards idle pooled
+connections without testing them after a failed pass in which the driver
+reports a connection held or opened by that pass as lost. Any other failed
+pass leaves the pool alone. With psycopg_pool 3.2.x, the loop still tests
+idle connections after every failed pass.
 
 Recovery runs only in `Worker.run()`, the loop used by `ox_worker`, on
 PostgreSQL with psycopg 3, pooled or not, MySQL and SQLite. Pending recovery

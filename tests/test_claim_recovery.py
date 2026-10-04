@@ -9,16 +9,20 @@ does when its own statements fail. tests/lost_reply.py loses the replies.
 
 import copy
 import logging
+import math
 import sqlite3
 import threading
 import time
 import traceback
+from contextlib import contextmanager, nullcontext, suppress
 
 import pytest
 from django.db import (
     DatabaseError,
+    Error,
     InterfaceError,
     OperationalError,
+    ProgrammingError,
     close_old_connections,
     connection,
     connections,
@@ -38,14 +42,24 @@ from django_ox.worker import (
     MYSQL_RECOVERY_TIMEOUT,
     Worker,
     _answering_by,
+    _connection_pool,
+    _lost,
     _pool_options,
+    _Seen,
     _sweep_pool,
     _Watch,
 )
 
 from . import tasks
 from .conftest import start_worker_thread, wait_for
-from .dead_connection_tasks import from_another_connection, restart_every_other_session
+from .dead_connection_tasks import (
+    end_connection,
+    from_another_connection,
+    gives_its_connection_back,
+    queries_after_its_session_ended,
+    restart_every_other_session,
+    works_on_through_a_restart_in_process,
+)
 from .lost_reply import COMMITTED_CLAIM_WINDOWS, LookReads, Seams, is_the_release
 from .unanswering import Unanswering
 
@@ -58,6 +72,27 @@ LIMIT = 60.0
 pooled_postgresql = pytest.mark.skipif(
     connection.vendor != "postgresql" or _pool_options("default") is None,
     reason="Django's connection pool: run with a pooled PostgreSQL settings module",
+)
+
+
+def _pool_can_drain():
+    try:
+        from psycopg_pool import ConnectionPool
+    except ImportError:
+        return False
+    return hasattr(ConnectionPool, "drain")
+
+
+#: The sweep discards a pool's idle connections with drain(), which
+#: psycopg_pool has from 3.3. An older pool is swept by testing them, as in
+#: 1.7.0, wait on a silent connection included, and these tests are about
+#: what drain() changes.
+drains_its_pool = pytest.mark.skipif(
+    connection.vendor == "postgresql"
+    and _pool_options("default") is not None
+    and not _pool_can_drain(),
+    reason="needs psycopg_pool 3.3 or later, which has ConnectionPool.drain(); "
+    "an older pool is swept with check(), as in 1.7.0",
 )
 
 
@@ -165,16 +200,33 @@ def _orphan(worker, label="orphan"):
     return result
 
 
+@contextmanager
+def _watching(alias="default"):
+    """
+    What a pass of the loop keeps, and an outcome's first write: every
+    connection this thread holds or opens for `alias` in the block, _Seen.
+    """
+    seen = _Seen(alias)
+    seen.watch()
+    try:
+        yield seen
+    finally:
+        seen.unwatch()
+
+
 def _a_failed_pass_then_its_look(worker):
     """
     What run() does, on the test's thread: a claim that raises, the failed
-    pass's handling of the connection, and the look at the head of the next
-    pass. The claim's error is returned.
+    pass's handling of the connection, with the pool swept when the pass
+    lost its connection, and the look at the head of the next pass. The
+    claim's error is returned.
     """
-    with pytest.raises(DatabaseError) as raised:
-        worker._claim()
+    with _watching(worker._db_alias) as seen:
+        with pytest.raises(DatabaseError) as raised:
+            worker._claim()
+        lost = seen.lost()
     close_old_connections()
-    _sweep_pool(connections[worker._db_alias])
+    _sweep_pool(connections[worker._db_alias], lost=lost)
     worker._recover_claims()
     return raised.value
 
@@ -1045,6 +1097,31 @@ def _fill_the_pool(size=3):
         thread.join(timeout=60)
 
 
+def _noting_the_sweeps(monkeypatch):
+    """
+    Every check() and drain() of Django's pool, as (name, thread), called
+    through. Noted on the class, which monkeypatch puts back as it was; on
+    the pool itself it would leave a method behind that a later test could
+    not take away.
+    """
+    pool_class = type(connections["default"].pool)
+    touched = []
+
+    def noting(name):
+        real = getattr(pool_class, name)
+
+        def call_through(self, *args, **kwargs):
+            touched.append((name, threading.current_thread().name))
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(pool_class, name, call_through)
+
+    noting("check")
+    if hasattr(pool_class, "drain"):
+        noting("drain")
+    return touched
+
+
 def _read_after_the_restart(read):
     """The test's own connection died with the rest; read on a new one."""
     connections["default"].close()
@@ -1656,9 +1733,9 @@ def test_a_stopping_look_on_mysql_gives_up_on_a_reply_never_sent(unanswering, ca
 
 def test_a_stopping_look_given_up_closes_nothing(monkeypatch, caplog):
     """
-    A stopping look given up leaves the thread's connection as it is: there
-    is no next statement for it, and closing a pooled one sweeps the pool,
-    which can wait on the very server the look gave up on.
+    A stopping look given up leaves the thread's connection as it is, and
+    Django's pool with it: there is no next statement for a closed
+    connection or a swept pool to serve.
     """
     caplog.set_level(logging.WARNING, logger="django_ox")
     worker = Worker(lock_timeout=LOCK_TIMEOUT)
@@ -2162,33 +2239,27 @@ def test_an_inline_claim_error_on_a_stalled_database_raises_at_once(
     assert (row.status, row.attempts) == (OxTask.Status.READY, 0)
 
 
+@drains_its_pool
 @pooled_postgresql
 @pytest.mark.parametrize("call", ["run_once", "run_tasks"])
-def test_an_inline_claim_error_never_checks_the_pool(
+def test_an_inline_claim_error_leaves_the_pool_alone(
     call, settings, monkeypatch, caplog, lose_the_reply
 ):
     """
-    Nothing on the caller's thread tests the connections Django's pool
-    holds idle after a claim error: pool.check() waits on each of them, and
-    on a server that stopped answering, for as long as the kernel does. The
-    loop's failed pass still sweeps the pool.
+    Nothing on the caller's thread touches the connections Django's pool
+    holds idle after a claim error, lost connection or not: none is tested
+    and none is discarded. The claim's error is raised at once and the pool
+    is the caller's process's, as its connection is. Only the loop's failed
+    pass sweeps the pool, and only when it lost its connection.
     """
     caplog.set_level(logging.WARNING, logger="django_ox")
     _budget(settings, 1)
-    tasks.record.enqueue("checked")
-    pool = connections["default"].pool
-    checks = []
-    real_check = pool.check
-
-    def check(*args, **kwargs):
-        checks.append(threading.current_thread().name)
-        return real_check(*args, **kwargs)
-
-    monkeypatch.setattr(pool, "check", check)
+    tasks.record.enqueue("swept")
+    touched = _noting_the_sweeps(monkeypatch)
     # The instrument sees a sweep.
     _sweep_pool(connections["default"])
-    assert checks == [threading.current_thread().name]
-    checks.clear()
+    assert touched == [("drain", threading.current_thread().name)]
+    touched.clear()
     seam = lose_the_reply("statement", on=connections["default"])
     worker = Worker(lock_timeout=LOCK_TIMEOUT)
 
@@ -2196,5 +2267,909 @@ def test_an_inline_claim_error_never_checks_the_pool(
         _call(call, worker)
 
     assert seam.fired
-    assert checks == []
+    assert touched == []
     assert _recovery_events(caplog) == []
+
+
+# -- a stop while the pool's idle connections never answer -------------------------
+
+#: How long the tests below give a worker, on a database that has stopped
+#: answering in the way each arranges, to stop or to be back at work. It is
+#: the tests' allowance, not a bound the worker holds: one whose every
+#: connection is silent waits in its next statement as it always did. The
+#: look a stopping worker makes gives up after five seconds, and the rest is
+#: room for whatever comes before it on a slow machine. The relay stays dark
+#: until the outcome has been judged, so a wait with no limit of its own
+#: lasts exactly as long as the test lets it: no machine is fast enough to
+#: pass by accident.
+STOPS_WITHIN = 20.0
+
+
+@drains_its_pool
+@pooled_postgresql
+@pytest.mark.parametrize("stop", ["before-the-sweep", "during-the-sweep"])
+def test_a_stop_is_honoured_while_the_pools_idle_connections_never_answer(
+    stop, relay, settings, monkeypatch, caplog, lose_the_reply
+):
+    """
+    The claim's reply is lost as the database goes dark: the connections
+    Django's pool holds idle stay open and never answer again, and a new
+    connection is accepted and never answered. The failed pass lost its
+    connection, so it sweeps the pool, and a sweep that tested each idle
+    connection would wait for a reply that never comes. It discards them
+    untested, so a stop asked for before that pass handles its error, or as
+    its sweep begins, is read once the pass is over: the worker makes its
+    look for the claim that raised, which gives up after five seconds, and
+    run() returns while the database is still dark.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 1)
+    _fill_the_pool()
+    result = tasks.record.enqueue("dark")
+    worker = Worker(lock_timeout=LOCK_TIMEOUT, poll_interval=0.05)
+    swept = []
+
+    def sweep(conn, **told):
+        swept.append(conn.alias)
+        if stop == "during-the-sweep":
+            # On the loop's own thread, so the stop is always asked for after
+            # the pass has come to its sweep and before the pool is touched.
+            worker.request_stop()
+        _sweep_pool(conn, **told)
+
+    def go_dark(other):
+        relay.go_dark("gone")
+        if stop == "before-the-sweep":
+            # Before the claim's error reaches the loop.
+            worker.request_stop()
+
+    monkeypatch.setattr("django_ox.worker._sweep_pool", sweep)
+    seam = lose_the_reply("statement", also=go_dark)
+
+    thread = start_worker_thread(worker)
+    assert wait_for(lambda: seam.fired, timeout=LIMIT)
+    thread.join(STOPS_WITHIN)
+    stopped = not thread.is_alive()
+    relay.detach()
+    thread.join(LIMIT)
+
+    if stop == "during-the-sweep":
+        # The stop is asked for from inside the sweep: no sweep, no stop.
+        assert swept == ["default"], "the failed pass never reached its sweep"
+    assert stopped, (
+        f"the worker was still stopping {STOPS_WITHIN:g}s after it was asked "
+        "to, on a database that had stopped answering"
+    )
+    assert len(_events(caplog, "worker_poll_failed", worker)) == 1
+    _given_up(caplog, worker, result)
+
+
+# -- what the driver says of a connection -------------------------------------------
+
+#: The SQLSTATE of each failure these tests provoke that leaves its connection
+#: answering: none is a lost connection.
+ANSWERING = {
+    "missing-table": "42P01",
+    "missing-column": "42703",
+    "lock-timeout": "55P03",
+}
+
+#: psycopg 3 says of a connection whether it went bad. No other driver here
+#: does, psycopg2 included, and none of them has a pool for a failed pass to
+#: sweep.
+PSYCOPG3 = connection.vendor == "postgresql" and (
+    connection.Database.__name__ == "psycopg"
+)
+says_when_lost = pytest.mark.skipif(
+    not PSYCOPG3,
+    reason="psycopg 3 reports a connection that went bad; no other driver does",
+)
+
+
+@says_when_lost
+def test_a_session_the_server_ended_is_a_lost_connection():
+    """
+    The statement fails on a session the server ended, and the driver says
+    the connection is lost while the wrapper still holds it, before any
+    cleanup has closed it.
+    """
+    connection.ensure_connection()
+    held = connection.connection
+    with _watching() as seen:
+        assert not seen.lost()
+
+        with pytest.raises(OperationalError):
+            end_connection()
+
+        assert connection.connection is held
+        assert _lost(held)
+        assert seen.lost()
+
+
+@says_when_lost
+def test_asking_whether_a_silent_connection_is_lost_does_not_wait(relay):
+    """
+    The connection is open and the server behind it has stopped answering.
+    Asking the driver about it returns at once, where a statement, Django's
+    is_usable() among them, would wait for a reply that never comes. It is
+    not a lost connection either: nothing has failed on it.
+    """
+    conn = connections["default"]
+    conn.ensure_connection()
+    held = conn.connection
+    relay.stall()
+    answer = []
+    asker = threading.Thread(target=lambda: answer.append(_lost(held)), daemon=True)
+    asker.start()
+    asker.join(5)
+    relay.detach()
+
+    assert answer == [False]
+
+
+@says_when_lost
+@pytest.mark.parametrize("began", ["holding-a-connection", "with-no-connection"])
+def test_a_session_ended_inside_a_transaction_is_lost_though_django_replaced_it(
+    began,
+):
+    """
+    The session ends inside an atomic block. The block's exit cannot roll
+    back, closes the connection and opens another, all before the error
+    reaches the caller: the connection the caller finds is a new one that
+    answers, with no error flagged on it. The one that was lost still says
+    so, and it was kept: because it was held when the watch began, or, when
+    none was, because the block's own entry opened it, and that is when it
+    was kept.
+    """
+    if began == "with-no-connection":
+        connection.close()
+    else:
+        connection.ensure_connection()
+    held = connection.connection
+    with _watching() as seen:
+        with pytest.raises(DatabaseError), transaction.atomic():
+            inside = connection.connection
+            end_connection()
+        replacement = connection.connection
+
+        assert (held is None) is (began == "with-no-connection")
+        assert replacement is not None
+        assert replacement is not inside
+        assert not _lost(replacement)
+        assert connection.errors_occurred is False
+        assert _lost(inside)
+        assert [raw is inside for raw in seen.raws] == [True, False]
+        assert seen.raws[1] is replacement
+        assert seen.lost()
+
+
+@says_when_lost
+@pytest.mark.parametrize("failure", ["missing-table", "lock-timeout"])
+@pytest.mark.parametrize("inside", [False, True], ids=["autocommit", "transaction"])
+def test_an_error_that_leaves_the_connection_answering_is_not_a_lost_one(
+    failure, inside
+):
+    """
+    The statement is refused and the connection answers the next one. The
+    driver does not call it lost, though Django has flagged an error on it,
+    as it flags a lost one: the flag cannot tell the two apart.
+    """
+    tasks.record.enqueue("locked")
+    connection.ensure_connection()
+    held = connection.connection
+    lock = _TableHeld() if failure == "lock-timeout" else None
+    try:
+        with _watching() as seen:
+            with (
+                pytest.raises(DatabaseError) as raised,
+                transaction.atomic() if inside else nullcontext(),
+                connection.cursor() as cursor,
+            ):
+                if lock is not None:
+                    cursor.execute("SET lock_timeout = '50ms'")
+                    cursor.execute(f"SELECT count(*) FROM {OxTask._meta.db_table}")  # noqa: S608
+                else:
+                    cursor.execute("SELECT * FROM ox_no_such_table")
+            flagged = connection.errors_occurred
+            lost = seen.lost()
+    finally:
+        if lock is not None:
+            lock.release()
+            with connection.cursor() as cursor:
+                cursor.execute("RESET lock_timeout")
+
+    expected = OperationalError if lock is not None else ProgrammingError
+    assert isinstance(raised.value, expected)
+    assert raised.value.__cause__.sqlstate == ANSWERING[failure]
+    assert connection.connection is held
+    assert not lost
+    # Flagged outside a transaction; inside one the rollback cleared it.
+    assert flagged is not inside
+    assert _row_count() == 1
+
+
+def _row_count():
+    return OxTask.objects.count()
+
+
+@says_when_lost
+def test_a_connection_closed_on_purpose_or_never_opened_is_not_a_lost_one(
+    monkeypatch,
+):
+    """
+    A connection Django closed, as its cleanup closes one past its age, did
+    not go bad, and neither did one that could not be had: the pool timed
+    out, or the server refused. Nothing was lost, whatever Django flagged,
+    and after the failed connect nothing was even seen.
+    """
+    import psycopg
+
+    connection.ensure_connection()
+    with _watching() as seen:
+        held = connection.connection
+        connection.close()
+        assert connection.connection is None
+        assert not _lost(held)
+        assert not seen.lost()
+
+    def refused(conn_params):
+        raise psycopg.OperationalError("couldn't get a connection after 30.00 sec")
+
+    with _watching() as seen:
+        monkeypatch.setattr(connection, "get_new_connection", refused)
+        with pytest.raises(OperationalError):
+            connection.ensure_connection()
+        monkeypatch.undo()
+        assert connection.connection is None
+        assert connection.errors_occurred is True
+        assert seen.raws == []
+        assert not seen.lost()
+
+
+@pytest.mark.skipif(
+    PSYCOPG3, reason="MySQL, SQLite and psycopg2: drivers that do not say"
+)
+def test_a_driver_that_does_not_say_reports_no_connection_lost():
+    """
+    MySQL's and SQLite's drivers and psycopg2 have nothing to ask, so no
+    pass of the loop ever counts as having lost its connection there, even
+    one that did; and there is no pool on them for it to sweep.
+    """
+    connection.ensure_connection()
+    held = connection.connection
+    with _watching() as seen:
+        if connection.vendor != "sqlite":
+            with pytest.raises(DatabaseError):
+                end_connection()
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+            assert not connection.is_usable()
+        assert not _lost(held)
+        assert not _lost(connection.connection)
+        assert not seen.lost()
+    assert _connection_pool(connection) is None
+    connection.close()
+
+
+# -- which failed passes sweep Django's pool ----------------------------------------
+
+
+def _other_sessions(cursor=None):
+    """The backends of every other session on the test database."""
+    sql = (
+        "SELECT pid FROM pg_stat_activity "
+        "WHERE datname = current_database() AND pid <> pg_backend_pid()"
+    )
+    if cursor is not None:
+        return {pid for (pid,) in cursor.execute(sql).fetchall()}
+    with connection.cursor() as own:
+        own.execute(sql)
+        return {pid for (pid,) in own.fetchall()}
+
+
+def _opened_since(before):
+    """The connections Django's pool has opened since `before`, its stats then."""
+    now = connections["default"].pool.get_stats()
+    return now.get("connections_num", 0) - before.get("connections_num", 0)
+
+
+def _a_connection_made_now(conn):
+    """
+    A psycopg connection of the test's own to `conn`'s database, through
+    whatever `conn`'s settings name, a relay included. Made after the relay
+    silenced what was open, it is answered, which the test thread's Django
+    connection, open before, no longer is.
+    """
+    import psycopg
+
+    params = conn.get_connection_params()
+    return psycopg.connect(
+        host=params["host"],
+        port=params["port"],
+        user=params["user"],
+        password=params["password"],
+        dbname=params["dbname"],
+        autocommit=True,
+    )
+
+
+@drains_its_pool
+@pooled_postgresql
+def test_a_pass_that_lost_its_connection_discards_the_idle_connections_untested(
+    settings, caplog, lose_the_reply
+):
+    """
+    The server ends the loop's session and no other: the connections the
+    pool holds idle would still answer. The failed pass does not ask them.
+    It discards every one, and the pool opens others; the claim that raised
+    is released on a new connection and its task runs once. A sweep that
+    tested the idle connections kept the ones that answered.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 1)
+    result = tasks.record.enqueue("reset")
+    _fill_the_pool()
+    held_idle = _other_sessions()
+    assert len(held_idle) >= 3
+    seam = lose_the_reply("statement")
+    worker = Worker(lock_timeout=LOCK_TIMEOUT, poll_interval=0.05)
+
+    _run_until(worker, lambda: _row(result).status == OxTask.Status.SUCCESSFUL)
+
+    assert seam.fired
+    assert len(_events(caplog, "worker_poll_failed", worker)) == 1
+    assert _released_ids(caplog, worker) == [str(result.id)]
+    row = _row(result)
+    assert (row.status, row.attempts, _runs("reset")) == (
+        OxTask.Status.SUCCESSFUL,
+        1,
+        1,
+    )
+    # One was the loop's, which the server ended; the pool closed the rest.
+    assert wait_for(lambda: not (_other_sessions() & held_idle), timeout=10), (
+        "the pool still holds a connection it held idle when the loop lost its own"
+    )
+
+
+@drains_its_pool
+@postgresql_relay
+def test_a_failed_pass_asks_nothing_of_a_connection_that_never_answers(
+    relay, monkeypatch, caplog
+):
+    """
+    The loop's connection is open and has stopped being answered, and the
+    pass fails without any statement having failed on it: the error is
+    another connection's. The handler asks the driver whether the loop's
+    connection is lost, which it is not, and asks the server nothing: the
+    pass is over at once, the stop is read, and run() returns with the
+    connection still silent. A handler that probed the connection waited
+    on it for as long as it stayed silent.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    worker = Worker(lock_timeout=LOCK_TIMEOUT, poll_interval=0.05)
+
+    def reap():
+        connections[worker._db_alias].ensure_connection()
+        relay.stall()
+        worker.request_stop()
+        raise OperationalError("the error of a connection that is not the loop's")
+
+    monkeypatch.setattr(worker, "reap", reap)
+
+    thread = start_worker_thread(worker)
+    thread.join(STOPS_WITHIN)
+    stopped = not thread.is_alive()
+    relay.detach()
+    thread.join(LIMIT)
+
+    assert stopped, (
+        f"the worker was still in its failed pass {STOPS_WITHIN:g}s after it "
+        "failed, on a connection that had stopped answering"
+    )
+    assert len(_events(caplog, "worker_poll_failed", worker)) == 1
+
+
+class ClaimsInATransaction(Worker):
+    """
+    A queryset claim filter without its SQL, which on PostgreSQL gives up
+    the single-statement claim for the one inside a transaction.
+    """
+
+    def claim_filter_q(self):
+        return Q(pk__isnull=False)
+
+
+@drains_its_pool
+@pooled_postgresql
+def test_a_connection_lost_inside_the_claims_transaction_still_sweeps_the_pool(
+    settings, caplog, lose_the_reply
+):
+    """
+    The claim runs in a transaction, and the server ends the session before
+    its commit. Django's exit from the block closes that connection and
+    checks another out of the pool before the error reaches the loop, so
+    the connection the failed pass finds answers. The pass still lost the
+    one it began on: it discards the pool's idle connections, and the
+    second task, whose claim rolled back, is claimed again and runs once.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 1)
+    first, second = _enqueue("t1", "t2")
+    _fill_the_pool()
+    held_idle = _other_sessions()
+    assert len(held_idle) >= 3
+    # The second claim, so the pass it fails in began on a connection. One
+    # task at a time, so the first has finished by then.
+    seam = lose_the_reply("before", nth=2)
+    worker = ClaimsInATransaction(
+        concurrency=1, lock_timeout=LOCK_TIMEOUT, poll_interval=0.05
+    )
+
+    _run_until(
+        worker,
+        lambda: all(
+            _row(r).status == OxTask.Status.SUCCESSFUL for r in (first, second)
+        ),
+    )
+
+    assert seam.fired
+    # The claim that lost its session had not committed: it rolled back.
+    assert seam.seen == [
+        (OxTask.Status.READY, None, 0, 0),
+        (OxTask.Status.SUCCESSFUL, None, 1, 1),
+    ]
+    assert len(_events(caplog, "worker_poll_failed", worker)) == 1
+    assert (_runs("t1"), _runs("t2")) == (1, 1)
+    assert wait_for(lambda: not (_other_sessions() & held_idle), timeout=10), (
+        "the pool still holds a connection it held idle when the claim lost its own"
+    )
+
+
+@drains_its_pool
+@pooled_postgresql
+def test_a_pass_that_began_with_no_connection_and_lost_one_in_a_transaction_sweeps(
+    settings, caplog, lose_the_reply
+):
+    """
+    The first pass of a worker begins with no connection, as does the pass
+    after any that failed. This one never reaps, so its claim is the first
+    thing to reach the database: the connection is opened for the claim,
+    the claim runs in a transaction, and the server ends the session before
+    its commit. Django's exit from the block replaces the connection before
+    the error reaches the loop. Nothing the pass began on says a connection
+    was lost, and the one in hand answers; the one that was lost was kept
+    when it was opened, and the pass discards the pool's idle connections.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 1)
+    result = tasks.record.enqueue("first")
+    _fill_the_pool()
+    held_idle = _other_sessions()
+    assert len(held_idle) >= 3
+    seam = lose_the_reply("before")
+    worker = ClaimsInATransaction(
+        concurrency=1,
+        lock_timeout=LOCK_TIMEOUT,
+        poll_interval=0.05,
+        reap_interval=math.inf,
+    )
+
+    _run_until(worker, lambda: _row(result).status == OxTask.Status.SUCCESSFUL)
+
+    assert seam.fired
+    # The claim that lost its session had not committed: it rolled back.
+    assert seam.seen == [(OxTask.Status.READY, None, 0, 0)]
+    assert len(_events(caplog, "worker_poll_failed", worker)) == 1
+    row = _row(result)
+    assert (row.status, row.attempts, _runs("first")) == (
+        OxTask.Status.SUCCESSFUL,
+        1,
+        1,
+    )
+    assert wait_for(lambda: not (_other_sessions() & held_idle), timeout=10), (
+        "the pool still holds a connection it held idle when the claim lost its own"
+    )
+
+
+class ClaimMissesItsTable(Worker):
+    """A claim that names a table the database does not have."""
+
+    def claim_filter_q(self):
+        return Q(pk__in=RawSQL("SELECT id FROM ox_no_such_table", ()))
+
+
+#: Failed passes each of those tests lets by before it judges the pool.
+PASSES = 20
+
+
+@pooled_postgresql
+@pytest.mark.parametrize("failure", list(ANSWERING))
+def test_a_pass_that_failed_on_a_connection_that_answers_leaves_the_pool_alone(
+    failure, settings, caplog
+):
+    """
+    Every pass fails and the loop's connection answers throughout: the
+    claim names a table or a column that is not there, or the pass waits on
+    a lock for longer than its session allows. Twenty failed passes later
+    the pool has opened no connection: it replaces every one it closes, so
+    it closed none. A sweep on each of those passes discarded the idle
+    connections, healthy as they were, and opened the pool again every poll
+    interval.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 1)
+    _fill_the_pool()
+    stats = connections["default"].pool.get_stats()
+    held = None
+    impatient = None
+    if failure == "missing-table":
+        worker = ClaimMissesItsTable(lock_timeout=LOCK_TIMEOUT, poll_interval=0.02)
+    elif failure == "missing-column":
+        worker = ClaimFails(lock_timeout=LOCK_TIMEOUT, poll_interval=0.02)
+        worker.failing = True
+    else:
+        worker = Worker(lock_timeout=LOCK_TIMEOUT, poll_interval=0.02)
+
+        def impatient(sender, connection, **kwargs):
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '50ms'")
+
+        connection_created.connect(impatient, weak=False)
+        held = _TableHeld()
+
+    def failed():
+        return _events(caplog, "worker_poll_failed", worker)
+
+    thread = start_worker_thread(worker)
+    try:
+        assert wait_for(lambda: len(failed()) >= PASSES, timeout=LIMIT)
+        opened = _opened_since(stats)
+    finally:
+        if held is not None:
+            # First, or the look a stopping worker makes waits out its five
+            # seconds on the table.
+            held.release()
+            connection_created.disconnect(impatient)
+        worker.request_stop()
+        thread.join(timeout=60)
+        if held is not None:
+            # The sessions that carry the setting go with the pool.
+            connection.close()
+            connection.close_pool()
+    assert not thread.is_alive(), "the worker did not stop"
+
+    states = {r.exc_info[1].__cause__.sqlstate for r in failed()[:PASSES]}
+    assert states == {ANSWERING[failure]}
+    assert opened == 0, f"the pool opened {opened} connection(s) in {PASSES} passes"
+
+
+@drains_its_pool
+@pooled_postgresql
+def test_after_a_failover_that_resets_nothing_the_worker_is_back_at_work(
+    relay, settings, caplog, lose_the_reply
+):
+    """
+    The claim's reply is lost, and from then on the connections that were
+    open, the pool's idle ones among them, stay open and are never answered
+    again, while a new connection works: a failover that reset nothing. The
+    failed pass discards the idle connections without asking them anything,
+    so the next pass runs on a new one: the lost claim is released and both
+    tasks run, while the old connections are still silent. A sweep that
+    tested them waited on the first for as long as it stayed silent.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 3)
+    _fill_the_pool()
+    lost = tasks.record.enqueue("lost")
+    later = tasks.record.using(priority=-1).enqueue("later")
+    ids = [str(lost.id), str(later.id)]
+    worker = Worker(lock_timeout=LOCK_TIMEOUT, poll_interval=0.05)
+    seam = lose_the_reply("statement", also=lambda other: relay.stall_open())
+
+    thread = start_worker_thread(worker)
+    assert wait_for(lambda: seam.fired, timeout=LIMIT)
+    with _a_connection_made_now(connections["default"]) as fresh:
+
+        def rows():
+            return fresh.execute(
+                "SELECT status, attempts FROM django_ox_oxtask "
+                "WHERE id = ANY(%s::uuid[]) ORDER BY priority DESC",
+                [ids],
+            ).fetchall()
+
+        done = [(OxTask.Status.SUCCESSFUL, 1)] * 2
+        back_at_work = wait_for(lambda: rows() == done, timeout=STOPS_WITHIN)
+        seen = rows()
+        worker.request_stop()
+        thread.join(STOPS_WITHIN)
+        stopped = not thread.is_alive()
+    relay.detach()
+    thread.join(LIMIT)
+
+    assert back_at_work, (
+        f"the tasks were not both done {STOPS_WITHIN:g}s after the claim's reply "
+        f"was lost, with the old connections still silent: {seen}"
+    )
+    assert stopped, "the worker did not stop while the old connections were silent"
+    assert (_runs("lost"), _runs("later")) == (1, 1)
+    assert _released_ids(caplog, worker) == [str(lost.id)]
+    assert len(_events(caplog, "worker_poll_failed", worker)) == 1
+
+
+@drains_its_pool
+@pooled_postgresql
+def test_a_task_that_lost_its_connection_is_recorded_beside_silent_idle_ones(
+    relay, settings, caplog
+):
+    """
+    The sweep on a task's thread. A task queries, its session is ended, and
+    from that moment every connection open then is silent, the pool's idle
+    ones among them, while a new connection works. The task's next query
+    fails; it catches the error and returns. Before the outcome is written
+    the dead connection is dropped and the pool swept, and the write lands
+    on a new connection while the idle ones are still silent. A sweep that
+    tested them waited on the first, the row stayed RUNNING, and its lease
+    kept being renewed.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 1)
+    _fill_the_pool()
+    conn = connections["default"]
+    ended = threading.Event()
+
+    def end_session(own):
+        relay.stall_open()
+        with _a_connection_made_now(conn) as fresh:
+            fresh.execute("SELECT pg_terminate_backend(%s, 10000)", [own])
+        ended.set()
+
+    tasks.STATE["end_session"] = end_session
+    result = queries_after_its_session_ended.enqueue()
+    worker = Worker(lock_timeout=LOCK_TIMEOUT, poll_interval=0.05)
+
+    thread = start_worker_thread(worker)
+    # A connection made before the relay silenced what was open would be
+    # silent too.
+    assert ended.wait(LIMIT), "the task never had its session ended"
+    with _a_connection_made_now(conn) as fresh:
+
+        def row():
+            return fresh.execute(
+                "SELECT status, attempts, return_value FROM django_ox_oxtask "
+                "WHERE id = %s",
+                [str(result.id)],
+            ).fetchone()
+
+        recorded = (OxTask.Status.SUCCESSFUL, 1, "succeeded anyway")
+        written = wait_for(lambda: row() == recorded, timeout=STOPS_WITHIN)
+        seen = row()
+    relay.detach()
+    worker.request_stop()
+    thread.join(LIMIT)
+
+    assert tasks.STATE.get("flagged") is True
+    assert written, (
+        f"the outcome was not recorded {STOPS_WITHIN:g}s after the task returned, "
+        f"with the pool's idle connections still silent: {seen}"
+    )
+    assert not thread.is_alive(), "the worker did not stop"
+    assert _events(caplog, "task_outcome_unrecorded", worker) == []
+
+
+# -- which outcome writes sweep Django's pool ---------------------------------------
+
+
+@drains_its_pool
+@pooled_postgresql
+def test_an_outcome_write_whose_checkout_timed_out_discards_no_connection(
+    settings, monkeypatch, caplog
+):
+    """
+    The task ends holding no connection, and the pool has none to give its
+    outcome write in time: the checkout times out, as it does on a pool too
+    small for the worker. That earns the write its second try, which lands.
+    No connection was lost, so the pool is left alone: it opens none, and a
+    pool that is only too small is not discarded at every such write.
+    """
+    from psycopg_pool import PoolTimeout
+
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 1)
+    _fill_the_pool()
+    pool = connections["default"].pool
+    touched = _noting_the_sweeps(monkeypatch)
+    armed, timed_out = [], []
+    real_getconn = type(pool).getconn
+
+    def getconn(self, *args, **kwargs):
+        if armed and not timed_out:
+            timed_out.append(threading.current_thread().name)
+            raise PoolTimeout("couldn't get a connection after 30.00 sec")
+        return real_getconn(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(pool), "getconn", getconn)
+    tasks.STATE["gave_it_back"] = lambda: armed.append(True)
+    result = gives_its_connection_back.enqueue()
+    stats = pool.get_stats()
+    worker = Worker(lock_timeout=LOCK_TIMEOUT, poll_interval=30.0)
+
+    _run_until(worker, lambda: _row(result).status == OxTask.Status.SUCCESSFUL)
+
+    assert len(timed_out) == 1 and timed_out[0].startswith("ox_")
+    (reconnected,) = _events(caplog, "task_outcome_reconnected", worker)
+    assert reconnected.already_written is False
+    assert "PoolTimeout" not in reconnected.getMessage()
+    assert "couldn't get a connection" in reconnected.getMessage()
+    assert _row(result).attempts == 1
+    assert touched == []
+    assert _opened_since(stats) == 0
+
+
+class WritesInATransaction(Worker):
+    """
+    Records each outcome inside a transaction of its own and, when the
+    connection goes there, closes the one Django opened in its place before
+    the error goes on, so that none is open and the write is
+    tried again.
+    """
+
+    def _write_outcome(self, db_task, **kwargs):
+        conn = connections[self._db_alias]
+        if not conn.get_autocommit() or conn.in_atomic_block:
+            return super()._write_outcome(db_task, **kwargs)
+        driver = conn.connection
+        try:
+            with transaction.atomic(using=self._db_alias):
+                return super()._write_outcome(db_task, **kwargs)
+        except Error:
+            if conn.connection is not None and conn.connection is not driver:
+                with suppress(Error):
+                    conn.close()
+            raise
+
+
+@drains_its_pool
+@pooled_postgresql
+@pytest.mark.parametrize(
+    "give_back", [False, True], ids=["held-before-the-write", "opened-by-the-write"]
+)
+def test_an_outcome_written_in_a_transaction_lands_after_a_restart(
+    give_back, settings, monkeypatch, caplog
+):
+    """
+    Every session ends while the task works on, and its outcome is written
+    by an override that uses a transaction. The write
+    fails on a dead connection, which the task held or which the write
+    itself checked out of the pool; Django replaces it on leaving the
+    block, with another dead one from the pool; and the override closes
+    that, leaving none open. None open is also what a checkout that timed
+    out leaves, and that discards nothing. Here a connection was lost, and
+    it was kept when it was opened: the pool's idle connections are
+    discarded, and the second try lands on a new one. The loop sleeps
+    through all of it, so no failed pass of its own sweeps the pool first.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 1)
+    _fill_the_pool()
+    touched = _noting_the_sweeps(monkeypatch)
+    tasks.STATE["ready"] = threading.Event()
+    tasks.STATE["go"] = threading.Event()
+    result = works_on_through_a_restart_in_process.enqueue(give_back)
+    worker = WritesInATransaction(
+        concurrency=1, lock_timeout=LOCK_TIMEOUT, poll_interval=30.0
+    )
+
+    thread = start_worker_thread(worker)
+    try:
+        assert tasks.STATE["ready"].wait(LIMIT)
+        assert touched == []
+        ended = restart_every_other_session(connection)
+        tasks.STATE["go"].set()
+        recorded = wait_for(
+            lambda: _row(result).status != OxTask.Status.RUNNING, timeout=LIMIT
+        )
+        swept = list(touched)
+    finally:
+        tasks.STATE["go"].set()
+        worker.request_stop()
+        thread.join(timeout=60)
+
+    assert not thread.is_alive(), "the worker did not stop"
+    assert ended >= 3
+    assert recorded
+    assert _events(caplog, "task_outcome_unrecorded", worker) == []
+    row = _row(result)
+    assert (row.status, row.attempts, row.return_value) == (
+        OxTask.Status.SUCCESSFUL,
+        1,
+        "succeeded anyway",
+    )
+    (reconnected,) = _events(caplog, "task_outcome_reconnected", worker)
+    assert reconnected.already_written is False
+    # The outcome's own sweep, on the task's thread. The loop wakes once the
+    # task is done, finds its own connection dead and sweeps as well.
+    assert [name for name, thread in swept if thread.startswith("ox_")] == ["drain"]
+    assert "check" not in [name for name, _ in swept]
+
+
+# -- a pool that cannot discard its idle connections ---------------------------------
+
+
+@pytest.fixture
+def psycopg_pool_before_3_3(monkeypatch):
+    """
+    Django's pool as psycopg_pool had it before 3.3, with no drain(), in a
+    process in which no alias has been told so yet.
+    """
+    monkeypatch.delattr("psycopg_pool.ConnectionPool.drain", raising=False)
+    monkeypatch.setattr("django_ox.worker._cannot_drain", set())
+    assert not hasattr(connections["default"].pool, "drain")
+
+
+@pooled_postgresql
+def test_a_pool_that_cannot_drain_is_tested_and_keeps_the_connections_that_answer(
+    psycopg_pool_before_3_3, settings, monkeypatch, caplog, lose_the_reply
+):
+    """
+    On psycopg_pool before 3.3 the sweep is 1.7.0's. The server ends the
+    loop's session and no other; the failed pass tests the pool's idle
+    connections, and the ones that answer are the ones it holds
+    afterwards. The claim that raised is released and its task runs once,
+    and it is said once that this pool cannot be drained.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 1)
+    result = tasks.record.enqueue("legacy")
+    _fill_the_pool()
+    held_idle = _other_sessions()
+    touched = _noting_the_sweeps(monkeypatch)
+    seam = lose_the_reply("statement")
+    worker = Worker(lock_timeout=LOCK_TIMEOUT, poll_interval=0.05)
+
+    _run_until(worker, lambda: _row(result).status == OxTask.Status.SUCCESSFUL)
+
+    assert seam.fired
+    assert [name for name, _ in touched] == ["check"]
+    assert _released_ids(caplog, worker) == [str(result.id)]
+    assert (_row(result).attempts, _runs("legacy")) == (1, 1)
+    answering = held_idle - {seam._session}
+    assert len(answering) >= 2
+    assert answering <= _other_sessions()
+    (said,) = _events(caplog, "connection_pool_cannot_drain")
+    assert said.database == "default"
+
+
+@pooled_postgresql
+def test_a_pool_that_cannot_drain_is_tested_on_every_failed_pass_as_before(
+    psycopg_pool_before_3_3, settings, monkeypatch, caplog
+):
+    """
+    1.7.0 tested the pool after every failed pass, whatever failed, and a
+    pool that cannot drain is still treated exactly so: here the claim
+    names a column that is not there, on a connection that answers. Its
+    idle connections answer too, are kept, and none is opened.
+    """
+    caplog.set_level(logging.WARNING, logger="django_ox")
+    _budget(settings, 1)
+    _fill_the_pool()
+    touched = _noting_the_sweeps(monkeypatch)
+    stats = connections["default"].pool.get_stats()
+    worker = ClaimFails(lock_timeout=LOCK_TIMEOUT, poll_interval=0.02)
+    worker.failing = True
+
+    def failed():
+        return _events(caplog, "worker_poll_failed", worker)
+
+    thread = start_worker_thread(worker)
+    try:
+        assert wait_for(lambda: len(failed()) >= 5, timeout=LIMIT)
+        passes, tested = len(failed()), [name for name, _ in touched]
+        opened = _opened_since(stats)
+    finally:
+        worker.request_stop()
+        thread.join(timeout=60)
+    assert not thread.is_alive(), "the worker did not stop"
+
+    assert set(tested) == {"check"}
+    assert passes - 1 <= len(tested) <= passes + 1
+    assert opened == 0

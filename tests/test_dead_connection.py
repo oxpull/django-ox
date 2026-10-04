@@ -25,8 +25,8 @@ A restart ends every session at once, the ones Django's pool holds idle
 included. The pool hands those out unchecked unless CONN_HEALTH_CHECKS is
 set, and when it is, tests them one at a time, waiting longer after each,
 until its timeout. So closing a pooled connection that died is followed by
-a sweep of the pool's idle connections, and a failed pass of the poll loop
-sweeps the pool too.
+a sweep, which discards the pool's idle connections without testing any,
+and a pass of the poll loop that lost its connection sweeps the pool too.
 
 The end-to-end tests run the real ox_worker command in a process of its
 own, against the test database, with tasks that have the server end their
@@ -35,17 +35,20 @@ pool tests need PostgreSQL and psycopg_pool, and the test that closes the
 database to new connections needs PostgreSQL. The rest run on every
 database and hold the drop, the second write and the sweep to what they may
 touch: only a connection with an error that no longer answers, never one
-inside an atomic block, and nothing at all on an ordinary outcome or a pass
-that did not fail.
+inside an atomic block, and nothing at all on an ordinary outcome, a pass
+that did not fail, or a pass that failed with its connection still
+answering.
 """
 
 import copy
 import importlib.util
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
+import threading
 import time
 from contextlib import nullcontext
 from datetime import timedelta
@@ -57,6 +60,8 @@ from django.db import (
     IntegrityError,
     InterfaceError,
     OperationalError,
+    ProgrammingError,
+    close_old_connections,
     connection,
     connections,
     transaction,
@@ -67,7 +72,7 @@ from django.utils import timezone
 
 from django_ox.compat import task_finished
 from django_ox.models import OxTask
-from django_ox.worker import Worker
+from django_ox.worker import Worker, _Seen, _sweep_pool
 
 from . import policy_tasks
 from .conftest import start_worker_thread
@@ -79,6 +84,7 @@ from .dead_connection_tasks import (
     ends_its_connection_from_async_and_succeeds,
     ends_the_second_connection_and_succeeds,
     gate,
+    gives_its_connection_back,
     loses_its_connection_and_its_lease,
     loses_its_connection_unnoticed,
     loses_the_database,
@@ -1372,7 +1378,7 @@ def test_a_second_write_carries_the_backoffs_one_answer(
 
 
 class Sweeps(list):
-    """The aliases whose pool was swept, in order; `error`, check() raises it."""
+    """The aliases whose pool was swept, in order; `error`, drain() raises it."""
 
     error: BaseException | None = None
 
@@ -1380,9 +1386,11 @@ class Sweeps(list):
 @pytest.fixture
 def sweeps(monkeypatch):
     """
-    Every alias is taken for pooled, with a stand-in pool whose check()
-    records the sweep, so these run the same on every database. What a real
-    pool's check() does is the end-to-end tests' business.
+    Every alias is taken for pooled, with a stand-in pool whose drain()
+    records the sweep, so these run the same on every database. It has no
+    check(): a sweep that tested the idle connections instead of discarding
+    them would record nothing. What a real pool's drain() does is the
+    business of the end-to-end tests and of test_claim_recovery.
     """
     swept = Sweeps()
 
@@ -1390,7 +1398,7 @@ def sweeps(monkeypatch):
         def __init__(self, alias):
             self.alias = alias
 
-        def check(self):
+        def drain(self):
             swept.append(self.alias)
             if swept.error is not None:
                 raise swept.error
@@ -1401,14 +1409,46 @@ def sweeps(monkeypatch):
     return swept
 
 
+class DriverSays:
+    """
+    Stands in for what the driver says of a connection, django_ox.worker's
+    _lost, so the tests below run the same on every database: a connection
+    is lost once lose() has named it, and no other is. What psycopg says of
+    a real connection after a real failure is test_claim_recovery's
+    business.
+    """
+
+    def __init__(self):
+        self.lost = []
+        self.asked = 0
+
+    def lose(self, conn):
+        """The driver connection `conn` holds now is lost; it must hold one."""
+        assert conn.connection is not None
+        self.lost.append(conn.connection)
+
+    def __call__(self, raw):
+        self.asked += 1
+        return any(raw is one for one in self.lost)
+
+
+@pytest.fixture
+def driver(monkeypatch):
+    says = DriverSays()
+    monkeypatch.setattr("django_ox.worker._lost", says)
+    return says
+
+
 @pytest.mark.parametrize("task", [echo, fail_always], ids=["success", "failure"])
-def test_an_ordinary_outcome_sweeps_no_pool(worker, sweeps, task):
+def test_an_ordinary_outcome_sweeps_no_pool(worker, sweeps, driver, task):
     args = ("x",) if task is echo else ()
     task.enqueue(*args)
 
     assert worker.run_once()
 
     assert sweeps == []
+    # Nor is the driver asked anything: the write did not fail.
+    assert driver.asked == 0
 
 
 def test_a_connection_that_still_answers_after_an_error_sweeps_no_pool(worker, sweeps):
@@ -1423,29 +1463,45 @@ def test_a_connection_that_still_answers_after_an_error_sweeps_no_pool(worker, s
 @pytest.mark.django_db(transaction=True, databases=["default", "alt"])
 @pytest.mark.parametrize("alias", ["default", "alt"])
 @pytest.mark.parametrize(
-    ("flagged", "usable", "atomic", "swept"),
+    ("flagged", "usable", "lost", "atomic", "closed", "swept"),
     [
-        pytest.param(False, False, False, False, id="no-error"),
-        pytest.param(True, True, False, False, id="error-still-answers"),
-        pytest.param(True, False, False, True, id="error-and-dead"),
-        pytest.param(True, False, True, False, id="inside-atomic"),
+        pytest.param(False, False, True, False, False, False, id="no-error"),
+        pytest.param(True, True, False, False, False, False, id="error-still-answers"),
+        pytest.param(True, False, True, False, True, True, id="error-and-lost"),
+        pytest.param(True, False, False, False, True, False, id="unusable-not-lost"),
+        pytest.param(True, False, True, True, False, False, id="inside-atomic"),
     ],
 )
-def test_only_closing_a_dead_connection_sweeps_its_pool(
-    worker, monkeypatch, sweeps, alias, flagged, usable, atomic, swept
+def test_only_closing_a_lost_connection_sweeps_its_pool(
+    worker,
+    monkeypatch,
+    sweeps,
+    driver,
+    alias,
+    flagged,
+    usable,
+    lost,
+    atomic,
+    closed,
+    swept,
 ):
     """
     The drop before the write sweeps the pool of the alias it closed, and
-    only when it closed one.
+    only when the driver reports the connection it closed lost. One that
+    fails its probe without that is closed all the same, and its pool is
+    left alone: unusable is not lost.
     """
     conn = connections[alias]
     conn.ensure_connection()
     monkeypatch.setattr(type(conn), "is_usable", lambda self: usable)
+    if lost:
+        driver.lose(conn)
     block = transaction.atomic(using=alias) if atomic else nullcontext()
     with block:
         conn.errors_occurred = flagged
         try:
             worker._discard_unusable_connections()
+            assert (conn.connection is None) is closed
         finally:
             conn.errors_occurred = False
     assert sweeps == ([alias] if swept else [])
@@ -1457,11 +1513,12 @@ def test_only_closing_a_dead_connection_sweeps_its_pool(
     ids=["other", "database"],
 )
 def test_a_sweep_that_raises_after_the_drop_does_not_escape(
-    worker, monkeypatch, sweeps, error
+    worker, monkeypatch, sweeps, driver, error
 ):
     conn = connections["default"]
     conn.ensure_connection()
     monkeypatch.setattr(type(conn), "is_usable", lambda self: False)
+    driver.lose(conn)
     sweeps.error = error
     conn.errors_occurred = True
     try:
@@ -1473,12 +1530,21 @@ def test_a_sweep_that_raises_after_the_drop_does_not_escape(
     assert sweeps == ["default"]
 
 
+def connection_is_lost(monkeypatch, driver):
+    """
+    From now on this run's connections fail is_usable(), and the driver
+    reports the one this thread holds lost.
+    """
+    connection_goes(monkeypatch)
+    driver.lose(connections["default"])
+
+
 @pytest.mark.parametrize("task", [echo, fail_always], ids=["success", "failure"])
 def test_the_pool_is_swept_after_the_close_and_before_the_second_try(
-    worker, monkeypatch, caplog, task
+    worker, monkeypatch, caplog, driver, task
 ):
     """
-    The first write finds the connection gone; the pool is swept once, after
+    The first write finds the connection lost; the pool is swept once, after
     the close, before the second try reads the row and writes.
     """
     order = []
@@ -1488,13 +1554,13 @@ def test_the_pool_is_swept_after_the_close_and_before_the_second_try(
     real_close = wrapper.close
 
     class StandIn:
-        def check(self):
+        def drain(self):
             order.append("sweep")
 
     def write(self, db_task, **fields):
         order.append("write")
         if order.count("write") == 1:
-            connection_goes(monkeypatch)
+            connection_is_lost(monkeypatch, driver)
             raise OperationalError(GONE)
         return real_write(self, db_task, **fields)
 
@@ -1532,7 +1598,7 @@ def test_the_pool_is_swept_after_the_close_and_before_the_second_try(
     ids=["other", "database"],
 )
 def test_a_sweep_that_raises_neither_escapes_nor_adds_a_write(
-    worker, monkeypatch, caplog, sweeps, finished_results, task, error
+    worker, monkeypatch, caplog, sweeps, driver, finished_results, task, error
 ):
     """
     The sweep raises between the two tries: the second try still goes, once,
@@ -1544,7 +1610,7 @@ def test_a_sweep_that_raises_neither_escapes_nor_adds_a_write(
     def raises_once(self, db_task, **fields):
         written.append(fields["status"])
         if len(written) == 1:
-            connection_goes(monkeypatch)
+            connection_is_lost(monkeypatch, driver)
             raise OperationalError(GONE)
         return real(self, db_task, **fields)
 
@@ -1578,6 +1644,208 @@ def test_a_sweep_that_raises_neither_escapes_nor_adds_a_write(
     ]
 
 
+def first_write_fails(monkeypatch, how):
+    """
+    The first outcome write runs `how` on its thread's connection and then
+    raises, as a write does that found no connection to write on; the
+    second is the real one. Returns the statuses written, in order.
+    """
+    real = Worker._write_outcome
+    written = []
+
+    def write(self, db_task, **fields):
+        written.append(fields["status"])
+        if len(written) == 1:
+            how(connections[self._db_alias])
+            raise OperationalError("couldn't get a connection after 30.00 sec")
+        return real(self, db_task, **fields)
+
+    monkeypatch.setattr(Worker, "_write_outcome", write)
+    return written
+
+
+def assert_written_on_the_second_try(caplog, result, written):
+    assert written == [OxTask.Status.SUCCESSFUL] * 2
+    assert OxTask.objects.get(id=result.id).status == OxTask.Status.SUCCESSFUL
+    assert outcome_events(
+        caplog, "task_outcome_reconnected", "task_outcome_unrecorded"
+    ) == [(logging.WARNING, "task_outcome_reconnected")]
+
+
+def test_a_write_that_could_not_get_a_connection_sweeps_no_pool(
+    worker, monkeypatch, caplog, sweeps, driver
+):
+    """
+    The first write finds no connection to write on, as when its checkout
+    from the pool times out, and none is open afterwards. That earns the
+    second try, which lands, and it is no lost connection: the pool, which
+    may only be too small, is not discarded.
+    """
+    written = first_write_fails(monkeypatch, lambda conn: conn.close())
+    result = echo.enqueue("x")
+
+    with caplog.at_level(logging.INFO, logger="django_ox"):
+        assert worker.run_once()
+
+    assert_written_on_the_second_try(caplog, result, written)
+    assert sweeps == []
+    assert driver.lost == []
+
+
+def test_a_write_on_a_connection_that_is_unusable_and_not_lost_sweeps_no_pool(
+    worker, monkeypatch, caplog, sweeps, driver
+):
+    """
+    The connection fails its probe after the first write raised, and the
+    driver does not report it lost. It is closed and the write goes once
+    more, as before, and the pool is left alone.
+    """
+    written = first_write_fails(monkeypatch, lambda conn: connection_goes(monkeypatch))
+    result = echo.enqueue("x")
+    connection.ensure_connection()
+    held = connection.connection
+
+    with caplog.at_level(logging.INFO, logger="django_ox"):
+        assert worker.run_once()
+
+    assert_written_on_the_second_try(caplog, result, written)
+    assert connection.connection is not held
+    assert sweeps == []
+
+
+@pytest.mark.parametrize(
+    "task",
+    [echo, gives_its_connection_back],
+    ids=["held-before-the-write", "opened-by-the-write"],
+)
+def test_a_write_that_lost_a_connection_sweeps_though_none_is_left_open(
+    worker, monkeypatch, caplog, sweeps, driver, task
+):
+    """
+    An override that writes in a transaction. The
+    connection goes inside the transaction; Django's exit from the block
+    closes it and opens another; and the override closes that one too, to
+    say none is left. None open is also what a checkout that timed out
+    leaves, and the two are told apart by the connection the write held or
+    opened, which is kept from the moment it was opened and is asked here:
+    the pool is swept. It was the thread's before the write, or the write
+    itself opened it.
+    """
+
+    def lose_it_inside_a_transaction(conn):
+        conn.ensure_connection()
+        driver.lose(conn)
+        # Django, on leaving the block: the lost one closed, another opened.
+        conn.close()
+        conn.ensure_connection()
+        # The override: none left.
+        conn.close()
+
+    written = first_write_fails(monkeypatch, lose_it_inside_a_transaction)
+    result = task.enqueue(*(("x",) if task is echo else ()))
+
+    with caplog.at_level(logging.INFO, logger="django_ox"):
+        assert worker.run_once()
+
+    assert written == [OxTask.Status.SUCCESSFUL] * 2
+    assert OxTask.objects.get(id=result.id).status == OxTask.Status.SUCCESSFUL
+    assert len(driver.lost) == 1
+    assert sweeps == ["default"]
+
+
+# -- which connections are kept to ask the driver about ---------------------------
+
+
+def open_and_close_a_connection():
+    try:
+        connections["default"].ensure_connection()
+    finally:
+        connections.close_all()
+
+
+@pytest.mark.django_db(transaction=True, databases=["default", "alt"])
+def test_a_watch_keeps_its_own_threads_connections_and_gives_way_to_the_one_before():
+    """
+    Each connection a watching thread opens for the alias is kept when
+    Django opens it; another thread's are not, and neither are another
+    alias's. A watch begun inside one, as an outcome write is begun inside
+    a caller's, takes over until it ends and then gives the first its place
+    back. Once nothing watches, nothing is kept.
+    """
+    conn = connections["default"]
+    conn.close()
+    outer = _Seen("default")
+    outer.watch()
+    try:
+        assert outer.raws == []
+        conn.ensure_connection()
+        first = conn.connection
+        assert [raw is first for raw in outer.raws] == [True]
+
+        other = threading.Thread(target=open_and_close_a_connection)
+        other.start()
+        other.join(30)
+        connections["alt"].close()
+        connections["alt"].ensure_connection()
+        assert len(outer.raws) == 1
+
+        inner = _Seen("default")
+        inner.watch()
+        try:
+            assert [raw is first for raw in inner.raws] == [True]
+            conn.close()
+            conn.ensure_connection()
+            assert inner.raws[-1] is conn.connection
+            assert len(inner.raws) == 2
+        finally:
+            inner.unwatch()
+        assert len(outer.raws) == 1
+
+        conn.close()
+        conn.ensure_connection()
+        assert outer.raws[-1] is conn.connection
+        assert len(outer.raws) == 2
+
+        outer.begin()
+        assert [raw is conn.connection for raw in outer.raws] == [True]
+    finally:
+        outer.unwatch()
+    conn.close()
+    conn.ensure_connection()
+    assert len(outer.raws) == 1
+
+
+def test_a_connection_lost_before_django_announced_it_is_asked_about_all_the_same(
+    monkeypatch, driver
+):
+    """
+    Django announces a connection once it has set it up, and a connection
+    can go during the setup: it is the wrapper's by then, and was never
+    announced, so it is not among those kept. The one the thread holds is
+    asked about as well as those kept, and this one is found there.
+    """
+    conn = connections["default"]
+    conn.close()
+
+    def lost_in_setup(self):
+        driver.lose(self)
+        raise OperationalError(GONE)
+
+    monkeypatch.setattr(type(conn), "init_connection_state", lost_in_setup)
+    seen = _Seen("default")
+    seen.watch()
+    try:
+        with pytest.raises(OperationalError):
+            conn.ensure_connection()
+        assert seen.raws == []
+        assert conn.connection is not None
+        assert seen.lost()
+    finally:
+        seen.unwatch()
+        monkeypatch.undo()
+        conn.close()
+
+
 # -- when the poll loop sweeps -----------------------------------------------------
 
 
@@ -1601,29 +1869,73 @@ def run_the_batch(worker, caplog):
     assert not thread.is_alive(), "the batch worker never finished"
 
 
-def claims_once_broken(worker, monkeypatch, order, error=OperationalError):
-    """The worker's first claim raises `error`; every claim is noted."""
+def claims_once_broken(worker, monkeypatch, order, error=OperationalError, lose=None):
+    """
+    The worker's first claim raises `error`, having lost the loop's
+    connection when `lose`, a DriverSays, is given; every claim is noted.
+    """
     real = worker.claim_one
 
     def claim_one():
         order.append("claim")
         if order.count("claim") == 1:
+            if lose is not None:
+                lose.lose(connections[worker._db_alias])
             raise error(GONE)
         return real()
 
     monkeypatch.setattr(worker, "claim_one", claim_one)
 
 
+def noting_the_handler(worker, monkeypatch, order):
+    """
+    Note, in `order`, each step a failed pass's handler takes on the loop's
+    thread: asking whether the pass lost a connection, its cleanup, and its
+    wait. The cleanup a dispatch pass makes of its own is noted as well.
+    """
+    loop = []
+    real_reap = worker.reap
+    real_lost = _Seen.lost
+    real_wait = worker._stop.wait
+
+    def reap():
+        # The first thing every pass does, so this is the loop's thread.
+        loop[:] = [threading.current_thread()]
+        return real_reap()
+
+    def lost(self):
+        if threading.current_thread() in loop:
+            order.append("lost?")
+        return real_lost(self)
+
+    def close():
+        # Pool threads close their connections around every task; only the
+        # loop's own cleanup is a step of a handler.
+        if threading.current_thread() in loop:
+            order.append("close")
+        return close_old_connections()
+
+    def wait(timeout=None):
+        order.append("wait")
+        return real_wait(timeout)
+
+    monkeypatch.setattr(worker, "reap", reap)
+    monkeypatch.setattr(_Seen, "lost", lost)
+    monkeypatch.setattr("django_ox.worker.close_old_connections", close)
+    monkeypatch.setattr(worker._stop, "wait", wait)
+
+
 def poll_events(caplog, name):
     return [r for r in caplog.records if getattr(r, "event", None) == name]
 
 
-def test_a_failed_poll_pass_sweeps_the_worker_pool_and_replays_nothing(
-    batch_worker, monkeypatch, caplog
+def test_a_pass_that_lost_its_connection_sweeps_the_worker_pool_and_replays_nothing(
+    batch_worker, monkeypatch, caplog, driver
 ):
     """
-    A pass the database interrupted sweeps the worker alias's pool once,
-    after its own cleanup, and then waits out the poll interval as before:
+    A pass that lost its connection sweeps the worker alias's pool once. It
+    asks the driver before its own cleanup, which hands the connection
+    back, sweeps after it, and then waits out the poll interval as before:
     the claim is not tried again until the next pass.
     """
     order = []
@@ -1632,31 +1944,52 @@ def test_a_failed_poll_pass_sweeps_the_worker_pool_and_replays_nothing(
         def __init__(self, alias):
             self.alias = alias
 
-        def check(self):
+        def drain(self):
             order.append(f"sweep:{self.alias}")
-
-    real_wait = batch_worker._stop.wait
-
-    def wait(timeout=None):
-        order.append("wait")
-        return real_wait(timeout)
 
     monkeypatch.setattr(
         "django_ox.worker._connection_pool", lambda conn: StandIn(conn.alias)
     )
-    monkeypatch.setattr(batch_worker._stop, "wait", wait)
-    claims_once_broken(batch_worker, monkeypatch, order)
+    noting_the_handler(batch_worker, monkeypatch, order)
+    claims_once_broken(batch_worker, monkeypatch, order, lose=driver)
     result = echo.enqueue("x")
 
     run_the_batch(batch_worker, caplog)
 
-    assert order[:4] == ["claim", "sweep:default", "wait", "claim"], order
+    assert order[:6] == ["claim", "lost?", "close", "sweep:default", "wait", "claim"]
     assert order.count("sweep:default") == 1
     assert len(poll_events(caplog, "worker_poll_failed")) == 1
     assert OxTask.objects.get(id=result.id).status == OxTask.Status.SUCCESSFUL
 
 
-def test_a_healthy_poll_pass_sweeps_no_pool(batch_worker, sweeps, caplog):
+@pytest.mark.parametrize(
+    "error",
+    [OperationalError, InterfaceError, ProgrammingError],
+    ids=["operational", "interface", "programming"],
+)
+def test_a_pass_that_failed_with_its_connection_answering_sweeps_no_pool(
+    batch_worker, monkeypatch, caplog, sweeps, driver, error
+):
+    """
+    The claim raises a database error, of whatever class, and the driver
+    does not report the loop's connection lost: a lock timeout, a missing
+    table, a deadlock. The pass fails and is retried as before, and the
+    pool is left alone, its idle connections not being implicated.
+    """
+    order = []
+    noting_the_handler(batch_worker, monkeypatch, order)
+    claims_once_broken(batch_worker, monkeypatch, order, error)
+    result = echo.enqueue("x")
+
+    run_the_batch(batch_worker, caplog)
+
+    assert order[:5] == ["claim", "lost?", "close", "wait", "claim"], order
+    assert sweeps == []
+    assert len(poll_events(caplog, "worker_poll_failed")) == 1
+    assert OxTask.objects.get(id=result.id).status == OxTask.Status.SUCCESSFUL
+
+
+def test_a_healthy_poll_pass_sweeps_no_pool(batch_worker, sweeps, caplog, driver):
     result = echo.enqueue("x")
 
     run_the_batch(batch_worker, caplog)
@@ -1664,6 +1997,8 @@ def test_a_healthy_poll_pass_sweeps_no_pool(batch_worker, sweeps, caplog):
     assert OxTask.objects.get(id=result.id).status == OxTask.Status.SUCCESSFUL
     assert poll_events(caplog, "worker_batch_empty")
     assert sweeps == []
+    # A pass that does not fail asks the driver nothing either.
+    assert driver.asked == 0
 
 
 @pytest.mark.parametrize(
@@ -1672,11 +2007,11 @@ def test_a_healthy_poll_pass_sweeps_no_pool(batch_worker, sweeps, caplog):
     ids=["other", "database"],
 )
 def test_a_sweep_that_raises_does_not_stop_the_poll_loop(
-    batch_worker, monkeypatch, caplog, sweeps, error
+    batch_worker, monkeypatch, caplog, sweeps, driver, error
 ):
     sweeps.error = error
     order = []
-    claims_once_broken(batch_worker, monkeypatch, order)
+    claims_once_broken(batch_worker, monkeypatch, order, lose=driver)
     result = echo.enqueue("x")
 
     run_the_batch(batch_worker, caplog)
@@ -1685,3 +2020,307 @@ def test_a_sweep_that_raises_does_not_stop_the_poll_loop(
     assert len(poll_events(caplog, "worker_poll_failed")) == 1
     assert OxTask.objects.get(id=result.id).status == OxTask.Status.SUCCESSFUL
     assert poll_events(caplog, "worker_batch_empty")
+
+
+def test_a_connection_django_replaced_before_the_handler_still_counts_as_lost(
+    batch_worker, monkeypatch, caplog, sweeps, driver
+):
+    """
+    A connection that goes inside an atomic block is closed by the block's
+    exit, which opens another before the error reaches the loop: the
+    connection the handler finds is a new one that answers. The pass still
+    lost a connection, the one it began on, and sweeps the pool.
+    """
+    real = batch_worker.claim_one
+    claims = []
+
+    def claim_one():
+        claims.append(len(claims) + 1)
+        if len(claims) == 2:
+            # The second pass begins on the connection the first one left.
+            conn = connections[batch_worker._db_alias]
+            driver.lose(conn)
+            conn.close()
+            conn.ensure_connection()
+            raise OperationalError(GONE)
+        return real()
+
+    monkeypatch.setattr(batch_worker, "claim_one", claim_one)
+    first, second = echo.enqueue("x"), echo.enqueue("y")
+
+    run_the_batch(batch_worker, caplog)
+
+    assert sweeps == ["default"]
+    assert len(poll_events(caplog, "worker_poll_failed")) == 1
+    for result in (first, second):
+        assert OxTask.objects.get(id=result.id).status == OxTask.Status.SUCCESSFUL
+
+
+def test_a_connection_opened_and_lost_inside_one_pass_counts_as_lost(
+    settings, monkeypatch, caplog, sweeps, driver
+):
+    """
+    The pass begins with no connection, as the first does and as the one
+    after any failed pass does. Its claim opens one on entering its
+    transaction and loses it there, and Django's exit from the block
+    replaces it: no connection the pass began on, and one that answers in
+    hand. The one that was lost was kept when it was opened, and the pass
+    sweeps the pool.
+    """
+    settings.TASKS = {
+        "default": {
+            "BACKEND": "django_ox.backend.OxBackend",
+            "QUEUES": ["default"],
+            "OPTIONS": {},
+        }
+    }
+    # Never reaps, so the claim is the first thing to touch the database.
+    worker = Worker(
+        backoff_initial=0, poll_interval=0.02, reap_interval=math.inf, batch=True
+    )
+    real = worker.claim_one
+    real_dispatch = worker.dispatch_schedules
+    began_with = []
+    claims = []
+
+    def dispatch_schedules():
+        # Before the pass has touched the database.
+        began_with.append(connections[worker._db_alias].connection)
+        return real_dispatch()
+
+    def claim_one():
+        claims.append(len(claims) + 1)
+        if len(claims) == 1:
+            conn = connections[worker._db_alias]
+            conn.ensure_connection()
+            driver.lose(conn)
+            conn.close()
+            conn.ensure_connection()
+            raise OperationalError(GONE)
+        return real()
+
+    monkeypatch.setattr(worker, "dispatch_schedules", dispatch_schedules)
+    monkeypatch.setattr(worker, "claim_one", claim_one)
+    result = echo.enqueue("x")
+
+    run_the_batch(worker, caplog)
+
+    assert began_with[0] is None
+    assert sweeps == ["default"]
+    assert len(poll_events(caplog, "worker_poll_failed")) == 1
+    assert OxTask.objects.get(id=result.id).status == OxTask.Status.SUCCESSFUL
+
+
+def test_a_pass_does_not_count_a_connection_an_earlier_pass_lost(
+    batch_worker, monkeypatch, caplog, sweeps, driver
+):
+    """
+    The first pass loses its connection and sweeps the pool. The second
+    fails with its connection answering. What the first pass kept is not
+    the second's to count: each pass starts again from the connection it
+    holds, and the second sweeps nothing.
+    """
+    real = batch_worker.claim_one
+    claims = []
+
+    def claim_one():
+        claims.append(len(claims) + 1)
+        if len(claims) == 1:
+            driver.lose(connections[batch_worker._db_alias])
+            raise OperationalError(GONE)
+        if len(claims) == 2:
+            raise ProgrammingError("relation does not exist")
+        return real()
+
+    monkeypatch.setattr(batch_worker, "claim_one", claim_one)
+    result = echo.enqueue("x")
+
+    run_the_batch(batch_worker, caplog)
+
+    assert len(driver.lost) == 1
+    assert sweeps == ["default"]
+    assert len(poll_events(caplog, "worker_poll_failed")) == 2
+    assert OxTask.objects.get(id=result.id).status == OxTask.Status.SUCCESSFUL
+
+
+def test_a_connection_lost_in_dispatch_is_remembered_when_the_claim_fails_too(
+    batch_worker, monkeypatch, caplog, driver
+):
+    """
+    A dispatch pass abandoned on a lost connection drops it and lets the
+    claim run. When the claim fails as well, on a connection that answers
+    or on none it could get, the connection in hand says nothing of the
+    one that was lost: the dispatch's own cleanup closed it. It was kept
+    when the pass opened it, the handler asks the driver about it still,
+    and the failed pass sweeps the pool.
+    """
+    order = []
+
+    class StandIn:
+        def drain(self):
+            order.append("sweep")
+
+    monkeypatch.setattr("django_ox.worker._connection_pool", lambda conn: StandIn())
+    noting_the_handler(batch_worker, monkeypatch, order)
+
+    def dispatch_schedules():
+        order.append("dispatch")
+        if order.count("dispatch") == 1:
+            driver.lose(connections[batch_worker._db_alias])
+            raise OperationalError(GONE)
+        return 0
+
+    monkeypatch.setattr(batch_worker, "dispatch_schedules", dispatch_schedules)
+    claims_once_broken(batch_worker, monkeypatch, order, ProgrammingError)
+    result = echo.enqueue("x")
+
+    run_the_batch(batch_worker, caplog)
+
+    assert order[:7] == [
+        "dispatch",
+        "close",
+        "claim",
+        "lost?",
+        "close",
+        "sweep",
+        "wait",
+    ], order
+    assert order.count("sweep") == 1
+    assert len(poll_events(caplog, "worker_poll_failed")) == 1
+    assert OxTask.objects.get(id=result.id).status == OxTask.Status.SUCCESSFUL
+
+
+def test_a_connection_lost_in_dispatch_sweeps_no_pool_when_the_pass_goes_on(
+    batch_worker, monkeypatch, caplog, sweeps, driver
+):
+    """
+    The dispatch pass is abandoned on a lost connection and the claim then
+    succeeds on another: the pass did not fail, and a pass that does not
+    fail sweeps nothing, as before.
+    """
+
+    def dispatch_schedules():
+        if not driver.lost:
+            driver.lose(connections[batch_worker._db_alias])
+            raise OperationalError(GONE)
+        return 0
+
+    monkeypatch.setattr(batch_worker, "dispatch_schedules", dispatch_schedules)
+    result = echo.enqueue("x")
+
+    run_the_batch(batch_worker, caplog)
+
+    assert driver.lost
+    assert sweeps == []
+    assert poll_events(caplog, "worker_poll_failed") == []
+    assert OxTask.objects.get(id=result.id).status == OxTask.Status.SUCCESSFUL
+
+
+def test_a_sweep_told_that_nothing_was_lost_discards_nothing(sweeps):
+    _sweep_pool(connections["default"], lost=False)
+    assert sweeps == []
+    _sweep_pool(connections["default"], lost=True)
+    assert sweeps == ["default"]
+
+
+# -- a pool that cannot discard its idle connections ---------------------------------
+
+
+@pytest.fixture
+def older_pool(monkeypatch):
+    """
+    Every alias is taken for pooled, with a stand-in pool as psycopg_pool
+    had it before 3.3, check() and no drain(), in a process in which no
+    alias has been told so yet. The aliases whose pool was tested, in
+    order.
+    """
+    tested = []
+
+    class OlderPool:
+        def __init__(self, alias):
+            self.alias = alias
+
+        def check(self):
+            tested.append(self.alias)
+
+    monkeypatch.setattr("django_ox.worker._cannot_drain", set())
+    monkeypatch.setattr(
+        "django_ox.worker._connection_pool", lambda conn: OlderPool(conn.alias)
+    )
+    return tested
+
+
+def test_a_pool_without_drain_is_tested_as_before_and_that_is_said_once(
+    older_pool, caplog
+):
+    """
+    psycopg_pool before 3.3 has no drain(). Its pool is swept as 1.7.0 swept
+    it, check(), whether or not a connection is known lost, so the recovery
+    after a restart is what it was; the wait on a connection that never
+    answers is too, and that is said, once per process for the alias, not
+    once per sweep.
+    """
+    conn = connections["default"]
+
+    with caplog.at_level(logging.WARNING, logger="django_ox"):
+        _sweep_pool(conn)
+        _sweep_pool(conn, lost=True)
+        _sweep_pool(conn, lost=False)
+
+    assert older_pool == ["default"] * 3
+    (said,) = poll_events(caplog, "connection_pool_cannot_drain")
+    assert said.levelno == logging.WARNING
+    assert said.database == "default"
+    message = said.getMessage()
+    assert "has no ConnectionPool.drain()" in message
+    assert "Recovery after a restart is kept." in message
+    assert message.endswith("Upgrade psycopg_pool to 3.3.3 or newer."), message
+
+
+@pytest.mark.parametrize("lost", [True, False], ids=["lost", "answering"])
+def test_on_a_pool_without_drain_every_failed_pass_tests_it_as_before(
+    batch_worker, monkeypatch, caplog, older_pool, driver, lost
+):
+    """
+    1.7.0 swept the pool on every failed pass, whatever failed. A pool that
+    cannot drain keeps exactly that: nobody on psycopg_pool 3.2 is worse off
+    than they were.
+    """
+    order = []
+    noting_the_handler(batch_worker, monkeypatch, order)
+    claims_once_broken(batch_worker, monkeypatch, order, lose=driver if lost else None)
+    result = echo.enqueue("x")
+
+    run_the_batch(batch_worker, caplog)
+
+    assert order[:5] == ["claim", "lost?", "close", "wait", "claim"], order
+    assert older_pool == ["default"]
+    assert len(poll_events(caplog, "worker_poll_failed")) == 1
+    assert OxTask.objects.get(id=result.id).status == OxTask.Status.SUCCESSFUL
+
+
+def test_on_a_pool_without_drain_a_write_that_got_no_connection_tests_it_as_before(
+    worker, monkeypatch, caplog, older_pool, driver
+):
+    """
+    1.7.0 swept between the two tries of an outcome write whenever the
+    first found its connection gone, a checkout that timed out included. A
+    pool that cannot drain keeps that too.
+    """
+    written = first_write_fails(monkeypatch, lambda conn: conn.close())
+    result = echo.enqueue("x")
+
+    with caplog.at_level(logging.INFO, logger="django_ox"):
+        assert worker.run_once()
+
+    assert_written_on_the_second_try(caplog, result, written)
+    assert older_pool == ["default"]
+
+
+def test_a_sweep_of_a_pool_with_drain_says_nothing(sweeps, caplog, monkeypatch):
+    monkeypatch.setattr("django_ox.worker._cannot_drain", set())
+    with caplog.at_level(logging.WARNING, logger="django_ox"):
+        _sweep_pool(connections["default"])
+
+    assert sweeps == ["default"]
+    assert poll_events(caplog, "connection_pool_cannot_drain") == []

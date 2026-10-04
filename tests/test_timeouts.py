@@ -14,6 +14,7 @@ is registered for the grace backstop and nothing is raised inside the task.
 """
 
 import contextlib
+import importlib.metadata
 import logging
 import math
 import os
@@ -70,6 +71,27 @@ TIMEOUT_PATH = f"{TaskTimeout.__module__}.{TaskTimeout.__qualname__}"
 
 postgres_only = pytest.mark.skipif(
     connection.vendor != "postgresql", reason="counts pg_stat_activity sessions"
+)
+
+
+def _psycopg_pool_version():
+    try:
+        version = importlib.metadata.version("psycopg-pool")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    return tuple(int(part) for part in re.findall(r"\d+", version)[:3])
+
+
+#: psycopg_pool before 3.3.1 loses a connection when an exception interrupts
+#: a thread waiting in getconn() at the moment the pool hands it one, and the
+#: tests below interrupt task threads with TaskTimeout on purpose: under load
+#: enough connections go that the pool runs dry and the worker stops making
+#: progress. psycopg_pool 3.3.1 gives such a connection back to the pool.
+keeps_interrupted_checkouts = pytest.mark.skipif(
+    bool(connections.settings["default"].get("OPTIONS", {}).get("pool"))
+    and (_psycopg_pool_version() or (3, 3, 1)) < (3, 3, 1),
+    reason="psycopg_pool before 3.3.1 loses a connection when an exception "
+    "interrupts a checkout",
 )
 sqlite_only = pytest.mark.skipif(
     connection.vendor != "sqlite", reason="SQLite has one writer; this is its lock"
@@ -891,6 +913,7 @@ class TestReleasesWhatItHeld:
         assert row(result).return_value == "loop done"
 
     @postgres_only
+    @keeps_interrupted_checkouts
     def test_many_timeouts_do_not_pile_up_connections(
         self, task_state, caplog, interruptible_attempts
     ):
@@ -993,6 +1016,7 @@ class TestReleasesWhatItHeld:
         assert "too many clients" not in caplog.text
 
     @postgres_only
+    @keeps_interrupted_checkouts
     @pytest.mark.parametrize(
         "loop", [write_until_released, atomic_write_until_released]
     )

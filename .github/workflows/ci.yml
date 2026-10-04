@@ -287,6 +287,56 @@ jobs:
         env:
           DJANGO_SETTINGS_MODULE: tests.settings_postgres
 
+  # The same reasoning for psycopg_pool, on the pooled leg. A worker on
+  # Django's PostgreSQL pool discards the pool's idle connections with
+  # ConnectionPool.drain(), which psycopg_pool has from 3.3.0; on an older one
+  # it falls back to testing them, as it did before. The dev group asks for
+  # psycopg-pool>=3.3, which resolves to the newest, so this leg pins the
+  # oldest release that has drain() and runs the pooled suite on it.
+  #
+  # Keep this pin and the psycopg-pool floor in pyproject.toml's dev group in
+  # lockstep; raising one without the other silently stops testing it.
+  test-pool-floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: pool floor (psycopg-pool==3.3.0)
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ox
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DJANGO_SETTINGS_MODULE: tests.settings_postgres_pooled
+      PYTHONFAULTHANDLER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --group dev -e . "Django~=6.1.0"
+      # ==, not >=. That is the whole point of this job.
+      - run: python -m pip install "psycopg-pool==3.3.0"
+      # Fail loudly if resolution drifted off the pin.
+      - run: |
+          python - <<'PY'
+          import importlib.metadata as m
+          got = m.version("psycopg-pool")
+          assert got == "3.3.0", f"expected the floor 3.3.0, got {got}"
+          print("psycopg-pool", got)
+          PY
+      - name: Suite on pooled PostgreSQL at the floor
+        run: timeout -s ABRT 1500 python -m pytest -q
+
   # Wagtail queues a search-index update through django_tasks.task on every
   # save of an indexed model. The suite never drives a real Wagtail project, so
   # "publish a page, the worker indexes it" was a claim rather than a fact.
@@ -444,7 +494,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [test-sqlite, test-postgres, test-postgres-naive, test-postgres-pooled, test-backport-floor, wagtail-smoke, test-mysql, lint, types, docs, packaging, zizmor]
+    needs: [test-sqlite, test-postgres, test-postgres-naive, test-postgres-pooled, test-backport-floor, test-pool-floor, wagtail-smoke, test-mysql, lint, types, docs, packaging, zizmor]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

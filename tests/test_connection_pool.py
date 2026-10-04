@@ -384,7 +384,7 @@ def test_renewal_keeps_the_leases_while_the_task_threads_hold_the_pool(tmp_path)
     assert "lost its lease" not in worker_log
     assert "couldn't get a connection" not in worker_log
     # max_size 3 is concurrency + 1: enough, so nothing to warn about.
-    assert "connection pool for database" not in worker_log
+    assert "has a connection limit of" not in worker_log
     assert proc.returncode == 0, worker_log
 
 
@@ -455,7 +455,7 @@ def test_an_undersized_pool_can_time_out_a_task_but_not_the_lease_renewal(tmp_pa
     assert "lost its lease" not in worker_log
     # The second task's thread waited for the pool and timed out.
     assert "couldn't get a connection" in worker_log
-    assert worker_log.count("connection pool for database") == 1, worker_log
+    assert worker_log.count("has a connection limit of") == 1, worker_log
     assert "has a connection limit of 2." in worker_log
 
 
@@ -589,13 +589,13 @@ def test_a_worker_whose_pool_is_too_small_says_so_once_at_startup(tmp_path):
     log = tmp_path / "worker.log"
     proc = start_worker(project, log, "--concurrency", "4")
     try:
-        assert wait_for(
-            lambda: "connection pool for database" in text(log), timeout=60
-        ), text(log)
+        assert wait_for(lambda: "has a connection limit of" in text(log), timeout=60), (
+            text(log)
+        )
     finally:
         stop(proc)
     worker_log = text(log)
-    assert worker_log.count("connection pool for database") == 1, worker_log
+    assert worker_log.count("has a connection limit of") == 1, worker_log
     assert "has a connection limit of 4." in worker_log
     assert "at least 5" in worker_log
     assert proc.returncode == 0, worker_log
@@ -1244,8 +1244,139 @@ class TestTheStartupWarning:
         # A worst case, and said to be one: a task may declare a timeout.
         assert "a task can declare its own, so this assumes the worst case" in (message)
         assert message.endswith(
-            "Budget 2 additional connections per worker process."
+            "Budget 2 additional connections per worker process in normal operation, "
+            "plus 1 during a stop-time recovery look."
         ), message
+
+
+@pytest.fixture
+def psycopg_pool_before_3_3(monkeypatch):
+    """
+    psycopg_pool as it was before 3.3, with no ConnectionPool.drain(), and
+    a process in which no alias has been told so yet.
+    """
+    monkeypatch.delattr("psycopg_pool.ConnectionPool.drain", raising=False)
+    monkeypatch.setattr(worker_module, "_cannot_drain", set())
+
+
+@needs_psycopg
+@with_psycopg_pool
+class TestTheStartupWarningForAPoolThatCannotDrain:
+    """
+    A sweep discards a pool's idle connections with drain(), which
+    psycopg_pool has from 3.3. Django's pool runs on 3.2 as well, where the
+    worker sweeps as 1.7.0 did, by testing them, and says at startup that
+    it does: the recovery after a restart is kept, and the wait on a
+    connection that never answers with it. It does not refuse to start.
+    """
+
+    @pytest.mark.parametrize(
+        ("engine", "pool", "warns"),
+        [
+            (POSTGRESQL, True, True),
+            (POSTGRESQL, {"max_size": 6}, True),
+            (POSTGRESQL, None, False),
+            (POSTGRESQL, {}, False),
+            (POSTGRESQL, "not-a-mapping", False),
+            (SQLITE, True, False),
+        ],
+        ids=[
+            "pool-true",
+            "pool-mapping",
+            "pool-absent",
+            "pool-empty",
+            "pool-invalid",
+            "not-postgresql",
+        ],
+    )
+    @pytest.mark.usefixtures("psycopg_pool_before_3_3")
+    def test_it_warns_for_a_pooled_postgresql_alias_alone(
+        self, add_alias, caplog, engine, pool, warns
+    ):
+        add_alias(ENGINE=engine, OPTIONS={} if pool is None else {"pool": pool})
+        worker = Worker(db_alias=ALIAS)
+        with caplog.at_level(logging.WARNING, logger="django_ox"):
+            worker._warn_if_the_connection_pool_cannot_drain()
+        assert bool(events(caplog, "connection_pool_cannot_drain")) is warns
+
+    def test_a_psycopg_pool_that_has_drain_is_passed_over_quietly(
+        self, add_alias, caplog, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "psycopg_pool.ConnectionPool.drain", lambda self: None, raising=False
+        )
+        add_alias(ENGINE=POSTGRESQL, OPTIONS={"pool": True})
+        worker = Worker(db_alias=ALIAS)
+        with caplog.at_level(logging.WARNING, logger="django_ox"):
+            worker._warn_if_the_connection_pool_cannot_drain()
+        assert not events(caplog, "connection_pool_cannot_drain")
+
+    @pytest.mark.usefixtures("psycopg_pool_before_3_3")
+    def test_it_names_the_database_the_version_and_what_to_do(self, add_alias, caplog):
+        add_alias(ENGINE=POSTGRESQL, OPTIONS={"pool": True})
+        worker = Worker(db_alias=ALIAS)
+        with caplog.at_level(logging.WARNING, logger="django_ox"):
+            worker._warn_if_the_connection_pool_cannot_drain()
+        (record,) = events(caplog, "connection_pool_cannot_drain")
+        assert record.levelno == logging.WARNING
+        assert record.worker_id == worker.worker_id
+        assert record.database == ALIAS
+        message = record.getMessage()
+        assert message.startswith(f"Worker {worker.worker_id}: ")
+        assert f"for database {ALIAS!r}" in message
+        installed = importlib.metadata.version("psycopg-pool")
+        assert f"psycopg_pool {installed} has no ConnectionPool.drain()" in message
+        # Both halves of what an operator has to know: nothing is lost
+        # against 1.7.0, and nothing is fixed until the upgrade.
+        assert "as in django-ox 1.7.0" in message
+        assert "Recovery after a restart is kept." in message
+        assert "a stop is not read until it does" in message
+        assert message.endswith("Upgrade psycopg_pool to 3.3.3 or newer."), message
+
+    @pytest.mark.usefixtures("psycopg_pool_before_3_3")
+    def test_the_sweeps_after_it_test_the_pool_and_do_not_say_it_again(
+        self, add_alias, caplog, monkeypatch
+    ):
+        calls = []
+
+        class OlderPool:
+            def check(self):
+                calls.append("check")
+
+        add_alias(ENGINE=POSTGRESQL, OPTIONS={"pool": True})
+        worker = Worker(db_alias=ALIAS)
+        monkeypatch.setattr(worker_module, "_connection_pool", lambda conn: OlderPool())
+        with caplog.at_level(logging.WARNING, logger="django_ox"):
+            worker._warn_if_the_connection_pool_cannot_drain()
+            worker_module._sweep_pool(connections[ALIAS])
+            worker_module._sweep_pool(connections[ALIAS], lost=False)
+        assert len(events(caplog, "connection_pool_cannot_drain")) == 1
+        assert calls == ["check", "check"]
+
+    @pytest.mark.usefixtures("psycopg_pool_before_3_3")
+    def test_run_says_it_once_after_it_has_started(
+        self, add_alias, caplog, monkeypatch
+    ):
+        """
+        run() makes the check as it starts, after worker_started, like the
+        check of the pool's size, and before it opens a connection: the
+        worker here is asked to stop first and never reaches the database.
+        """
+        add_alias(ENGINE=POSTGRESQL, OPTIONS={"pool": {"max_size": 2}})
+        worker = Worker(concurrency=1, db_alias=ALIAS)
+        worker.request_stop()
+        with caplog.at_level(logging.INFO, logger="django_ox"):
+            worker.run()
+        said = [
+            record.event
+            for record in caplog.records
+            if getattr(record, "worker_id", None) == worker.worker_id
+        ]
+        assert said == [
+            "worker_started",
+            "connection_pool_cannot_drain",
+            "worker_stopped",
+        ]
 
 
 def deadline_alias(add_alias, *, budget_options=None, **overrides):
@@ -1305,6 +1436,29 @@ def resolver(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
     yield made
     made.release.set()
+
+
+class Reaching:
+    """
+    psycopg's connection generator as _connect_by drives it, noting in
+    `reached` the first step it takes: libpq has opened its socket by then
+    and begun to connect, so the port it connects to will hold it.
+    """
+
+    def __init__(self, gen, reached):
+        self._gen = gen
+        self._reached = reached
+
+    def __next__(self):
+        step = next(self._gen)
+        self._reached.append(step)
+        return step
+
+    def send(self, value):
+        return self._gen.send(value)
+
+    def close(self):
+        self._gen.close()
 
 
 @pytest.fixture
@@ -1383,16 +1537,31 @@ class TestOpeningItsOwnConnectionByADeadline:
 
     @needs_psycopg
     def test_what_it_gave_up_on_is_closed_and_no_thread_is_left(
-        self, add_alias, blackhole
+        self, add_alias, blackhole, monkeypatch
     ):
         deadline_alias(add_alias, HOST="127.0.0.1", PORT=str(blackhole.port))
+        # An attempt that has spent its tenth of a second before it opens a
+        # socket gives up without one, and the port never sees it. So the
+        # attempts that reach the port are counted where they do, at the
+        # first step of psycopg's connection, not taken from how many were
+        # made.
+        reached = []
+        connect_by = worker_module._connect_by
+
+        def counting(deadline, gen):
+            return connect_by(deadline, Reaching(gen, reached))
+
+        monkeypatch.setattr(worker_module, "_connect_by", counting)
         threads = threading.active_count()
         with _outside_the_pool(ALIAS, 0.1) as own:
             for _ in range(10):
                 with pytest.raises(OperationalError):
                     own.open(time.monotonic() + 0.1)
-        assert len(blackhole.held) == 10
-        assert wait_for(lambda: blackhole.closed_by_the_client() == 10)
+        assert reached, "no attempt got as far as the port"
+        # The port accepts on a thread of its own, which can still be taking
+        # the last connections in when the last attempt has given up.
+        assert wait_for(lambda: len(blackhole.held) == len(reached))
+        assert wait_for(lambda: blackhole.closed_by_the_client() == len(reached))
         assert threading.active_count() == threads
 
     @needs_psycopg

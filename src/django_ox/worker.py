@@ -46,6 +46,7 @@ from django.db import (
     router,
     transaction,
 )
+from django.db.backends.signals import connection_created
 from django.db.models import (
     BooleanField,
     DateTimeField,
@@ -915,8 +916,7 @@ def _connection_pool(conn: Any) -> Any:
     The open psycopg_pool pool Django checks `conn`'s alias out of, or None
     when the alias is not pooled or its pool is not open. A pool that
     nothing has connected through yet, or that was closed, holds no
-    connection to test, and checking it would ask a pool with no workers
-    to grow.
+    connection to discard.
     """
     if conn.vendor != "postgresql" or _pool_options(conn.alias) is None:
         return None
@@ -926,11 +926,134 @@ def _connection_pool(conn: Any) -> Any:
     return pool
 
 
-def _sweep_pool(conn: Any) -> None:
+def _lost(raw: Any) -> bool:
     """
-    Have Django's PostgreSQL pool for `conn`'s alias test every connection
-    it holds idle, now, and discard each that fails; nothing when the alias
-    is not pooled.
+    Whether the driver itself reports its connection `raw` lost: psycopg 3's
+    `broken`, a connection that went bad without being closed. None, and a
+    connection of any driver that does not say, is not lost.
+
+    Read from the driver's own state, with no round trip, so the answer
+    never waits on a server that has stopped answering, as Django's
+    is_usable() can. libpq marks a connection bad when a read or a write on
+    it fails: the server ended the session, or the socket was reset or
+    closed under it. A statement the server refused, a missing table, a
+    lock timeout, a deadlock, leaves it good. A connection that could not
+    be opened is no connection, so it is not a lost one either.
+
+    Django's errors_occurred cannot answer this. A refused statement sets
+    it as a lost connection does; and when the connection goes inside an
+    atomic block, the block's exit closes it and opens another, on which
+    the flag is clear again by the time anyone can ask.
+    """
+    return raw is not None and bool(getattr(raw, "broken", False))
+
+
+# The _Seen the calling thread is keeping connections in, as `seen`, or
+# nothing while it watches none. Read by _note_opened on every connect.
+_seeing = threading.local()
+
+
+class _Seen:
+    """
+    The driver connections one thread holds or opens for `alias` while it
+    watches, each kept from the moment it is opened, so that lost() can ask
+    the driver about a connection Django no longer holds.
+
+    The connection in hand when the question is asked is often not the one
+    that was lost. One that goes inside an atomic block is closed by the
+    block's exit, which opens another before the error reaches anyone; an
+    override of a write may close that one as well,
+    to say none is left. A reference taken before the block is no help when
+    the block's own entry opened the connection. Django says when it opens
+    one, connection_created, a pooled checkout included, and that is where
+    each is kept: nothing is opened, checked out or asked for the sake of
+    keeping it.
+
+    No connection seen is no connection lost. A checkout that timed out
+    and a connect the server refused had none to lose, whatever
+    errors_occurred says of them.
+
+    watch() starts on the calling thread, from the connection it holds, and
+    unwatch() puts back whatever watch that interrupted; begin() starts
+    again from the connection held now. Another thread's connections are
+    never seen.
+    """
+
+    def __init__(self, alias: str) -> None:
+        self.alias = alias
+        self.raws: list[Any] = []
+        self._before: _Seen | None = None
+
+    def watch(self) -> None:
+        self._before = getattr(_seeing, "seen", None)
+        _seeing.seen = self
+        self.begin()
+
+    def unwatch(self) -> None:
+        _seeing.seen = self._before
+        self._before = None
+
+    def begin(self) -> None:
+        raw = connections[self.alias].connection
+        self.raws = [] if raw is None else [raw]
+
+    def lost(self) -> bool:
+        """
+        Whether the driver reports lost, _lost, a connection kept here or
+        the one the thread holds now. Reads the driver's state alone: no
+        statement, no is_usable().
+        """
+        held = connections[self.alias].connection
+        return any(_lost(raw) for raw in (*self.raws, held))
+
+
+def _note_opened(sender: Any, connection: Any, **kwargs: Any) -> None:
+    """
+    Django's connection_created, sent on the thread that opened the
+    connection: keep its driver connection when that thread is watching the
+    alias, _Seen. Every connection the process opens comes through here, so
+    it does nothing else, and nothing in it can raise.
+    """
+    seen = getattr(_seeing, "seen", None)
+    if seen is not None and connection.alias == seen.alias:
+        seen.raws.append(connection.connection)
+
+
+connection_created.connect(_note_opened, dispatch_uid="django_ox.worker.seen")
+
+
+# What is said of a pool with no drain(), _sweep_pool: by the worker when it
+# starts, and by the first sweep that finds such a pool.
+POOL_CANNOT_DRAIN = (
+    "Django's PostgreSQL connection pool for database '%s' is still swept by testing "
+    "its idle connections, as in django-ox 1.7.0: psycopg_pool %s has no "
+    "ConnectionPool.drain(), which psycopg_pool 3.3.0 added. Recovery after a restart "
+    "is kept. The test of a connection that stays open without "
+    "answering does not return, and a stop is not read until it does. Upgrade "
+    "psycopg_pool to 3.3.3 or newer."
+)
+
+# The aliases whose pool a sweep has found without drain(), so that it is
+# said once per process and not once per sweep. No lock: two threads that
+# both find it first say it twice, and nothing else is lost.
+_cannot_drain: set[str] = set()
+
+
+def _psycopg_pool_version() -> str:
+    """The psycopg_pool installed, for a log message; "unknown" without one."""
+    try:
+        import psycopg_pool
+    except ImportError:
+        return "unknown"
+    return str(getattr(psycopg_pool, "__version__", "unknown"))
+
+
+def _sweep_pool(conn: Any, *, lost: bool = True) -> None:
+    """
+    Have Django's PostgreSQL pool for `conn`'s alias discard every
+    connection it holds idle, now, and open another in place of each, when
+    a connection of the alias was `lost`; nothing when the alias is not
+    pooled.
 
     A connection lost to a restart or a failover is rarely the only one:
     the server ended every session, and the pool's idle connections are as
@@ -940,15 +1063,30 @@ def _sweep_pool(conn: Any) -> None:
     unchecked, and it fails at its first statement too; with them, the
     checkout tests it, discards it and tries the next, waiting longer each
     time, and enough dead ones use up the checkout's timeout. psycopg_pool's
-    check() takes every idle connection out, tests each once, puts the
-    live ones back and asks for a replacement of each dead one.
+    drain() takes every idle connection out, closes each without asking
+    whether it answers, and asks for a replacement of each; a connection
+    that is checked out at that moment is closed and replaced when it is
+    given back.
 
-    It costs one round trip per idle connection, and a dead one can take
-    longer to fail than a live one takes to answer, so it runs only on a
-    path that has already failed, never on an ordinary one. It does not
-    make the next checkout fresh: a replacement may still be connecting,
-    and the checkout waits for it; the database may still be down; and a
-    connection the sweep found alive can drop the moment after.
+    Nothing is tested, because a test is a statement, and a statement on a
+    connection that is still open and is never answered, as after a
+    failover that reset nothing, waits for as long as the connection stays
+    silent. The price is that an idle connection that would have answered
+    is discarded with the rest and opened again. So the pool is drained
+    only when `lost`: the caller has it from the driver, _lost, that a
+    connection of this alias went. An error that left its connection
+    answering is not that, and neither is a connection that could not be
+    had. It does not make the next checkout fresh: a replacement may still
+    be connecting, and the checkout waits for it; and the database may
+    still be down.
+
+    drain() came with psycopg_pool 3.3. A pool without it is swept as 1.7.0
+    swept every pool, on every call and whatever `lost` says: check() takes
+    every idle connection out, tests each once, puts the live ones back and
+    asks for a replacement of each dead one. That keeps the recovery after
+    a restart on such a pool, and with it the wait on a connection that
+    never answers. It is said once per process, at WARNING, and by the
+    worker when it starts.
 
     Best-effort: it runs while the caller handles an error, and whatever it
     raises is dropped, so it can neither replace that error nor stop the
@@ -956,23 +1094,48 @@ def _sweep_pool(conn: Any) -> None:
     """
     with suppress(Exception):
         pool = _connection_pool(conn)
-        if pool is not None:
+        if pool is None:
+            return
+        drain = getattr(pool, "drain", None)
+        if drain is None:
+            if conn.alias not in _cannot_drain:
+                _cannot_drain.add(conn.alias)
+                logger.warning(
+                    POOL_CANNOT_DRAIN,
+                    conn.alias,
+                    _psycopg_pool_version(),
+                    extra={
+                        "event": "connection_pool_cannot_drain",
+                        "database": conn.alias,
+                    },
+                )
             pool.check()
+        elif lost:
+            drain()
 
 
-def _close_lost_connection(conn: Any) -> None:
+def _close_lost_connection(conn: Any, *, lost: bool | None = None) -> None:
     """
-    Close `conn`, which a lost connection to its database has left unusable,
-    then sweep its pool, _sweep_pool, when the alias is pooled.
+    Close `conn`, which its caller found unusable, then sweep its pool,
+    _sweep_pool, when the alias is pooled, saying whether a connection was
+    lost: `lost` where the caller knows, and otherwise what the driver says
+    of the connection `conn` holds, asked before the close forgets it.
+
+    Unusable is not lost. A connection that fails its probe may only be in
+    a state that refuses the next statement, and a write that could not get
+    a connection lost none. Only a connection the driver reports lost says
+    that the pool's idle ones may have gone with it.
 
     Only for a connection outside any atomic block, which each caller
     checks first: inside one, the transaction belongs to whoever opened the
     block, not to the worker. close() drops its reference to the driver
     connection even when closing it raises, and on a dead one it may.
     """
+    if lost is None:
+        lost = _lost(conn.connection)
     with suppress(Error):
         conn.close()
-    _sweep_pool(conn)
+    _sweep_pool(conn, lost=lost)
 
 
 def _looks_for_claims(conn: Any) -> bool:
@@ -2437,9 +2600,9 @@ class Worker:
         try:
             self._recover_claims_by(time.monotonic() + OWN_CONNECTION_DEADLINE)
         except Exception as exc:
-            # The thread's connection is left as it is: there is no next
-            # statement, and a pool sweep could wait on the very server the
-            # deadline gave up on.
+            # The thread's connection is left as it is, and Django's pool
+            # with it: there is no next statement for a closed connection
+            # or a swept pool to serve.
             logger.warning(
                 "Worker %s could not look for a claim of its own that raised "
                 "and may have committed (%s: %s). It is stopping, so a row that "
@@ -2524,8 +2687,8 @@ class Worker:
         Only on the recovery path, where the probe's round trip is paid once
         per look. A look _recover_claims_by makes on a connection of its own
         finds it not yet open and pays nothing. Django's pool is not swept
-        here: run()'s failed pass sweeps it, and nothing on a caller's
-        thread does.
+        here: run()'s failed pass sweeps it, when the pass lost its
+        connection, and nothing on a caller's thread does.
         """
         if conn.connection is None:
             return
@@ -3204,11 +3367,23 @@ class Worker:
         Django's PostgreSQL pool, the pool's idle connections are swept,
         _close_lost_connection. After a restart they are all as dead as
         this one, and the second try would otherwise check one of them out
-        and fail the same way. The sweep does not promise the second try a
-        fresh connection: a replacement may still be connecting, the
-        database may still be down, and a connection the sweep found alive
-        can drop the moment after. The second try then fails as the first
+        and fail the same way. The sweep discards them untested, the ones
+        that still answered among them, and does not promise the second try
+        a fresh connection: a replacement may still be connecting, and the
+        database may still be down. The second try then fails as the first
         did. There is no third, and no wait before the second.
+
+        The second try is earned by a connection that is gone, and the
+        sweep by one that was lost, which is narrower. A write whose
+        checkout timed out, or whose connect was refused, finds none open
+        and held none: the pool it could not get a connection from is not
+        one to discard, and a pool that is only too small would be
+        discarded at every such write. So every connection the first try
+        holds or opens is kept while it runs, _Seen, and the pool is swept
+        only if the driver reports one of them lost. That also holds for an
+        override that writes in a transaction: Django replaces a connection
+        lost inside one, and the override may close the replacement to say none
+        is left, and the one that was lost is still among those kept.
 
         A write can commit and still raise, when the connection goes
         between the commit and its reply. Writing it again records nothing
@@ -3236,6 +3411,8 @@ class Worker:
         ends here. Whatever the second try raises that is not a database
         error is raised.
         """
+        seen = _Seen(self._db_alias)
+        seen.watch()
         try:
             return self._write_outcome(
                 db_task, status=status, duration_ms=duration_ms, **fields
@@ -3244,13 +3421,16 @@ class Worker:
             if not self._outcome_connection_lost():
                 raise
             lost = f"{type(exc).__qualname__}: {_reason(exc)}"
+        finally:
+            seen.unwatch()
         conn = connections[self._db_alias]
         # Outside any atomic block, so the close forgets the dead connection
         # and the next statement checks out or opens another. With Django's
         # pool that other one would be one the pool held idle, which a
-        # restart left as dead as this one, so the pool is swept first; even
-        # so, the next one is not certain to be alive.
-        _close_lost_connection(conn)
+        # restart left as dead as this one, so the pool is swept first, when
+        # the first try lost a connection and did not merely fail to get
+        # one; even so, the next one is not certain to be alive.
+        _close_lost_connection(conn, lost=seen.lost())
         try:
             written = self._outcome_already_written(db_task, status, fields)
             landed = written or self._write_outcome(
@@ -3327,6 +3507,10 @@ class Worker:
         autocommit is theirs for the same reason. Otherwise it is gone when
         there is none open, because the connect itself failed or the driver
         dropped it, or when is_usable() fails: one probe, only here.
+
+        Gone is what earns the write its second try. It does not say that a
+        connection was lost, which is what sweeps the pool: none open is
+        also what a checkout that timed out leaves.
         """
         conn = connections[self._db_alias]
         if conn.in_atomic_block:
@@ -3917,11 +4101,12 @@ class Worker:
         Closing a pooled connection hands it back for Django's pool to
         discard, and the write then checks out one the pool held idle.
         After a restart those are as dead as the one closed, so each close
-        here also sweeps its alias's pool, _close_lost_connection. That
-        does not make the write's connection certain to be alive: the
-        database may still be down, and a connection can drop after the
-        sweep found it alive. A connection that is kept, or that has no
-        pool, costs no sweep.
+        here also sweeps its alias's pool, _close_lost_connection, which
+        discards them without testing any when the driver reports the
+        closed one lost. That does not make the write's connection certain
+        to be alive: a replacement may still be connecting, and the
+        database may still be down. A connection that is kept, or that has
+        no pool, costs no sweep.
 
         One inside an atomic block is left alone: it belongs to whoever
         opened the block, and closing it would end their transaction; an
@@ -5653,7 +5838,8 @@ class Worker:
             "or prove that the server has enough slots. Budget all processes, "
             "aliases, private connections and other clients. Account for reserved "
             "slots and role limits. Pool fallback adds resilience, not capacity. "
-            "%s per worker process.",
+            "%s per worker process in normal operation, plus 1 during a stop-time "
+            "recovery look.",
             self.worker_id,
             self._db_alias,
             max_size,
@@ -5671,6 +5857,46 @@ class Worker:
                 "unpooled_connections": unpooled,
             },
         )
+
+    def _warn_if_the_connection_pool_cannot_drain(self) -> None:
+        """
+        Say so at startup when Django's PostgreSQL connection pool for this
+        worker's database has no drain(), which psycopg_pool has from 3.3.
+
+        Such a pool is swept as 1.7.0 swept it, by testing each idle
+        connection, _sweep_pool: the recovery after a restart is kept, and
+        so is the wait on a connection that stays open and is never
+        answered, which holds the loop and any stop with it. A warning
+        rather than a refusal, as for a pool that is too small: such a
+        worker ran before and runs as it did. Read from the installed
+        psycopg_pool, never from the pool, so nothing is opened; where
+        psycopg_pool is missing, Django says so itself when it first
+        connects.
+        """
+        if (
+            _pool_options(self._db_alias) is None
+            or connections[self._db_alias].vendor != "postgresql"
+        ):
+            return
+        try:
+            from psycopg_pool import ConnectionPool
+        except ImportError:
+            return
+        if hasattr(ConnectionPool, "drain"):
+            return
+        logger.warning(
+            "Worker %s: " + POOL_CANNOT_DRAIN,
+            self.worker_id,
+            self._db_alias,
+            _psycopg_pool_version(),
+            extra={
+                "event": "connection_pool_cannot_drain",
+                "worker_id": self.worker_id,
+                "database": self._db_alias,
+            },
+        )
+        # Said, so the first sweep that finds the pool does not say it again.
+        _cannot_drain.add(self._db_alias)
 
     def run_once(self) -> bool:
         """
@@ -5834,6 +6060,7 @@ class Worker:
             },
         )
         self._warn_if_the_connection_pool_is_short()
+        self._warn_if_the_connection_pool_cannot_drain()
         in_flight: set[Future[None]] = set()
         last_reap = 0.0
         last_dispatch = 0.0
@@ -5870,6 +6097,10 @@ class Worker:
             daemon=True,
         )
         renewer.start()
+        # The connections the loop holds or opens for the worker's database,
+        # pass by pass, for the handler of a pass that fails. _Seen.
+        seen = _Seen(self._db_alias)
+        seen.watch()
         try:
             while not self._stop.is_set():
                 # First, before any statement, and on every pass including
@@ -5891,6 +6122,11 @@ class Worker:
                     )
                     self.request_stop()
                     break
+                # Every connection this pass holds or opens is kept, from
+                # the one it begins on, so that a pass which fails can ask
+                # the driver about one that Django has since replaced or a
+                # cleanup part way through has closed. _Seen.
+                seen.begin()
                 try:
                     if time.monotonic() - last_reap >= self.reap_interval:
                         self.reap()
@@ -5982,6 +6218,13 @@ class Worker:
                     # by construction: nothing here holds state that a missed
                     # pass loses. Dropping the connection is what makes the
                     # next pass reconnect rather than reuse a broken one.
+                    #
+                    # Whether the pass lost a connection is asked first, of
+                    # the driver and without a statement, of every connection
+                    # the pass held or opened: the drop below hands them
+                    # back, and another thread may have one by the time
+                    # anything else could ask. _Seen.
+                    lost = seen.lost()
                     logger.warning(
                         "Worker %s could not reach the database this pass; "
                         "retrying in %.1fs",
@@ -6012,6 +6255,15 @@ class Worker:
                     # one. One sweep on the failed pass discards them all,
                     # though the next pass can still fail: the database may
                     # still be down, or a connection drop after the sweep.
+                    # Only a pass that lost a connection has the pool
+                    # discard them. One that failed with its connection
+                    # still answering, on a missing table, a lock timeout
+                    # or a deadlock, or that could not get a connection,
+                    # says nothing about the pool's idle ones, and the
+                    # sweep discards them untested: every such pass would
+                    # open the pool's connections again. A pool that cannot
+                    # discard, psycopg_pool before 3.3, is tested on every
+                    # failed pass as it always was. _sweep_pool.
                     # It replays nothing: reap, dispatch and claim wait for
                     # the next pass as before. A claim that raised may still
                     # have committed. It is not claimed again: the next pass
@@ -6019,7 +6271,7 @@ class Worker:
                     # this worker's id that no claim returned, and releases
                     # it; past LOCK_TIMEOUT its row waits out its lease as it
                     # always did. _recover_claims.
-                    _sweep_pool(connections[self._db_alias])
+                    _sweep_pool(connections[self._db_alias], lost=lost)
                     self._stop.wait(self.poll_interval)
                     continue
                 if self._limit_reached():
@@ -6053,6 +6305,7 @@ class Worker:
                     else:
                         self._stop.wait(self.poll_interval)
         finally:
+            seen.unwatch()
             # A claim that raised on the last pass is looked for once more
             # before the worker goes, with a failure logged and not raised,
             # on PostgreSQL given up after OWN_CONNECTION_DEADLINE and on

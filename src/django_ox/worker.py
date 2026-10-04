@@ -1580,7 +1580,8 @@ class Worker:
       over whoever holds it now. It is fenced by arithmetic, not by timing,
       so no pause is long enough to defeat it.
     - While a worker is executing, it attempts to refresh locked_at every
-      LOCK_TIMEOUT / 3 seconds, one statement covering every in-flight row.
+      LOCK_TIMEOUT / 3 seconds, one statement covering every in-flight row
+      but those claimed inside a caller's atomic block, _renewable.
       The lease holds only while that statement reaches the database on
       time; a running worker can still lose its lease.
 
@@ -1782,6 +1783,34 @@ class Worker:
         # is gone stops being renewed and the reaper can still recover it.
         self._in_flight: set[tuple[Any, int]] = set()
         self._in_flight_lock = Lock()
+        # The entries of _in_flight whose claim run_once() made inside its
+        # caller's atomic block, under the same lock. Such a claim is the
+        # caller's uncommitted write. No other connection can see its lease,
+        # so renewing it protects nothing, and its row is locked by the
+        # caller's transaction, so on MySQL a renewal that names it waits for
+        # that transaction and renews no other row of this Worker's until it
+        # ends. Renewal leaves these rows out, _renewable, and nothing else
+        # reads this set: such a row is in _in_flight like any other, so a
+        # look for a claim that raised still knows it, and it moves through
+        # _handed_off and _unsettled as every claim does. execute() adds an
+        # entry in the step that puts it in _in_flight, and each step that
+        # takes it out of there removes it, so this never names an
+        # execution that is not in flight.
+        self._in_callers_atomic_block: set[tuple[Any, int]] = set()
+        # How execute() learns that its claim was made inside the caller's
+        # atomic block, with no argument that an override or a wrapper of
+        # execute() written to its 1.7.0 signature would refuse. Under the
+        # same lock, one entry per run_once() that claimed inside its
+        # caller's atomic block and is calling execute() for that claim:
+        # (thread ident, pk, lease_epoch), under a key of the call's own.
+        # run_once() adds it just before the call. The base execute() takes
+        # the entry of its own thread and pair in the step that puts the
+        # pair in flight and records it above, and run_once() drops its own
+        # entry when the call returns or raises, so an override that raises,
+        # or returns without calling the base execute(), leaves nothing
+        # behind. A call drops only its own entry and a nested call adds one
+        # of its own, so no call overwrites, takes or drops another's.
+        self._claimed_in_callers_atomic_block: dict[object, tuple[int, Any, int]] = {}
         # Two more sets of (pk, lease_epoch), under the same lock, which
         # together with _in_flight name every claim of this worker that
         # returned and may still be RUNNING under its id. _recover_claims
@@ -1911,11 +1940,13 @@ class Worker:
         - A new worker id, with the same slot suffix. Every row the child
           claims carries it, so neither process's look for a claim that
           raised can take the other's row for its own; _recover_claims.
-        - Bookkeeping empty: _in_flight, _handed_off and _unsettled name
-          the parent's executions, and so do the timeout watches and the
-          maps of the parent's pool threads, none of which exist here. No
-          look pending, no claim in flight, and no count of claims: the
-          parent made those.
+        - Bookkeeping empty: _in_flight, _in_callers_atomic_block,
+          _handed_off and _unsettled name the parent's executions, and so
+          do the timeout watches and the maps of the parent's pool
+          threads, none of which exist here. So does
+          _claimed_in_callers_atomic_block, of the parent's calls. No look
+          pending, no claim in flight, and no count of claims: the parent
+          made those.
         - Every lock new, and every Condition and Event built on one. A
           lock another thread held when the process forked stays held in
           the child forever, with no thread left to release it. The stop
@@ -1944,6 +1975,8 @@ class Worker:
         self._dispatch_report = _DispatchReport(self.worker_id, self._db_alias)
         self._in_flight = set()
         self._in_flight_lock = Lock()
+        self._in_callers_atomic_block = set()
+        self._claimed_in_callers_atomic_block = {}
         self._handed_off = set()
         self._unsettled = set()
         self._fence_lock = Lock()
@@ -2812,6 +2845,49 @@ class Worker:
 
     # -- lease renewal -----------------------------------------------------
 
+    def _renewable(self) -> set[Any]:
+        """
+        The rows a renewal names: every row in flight, less those whose
+        latest execution in flight is inside its caller's atomic block,
+        _in_callers_atomic_block.
+
+        Renewal runs on a connection of its own, and one statement covers
+        every row it names. A claim run_once() made inside its caller's
+        atomic block is uncommitted until that block ends. The task runs
+        inside the call, and Django refuses a commit inside the block, so
+        the claim stays uncommitted for as long as its execution is in
+        flight. Another connection sees the row as it was before the claim,
+        with no lease to renew or to expire, and cannot take it: the
+        caller's transaction holds its lock. In 1.7.0, a renewal that named
+        the row matched nothing on PostgreSQL and went on. On MySQL it
+        waited for the caller's transaction, 50 seconds an attempt by
+        default, and renewed none of the other rows it named either. Their
+        leases expired under running tasks, a reaper requeued them, and
+        their bodies ran again. So renewal leaves the row out, and every other
+        row of this Worker's is renewed as if the call were not there.
+
+        The latest execution of a row decides for the row. Every claim
+        moves the epoch on, so of two executions of one row in flight only
+        the one with the higher epoch can still hold it. While that one is
+        inside a caller's atomic block, the row is locked by the caller's
+        transaction whichever execution it is named for, and it is left
+        out. An earlier one says nothing about a later claim of the row,
+        which is renewed like any other.
+
+        SQLite is not helped. Its one write lock is the caller's for as
+        long as the caller's transaction is open, and a renewal of any row
+        waits for it whatever it names.
+        """
+        with self._in_flight_lock:
+            latest: dict[Any, int] = {}
+            for pk, epoch in self._in_flight:
+                latest[pk] = max(epoch, latest.get(pk, epoch))
+            return {
+                pk
+                for pk, epoch in latest.items()
+                if (pk, epoch) not in self._in_callers_atomic_block
+            }
+
     def renew_leases(self) -> int:
         """
         Refresh the lock timestamp on this worker's in-flight rows.
@@ -2831,9 +2907,12 @@ class Worker:
         cannot reach the database in time. Sizing LOCK_TIMEOUT alone does
         not prevent a reclaim. Recovering a wedged task whose lease keeps
         renewing is an operator's job, not the reaper's.
+
+        A row run_once() claimed inside its caller's atomic block is not
+        among them, _renewable: its claim is uncommitted, and the caller's
+        transaction is what keeps it from being reclaimed.
         """
-        with self._in_flight_lock:
-            pks = {pk for pk, _ in self._in_flight}
+        pks = self._renewable()
         if not pks:
             return 0
         return (
@@ -2921,9 +3000,10 @@ class Worker:
         `safe_until`: the earliest a lease this worker holds can expire, on
         time.monotonic(). A lease renewed or taken no earlier than the last
         renewal that succeeded, or than the last tick with nothing to
-        renew, lasts lock_timeout from then.
+        renew, lasts lock_timeout from then. A lease renewal leaves out,
+        _renewable, is not one of them: no other connection can see it.
 
-        With nothing in flight, renew_leases() is called without opening
+        With nothing to renew, renew_leases() is called without opening
         the thread's own connection first, which for the stock method opens
         nothing. Otherwise the renewal runs on the thread's own connection
         when it is open or can be opened by own.budget from the start of the
@@ -2948,9 +3028,7 @@ class Worker:
         connection is dropped.
         """
         started = time.monotonic()
-        with self._in_flight_lock:
-            idle = not self._in_flight
-        if idle:
+        if not self._renewable():
             # Nothing to renew, so nothing is opened first. renew_leases() is
             # still called once, as it is without a pool: the stock one
             # returns without a query, and a subclass that overrides it is
@@ -3302,10 +3380,29 @@ class Worker:
         and leaves it for _unsettled unless the attempt's outcome was
         recorded, so at no instant is a claim that returned in none of the
         three; _recover_claims depends on that.
+
+        A claim run_once() made inside its caller's atomic block on the
+        worker's database, as it decides before it claims, comes with an
+        entry of run_once()'s for this thread and pair,
+        _claimed_in_callers_atomic_block. The pair is then in flight like any
+        other, and no renewal names its row; _renewable says why. The entry
+        is taken, and the pair recorded in _in_callers_atomic_block, in the
+        step that puts the pair in flight, and the record is taken back in
+        the step that takes it out, so no renewal ever sees the pair in
+        flight and not left out. An override or a wrapper of this method
+        with its signature keeps that by calling it; one that never calls it
+        never had it. Any other execution takes such a record of its own
+        pair back as it starts: a claim that was rolled back gave its epoch
+        back with it, and the next claim of the row is granted the same
+        pair.
         """
         held = (db_task.pk, db_task.lease_epoch)
         ident = threading.get_ident()
         with self._in_flight_lock:
+            if self._take_claimed_in_callers_atomic_block(ident, held):
+                self._in_callers_atomic_block.add(held)
+            else:
+                self._in_callers_atomic_block.discard(held)
             self._handed_off.discard(held)
             self._in_flight.add(held)
             self._running_on[ident] = held
@@ -3322,6 +3419,7 @@ class Worker:
             self._attempt_local.policy = outer
             with self._in_flight_lock:
                 self._in_flight.discard(held)
+                self._in_callers_atomic_block.discard(held)
                 # Only an outcome that landed settles the row. False is a
                 # lease lost or an outcome that could not be written, and an
                 # override may answer False for either; a raise says nothing.
@@ -3334,6 +3432,65 @@ class Worker:
                     self._unsettled.add(held)
                 if self._running_on.get(ident) == held:
                     del self._running_on[ident]
+
+    def _take_claimed_in_callers_atomic_block(
+        self, ident: int, held: tuple[Any, int]
+    ) -> bool:
+        """
+        Called by execute() holding _in_flight_lock, in the step that puts
+        `held` in flight on the thread `ident`: take run_once()'s entry for
+        that thread and that pair out of _claimed_in_callers_atomic_block,
+        and say whether there was one. Of two, the later is taken: a call
+        nested inside another on the same thread runs before the outer one
+        returns. An entry of another thread's, or of the same row at another
+        epoch, is not this execution's, and is left as it is.
+        """
+        claimed = self._claimed_in_callers_atomic_block
+        for call in reversed(claimed):
+            if claimed[call] == (ident, *held):
+                del claimed[call]
+                return True
+        return False
+
+    def _add_claimed_in_callers_atomic_block(
+        self, call: object, db_task: OxTask
+    ) -> None:
+        """
+        run_once()'s entry for a claim it made inside its caller's atomic
+        block, added under `call`, its own key, just before it hands the
+        claim to execute(): this thread, and the claim's pair. The lock is
+        taken as _hand_off takes it, since run_once() can run on a task's
+        thread under a timeout.
+        """
+        entry = (threading.get_ident(), db_task.pk, db_task.lease_epoch)
+        lock = self._in_flight_lock
+        held: list[bool] = []
+        try:
+            held.extend(map(lock.acquire, (True,)))
+            self._claimed_in_callers_atomic_block[call] = entry
+        finally:
+            if held:
+                lock.release()
+
+    def _drop_claimed_in_callers_atomic_block(self, call: object) -> None:
+        """
+        Drop run_once()'s entry under `call`, if execute() did not take it,
+        and nothing else: an override that raised, or returned without
+        calling the base execute(), leaves nothing behind, and no other
+        call's entry goes with it. The entry is dropped in the finally of
+        the acquire, as _claiming counts a claim out, so an exception
+        delivered as the lock is taken does not leave it behind.
+        """
+        lock = self._in_flight_lock
+        held: list[bool] = []
+        try:
+            held.extend(map(lock.acquire, (True,)))
+        finally:
+            if held:
+                try:
+                    self._claimed_in_callers_atomic_block.pop(call, None)
+                finally:
+                    lock.release()
 
     def _run_attempt(self, db_task: OxTask, *, inline: bool = False) -> bool:
         """
@@ -4072,6 +4229,7 @@ class Worker:
         duration_ms = _elapsed_ms(watch.started)
         with self._in_flight_lock:
             self._in_flight.discard(watch.attempt)
+            self._in_callers_atomic_block.discard(watch.attempt)
             # Its thread is still inside the body, so its row must never be
             # released as a claim that did not happen, whatever the record
             # below manages; see _recover_claims.
@@ -5531,18 +5689,30 @@ class Worker:
         thread is started. The claim and outcome are written in the caller's
         transaction. That transaction protects the uncommitted claim from
         reclaim. Renewal from another connection adds no protection and can
-        wait on the caller's lock on SQLite and MySQL.
+        wait on the caller's lock on SQLite and MySQL. So no renewal names
+        the row either: not one another call on this Worker started, and not
+        run()'s, which would otherwise wait on that lock on MySQL and renew
+        none of the rows it is there for. _renewable.
 
         A connection taken out of autocommit without an atomic block still
         gets renewal. The task can commit and make its lease visible while it
         runs. An atomic block on a different database does not disable renewal.
         """
-        in_callers_transaction = connections[self._db_alias].in_atomic_block
+        in_callers_atomic_block = connections[self._db_alias].in_atomic_block
         db_task = self._claim_inline()
         if db_task is None:
             return False
-        if in_callers_transaction:
-            self.execute(db_task, inline=True)
+        if in_callers_atomic_block:
+            # execute() keeps its signature, and learns this from the entry
+            # added here, which it takes in the step that puts the pair in
+            # flight. The key is this call's own, so the finally drops this
+            # call's entry, if execute() did not take it, and no other.
+            call = object()
+            try:
+                self._add_claimed_in_callers_atomic_block(call, db_task)
+                self.execute(db_task, inline=True)
+            finally:
+                self._drop_claimed_in_callers_atomic_block(call)
             return True
         stop = Event()
         renewer = Thread(

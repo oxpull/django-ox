@@ -399,3 +399,32 @@ def enqueue_follow_up_once_released(label):
         raise TimeoutError("the test never released this task")
     echo.enqueue(label)
     return label
+
+
+@task
+def hold(label):
+    """
+    Note the run under `label`, say it began, and hold until the test lets
+    this label go: STATE["hold_began"] and STATE["hold_release"] each map
+    the label to an event the test made. Gives up after a minute rather than
+    hold a thread for a test that never lets it go.
+    """
+    STATE.setdefault("order", []).append(label)
+    STATE["hold_began"][label].set()
+    if not STATE["hold_release"][label].wait(60):
+        raise TimeoutError("the test never released this task")
+    return label
+
+
+@task
+def with_hook(label):
+    """
+    Note the run under `label`, then call STATE["hooks"][label] if the test
+    put one there: whatever the test wants seen, done or raised while this
+    body runs.
+    """
+    STATE.setdefault("order", []).append(label)
+    hook = STATE.get("hooks", {}).get(label)
+    if hook is not None:
+        hook()
+    return label

@@ -99,6 +99,9 @@ base `claim_one()` counts as in flight until its returned row is
 registered. A short per-Worker lock protects this bookkeeping and is
 never held across a database call. `ox_worker` does not share its Worker:
 its loop claims and checks recovery on one thread.
+On PostgreSQL and MySQL, a `run_once()` call inside its caller's atomic block
+does not hold up lease renewal for the Worker's other tasks; see the SQLite
+write-lock limit below.
 
 Neither `run_once()` nor `run_tasks()` closes the failed claim's
 connection for recovery or tests idle connections in Django's PostgreSQL
@@ -887,8 +890,11 @@ safe.
 
 **Renewal keeps the lease alive while it reaches the database on time.**
 While tasks execute, the worker refreshes their lock timestamps with one
-statement per interval, including during graceful drain. Slow tasks stay
-protected while those renewals succeed. If renewal is delayed or cannot get
+statement per interval, including during graceful drain. Renewal excludes
+claims made by `run_once()` inside a caller's atomic block on the worker's
+database. Those claims remain uncommitted and are protected by the caller's
+transaction until the commit publishes their outcomes. Other slow tasks
+stay protected while renewals succeed. If renewal is delayed or cannot get
 a connection for `LOCK_TIMEOUT`, the reaper can reclaim work from a live
 worker whose task bodies are still running. See
 [Tuning LOCK_TIMEOUT](#tuning-lock_timeout) and
@@ -1189,7 +1195,13 @@ With inline `run_once()`, a `KeyboardInterrupt` or `SystemExit` raised
 by the callback propagates to the caller. The row remains `RUNNING`
 for lease recovery, matching inline task-interrupt handling.
 
-Inside a caller's atomic block on the worker's database, `run_once()` does not start a lease-renewal thread: the claim and outcome are written in the caller's transaction. Renewal remains enabled outside an atomic block on that database, including when autocommit is turned off.
+Inside a caller's atomic block on the worker's database, `run_once()` does not start a lease-renewal thread. Lease renewal also excludes that claim when the Worker is shared with other calls. The claim is uncommitted, so no other connection can see its lease. The caller's transaction protects it until the commit publishes the row with its outcome. The Worker's other rows are renewed as before.
+
+Renewal remains enabled outside an atomic block on that database, including when autocommit is turned off. On MySQL, a `run_once()` call with autocommit off and no atomic block still stalls renewal of a shared Worker's other tasks. Such callers must not share their Worker with other calls.
+
+Tasks executing inside a caller's atomic block must not commit behind Django's back, including through raw transaction-control SQL or implicitly committing DDL. Such a commit makes the claim visible while its task is still running, and nothing renews its lease.
+
+SQLite's single write lock still makes every other connection's write wait while the caller's transaction is open on the worker's database. This includes lease renewal, outcome writes, reaper requeues and other claims, whether or not a Worker is shared.
 
 A callback can still run after the attempt has lost its lease.
 The ownership check then drops its outcome write and logs

@@ -1735,6 +1735,31 @@ class TestARenewalTick:
         assert safe_until >= started + worker.lock_timeout
         assert pool.get_stats()["requests_num"] == requests
 
+    def test_a_tick_with_only_a_callers_claim_in_flight_opens_nothing(
+        self, claimed, monkeypatch
+    ):
+        """
+        A row claimed inside a caller's atomic block is in flight and is not
+        renewed, so a tick with nothing else in flight has nothing to renew
+        either: no query, nothing opened, nothing asked of the pool, and the
+        lease left as it was.
+        """
+        worker, task, pool = claimed
+        worker._in_callers_atomic_block.add((task.pk, task.lease_epoch))
+        renewed = []
+        stock = worker.renew_leases
+        monkeypatch.setattr(worker, "renew_leases", lambda: renewed.append(stock()))
+        requests = pool.get_stats()["requests_num"]
+        before = lease(task)
+        with _outside_the_pool(ALIAS, 2.0) as own:
+            started = time.monotonic()
+            safe_until = worker._renew_on(own, _RenewalReport(worker.worker_id), 0)
+            assert not own.is_open
+        assert renewed == [0]
+        assert lease(task) == before
+        assert safe_until >= started + worker.lock_timeout
+        assert pool.get_stats()["requests_num"] == requests
+
     def test_an_override_that_queries_with_nothing_in_flight_gets_a_connection(
         self, claimed, blackhole, caplog
     ):

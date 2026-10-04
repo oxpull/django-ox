@@ -23,6 +23,13 @@ Disable action also return HTTP 500. `update_schedule(row, enabled=False)`
 raises `DataError`. Delete this row with
 `delete_schedule(OxSchedule(pk=schedule_pk))` or a plain SQL `DELETE`.
 
+If you applied importer output from 1.2.0 through 1.7.0, check schedules
+restricting both day fields and crontabs from a zone other than
+`TIME_ZONE`. Those versions passed crontab fields through as stored and
+judged zones by two sample offsets. Also check beat rows with microsecond
+intervals, which were listed as below one second. Regenerate output with
+this version to see these rows by name.
+
 ### Security
 
 - Fixed worker termination from an uncaught overflow in interval tick
@@ -111,6 +118,56 @@ raises `DataError`. Delete this row with
   and `phase_seconds` still raise a `ValidationError` with no field at
   an earlier step; that behavior is unchanged.
 
+- Read crontabs with Celery's grammar, including wrap-around ranges,
+  names, steps and lists. Write equivalent django-ox fields, using
+  `*` for a whole range. Write stepped ranges as `a-b/n`, using `*/n`
+  only for a set of three or more values over the whole field.
+  `1-59/2 1-23/2 1-31/2 * *` fits the cron column.
+  Long crontabs that 1.7.0 printed can print when the command finds a
+  verified expression within the 128-character column limit. If the
+  canonical form is too long, try a covering form within that limit.
+  List the row if no verified expression fits.
+
+  When the weekday is restricted, write a day-of-month field covering
+  every date of its selected months as `*`. List rows that still
+  restrict both day fields instead of translating them: Celery requires
+  both to match, while a stored schedule runs when either matches.
+
+- Compute interval durations as beat does, with
+  `timedelta(**{period: every})`, including weeks and milliseconds.
+  For example, 2,000,000 microseconds translates to 2 seconds.
+  A fractional `every` can be stored only on SQLite; PostgreSQL and
+  MySQL use an integer column. On SQLite, 0.1 days translates to
+  8,640 seconds. Python's `timedelta` rounds fractions to the
+  microsecond before the whole-seconds check. List intervals whose
+  resulting `timedelta` has fractional seconds, durations below one
+  second, unknown periods or non-numeric values instead of translating
+  them.
+
+- Compare crontab zone files with the timezone data for `TIME_ZONE`.
+  Identical aliases qualify; matching current offsets alone do not.
+  List incompatible or empty zones instead of translating them.
+  Where the settings require `TIME_ZONE` to have UTC-identical data,
+  distinguish a zone this Python cannot load from missing zone files
+  that prevent comparison. Neither failure establishes that the data
+  differs from UTC's.
+
+- Decode task arguments as beat decodes them, rather than applying
+  different JSON decoding rules during import. List rows whose
+  arguments cannot be translated instead of printing calls for them.
+
+- Name rows that stop beat's whole-table scheduling pass in a header
+  line. With `USE_TZ` and `DJANGO_CELERY_BEAT_TZ_AWARE` both off, rows
+  with a start time or expiry stored with a UTC offset are listed with
+  a reason explaining the offset-bound problem. In django-celery-beat
+  2.9.0, their due checks raise
+  `TypeError`; the failure can stop scheduling for the whole table,
+  not just those rows.
+
+- Quote names and values with bounded output in importer diagnostics,
+  so an unusually large stored value does not produce an unbounded
+  diagnostic.
+
 
 ### Changed
 
@@ -124,6 +181,42 @@ raises `DataError`. Delete this row with
   accepted larger values that were then skipped at every read.
   A `SCHEDULES` `every` or `phase` outside the range of Python's
   `timedelta` now produces `django_ox.E002` instead of `OverflowError`.
+
+- Make the beat importer print one all-or-nothing
+  `created = create_schedules([...])` call. The `SCHEDULABLE_TASKS`
+  fragment contains only entries used by printed rows. Apply the batch
+  after checking the output. Keep `SCHEDULE_SOURCE` in the same
+  `OPTIONS`; without it, no stored schedule ever runs. Applying the
+  output remains subject to validation, permissions, concurrent changes
+  and database errors.
+
+- List translations whose behavior differs from beat under
+  "Translated, with a difference from beat". Every interval is listed
+  because stored schedules count from a fixed instant and Celery counts
+  from the last run. Clock-change notices come from the actual tick
+  pattern, including spring-forward gaps and django-celery-beat 2.9.0's
+  hour filter, rather than from clock transitions alone.
+
+  With `USE_TZ` on, stored schedules run matching repeated clock times
+  on both passes, while beat runs them on the first only. Notices give the
+  next relevant date; the scan covers ten years from import. Check
+  these differences before applying output.
+
+- Stop printing start times in importer output. Past starts are dropped.
+  Rows with future starts are listed instead: beat runs once when the
+  start arrives, while a stored schedule waits for its next tick.
+  Arrange those starts separately before switching schedulers.
+
+- List rows whose timezone settings, schedule rules, arguments or
+  destination limits prevent translation instead of printing calls for
+  them. This includes values the destination database would refuse or
+  alter: NUL characters, surrogates, excessively deep JSON, oversized
+  integers, names equal under the name column's comparison, and names
+  already taken.
+
+  Check each named reason and resolve omitted rows before switching.
+  Run the command with beat's Python environment, timezone data and
+  Django settings; the command cannot verify that they match.
 
 
 ### Added
@@ -142,6 +235,13 @@ raises `DataError`. Delete this row with
 - Annotate database errors from batch creation with the row concerned,
   both during the database check and at the write, so callers can
   identify the failing input to `create_schedules`.
+
+- Add the beat timezone option `--beat-timezone ZONE` to
+  `ox_import_beat_schedules`. Supply the timezone the Celery app ran
+  beat in when the crontab table has no timezone column, or when
+  `DJANGO_CELERY_BEAT_TZ_AWARE=False`. When the option was given but
+  was not needed, print a comment directly under the header explaining
+  why. Print it only when at least one crontab row was read.
 
 ## [1.7.0] - 2026-09-28
 

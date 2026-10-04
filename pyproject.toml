@@ -64,6 +64,10 @@ dev = [
     "django-stubs>=6.0",
     "psycopg[binary,pool]>=3.2",
     "prometheus-client",
+    # The oracle for ox_import_beat_schedules, which reads beat's crontabs
+    # with its own implementation of Celery's grammar. The tests import it
+    # plainly, so a run without it fails rather than skips.
+    "celery>=5.6",
 ]
 
 [tool.hatch.build.targets.sdist]

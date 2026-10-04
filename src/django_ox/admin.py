@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, cast
 from django import forms
 from django.conf import settings
 from django.contrib import admin, messages
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import router, transaction
 from django.db.models import (
     CharField,
@@ -52,6 +52,13 @@ from . import actions, metrics, registry, stored
 from .compat import DEFAULT_TASK_BACKEND_ALIAS
 from .models import OxSchedule, OxScheduleTick, OxTask
 from .schedules import STORED_KEY_PREFIX
+
+# The one string in this block: what "Enable selected
+# schedules" says of the selected rows it could not enable because they do
+# not validate. `count` is how many.
+_COULD_NOT_ENABLE = (
+    "Left {count} schedule(s) disabled. Correct them before enabling them."
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -709,15 +716,29 @@ class OxScheduleAdmin(_ScheduleAdmin):
         # db_for_read: on a replica that is behind, the selection and the
         # count below are of rows as they were, not as they are.
         queryset = queryset.using(stored.schedule_db_alias())
-        changed = 0
+        changed = invalid = 0
         for schedule in queryset:
             if not self.has_change_permission(request, schedule):
                 continue
-            stored.update_schedule(schedule, user=request.user, enabled=enabled)
+            # Disabling is `enabled=False` alone, which update_schedule
+            # writes without validating the rest of the row: it is how an
+            # operator stops a schedule that no longer validates. Enabling
+            # validates the row in full, and a row that does not is counted
+            # and reported rather than ending the request with an error,
+            # so the rest of the selection is still enabled.
+            try:
+                stored.update_schedule(schedule, user=request.user, enabled=enabled)
+            except ValidationError:
+                invalid += 1
+                continue
             changed += 1
         verb = "Enabled" if enabled else "Disabled"
         self.message_user(request, f"{verb} {changed} schedule(s).", messages.SUCCESS)
-        skipped = queryset.count() - changed
+        if invalid:
+            self.message_user(
+                request, _COULD_NOT_ENABLE.format(count=invalid), messages.WARNING
+            )
+        skipped = queryset.count() - changed - invalid
         if skipped:
             self.message_user(
                 request,

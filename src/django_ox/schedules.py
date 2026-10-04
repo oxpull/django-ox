@@ -66,6 +66,31 @@ MIN_INTERVAL = timedelta(seconds=1)
 # nothing stored.
 _INTERVAL_EPOCH = datetime(1970, 1, 1)
 
+# The longest interval whose ticks can be derived: the time from year 1 to
+# the epoch, which is 719,162 days or 62,135,596,800 seconds, exactly
+# 1,969 years. While the clock has not reached epoch + phase, a schedule's
+# latest tick is the one an interval before that, and
+# IntervalTrigger.previous() reaches it by stepping a whole interval back
+# from the epoch and then adding the phase. A datetime cannot say an
+# instant before year 1, so a second more than this and that step raises
+# OverflowError, in the dispatch pass, on every pass until the clock gets
+# there. From the epoch on, no clock reading takes the step twice while the
+# phase is under the interval.
+MAX_INTERVAL = _INTERVAL_EPOCH - datetime.min
+
+# Both strings in this block: what a SCHEDULES entry is told
+# when its interval is refused for its length. `manage.py check` reports
+# each as django_ox.E002, and constructing a worker raises it.
+
+#: An `every` longer than MAX_INTERVAL. `limit` is that, in seconds.
+_EVERY_TOO_LONG = (
+    "{prefix}: 'every' exceeds {limit} seconds, the maximum supported interval."
+)
+#: A number of seconds, for `every` or `phase`, that no timedelta holds.
+_NOT_A_TIMEDELTA = (
+    "{prefix}: {key!r} is outside the range of seconds a timedelta can hold."
+)
+
 
 @runtime_checkable
 class Trigger(Protocol):
@@ -327,7 +352,14 @@ def _as_interval(value: Any, prefix: str, key: str) -> timedelta:
         )
     if value != value or value in (float("inf"), float("-inf")):
         raise ImproperlyConfigured(f"{prefix}: {key!r} must be a finite number.")
-    return timedelta(seconds=value)
+    try:
+        return timedelta(seconds=value)
+    except OverflowError:
+        # Refused like any other bad entry. Left to escape, it is a
+        # traceback out of the check that exists to report the entry.
+        raise ImproperlyConfigured(
+            _NOT_A_TIMEDELTA.format(prefix=prefix, key=key)
+        ) from None
 
 
 def schedules_from_options(
@@ -401,6 +433,12 @@ def schedules_from_options(
                     f"{prefix}: 'every' is {every}, below the {MIN_INTERVAL} the "
                     "dispatch loop can honour; ticks that close together would be "
                     "coalesced rather than run."
+                )
+            if every > MAX_INTERVAL:
+                raise ImproperlyConfigured(
+                    _EVERY_TOO_LONG.format(
+                        prefix=prefix, limit=MAX_INTERVAL // timedelta(seconds=1)
+                    )
                 )
             phase = (
                 _as_interval(config["phase"], prefix, "phase")

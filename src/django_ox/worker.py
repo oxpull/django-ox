@@ -5102,13 +5102,27 @@ class Worker:
         # only as far back as the oldest of them.
         due: list[tuple[Schedule, datetime]] = []
         for schedule in schedules:
-            tick = schedule.trigger.previous(local_now)
-            if tick is None:
-                # A one-shot trigger whose instant has not arrived. Nothing
-                # is due and nothing is recorded, so it stays a candidate.
+            # Each schedule's tick, and the comparisons below with its
+            # bounds, are that schedule's own: arithmetic its timing cannot
+            # do, or a bound its clock cannot be compared with, is its
+            # failure and not the pass's. Raised from here they ended the
+            # pass, and the worker, for every schedule. Nothing in this
+            # part reads the database, so a database error is not one.
+            try:
+                tick = schedule.trigger.previous(local_now)
+                if tick is None:
+                    # A one-shot trigger whose instant has not arrived.
+                    # Nothing is due and nothing is recorded, so it stays a
+                    # candidate.
+                    continue
+                scheduled_for = timezone.make_aware(tick) if settings.USE_TZ else tick
+                ahead = scheduled_for > now
+            except DatabaseError:
+                raise
+            except Exception as exc:
+                self._dispatch_report.schedule_failed(schedule, exc)
                 continue
-            scheduled_for = timezone.make_aware(tick) if settings.USE_TZ else tick
-            if scheduled_for > now:
+            if ahead:
                 # A tick is the latest instant at or before now, so one in
                 # the future is not due and must not be enqueued. It can
                 # arise where a local time does not exist: on the day a
@@ -5127,10 +5141,19 @@ class Worker:
         )
         dispatched = 0
         for schedule, scheduled_for in due:
-            if schedule.start_time is not None and scheduled_for < schedule.start_time:
-                # Before the schedule existed, or before it was retimed.
-                continue
-            if schedule.end_time is not None and scheduled_for > schedule.end_time:
+            try:
+                if (
+                    schedule.start_time is not None
+                    and scheduled_for < schedule.start_time
+                ):
+                    # Before the schedule existed, or before it was retimed.
+                    continue
+                if schedule.end_time is not None and scheduled_for > schedule.end_time:
+                    continue
+            except DatabaseError:
+                raise
+            except Exception as exc:
+                self._dispatch_report.schedule_failed(schedule, exc)
                 continue
             last = latest.get(schedule.key)
             if last is not None and scheduled_for <= last and last <= now:

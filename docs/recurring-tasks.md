@@ -231,9 +231,12 @@ want a sequence offset from the grid, say so with `phase`:
 }
 ```
 
-`every` must be at least one second. The dispatch loop looks about once a
-second and only the latest due tick fires, so anything faster would be
-coalesced away rather than run.
+`every` must be at least one second and at most 62,135,596,800 seconds.
+The upper bound is the time from year 1 to 1970, about 1,969 years.
+The dispatch loop looks about once a second and only the latest due tick
+fires, so anything faster would be coalesced away rather than run.
+A `SCHEDULES` entry above the upper bound is refused by `manage.py check`
+and at worker start with `django_ox.E002`.
 
 Interval ticks are wall-clock, exactly as cron ticks are, so the
 daylight-saving behaviour above applies to them too.

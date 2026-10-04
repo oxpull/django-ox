@@ -74,7 +74,9 @@ own, check that a backend's `OPTIONS` sets `SCHEDULE_SOURCE` to
 ## What a person with admin access can do
 
 They can pick a task from the list you exposed, set its timing and arguments,
-enable it, disable it, and run it once immediately.
+enable it, disable it, and run it once immediately. Disabling a readable row
+alone can pause it even if it no longer validates. This does not repair the row.
+Enabling it again is refused until it is corrected.
 
 Running one immediately ignores both the pause and the end time: a schedule
 that is disabled or past its `end_time` still runs.
@@ -312,17 +314,36 @@ boundary set for the old timing, and doesn't tell workers the row moved.
 
 A row written that way has its activation boundary moved to the moment a
 worker noticed it, logged as `schedule_boundary_healed`, whether or not it
-validates. This replaces any `start_time` the writer chose. A row that fails
-validation is also skipped and logged as `schedule_row_skipped`.
-Database acceptance is determined at dispatch; a schedule-scoped dispatch
-failure is reported as `schedule_dispatch_error`.
+validates. This replaces any `start_time` the writer chose. A row is skipped
+and logged as `schedule_row_skipped` if a value cannot be converted, its start
+or end cannot be compared with the worker's clock, or it cannot be built.
+Skipping the row does not repair its invalid values. Database acceptance is
+determined at dispatch; a schedule-scoped dispatch failure is reported as
+`schedule_dispatch_error`.
+
+To pause a readable row that no longer validates, call `update_schedule` with
+`enabled=False` alone. This writes the disabled state without validating the
+rest of the row. It does not repair the row. Enabling it again is refused
+until the row is corrected.
 
 `create_schedule`, `create_schedules` and `update_schedule` take an optional
 `user=`, and enforce any per-entry permission when you pass one.
 
 Use `create_schedules(rows, *, user=None)` for several schedules that should
 exist together, such as schedules added by a migration or the importer's
-output. Pass a list of mappings with the keyword fields that `create_schedule`
+output.
+
+For stored-schedule writes, start and end times must fall within years 1 to
+9999 in the database's time zone. With `USE_TZ` off, they must have no time
+zone.
+
+If the database raises an error while `create_schedules` checks a row, the
+error carries a note identifying its `rows` index and name and stating that
+no rows in the batch have been written. If the database raises an error
+during the write, the error carries a note identifying the row's index and
+name.
+
+Pass a list of mappings with the keyword fields that `create_schedule`
 takes:
 
 ```python
@@ -379,6 +400,24 @@ On SQLite, inside a caller's `transaction.atomic()` that has already read,
 `create_schedule` and `create_schedules` fail immediately with
 "database is locked" if another connection holds the write lock.
 
+Stored-schedule writes reject start and end times outside years 1 to
+9999 in the database's time zone, and reject times with a time zone when
+`USE_TZ` is off.
+
+Stored-schedule reads isolate rows whose values cannot be converted,
+whose start or end cannot be compared with the worker's clock, or which
+cannot be built. Other schedules and the queue keep running. Database read
+errors stop the pass rather than being attributed to a row. Skips
+carry the row's key, name when readable, and reason. They are logged once,
+then at most once a minute per row per worker while the row stays skipped.
+Locked dispatch skips include a traceback only on the first line.
+
+An unreadable change marker reports `schedule_source_unavailable` once,
+then at most once a minute. The worker reads the schedules in full at each
+reconcile interval while the marker remains unreadable. For any schedule
+source, a tick that cannot be derived or bounds that cannot be compared
+with the worker's clock are reported as `schedule_dispatch_error`.
+
 ## Coming from django-celery-beat
 
 The shape is familiar. The differences that will surprise you:
@@ -426,25 +465,49 @@ Worth knowing before you turn it on:
   `OPTIONS["SCHEDULE_RECONCILE_INTERVAL"]` if you want that sooner; it is one
   indexed read of a small table.
 - **One extra query per pass.** Workers read a single row to learn whether
-  anything changed, and re-read the schedules only when it did.
-- **Read-time validation failures are skipped.** A row that no longer
-  validates is logged as `schedule_row_skipped` and ignored so the others
-  keep running.
-- **Dispatch failures have a separate boundary.** A row can validate and
-  still fail when dispatched. A schedule-scoped failure rolls back its tick
-  and task and is reported as `schedule_dispatch_error`. If rollback succeeds
+  anything changed. They re-read the schedules when it did and at each
+  reconcile interval. If the change marker cannot be read, full reads still
+  run at each reconcile interval.
+- **Unreadable or invalid rows are skipped.** A row is left out if a value
+  cannot be converted, its start or end cannot be compared with the worker's
+  clock, or it cannot be built. The other schedules and the queue keep
+  running. The skip is logged as `schedule_row_skipped` with `schedule_pk`,
+  `schedule` and `reason`. If the name cannot be read, `schedule` may be
+  `None`. A conversion failure's reason names the column. Each row is logged
+  once, then at most once a minute per worker while it stays skipped. A skip
+  during the locked dispatch read includes a traceback only on its first
+  line.
+- **Skipped rows need repair.** Skipping does not repair invalid values. Find
+  the row by `schedule_pk` and correct it in the admin change form or with
+  `update_schedule`. Use SQL if the value is one the ORM cannot read. To pause
+  a readable row that no longer validates, use `update_schedule` with
+  `enabled=False`
+  alone. Enabling it again is refused until it is corrected.
+- **Dispatch failures have a separate boundary.** A schedule can validate and
+  still fail when dispatched. For any schedule source, a tick that cannot be
+  derived or bounds that cannot be compared with the worker's clock are
+  reported as `schedule_dispatch_error`. A schedule-scoped failure inside
+  the dispatch transaction rolls back its tick and task. If rollback succeeds
   and the same connection remains usable, later schedules are still attempted.
   The failed schedule is retried on subsequent passes under the usual
   due-tick and deadline rules; only its reporting is rate-limited.
+- **Database read failures are not bad rows.** A database error during a full
+  schedule read or a shared dispatch read, such as a lost connection, missing
+  table or lock error, is not attributed to an individual row. It stops the
+  pass rather than skipping a row.
 - **An abandoned pass stops further traversal.** A `django.db.DatabaseError`
   escaping a shared dispatch read, failed rollback or unusable connection is
   reported as `schedule_dispatch_failed`. The stored source's marker read and
-  boundary heal retain their own events: a failed marker read reports
-  `schedule_source_unavailable` and dispatch continues from the cached set; a
-  failed boundary heal reports `schedule_boundary_heal_failed`. Dispatch is
-  retried on a later pass. Ticks already committed are not undone. Alert on
-  `schedule_row_skipped`, `schedule_dispatch_error`, `schedule_dispatch_failed`
-  and `schedule_source_unavailable`.
+  boundary heal retain their own events. An unreadable change-marker value
+  reports `schedule_source_unavailable` once, then at most once a minute while
+  it remains unreadable, and the worker reads the schedules in full at each
+  reconcile interval during that time. A database error on the marker read
+  reports the same event on every dispatch pass, and the worker keeps using
+  the last schedules it read. A failed boundary heal reports
+  `schedule_boundary_heal_failed`. Dispatch is retried on a later pass.
+  Ticks already committed are not undone. Alert on `schedule_row_skipped`,
+  `schedule_dispatch_error`, `schedule_dispatch_failed` and
+  `schedule_source_unavailable`.
 - **`manage.py check` cannot see rows.** Checks run before `migrate`, so a bad
   schedule in the database is a log line, not a start-up error.
   Settings-declared schedules still fail fast for errors their checks can

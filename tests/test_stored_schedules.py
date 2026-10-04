@@ -569,9 +569,13 @@ class TestATimeThatCannotBeComparedWithTheOther:
         assert row.end_time is None
         assert row.boundary_generation == 0
 
-    def test_two_times_of_one_kind_are_ordered_as_they_always_were(self):
-        # Both of the kind the setting does not expect. They can be
-        # compared, so the ordinary rule is the one that answers.
+    def test_two_times_of_one_kind_are_ordered_or_refused_each(self):
+        # Both of the kind the setting does not expect. With USE_TZ on, two
+        # naive times are read in the default time zone and can be
+        # compared, so the ordinary rule is the one that answers. With
+        # USE_TZ off, a time with a zone is refused on its own, since the
+        # dispatch pass compares naive times, and two refused
+        # times are not ordered on top of that.
         with pytest.raises(ValidationError) as caught:
             create_schedule(
                 **fields_of(
@@ -579,9 +583,15 @@ class TestATimeThatCannotBeComparedWithTheOther:
                     end_time=a_time_the_setting_does_not_expect(days=-1),
                 )
             )
-        assert caught.value.message_dict == {
-            "end_time": ["The end time must be after the start time."]
-        }
+        if project.USE_TZ:
+            assert caught.value.message_dict == {
+                "end_time": ["The end time must be after the start time."]
+            }
+        else:
+            assert caught.value.message_dict == {
+                "start_time": [stored._TIME_ZONE_WHILE_USE_TZ_IS_OFF],
+                "end_time": [stored._TIME_ZONE_WHILE_USE_TZ_IS_OFF],
+            }
 
 
 class TestTheDigestSurvivesTheRoundTrip:

@@ -281,6 +281,18 @@ FIELD_SETS = [
     pytest.param({"starting_deadline_seconds": ""}, id="deadline an empty string"),
     pytest.param({"end_time": []}, id="end an empty list"),
     pytest.param(
+        {"trigger": "interval", "cron": "", "every_seconds": 10**15},
+        id="interval no timedelta holds",
+    ),
+    pytest.param(
+        {"trigger": "interval", "cron": "", "every_seconds": 62_135_596_801},
+        id="interval one second past the longest",
+    ),
+    pytest.param(
+        {"starting_deadline_seconds": 86_400_000_000_000},
+        id="deadline one second past a timedelta",
+    ),
+    pytest.param(
         {
             "name": "",
             "trigger": "solar",

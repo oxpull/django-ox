@@ -22,7 +22,14 @@ from django.core.exceptions import (
     PermissionDenied,
     ValidationError,
 )
-from django.db import IntegrityError, connection, connections, transaction
+from django.db import (
+    DataError,
+    IntegrityError,
+    OperationalError,
+    connection,
+    connections,
+    transaction,
+)
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
@@ -751,6 +758,165 @@ class TestTheUniqueIndexIsTheLastWord:
         ]
 
 
+class TestTheRowTheDatabaseRefusedIsNamed:
+    """
+    A refusal only the database gives, at the write: its own error, with its
+    class and its cause, and a note saying which row of the batch it was, by
+    position and by the name the row supplied. The statement alone does not
+    say, and in a batch of two hundred the operator cannot tell. Nothing of
+    the batch is left behind.
+    """
+
+    @staticmethod
+    def _the_name_lands_first(name):
+        landed = []
+
+        def wrapper(execute, sql, params, many, context):
+            # As in TestTheUniqueIndexIsTheLastWord: ahead of the batch's
+            # first INSERT, on this connection, gone with the batch.
+            if not landed and _writes_the_schedule_table(sql):
+                landed.append(True)
+                now = timezone.now()
+                OxSchedule.objects.create(
+                    **a_row(name, cron="0 5 * * *"),
+                    start_time=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+            return execute(sql, params, many, context)
+
+        return wrapper
+
+    def test_a_name_taken_after_the_check(self):
+        with (
+            connection.execute_wrapper(self._the_name_lands_first("c")),
+            pytest.raises(IntegrityError) as caught,
+        ):
+            create_schedules([a_row("a"), a_row("b"), a_row("c")])
+        assert caught.value.__notes__ == [
+            stored._ROW_REFUSED_AT_THE_WRITE.format(index=2, name="'c'")
+        ]
+        # The driver's own error underneath, as Django raised it.
+        assert isinstance(caught.value.__cause__, connection.Database.IntegrityError)
+        assert not OxSchedule.objects.filter(name__in=["a", "b"]).exists()
+        assert not OxScheduleChange.objects.exists()
+
+    def test_a_nul_postgresql_will_not_keep(self):
+        if connection.vendor != "postgresql":
+            pytest.skip(
+                f"PostgreSQL refuses a NUL in JSON text; {connection.vendor} keeps it"
+            )
+        rows = [a_row("a"), a_row("b"), a_row("c", arguments={"note": "a\x00b"})]
+        with pytest.raises(DataError) as caught:
+            create_schedules(rows)
+        assert caught.value.__notes__ == [
+            stored._ROW_REFUSED_AT_THE_WRITE.format(index=2, name="'c'")
+        ]
+        assert caught.value.__cause__ is not None
+        assert not OxSchedule.objects.exists()
+        assert not OxScheduleChange.objects.exists()
+
+    def test_a_nul_in_a_name_postgresql_refuses_before_the_write(self):
+        """
+        A NUL in a name never reaches the write on PostgreSQL: validation's
+        query for names already taken carries the name, and that is where
+        it is refused. The database's own error is raised with its class, its
+        cause and a note naming the row, and nothing is written.
+        """
+        if connection.vendor != "postgresql":
+            pytest.skip(
+                f"PostgreSQL refuses a NUL in text; {connection.vendor} keeps it"
+            )
+        create_schedule(**a_row("kept"))
+        stored_before = list(OxSchedule.objects.values_list("name", "updated_at"))
+        marker = OxScheduleChange.objects.get().changed_at
+        rows = [a_row("a"), a_row("b"), a_row("c\x00d"), a_row("e")]
+        with pytest.raises(DataError) as caught:
+            create_schedules(rows)
+        assert caught.value.__notes__ == [
+            stored._ROW_REFUSED_AT_THE_CHECK.format(index=2, name="'c\\x00d'")
+        ]
+        assert type(caught.value) is DataError
+        assert isinstance(caught.value.__cause__, connection.Database.DataError)
+        assert list(OxSchedule.objects.values_list("name", "updated_at")) == (
+            stored_before
+        )
+        assert OxScheduleChange.objects.get().changed_at == marker
+
+    def test_whatever_the_database_raises_in_the_check_names_the_row(self):
+        # Not only a value it refuses: an error in the query for names
+        # already taken is raised as it was, with the row named, on every
+        # database.
+        def fail_on_the_third_name(execute, sql, params, many, context):
+            if sql.lstrip().upper().startswith("SELECT") and "c" in (params or ()):
+                raise OperationalError("the database went away")
+            return execute(sql, params, many, context)
+
+        with (
+            connection.execute_wrapper(fail_on_the_third_name),
+            pytest.raises(OperationalError) as caught,
+        ):
+            create_schedules([a_row("a"), a_row("b"), a_row("c")])
+        assert str(caught.value) == "the database went away"
+        assert caught.value.__notes__ == [
+            stored._ROW_REFUSED_AT_THE_CHECK.format(index=2, name="'c'")
+        ]
+        assert not OxSchedule.objects.exists()
+        assert not OxScheduleChange.objects.exists()
+
+    def test_a_nul_in_a_name_is_kept_where_the_database_keeps_it(self):
+        # SQLite and MySQL keep a NUL in text, and the batch is created
+        # whole.
+        if connection.vendor == "postgresql":
+            pytest.skip("PostgreSQL refuses a NUL in text")
+        created = create_schedules([a_row("a"), a_row("b"), a_row("c\x00d")])
+        assert [row.name for row in created] == ["a", "b", "c\x00d"]
+        assert sorted(OxSchedule.objects.values_list("name", flat=True)) == [
+            "a",
+            "b",
+            "c\x00d",
+        ]
+
+    def test_a_name_is_escaped_and_cut(self):
+        # The name the row supplied, whatever it holds, cannot reach a
+        # terminal as itself when the traceback is printed.
+        hostile = "\x1b]0;owned\x07\x1b[2J\r\nforged " + "x" * 90
+        with (
+            connection.execute_wrapper(self._the_name_lands_first(hostile)),
+            pytest.raises(IntegrityError) as caught,
+        ):
+            create_schedules([a_row("a"), a_row(hostile)])
+        (note,) = caught.value.__notes__
+        assert note.startswith("The database refused rows[1] (name '")
+        assert note.isprintable() and note.isascii()
+        assert "\x1b" not in note and "\n" not in note and "\r" not in note
+        assert len(note) < 300
+        assert not OxSchedule.objects.exists()
+
+    def test_a_name_refused_in_the_check_is_escaped_and_cut(self):
+        # The same of a name PostgreSQL refuses before the write: as long as
+        # a name may be, and every character of it written as an escape.
+        if connection.vendor != "postgresql":
+            pytest.skip(
+                f"PostgreSQL refuses a NUL in text; {connection.vendor} keeps it"
+            )
+        hostile = "\x00\x1b]0;owned\x07\x1b[2J\r\n" * 7 + "\x00" * 9
+        assert len(hostile) == OxSchedule._meta.get_field("name").max_length
+        with pytest.raises(DataError) as caught:
+            create_schedules([a_row("a"), a_row(hostile)])
+        (note,) = caught.value.__notes__
+        assert note.startswith(
+            "The database raised this error while checking rows[1] (name "
+            "'\\x00\\x1b]0;owned\\x07"
+        )
+        assert note.isprintable() and note.isascii()
+        assert "\x1b" not in note and "\n" not in note and "\r" not in note
+        # Bounded by the note's own text and the cut name, not by the name.
+        fixed = len(stored._ROW_REFUSED_AT_THE_CHECK.format(index=1, name=""))
+        assert len(note) <= fixed + stored._PRINTABLE_LIMIT + 2
+        assert not OxSchedule.objects.exists()
+
+
 #: How long the other connection goes on holding its write transaction
 #: open once the batch has reached its first write.
 HELD_FOR = 0.25
@@ -918,6 +1084,18 @@ EITHER_WAY = [
     ),
     pytest.param({"starting_deadline_seconds": ""}, id="deadline an empty string"),
     pytest.param({"end_time": []}, id="end an empty list"),
+    pytest.param(
+        {"trigger": "interval", "cron": "", "every_seconds": 10**15},
+        id="interval no timedelta holds",
+    ),
+    pytest.param(
+        {"trigger": "interval", "cron": "", "every_seconds": 62_135_596_801},
+        id="interval one second past the longest",
+    ),
+    pytest.param(
+        {"starting_deadline_seconds": 86_400_000_000_000},
+        id="deadline one second past a timedelta",
+    ),
     # Not a refusal of the row but of the call: what the single call raises,
     # the batch raises.
     pytest.param({"colour": "red"}, id="not a field"),

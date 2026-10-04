@@ -309,6 +309,8 @@ def _report_state(worker, report):
                 "worker_id": worker.worker_id,
                 "sets": [
                     sorted(worker._in_flight),
+                    sorted(worker._in_callers_atomic_block),
+                    sorted(worker._claimed_in_callers_atomic_block.values()),
                     sorted(worker._handed_off),
                     sorted(worker._unsettled),
                 ],
@@ -347,6 +349,10 @@ def test_child_reinitializes_inherited_worker_state(how, tmp_path):
     heartbeat = worker._heartbeat
     running, handed_off, unsettled = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     worker._in_flight.add((running, 1))
+    worker._in_callers_atomic_block.add((running, 1))
+    # A call of the parent's that is handing a claim to execute().
+    call = object()
+    worker._claimed_in_callers_atomic_block[call] = (1, handed_off, 1)
     worker._handed_off.add((handed_off, 1))
     worker._unsettled.add((unsettled, 1))
     worker._claim_unconfirmed_at = pending = time.monotonic()
@@ -366,7 +372,7 @@ def test_child_reinitializes_inherited_worker_state(how, tmp_path):
     assert state["worker_id"] != parent_id
     assert state["worker_id"].endswith("-3")
     assert f"-{state['pid']}-" in state["worker_id"]
-    assert state["sets"] == [[], [], []]
+    assert state["sets"] == [[], [], [], [], []]
     assert state["pending"] is None
     assert state["claims_in_flight"] == 0
     assert (state["watches"], state["stuck"], state["running_on"]) == (0, 0, 0)
@@ -378,6 +384,8 @@ def test_child_reinitializes_inherited_worker_state(how, tmp_path):
 
     assert worker.worker_id == parent_id
     assert worker._in_flight == {(running, 1)}
+    assert worker._in_callers_atomic_block == {(running, 1)}
+    assert worker._claimed_in_callers_atomic_block == {call: (1, handed_off, 1)}
     assert worker._handed_off == {(handed_off, 1)}
     assert worker._unsettled == {(unsettled, 1)}
     assert worker._claim_unconfirmed_at == pending

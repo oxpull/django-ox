@@ -168,6 +168,29 @@ this version to see these rows by name.
   so an unusually large stored value does not produce an unbounded
   diagnostic.
 
+- Fix lease renewal on MySQL when callers share a Worker and one calls
+  `run_once()` inside its own atomic block on the worker's database.
+  In 1.7.0, the renewal statement waited on that call's uncommitted,
+  locked row for as long as the transaction stayed open, blocking renewal
+  for every other task on the Worker. Other tasks could lose their leases,
+  be requeued and run twice. Other `run_once()` calls could return late,
+  and a `run()` loop asked to stop could take longer to return.
+
+  Renewal now excludes the uncommitted claim, which the caller's
+  transaction protects until commit publishes its outcome. Other rows
+  are renewed as before.
+  Affected deployments should upgrade. PostgreSQL, pooled or unpooled,
+  two plain `run_once()` calls outside atomic blocks, and two separate
+  Workers were unaffected by this defect.
+
+  SQLite's single write-lock limit is unchanged: other connections'
+  writes still wait while the caller's transaction is open. On MySQL,
+  callers using autocommit off without an atomic block must still use
+  an unshared Worker. Tasks inside a caller's atomic block must not
+  commit behind Django's back through raw transaction-control SQL or
+  implicitly committing DDL, since that exposes a claim whose lease is
+  not renewed.
+
 
 ### Changed
 

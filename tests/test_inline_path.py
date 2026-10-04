@@ -11,12 +11,13 @@ import threading
 import time
 
 import pytest
-from django.db import connections, transaction
+from django.db import connection, connections, transaction
 
 from django_ox.models import OxTask
 from django_ox.worker import Worker
 
 from . import tasks
+from .conftest import wait_for
 
 pytestmark = pytest.mark.django_db
 
@@ -200,6 +201,111 @@ class TestRenewalInsideTheCallersTransaction:
         with transaction.atomic(using="default"):
             assert worker.run_once() is True
         assert started == ["ox-renew-inline"]
+
+
+#: How long a thread here is waited for. Far past what a loaded machine needs.
+LIMIT = 60.0
+
+
+class TestTwoCallsAtOnceOnOneWorker:
+    """
+    Two threads share one Worker and call run_once() at the same time, as
+    request threads sharing a module-level Worker do, and one of the calls
+    is inside its caller's transaction. That call starts no renewal thread,
+    but its row is in flight on the Worker like any other, uncommitted and
+    locked by the caller's transaction. The other call renews its own lease
+    on a thread and a connection of its own, and nothing the first holds may
+    keep that renewal from landing.
+    """
+
+    @pytest.mark.skipif(
+        connection.vendor == "sqlite",
+        reason="SQLite has one writer: while one call's transaction is open, "
+        "every other connection's write waits for it, whoever shares a Worker",
+    )
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.parametrize("inside", ["first", "second"])
+    def test_a_call_inside_an_atomic_block_does_not_stop_the_others_renewal(
+        self, settings, inside
+    ):
+        settings.TASKS = {
+            "default": {
+                "BACKEND": "django_ox.backend.OxBackend",
+                "QUEUES": ["default"],
+                "OPTIONS": {},
+            }
+        }
+        # A lease far longer than the test, so none expires and only renewal
+        # moves locked_at; an interval short enough to see several land.
+        worker = Worker(backoff_initial=0, lock_timeout=60, renew_interval=0.05)
+        labels = ["inside", "outside"] if inside == "first" else ["outside", "inside"]
+        began = tasks.STATE["hold_began"] = {
+            label: threading.Event() for label in labels
+        }
+        release = tasks.STATE["hold_release"] = {
+            label: threading.Event() for label in labels
+        }
+        # The higher priority is claimed first, so each call claims the task
+        # that carries its own label.
+        rows = {
+            label: tasks.hold.using(priority=priority).enqueue(label).id
+            for label, priority in zip(labels, (2, 1), strict=True)
+        }
+        returned = {}
+
+        def call(label):
+            try:
+                if label == "inside":
+                    with transaction.atomic():
+                        returned[label] = worker.run_once()
+                else:
+                    returned[label] = worker.run_once()
+            except BaseException as exc:
+                returned[label] = exc
+            finally:
+                connections.close_all()
+
+        def locked_at():
+            return OxTask.objects.get(id=rows["outside"]).locked_at
+
+        threads = {
+            label: threading.Thread(target=call, args=(label,), daemon=True)
+            for label in labels
+        }
+        landed = 0
+        try:
+            for label in labels:
+                threads[label].start()
+                assert began[label].wait(LIMIT), f"the {label} call never began"
+            # Both rows are in flight now. A renewal already under way when
+            # the second one joined can land once more without naming it, so
+            # only the second landing after this proves a renewal that had
+            # both rows to renew.
+            for _ in range(2):
+                seen = locked_at()
+                if not wait_for(lambda seen=seen: locked_at() > seen):
+                    break
+                landed += 1
+        finally:
+            # Release the call inside the transaction first so cleanup can finish
+            # even if a renewal regression makes other writes wait on its lock.
+            for label in ("inside", "outside"):
+                release[label].set()
+                threads[label].join(LIMIT)
+
+        assert landed == 2, (
+            "the call outside a transaction stopped having its lease renewed "
+            "while the other call's transaction was open"
+        )
+        assert returned == {"inside": True, "outside": True}
+        assert sorted(tasks.STATE["order"]) == ["inside", "outside"]
+        for label in labels:
+            row = OxTask.objects.get(id=rows[label])
+            assert (row.status, row.attempts, row.lease_epoch) == (
+                OxTask.Status.SUCCESSFUL,
+                1,
+                1,
+            ), label
 
 
 class TestAnExceptionAimedAtTheProcess:

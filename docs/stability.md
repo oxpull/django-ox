@@ -173,8 +173,8 @@ are not public.
 
 `Worker` internals remain **Not public**. This includes `_handed_off`,
 `_unsettled`, `_fence`, `_claims_in_flight`, `_claim_generation`,
-`_claiming`, `_claim`, `_claim_inline`, `_recover_claims` and
-`_release_claim`.
+`_claiming`, `_claim`, `_claim_inline`, `_recover_claims`,
+`_release_claim`, `_in_callers_atomic_block` and `_renewable()`.
 
 `Worker._run_attempt` is also private. It returns a `bool` indicating
 whether the outcome was recorded. A subclass override that returns
@@ -188,6 +188,10 @@ another claim through a Worker lock. A claim made through `run()`,
 `run_once()` or the base `claim_one()` counts as in flight until its
 returned row is registered. A short per-Worker lock protects this
 bookkeeping and is never held across a database call.
+On PostgreSQL and MySQL, a `run_once()` call inside its caller's atomic block
+does not hold up lease renewal for the Worker's other tasks; see the SQLite
+write-lock limit in
+[Production](production.md#execution-and-failure-boundaries).
 
 `Worker.run_once()` and `testing.run_tasks()` raise a claim's original
 error at once. They make no immediate recovery attempt and no pending

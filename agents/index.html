@@ -1115,11 +1115,12 @@ supervisor:</p>
   A row names a key registered with <code>@schedulable</code>, never an import path, so
   admin access does not become permission to run arbitrary code. The decorator
   takes effect only when its module is imported, and django-ox imports each
-  installed app's <code>tasks</code> module. Write rows
-  with <code>django_ox.stored.create_schedule</code> and <code>update_schedule</code>, not
-  <code>objects.create()</code>: <code>save()</code> runs no validation and leaves the activation
-  boundary stale. Retiming a stored schedule reschedules it from the moment of
-  the change, and re-enabling a paused one does not replay what it missed.</li>
+  installed app's <code>tasks</code> module. Write rows with
+  <code>django_ox.stored.create_schedule</code>, <code>create_schedules</code> or
+  <code>update_schedule</code>; <code>objects.create()</code> skips validation and leaves the
+  activation boundary stale. Retiming a stored schedule reschedules it from
+  the moment of the change, and re-enabling a paused one does not replay what
+  it missed.</li>
 <li><code>ox_prune --older-than 7d</code> deletes finished rows; FAILED rows stay unless
   <code>--include-failed</code>. READY, WAITING and RUNNING rows are never deleted.</li>
 <li>For per-container loop-liveness, pair <code>ox_worker --heartbeat-file PATH</code>

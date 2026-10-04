@@ -608,6 +608,89 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Coming from django-celery-beat">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-the-command-prints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the command prints
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-is-translated-exactly" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What is translated exactly
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#translated-differences" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Translated differences
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rows-that-are-not-translated" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rows that are not translated
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#supplying-beats-timezone" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supplying beat's timezone
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#scope-of-the-translation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scope of the translation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#check-output-applied-from-earlier-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Check output applied from earlier versions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1126,6 +1209,89 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Coming from django-celery-beat">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-the-command-prints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the command prints
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-is-translated-exactly" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What is translated exactly
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#translated-differences" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Translated differences
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rows-that-are-not-translated" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rows that are not translated
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#supplying-beats-timezone" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supplying beat's timezone
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#scope-of-the-translation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scope of the translation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#check-output-applied-from-earlier-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Check output applied from earlier versions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1226,7 +1392,9 @@ own, check that a backend's <code>OPTIONS</code> sets <code>SCHEDULE_SOURCE</cod
 <code>django_ox.stored.DatabaseScheduleSource</code>.</p>
 <h2 id="what-a-person-with-admin-access-can-do">What a person with admin access can do</h2>
 <p>They can pick a task from the list you exposed, set its timing and arguments,
-enable it, disable it, and run it once immediately.</p>
+enable it, disable it, and run it once immediately. Disabling a readable row
+alone can pause it even if it no longer validates. This does not repair the row.
+Enabling it again is refused until it is corrected.</p>
 <p>Running one immediately ignores both the pause and the end time: a schedule
 that is disabled or past its <code>end_time</code> still runs.</p>
 <p>They cannot name a task you haven't exposed. The field is a list, not a text box,
@@ -1405,12 +1573,94 @@ run model validation, so a direct write skips the checks, leaves the activation
 boundary set for the old timing, and doesn't tell workers the row moved.</p>
 <p>A row written that way has its activation boundary moved to the moment a
 worker noticed it, logged as <code>schedule_boundary_healed</code>, whether or not it
-validates. This replaces any <code>start_time</code> the writer chose. A row that fails
-validation is also skipped and logged as <code>schedule_row_skipped</code>.
-Database acceptance is determined at dispatch; a schedule-scoped dispatch
-failure is reported as <code>schedule_dispatch_error</code>.</p>
-<p><code>update_schedule</code> and <code>create_schedule</code> take an optional <code>user=</code>, and enforce any
-per-entry permission when you pass one.</p>
+validates. This replaces any <code>start_time</code> the writer chose. A row is skipped
+and logged as <code>schedule_row_skipped</code> if a value cannot be converted, its start
+or end cannot be compared with the worker's clock, or it cannot be built.
+Skipping the row does not repair its invalid values. Database acceptance is
+determined at dispatch; a schedule-scoped dispatch failure is reported as
+<code>schedule_dispatch_error</code>.</p>
+<p>To pause a readable row that no longer validates, call <code>update_schedule</code> with
+<code>enabled=False</code> alone. This writes the disabled state without validating the
+rest of the row. It does not repair the row. Enabling it again is refused
+until the row is corrected.</p>
+<p><code>create_schedule</code>, <code>create_schedules</code> and <code>update_schedule</code> take an optional
+<code>user=</code>, and enforce any per-entry permission when you pass one.</p>
+<p>Use <code>create_schedules(rows, *, user=None)</code> for several schedules that should
+exist together, such as schedules added by a migration or the importer's
+output.</p>
+<p>For stored-schedule writes, start and end times must fall within years 1 to
+9999 in the database's time zone. With <code>USE_TZ</code> off, they must have no time
+zone.</p>
+<p>If the database raises an error while <code>create_schedules</code> checks a row, the
+error carries a note identifying its <code>rows</code> index and name and stating that
+no rows in the batch have been written. If the database raises an error
+during the write, the error carries a note identifying the row's index and
+name.</p>
+<p>Pass a list of mappings with the keyword fields that <code>create_schedule</code>
+takes:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django_ox.stored</span><span class="w"> </span><span class="kn">import</span> <span class="n">create_schedules</span>
+
+<span class="n">schedules</span> <span class="o">=</span> <span class="n">create_schedules</span><span class="p">(</span>
+    <span class="p">[</span>
+        <span class="p">{</span>
+            <span class="s2">"name"</span><span class="p">:</span> <span class="s2">"morning-report"</span><span class="p">,</span>
+            <span class="s2">"task_key"</span><span class="p">:</span> <span class="s2">"reports.daily"</span><span class="p">,</span>
+            <span class="s2">"trigger"</span><span class="p">:</span> <span class="s2">"cron"</span><span class="p">,</span>
+            <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"0 8 * * *"</span><span class="p">,</span>
+        <span class="p">},</span>
+        <span class="p">{</span>
+            <span class="s2">"name"</span><span class="p">:</span> <span class="s2">"evening-report"</span><span class="p">,</span>
+            <span class="s2">"task_key"</span><span class="p">:</span> <span class="s2">"reports.daily"</span><span class="p">,</span>
+            <span class="s2">"trigger"</span><span class="p">:</span> <span class="s2">"cron"</span><span class="p">,</span>
+            <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"0 18 * * *"</span><span class="p">,</span>
+        <span class="p">},</span>
+    <span class="p">]</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>The function returns a list of <code>OxSchedule</code> instances. An empty list returns
+<code>[]</code>. The batch is all or nothing: nothing is written unless every row passes
+validation and any permission check.</p>
+<p>The batch uses one clock reading for every row's <code>created_at</code> and <code>updated_at</code>,
+and for any <code>start_time</code> that is not supplied. Each row receives the same
+validation as <code>create_schedule</code>. Names must also be unique within the batch.
+Only after the whole batch validates does the function check <code>user</code>'s
+permission for every row, if <code>user</code> is supplied.</p>
+<p>Validation and permission checks happen before the write transaction. The
+transaction runs on the database that stores the schedules and contains only
+writes: every schedule save and one change-row touch. Workers are told once
+for the whole batch.</p>
+<p>The function raises:</p>
+<ul>
+<li><code>TypeError</code> immediately if a row is not a mapping or a key is not a writable
+  field. The message identifies the row.</li>
+<li>One <code>ValidationError</code> with a flat list of every validation failure across
+  the batch. Each entry's <code>params</code> contains <code>index</code>, the zero-based position
+  in <code>rows</code>; <code>name</code>, as supplied; <code>field</code>, or <code>""</code> for a failure that belongs
+  to no one field; and <code>message</code>. Each message identifies its row and field,
+  where there is one.</li>
+<li><code>PermissionDenied</code> naming every denied row, after the whole batch validates
+  and before any write.</li>
+<li><code>IntegrityError</code> from the unique index if another writer takes a name
+  between validation and the write. The whole batch is rolled back.</li>
+</ul>
+<p>On SQLite, inside a caller's <code>transaction.atomic()</code> that has already read,
+<code>create_schedule</code> and <code>create_schedules</code> fail immediately with
+"database is locked" if another connection holds the write lock.</p>
+<p>Stored-schedule writes reject start and end times outside years 1 to
+9999 in the database's time zone, and reject times with a time zone when
+<code>USE_TZ</code> is off.</p>
+<p>Stored-schedule reads isolate rows whose values cannot be converted,
+whose start or end cannot be compared with the worker's clock, or which
+cannot be built. Other schedules and the queue keep running. Database read
+errors stop the pass rather than being attributed to a row. Skips
+carry the row's key, name when readable, and reason. They are logged once,
+then at most once a minute per row per worker while the row stays skipped.
+Locked dispatch skips include a traceback only on the first line.</p>
+<p>An unreadable change marker reports <code>schedule_source_unavailable</code> once,
+then at most once a minute. The worker reads the schedules in full at each
+reconcile interval while the marker remains unreadable. For any schedule
+source, a tick that cannot be derived or bounds that cannot be compared
+with the worker's clock are reported as <code>schedule_dispatch_error</code>.</p>
 <h2 id="coming-from-django-celery-beat">Coming from django-celery-beat</h2>
 <p>The shape is familiar. The differences that will surprise you:</p>
 <table>
@@ -1454,22 +1704,218 @@ per-entry permission when you pass one.</p>
 </tr>
 </tbody>
 </table>
-<p><code>manage.py ox_import_beat_schedules</code> reads your existing table and prints the
-registry entries and <code>create_schedule</code> calls it would take. It writes nothing:
-retiming production is a decision, so you read the output, edit it and apply it
-yourself. <code>--database</code> names the alias holding the <code>django_celery_beat</code>
-tables, not django-ox's; it defaults to the alias <code>OxSchedule</code> reads from.</p>
-<p>Celery requires both <code>day_of_month</code> and <code>day_of_week</code> to match, while
-django-ox's cron fires when either matches. The 1.5.0 importer passes both
-fields through unchanged, so a "first Monday" schedule
-(<code>day_of_month="1-7"</code>, <code>day_of_week="mon"</code>) imports as roughly 11 runs per
-month instead of one. Regenerating output preserves this difference;
-reviewing and manually adapting schedules that restrict both fields
-before applying them is the reader's responsibility.</p>
-<p>The interval difference is the one to watch. <code>every=timedelta(minutes=90)</code> fires
-at 00:00, 01:30, 03:00 and so on, whatever time you created it. Celery would
-measure ninety minutes from the last run. Use <code>phase</code> to shift the sequence if
-the alignment matters.</p>
+<p>Run <code>manage.py ox_import_beat_schedules</code> in the Python environment and with
+the Django settings beat ran with. Use the same timezone data, <code>USE_TZ</code> and
+<code>DJANGO_CELERY_BEAT_TZ_AWARE</code>. The command cannot check that these match.</p>
+<p><code>--database</code> names the alias holding the <code>django_celery_beat</code> tables. It
+defaults to the alias <code>OxSchedule</code> reads from.</p>
+<h3 id="what-the-command-prints">What the command prints</h3>
+<p>The command writes nothing itself. Read the output, edit it and apply it
+yourself. It prints, in order:</p>
+<ol>
+<li>A header stating the conditions the translation depends on, with
+   additional notices where needed.</li>
+<li>Section 1: a <code>SCHEDULABLE_TASKS</code> fragment built only from the schedule rows
+   printed below it, followed by a comment about <code>SCHEDULE_SOURCE</code>. The same
+   <code>OPTIONS</code> must include
+   <code>"SCHEDULE_SOURCE": "django_ox.stored.DatabaseScheduleSource"</code>.
+   Without it, no stored schedule ever runs.</li>
+<li>Section 2: one <code>created = create_schedules([...])</code> call, with one
+   <code>dict(...)</code> per schedule. The assignment keeps a shell from echoing the
+   result. Applying the call creates every schedule or none.</li>
+<li>A list headed <code># Translated, with a difference from beat:</code>.</li>
+<li>A list headed <code># Not translated, and why:</code>.</li>
+<li>A footer with instructions and limits on the checks.</li>
+</ol>
+<p>Before printing a row, the command checks what <code>create_schedules</code> will
+accept, including name, task key and cron lengths, against the database
+the schedules will be written to. It also checks that the generated call
+compiles. Rows that fail these checks are listed instead.</p>
+<p>The destination checks include integer limits and text and JSON
+restrictions. PostgreSQL refuses NUL and lone surrogates. MySQL refuses
+lone surrogates and JSON nested more than 100 levels, and stores integers
+outside its exact range as approximate floats. Names are compared using the destination column's comparison
+rules: rows whose names compare equal to another name in the batch or to
+an existing schedule name are all listed instead of printed for creation.
+If the schedule table does not exist yet, the output says names were not
+checked.</p>
+<p>These are checks at the time the command runs, not a guarantee that
+applying will succeed. A name may since have been taken, permissions or
+the schema may have changed, or the database may not answer. An expiry
+may also pass before applying. Regenerate stale output. If the call
+raises, nothing was created; after a successful call, do not paste it
+again.</p>
+<p>A refused database read exits non-zero with a one-line error. A stored
+value that cannot be converted can also stop the command before any
+translation output. Row-level exclusions are described below. Quoted
+stored values in the output are shortened to a bounded length, with a
+mark where they have been cut.</p>
+<h3 id="what-is-translated-exactly">What is translated exactly</h3>
+<p>Crontab fields are read with Celery's own grammar. The resulting django-ox
+expression fires on the same minutes, hours, days and months, subject to
+the differences and exclusions below. This includes wrap-around ranges
+such as <code>22-2</code>, names in any field read by their first three letters such
+as <code>monday</code>, <code>*/n</code> steps, and lists. A field covering its whole range is
+written as <code>*</code>.</p>
+<p>The command prints its canonical expression when that fits the
+128-character cron column. Otherwise it tries a deterministic covering
+form, which may use django-ox's value-to-top steps such as <code>5/15</code>.
+Every printed expression is re-parsed and must give the same times as
+Celery's reading. A row with no verified expression within the limit is
+listed instead. The project's tests check the field reading against
+Celery's own parser.</p>
+<p>When a weekday is restricted, a day-of-month field covering every date
+of the allowed months is written as <code>*</code>. For example, a schedule for
+Mondays in February can be translated even if its day-of-month field
+does not cover all 31 possible dates.</p>
+<p>Intervals are computed as beat computes them:
+<code>timedelta(**{period: every})</code>. Accepted periods include <code>weeks</code> and
+<code>milliseconds</code>. Whole seconds are taken from the timedelta's own fields.
+For example, 2,000,000 microseconds becomes 2 seconds. A fractional
+<code>every</code> can be stored only on SQLite; PostgreSQL and MySQL use an integer
+column. On SQLite, 0.1 days becomes 8,640 seconds. Python's timedelta
+rounds fractions to the microsecond before the whole-seconds check.</p>
+<p>An interval must have a supported period and a numeric value whose
+resulting timedelta amounts to a whole number of seconds, at least one
+second. For example, 1,500,000 microseconds is refused. Intervals must
+also fit the destination column and the 62,135,596,800-second ceiling.
+For an interval past a limit, the reason names the limit that refuses it.</p>
+<p>Arguments are decoded as beat decodes them, using kombu's JSON decoder
+for text or bytes. A stored <code>[]</code> blob means no positional arguments.
+Values that decode to non-JSON types, such as datetime, Decimal, UUID or
+bytes, are not translated. Rows that beat disables because of an unknown
+type marker or undecodable arguments are also listed instead.</p>
+<p>A stored schedule has no timezone of its own. It runs in <code>TIME_ZONE</code>.
+A crontab is translated only when its zone's timezone data is identical to
+<code>TIME_ZONE</code>'s. The command compares the two zone files. Aliases such as
+<code>US/Eastern</code> and <code>America/New_York</code> qualify. Zones that merely share
+offsets today do not.</p>
+<p>Enabled states are preserved. Schedules start when created; enabling a
+disabled schedule resets its start time. Expiry is carried over as an
+inclusive <code>end_time</code> one microsecond earlier than beat's expiry. A queue
+or priority set on a beat task has no equivalent on a stored schedule;
+set it on the task.</p>
+<h3 id="translated-differences">Translated differences</h3>
+<p>The command checks clock changes over ten years from the import. It
+names affected crontabs with the next date of a difference:</p>
+<ul>
+<li>With <code>USE_TZ</code> on, a stored schedule runs a repeated clock time on both
+  passes; beat runs it on the first pass only. With <code>USE_TZ</code> off, both
+  engines run a repeated time once, so there is no two-pass notice.</li>
+<li>With <code>USE_TZ</code> on, beat fires the first skipped run at the end of a
+  spring-forward gap and counts on from it; a stored schedule fires the
+  last skipped run. A notice is printed where these produce different
+  run times.</li>
+<li>With <code>USE_TZ</code> off, a run inside a skipped hour is named where a stored
+  schedule fires it early.</li>
+</ul>
+<p>Within those ten years, a printed crontab with no clock-change notice
+runs through skipped and repeated clock times at the times beat ran it.
+Later years are not checked.</p>
+<p>The command also checks django-celery-beat 2.9.0's hour filter. For a
+plain-number crontab hour, beat loads the row only when that hour is
+within two hours of the server's hour or is 4, using the crontab's
+timezone column as of 2023-01-01 for the calculation. This applies whatever
+<code>DJANGO_CELERY_BEAT_TZ_AWARE</code> says. Rows the filter leaves out at their
+scheduled hour are named with the first date. Beat may still run them
+on time if it reloads soon enough; a stored schedule runs them at their
+hour. This analysis applies to django-celery-beat 2.9.0. If another
+version is installed, or none is installed, a header line says so.</p>
+<p>Every translated interval is listed as different. A stored schedule counts
+the interval from a fixed instant. Celery counts it from the last run.
+Its run times may differ.</p>
+<p><code>every=timedelta(minutes=90)</code> fires at 00:00, 01:30, 03:00 and so on,
+whatever time you created it. Celery would measure ninety minutes from the
+last run. Use <code>phase</code> to shift the sequence if the alignment matters.</p>
+<h3 id="rows-that-are-not-translated">Rows that are not translated</h3>
+<p>The command lists each omitted row with its reason. The main groups are:</p>
+<ul>
+<li><strong>Different day or start-time rules.</strong> A crontab is omitted when its
+  <code>day_of_month</code> leaves out a date of a month it runs in and its
+  <code>day_of_week</code> leaves out a weekday. Celery requires both to match.
+  A stored schedule runs when either matches. A future start is also
+  omitted: beat runs the task once when the start arrives, while a
+  stored schedule waits for its next tick. A start already past is
+  dropped from translated rows. Expired rows, including a year-1
+  expiry, are listed as expired.</li>
+<li><strong>Unsupported schedules or arguments.</strong> These include one-off, solar
+  and clocked schedules, rows with both a crontab and an interval, beat's
+  cleanup task, and arguments the stored-schedule API cannot accept.
+  Use <code>ox_prune</code> to remove django-ox's finished rows rather than importing
+  <code>celery.backend_cleanup</code>.</li>
+<li><strong>Invalid or unrepresentable values.</strong> These include crontab fields
+  Celery refuses, intervals outside the rules above, and values or names
+  that fail the destination checks.</li>
+<li><strong>Incompatible timezone data or settings.</strong> Crontab zones must satisfy
+  the zone-file comparison above. The settings restrictions below also
+  apply.</li>
+</ul>
+<p>Some rows stop beat for the whole table, rather than merely failing to
+run themselves. These include rows beat cannot build, empty or unloadable
+crontab timezones, and, under some settings, bounds beat cannot compare.
+The command lists these rows and adds a header comment saying beat ran
+nothing from the table while they existed. The header names at most ten
+such rows and counts the rest. Applying the other rows starts work beat
+was not running.</p>
+<p>Naive start and expiry bounds are judged by beat's clock, not the
+importing process's zone. The timezone settings impose these restrictions:</p>
+<ul>
+<li>With <code>USE_TZ=True</code> and <code>DJANGO_CELERY_BEAT_TZ_AWARE=False</code>, rows are
+  translated only when <code>TIME_ZONE</code> has timezone data identical to UTC.
+  Rows carrying any start time or expiry are omitted.</li>
+<li>With <code>USE_TZ=False</code> and <code>DJANGO_CELERY_BEAT_TZ_AWARE=True</code> or unset,
+  no row is translated.</li>
+<li>With both settings false, a row with a start time or expiry stored
+  with a UTC offset is omitted. In django-celery-beat 2.9.0, beat's due
+  check raises <code>TypeError</code> for such a row.
+  A naive expiry is translated only when <code>TIME_ZONE</code> has timezone data
+  identical to UTC.</li>
+</ul>
+<p>Where these restrictions require a comparison with UTC, a <code>TIME_ZONE</code>
+that this Python cannot load is reported as such. If it loads but its
+zone file or UTC's cannot be found in the TZPATH directories or the
+tzdata package, the command reports that the comparison could not be
+made, not that the data differs. Check the setting and this environment's
+timezone data.</p>
+<p>Resolve or replace omitted schedules before switching schedulers.</p>
+<h3 id="supplying-beats-timezone">Supplying beat's timezone</h3>
+<p><code>--beat-timezone ZONE</code> names the timezone the Celery app ran beat in.
+Supply it when the crontab table has no timezone column. It is also
+required for every crontab when <code>DJANGO_CELERY_BEAT_TZ_AWARE=False</code>,
+because beat ignores the row's zone for scheduling in that mode.
+The 2.9.0 hour filter described above still uses the timezone column.</p>
+<p>The supplied zone must satisfy the same zone-file comparison with
+<code>TIME_ZONE</code>. An empty zone in a table that has the timezone column is
+not translated.</p>
+<p>If the option was given but was not needed, and at least one crontab row
+was read, the command prints a comment directly under the header
+explaining that every crontab has its own timezone and
+<code>DJANGO_CELERY_BEAT_TZ_AWARE</code> is on. It does not print this comment when
+there are no crontab rows.</p>
+<h3 id="scope-of-the-translation">Scope of the translation</h3>
+<p>The translation describes when schedules run while their scheduler is
+running, under the environment and settings stated above. It does not
+cover behavior after downtime, when a row is loaded late, or on a
+never-run row's first run.</p>
+<p>The beat behavior behind these rules was measured with
+django-celery-beat 2.9.0 and Celery 5.6.3.</p>
+<h3 id="check-output-applied-from-earlier-versions">Check output applied from earlier versions</h3>
+<p>Output from versions 1.2.0 through 1.7.0 passed crontab fields through as
+stored and judged zones by two sample offsets. If you applied that output,
+check:</p>
+<ul>
+<li>Imported schedules restricting both day fields where the day-of-month
+  restriction excludes a date of an allowed month. They run when either
+  field matches. A "first Monday" expression using <code>day_of_month="1-7"</code>
+  and <code>day_of_week="mon"</code> runs about 124 times a year instead of 12.</li>
+<li>Imported crontabs from a zone other than <code>TIME_ZONE</code>.</li>
+<li>Beat rows with microsecond intervals. They were listed as below one
+  second, including values that represent whole seconds.</li>
+</ul>
+<p>Regenerate output with this version to review the translations and
+named differences or exclusions. Long crontabs that 1.7.0 printed as
+stored can print again when the command finds a verified expression
+within the column limit.</p>
 <h2 id="what-this-costs">What this costs</h2>
 <p>Worth knowing before you turn it on:</p>
 <ul>
@@ -1484,25 +1930,49 @@ the alignment matters.</p>
   <code>OPTIONS["SCHEDULE_RECONCILE_INTERVAL"]</code> if you want that sooner; it is one
   indexed read of a small table.</li>
 <li><strong>One extra query per pass.</strong> Workers read a single row to learn whether
-  anything changed, and re-read the schedules only when it did.</li>
-<li><strong>Read-time validation failures are skipped.</strong> A row that no longer
-  validates is logged as <code>schedule_row_skipped</code> and ignored so the others
-  keep running.</li>
-<li><strong>Dispatch failures have a separate boundary.</strong> A row can validate and
-  still fail when dispatched. A schedule-scoped failure rolls back its tick
-  and task and is reported as <code>schedule_dispatch_error</code>. If rollback succeeds
+  anything changed. They re-read the schedules when it did and at each
+  reconcile interval. If the change marker cannot be read, full reads still
+  run at each reconcile interval.</li>
+<li><strong>Unreadable or invalid rows are skipped.</strong> A row is left out if a value
+  cannot be converted, its start or end cannot be compared with the worker's
+  clock, or it cannot be built. The other schedules and the queue keep
+  running. The skip is logged as <code>schedule_row_skipped</code> with <code>schedule_pk</code>,
+  <code>schedule</code> and <code>reason</code>. If the name cannot be read, <code>schedule</code> may be
+  <code>None</code>. A conversion failure's reason names the column. Each row is logged
+  once, then at most once a minute per worker while it stays skipped. A skip
+  during the locked dispatch read includes a traceback only on its first
+  line.</li>
+<li><strong>Skipped rows need repair.</strong> Skipping does not repair invalid values. Find
+  the row by <code>schedule_pk</code> and correct it in the admin change form or with
+  <code>update_schedule</code>. Use SQL if the value is one the ORM cannot read. To pause
+  a readable row that no longer validates, use <code>update_schedule</code> with
+  <code>enabled=False</code>
+  alone. Enabling it again is refused until it is corrected.</li>
+<li><strong>Dispatch failures have a separate boundary.</strong> A schedule can validate and
+  still fail when dispatched. For any schedule source, a tick that cannot be
+  derived or bounds that cannot be compared with the worker's clock are
+  reported as <code>schedule_dispatch_error</code>. A schedule-scoped failure inside
+  the dispatch transaction rolls back its tick and task. If rollback succeeds
   and the same connection remains usable, later schedules are still attempted.
   The failed schedule is retried on subsequent passes under the usual
   due-tick and deadline rules; only its reporting is rate-limited.</li>
+<li><strong>Database read failures are not bad rows.</strong> A database error during a full
+  schedule read or a shared dispatch read, such as a lost connection, missing
+  table or lock error, is not attributed to an individual row. It stops the
+  pass rather than skipping a row.</li>
 <li><strong>An abandoned pass stops further traversal.</strong> A <code>django.db.DatabaseError</code>
   escaping a shared dispatch read, failed rollback or unusable connection is
   reported as <code>schedule_dispatch_failed</code>. The stored source's marker read and
-  boundary heal retain their own events: a failed marker read reports
-  <code>schedule_source_unavailable</code> and dispatch continues from the cached set; a
-  failed boundary heal reports <code>schedule_boundary_heal_failed</code>. Dispatch is
-  retried on a later pass. Ticks already committed are not undone. Alert on
-  <code>schedule_row_skipped</code>, <code>schedule_dispatch_error</code>, <code>schedule_dispatch_failed</code>
-  and <code>schedule_source_unavailable</code>.</li>
+  boundary heal retain their own events. An unreadable change-marker value
+  reports <code>schedule_source_unavailable</code> once, then at most once a minute while
+  it remains unreadable, and the worker reads the schedules in full at each
+  reconcile interval during that time. A database error on the marker read
+  reports the same event on every dispatch pass, and the worker keeps using
+  the last schedules it read. A failed boundary heal reports
+  <code>schedule_boundary_heal_failed</code>. Dispatch is retried on a later pass.
+  Ticks already committed are not undone. Alert on <code>schedule_row_skipped</code>,
+  <code>schedule_dispatch_error</code>, <code>schedule_dispatch_failed</code> and
+  <code>schedule_source_unavailable</code>.</li>
 <li><strong><code>manage.py check</code> cannot see rows.</strong> Checks run before <code>migrate</code>, so a bad
   schedule in the database is a log line, not a start-up error.
   Settings-declared schedules still fail fast for errors their checks can

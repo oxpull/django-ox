@@ -938,6 +938,9 @@ export names this page does not list; those names are not public.</p>
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   <code>128 + the signal number</code>, following the shell convention.</li>
+<li><strong>The stored-schedule write functions</strong> <code>django_ox.stored.create_schedule</code>,
+  <code>django_ox.stored.create_schedules</code>, <code>django_ox.stored.update_schedule</code> and
+  <code>django_ox.stored.delete_schedule</code>.</li>
 <li><strong>The heartbeat-file protocol</strong>: with <code>ox_worker</code>, one process writes
   <code>PATH</code>; above one process, the supervisor writes <code>PATH.supervisor</code> and
   slot i writes <code>PATH.i</code>. The modification time is the signal; file
@@ -1065,8 +1068,8 @@ are not public.</p>
 <h3 id="worker-implementation-details">Worker implementation details</h3>
 <p><code>Worker</code> internals remain <strong>Not public</strong>. This includes <code>_handed_off</code>,
 <code>_unsettled</code>, <code>_fence</code>, <code>_claims_in_flight</code>, <code>_claim_generation</code>,
-<code>_claiming</code>, <code>_claim</code>, <code>_claim_inline</code>, <code>_recover_claims</code> and
-<code>_release_claim</code>.</p>
+<code>_claiming</code>, <code>_claim</code>, <code>_claim_inline</code>, <code>_recover_claims</code>,
+<code>_release_claim</code>, <code>_in_callers_atomic_block</code> and <code>_renewable()</code>.</p>
 <p><code>Worker._run_attempt</code> is also private. It returns a <code>bool</code> indicating
 whether the outcome was recorded. A subclass override that returns
 <code>None</code> is treated as "outcome not recorded". This keeps its row excluded
@@ -1077,7 +1080,11 @@ the base claim returns. A database wait in one claim does not block
 another claim through a Worker lock. A claim made through <code>run()</code>,
 <code>run_once()</code> or the base <code>claim_one()</code> counts as in flight until its
 returned row is registered. A short per-Worker lock protects this
-bookkeeping and is never held across a database call.</p>
+bookkeeping and is never held across a database call.
+On PostgreSQL and MySQL, a <code>run_once()</code> call inside its caller's atomic block
+does not hold up lease renewal for the Worker's other tasks; see the SQLite
+write-lock limit in
+<a href="../production/#execution-and-failure-boundaries">Production</a>.</p>
 <p><code>Worker.run_once()</code> and <code>testing.run_tasks()</code> raise a claim's original
 error at once. They make no immediate recovery attempt and no pending
 recovery read before a later claim, whether inside or outside a caller's
@@ -1085,11 +1092,15 @@ transaction. A claim that committed stays <code>RUNNING</code> and is left to th
 reaper, which requeues it with the attempt spent or marks it <code>LOST</code> on
 the final attempt. The next call does not find that landed claim while
 it remains <code>RUNNING</code>.</p>
-<p>Neither <code>run_once()</code> nor <code>run_tasks()</code> closes the failed claim's connection
-for recovery or tests idle connections in Django's PostgreSQL pool.
-The caller's connection and session, including advisory locks, temporary
-tables and <code>SET</code> values, are left as the claim left them. The <code>run()</code> loop
-tests the pool after a failed pass.</p>
+<p>Neither <code>run_once()</code> nor <code>run_tasks()</code> closes the failed claim's
+connection for recovery or tests or discards idle connections in Django's
+PostgreSQL pool. The caller's connection and session, including advisory
+locks, temporary tables and <code>SET</code> values, are left as the claim left them.
+With psycopg_pool 3.3.0 or later, the <code>run()</code> loop discards idle pooled
+connections without testing them after a failed pass in which the driver
+reports a connection held or opened by that pass as lost. Any other failed
+pass leaves the pool alone. With psycopg_pool 3.2.x, the loop still tests
+idle connections after every failed pass.</p>
 <p>Recovery runs only in <code>Worker.run()</code>, the loop used by <code>ox_worker</code>, on
 PostgreSQL with psycopg 3, pooled or not, MySQL and SQLite. Pending recovery
 is checked at the head of a poll pass unless another claim of the same
@@ -1170,7 +1181,7 @@ has no filter for it. Bulk discards skip it, and <code>queue_stats()</code>, the
 process that shares a database before anything writes the new status. The
 release notes name the value, say how it reads through <code>django.tasks</code>, and
 give the upgrade and rollback steps.</p>
-<p>Pin accordingly: <code>django-ox~=1.7.0</code> accepts patch releases only;
+<p>Pin accordingly: <code>django-ox~=1.8.0</code> accepts patch releases only;
 <code>django-ox~=1.3</code> accepts the current major line.</p>
 <h2 id="deprecation-policy">Deprecation policy</h2>
 <p>When a public surface is going to be removed or changed incompatibly, and

@@ -1392,9 +1392,12 @@ want a sequence offset from the grid, say so with <code>phase</code>:</p>
     <span class="s2">"phase"</span><span class="p">:</span> <span class="n">timedelta</span><span class="p">(</span><span class="n">minutes</span><span class="o">=</span><span class="mi">10</span><span class="p">),</span>
 <span class="p">}</span>
 </code></pre></div>
-<p><code>every</code> must be at least one second. The dispatch loop looks about once a
-second and only the latest due tick fires, so anything faster would be
-coalesced away rather than run.</p>
+<p><code>every</code> must be at least one second and at most 62,135,596,800 seconds.
+The upper bound is the time from year 1 to 1970, about 1,969 years.
+The dispatch loop looks about once a second and only the latest due tick
+fires, so anything faster would be coalesced away rather than run.
+A <code>SCHEDULES</code> entry above the upper bound is refused by <code>manage.py check</code>
+and at worker start with <code>django_ox.E002</code>.</p>
 <p>Interval ticks are wall-clock, exactly as cron ticks are, so the
 daylight-saving behaviour above applies to them too.</p>
 <h2 id="missed-ticks">Missed ticks</h2>

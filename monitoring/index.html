@@ -1607,12 +1607,19 @@ restart trigger if that tradeoff is unacceptable.</p>
 <h4 id="updates-and-scope">Updates and scope</h4>
 <p>The worker updates its file on the main thread at the head of each poll
 pass, before database work, and at the head of each drain pass. Updates
-resume when database work returns control to the loop. On a pooled
-PostgreSQL alias, a <code>worker_poll_failed</code> pass is followed by a synchronous
-test of each idle pooled connection on the main thread, then the polling
-wait, before the next update. Include pool acquisition and these connection
-tests in the freshness budget. A connection test that never returns stalls
-updates just as a hung statement does.</p>
+resume when database work returns control to the loop.
+On a pooled PostgreSQL alias with psycopg_pool 3.3.0 or later, a
+<code>worker_poll_failed</code> pass that lost a connection has the pool discard its
+idle connections without testing them, then enters the polling wait.
+Discarding those connections runs no statement and waits for no server
+reply. Other failed passes leave the pool alone. Include pool acquisition
+in the freshness budget; there are no idle-connection tests in this
+recovery sweep.</p>
+<p>With psycopg_pool 3.2.x, every <code>worker_poll_failed</code> pass is still followed
+by a synchronous test of each idle pooled connection on the main thread,
+then the polling wait, before the next update. Include pool acquisition
+and these tests in the freshness budget. A connection test that never
+returns stalls updates just as a hung statement does.</p>
 <p>Startup work before <code>Worker.run()</code> writes no heartbeat. This includes
 Django setup and configured startup work such as reading stored schedules
 through <code>DatabaseScheduleSource</code>. Allow time for startup before treating a
@@ -1723,9 +1730,12 @@ one per claim attempt.</p>
 <p>Size <code>--max-heartbeat-age</code> above those expected gaps. With Django's
 PostgreSQL connection pool, a refused database can hold a pass for the
 pool's <code>timeout</code>, which defaults to 30 seconds, before the error returns
-control to the loop. The freshness budget must exceed the pool timeout,
-idle-connection testing after a failed pass, <code>--interval</code> and scheduling
-margin, with further allowance for other reap, dispatch and claim work.</p>
+control to the loop.
+The freshness budget must exceed the pool timeout, <code>--interval</code> and
+scheduling margin, with further allowance for other reap, dispatch and
+claim work. With psycopg_pool 3.2.x, it must also allow for idle-connection
+testing after every failed pass; a test that never returns can exhaust
+any finite budget.</p>
 <p>A file passes only if it is regular and:</p>
 <div class="highlight"><pre><span></span><code>0 &lt;= probe wall clock - file modification time &lt;= max heartbeat age
 </code></pre></div>
@@ -1931,9 +1941,10 @@ A configured <code>OPTIONS["connect_timeout"]</code> bounds connects; PyMySQL de
 to 10 seconds. PostgreSQL statements are unbounded by default. MySQL
 row-lock waits use <code>innodb_lock_wait_timeout</code>, 50 seconds by default, while
 PyMySQL's client read timeout is unbounded by default. SQLite's busy timeout,
-5 seconds by default, bounds each lock wait. With Django's PostgreSQL pool,
-include its acquisition <code>timeout</code>, 30 seconds by default, and the time
-spent testing idle connections after a failed pass.</p>
+5 seconds by default, bounds each lock wait.
+With Django's PostgreSQL pool, include its acquisition <code>timeout</code>,
+30 seconds by default. With psycopg_pool 3.2.x, also include the time
+spent testing idle connections after every failed pass.</p>
 <p>Choose <code>--max-heartbeat-age</code> above the polling interval (<code>--interval</code>,
 default 1 second), expected loop latency and a scheduling margin. The
 default maximum age is 60 seconds.</p>
@@ -2171,6 +2182,11 @@ The message text is not part of the contract. The keys are.</p>
 <td>Once per <code>Worker.run()</code>, after <code>worker_started</code> and before threads start: the worker alias's effective PostgreSQL pool maximum is below <code>concurrency + 1</code>. Each <code>--processes</code> child checks separately. The warning does not resize the pool, refuse startup, measure available server slots, or reserve fallback capacity.</td>
 </tr>
 <tr>
+<td><code>connection_pool_cannot_drain</code></td>
+<td>WARNING</td>
+<td>Pooled PostgreSQL only. The installed psycopg_pool has no <code>ConnectionPool.drain()</code> method, which was added in 3.3.0. Emitted once per <code>Worker.run()</code>, after <code>worker_started</code> and the <code>connection_pool_too_small</code> check, before threads start. Each <code>--processes</code> child checks separately. Also emitted at the first sweep of such a pool in a process, for each database alias, unless startup already emitted it in that process. Concurrent first sweeps may emit duplicate warnings. The sweep record is the only notice available to callers of <code>run_once()</code> or <code>run_tasks()</code>. Idle connections are still tested as in django-ox 1.7.0, preserving restart recovery but also the wait on a connection that stays open without answering. A stop is not read until that test returns. Upgrade psycopg_pool to 3.3.3 or newer. This warning does not refuse startup or change the pool. No traceback. Keys: <code>event</code> and <code>database</code> always; <code>worker_id</code> only on the startup record.</td>
+</tr>
+<tr>
 <td><code>task_claimed</code></td>
 <td>DEBUG</td>
 <td>A task was claimed from the queue.</td>
@@ -2293,12 +2309,12 @@ The message text is not part of the contract. The keys are.</p>
 <tr>
 <td><code>schedule_row_skipped</code></td>
 <td>WARNING</td>
-<td>A row could not be built. A skip during a periodic full read carries <code>schedule</code>, <code>schedule_pk</code> and <code>reason</code>. A skip during the locked dispatch read carries <code>schedule_pk</code> and a traceback.</td>
+<td>A row could not be converted, its start or end could not be compared with the worker's clock, or it could not be built. Carries <code>schedule</code>, <code>schedule_pk</code> and <code>reason</code> during both full reads and locked dispatch reads. Logged once, then at most once a minute per row per worker while the row stays skipped. A locked dispatch skip includes a traceback only on its first line.</td>
 </tr>
 <tr>
 <td><code>schedule_dispatch_error</code></td>
 <td>ERROR</td>
-<td>A schedule-scoped failure, database or not. Its transaction rolled back and the same database connection remains usable, so the rest of the pass continues. The schedule is retried under the usual due-tick and deadline rules. The first failure has a traceback; continued failures produce at most one summary per 60 seconds. Carries <code>schedule</code>, <code>database</code>, <code>error</code>, <code>failures</code> and <code>suppressed</code>.</td>
+<td>A schedule-scoped failure, database or not, from any schedule source. This includes a tick that cannot be derived or bounds that cannot be compared with the worker's clock. If a dispatch transaction was started, it rolled back and the same database connection remains usable. The rest of the pass continues. The schedule is retried under the usual due-tick and deadline rules. The first failure has a traceback; continued failures produce at most one summary per 60 seconds. Carries <code>schedule</code>, <code>database</code>, <code>error</code>, <code>failures</code> and <code>suppressed</code>.</td>
 </tr>
 <tr>
 <td><code>schedule_dispatch_recovered</code></td>
@@ -2318,7 +2334,7 @@ The message text is not part of the contract. The keys are.</p>
 <tr>
 <td><code>schedule_source_unavailable</code></td>
 <td>WARNING</td>
-<td>The stored schedules could not be read, so the worker is running on the set it last read rather than on none. Repeated every dispatch pass while the read keeps failing. A stream of it right after a deploy means the code is running ahead of migration <code>0007</code>.</td>
+<td>The stored schedules or their change marker could not be read. A change marker holding a value that cannot be read is reported once, then at most once a minute while it remains unreadable. During that time, the worker reads the schedules in full at each reconcile interval instead of relying only on the last set it read. A database error on the marker read is reported on every dispatch pass while it lasts, and the worker keeps running on the last set it read. A database error during a full read stops the pass. A stream of this event right after a deploy can mean the code is running ahead of migration <code>0007</code>.</td>
 </tr>
 <tr>
 <td><code>schedule_lock_unavailable</code></td>
@@ -2465,6 +2481,12 @@ The message text is not part of the contract. The keys are.</p>
 <p>The four renewal connection events and <code>watchdog_connection_unavailable</code>
 include <code>worker_id</code> and no traceback. They apply only to Django's
 PostgreSQL pool.</p>
+<p><code>connection_pool_cannot_drain</code> is also specific to pooled PostgreSQL and
+carries no traceback.</p>
+<p>For <code>connection_pool_cannot_drain</code>, <code>worker_id</code> is present only on the
+startup record. The record emitted by a sweep has no <code>worker_id</code>.</p>
+<p><code>database</code> is always present on <code>connection_pool_cannot_drain</code>, both at
+startup and when emitted by a sweep.</p>
 <p><code>heartbeat_write_failed</code> and <code>heartbeat_invalidate_failed</code> also have no
 traceback. Neither carries a <code>worker_id</code> key, including when a worker emits
 <code>heartbeat_write_failed</code>.</p>
@@ -2651,8 +2673,8 @@ A failed connect while recording a stuck attempt logs
 </tr>
 <tr>
 <td><code>schedule</code></td>
-<td><code>schedule_dispatched</code>, <code>schedule_row_skipped</code> during a periodic full read, <code>schedule_dispatch_error</code>, <code>schedule_dispatch_recovered</code>, <code>schedule_dispatch_callback_failed</code>, <code>schedule_tick_dropped</code>, <code>schedule_lock_unavailable</code> for a settings-declared schedule</td>
-<td>The schedule's name, from <code>SCHEDULES</code> or from its row.</td>
+<td><code>schedule_dispatched</code>, <code>schedule_row_skipped</code>, <code>schedule_dispatch_error</code>, <code>schedule_dispatch_recovered</code>, <code>schedule_dispatch_callback_failed</code>, <code>schedule_tick_dropped</code>, <code>schedule_lock_unavailable</code> for a settings-declared schedule</td>
+<td>The schedule's name, from <code>SCHEDULES</code> or from its row. For <code>schedule_row_skipped</code>, this may be <code>None</code> if the row's name could not be read.</td>
 </tr>
 <tr>
 <td><code>schedule_pk</code></td>
@@ -2666,8 +2688,8 @@ A failed connect while recording a stuck attempt logs
 </tr>
 <tr>
 <td><code>reason</code></td>
-<td><code>schedule_row_skipped</code> during a periodic full read</td>
-<td>Why the row could not be used. A skip during the locked dispatch read carries <code>schedule_pk</code> and a traceback instead.</td>
+<td><code>schedule_row_skipped</code></td>
+<td>Why the row could not be used, during either a full read or a locked dispatch read. For a value that could not be converted, the reason names the column.</td>
 </tr>
 <tr>
 <td><code>queues</code></td>

@@ -807,6 +807,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#psycopg_pool-versions-and-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        psycopg_pool versions and recovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#rolling-out-per-task-policy" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1352,6 +1363,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#psycopg_pool-versions-and-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        psycopg_pool versions and recovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#rolling-out-per-task-policy" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1620,8 +1642,17 @@ no stop-time recovery attempt.</p>
 <p>A recovery error does not prevent shutdown. These recovery limits apply
 only to the stop-time attempt. They do not bound shutdown as a whole.
 Existing waits elsewhere can delay shutdown before the stop-time attempt
-is reached, including MySQL claim-path reconnection and the pooled
-PostgreSQL health checks that <code>Worker.run()</code> makes after a failed pass.</p>
+is reached, including MySQL claim-path reconnection. With psycopg_pool
+3.3.0 or later, the pooled PostgreSQL recovery sweep runs no statements on
+idle connections. The next pass can still wait for the pool's checkout
+<code>timeout</code>, which defaults to 30 seconds. Lowering that timeout shortens
+the checkout wait, but stopping can still wait for the stop-time recovery
+look.</p>
+<p>The legacy sweep on psycopg_pool 3.2.x is excluded from this improvement.
+It still tests idle connections after every failed pass, and a test can
+wait as long as a connection stays open without answering. Statements
+elsewhere can also wait without limit. This change adds no shutdown
+deadline.</p>
 <p><code>Worker.run_once()</code> and <code>testing.run_tasks()</code> raise the claim's original
 error at once, without an immediate recovery attempt or a pending recovery
 read on the next call. A claim that committed stays <code>RUNNING</code> and is left
@@ -1635,12 +1666,19 @@ through a Worker lock. A claim made through <code>run()</code>, <code>run_once()
 base <code>claim_one()</code> counts as in flight until its returned row is
 registered. A short per-Worker lock protects this bookkeeping and is
 never held across a database call. <code>ox_worker</code> does not share its Worker:
-its loop claims and checks recovery on one thread.</p>
+its loop claims and checks recovery on one thread.
+On PostgreSQL and MySQL, a <code>run_once()</code> call inside its caller's atomic block
+does not hold up lease renewal for the Worker's other tasks; see the SQLite
+write-lock limit below.</p>
 <p>Neither <code>run_once()</code> nor <code>run_tasks()</code> closes the failed claim's
-connection for recovery or tests idle connections in Django's PostgreSQL
-pool. The caller's connection and session, including advisory locks,
-temporary tables and <code>SET</code> values, are left as the claim left them.
-The <code>run()</code> loop tests the pool after a failed pass.</p>
+connection for recovery or tests or discards idle connections in Django's
+PostgreSQL pool. The caller's connection and session, including advisory
+locks, temporary tables and <code>SET</code> values, are left as the claim left them.
+With psycopg_pool 3.3.0 or later, the <code>run()</code> loop discards idle pooled
+connections without testing them after a failed pass in which the driver
+reports a connection held or opened by that pass as lost. Any other failed
+pass leaves the pool alone. With psycopg_pool 3.2.x, the loop still tests
+idle connections after every failed pass.</p>
 <p><code>run_once()</code> and <code>run_tasks()</code> perform no recovery either inside or
 outside a caller's transaction. Inside <code>atomic()</code> or Django <code>TestCase</code>,
 or when the caller has disabled autocommit, the claim belongs to the
@@ -1893,6 +1931,18 @@ the drain heartbeat stale.</p>
 <p>The heartbeat does not bound shutdown. If the main loop is wedged in a
 claim or another call that never returns, the first signal sets the drain
 flag but the loop cannot act on it. A second signal or SIGKILL is needed.</p>
+<p>For PostgreSQL connections that stay open without answering, use libpq's
+socket-level timeout settings as mitigation: <code>keepalives</code>,
+<code>keepalives_idle</code>, <code>keepalives_interval</code>, <code>keepalives_count</code> and
+<code>tcp_user_timeout</code>. Set them through the database alias's <code>OPTIONS</code>.
+They apply to every connection opened for that alias, pooled or not.</p>
+<p>Their effectiveness depends on the failure mode and platform support.
+They do not impose a statement or shutdown deadline. A proxy or load
+balancer that continues acknowledging traffic at the TCP level can
+defeat this mitigation even when the database never answers. In a local
+test with such a relay, waits remained in place after 40 seconds with
+keepalive settings and with <code>tcp_user_timeout</code>. Those tests do not
+establish how quickly either setting detects real packet loss.</p>
 <p>A second signal forces an immediate exit, code 130. Whatever was running
 is abandoned mid-flight. The reaper on a surviving worker reclaims it
 later, and it counts as a failed attempt.</p>
@@ -2199,6 +2249,19 @@ other aliases, connections opened by tasks, or available server slots.</p>
 <p>The check accepts only an <code>int</code> of at least 1, excluding booleans. Other
 values receive no sizing warning. This includes whole-valued floats such
 as <code>10.0</code>, which psycopg_pool accepts. Pool validation remains separate.</p>
+<p>The worker also emits <code>connection_pool_cannot_drain</code> at WARNING level
+when its PostgreSQL pool has no <code>ConnectionPool.drain()</code> method. This
+method requires psycopg_pool 3.3.0 or later. The startup check runs once
+per <code>Worker.run()</code>, after <code>worker_started</code> and the pool-size check, before
+threads start. Each <code>--processes</code> child checks separately.</p>
+<p>This warning does not refuse startup or change the pool. The worker
+keeps django-ox 1.7.0's sweep, testing each idle connection. Recovery after
+a database restart is preserved, but a test of a connection that stays open without answering does
+not return, and the worker cannot read a stop until it does.</p>
+<p>Upgrade psycopg_pool to 3.3.3 or newer. A caller that does not use
+<code>Worker.run()</code> receives the warning only when a sweep first encounters
+such a pool in a process, for each database alias. Concurrent first
+sweeps may emit duplicate warnings.</p>
 <p>An undersized pool can still cause task-query and task-thread outcome-write
 timeouts. Retries can exhaust the row's stored attempt budget. Failed
 outcome writes can leave attempts for the reaper to reclaim after the task
@@ -2233,6 +2296,31 @@ SQLite is unchanged. The start-to-start renewal cadence applies to all
 workers.</p>
 <p>Unpooled renewal and watchdog connects do not gain these local deadlines.
 PgBouncer and third-party pools have not been tested.</p>
+<h3 id="psycopg_pool-versions-and-recovery">psycopg_pool versions and recovery</h3>
+<p>Use psycopg_pool 3.3.3 or newer with Django's PostgreSQL pool. Version
+3.3.0 is the minimum for django-ox's drain-based recovery fix; it added
+<code>ConnectionPool.drain()</code>. django-ox does not declare a psycopg dependency,
+so its package metadata does not enforce this minimum.</p>
+<p>With psycopg_pool 3.3.0 or later, a recovery sweep closes idle connections
+without testing them, and the pool opens replacements. Connections
+checked out when the drain begins are not interrupted. They are closed
+and replaced when returned to the pool. The sweep runs only when the
+driver reports a connection as lost, not merely because a statement or
+pool checkout failed.</p>
+<p>On psycopg_pool 3.2.x, the worker starts, emits
+<code>connection_pool_cannot_drain</code>, and keeps the sweep used in django-ox
+1.7.0. That sweep tests idle connections. It preserves restart recovery,
+but a test of a connection that stays open without answering can still
+hold up the worker and prevent it from reading a stop.</p>
+<p>There is a separate reason to upgrade if tasks have timeouts.
+psycopg_pool versions before 3.3.1 can lose a pooled connection when a
+task timeout interrupts a thread waiting for a connection just as the
+pool hands it one. Repeated losses can leave the pool with no connections
+available. This also affects django-ox 1.7.0 and is not introduced by the
+drain-based fix.</p>
+<p>psycopg_pool 3.3.3 also fixes pool maintenance threads terminating after
+24 hours without work. A drain relies on those threads to open
+replacement connections.</p>
 <h3 id="rolling-out-per-task-policy">Rolling out per-task policy</h3>
 <p>No database migration is required. The attempt-budget column already
 exists, but old and new workers do not execute the same live policy.</p>
@@ -2309,8 +2397,11 @@ they belong together because they are what makes recovery
 safe.</p>
 <p><strong>Renewal keeps the lease alive while it reaches the database on time.</strong>
 While tasks execute, the worker refreshes their lock timestamps with one
-statement per interval, including during graceful drain. Slow tasks stay
-protected while those renewals succeed. If renewal is delayed or cannot get
+statement per interval, including during graceful drain. Renewal excludes
+claims made by <code>run_once()</code> inside a caller's atomic block on the worker's
+database. Those claims remain uncommitted and are protected by the caller's
+transaction until the commit publishes their outcomes. Other slow tasks
+stay protected while renewals succeed. If renewal is delayed or cannot get
 a connection for <code>LOCK_TIMEOUT</code>, the reaper can reclaim work from a live
 worker whose task bodies are still running. See
 <a href="#tuning-lock_timeout">Tuning LOCK_TIMEOUT</a> and
@@ -2588,7 +2679,10 @@ and logs <code>task_failed</code> with <code>reason="attempts_exhausted"</code>.
 <p>With inline <code>run_once()</code>, a <code>KeyboardInterrupt</code> or <code>SystemExit</code> raised
 by the callback propagates to the caller. The row remains <code>RUNNING</code>
 for lease recovery, matching inline task-interrupt handling.</p>
-<p>Inside a caller's atomic block on the worker's database, <code>run_once()</code> does not start a lease-renewal thread: the claim and outcome are written in the caller's transaction. Renewal remains enabled outside an atomic block on that database, including when autocommit is turned off.</p>
+<p>Inside a caller's atomic block on the worker's database, <code>run_once()</code> does not start a lease-renewal thread. Lease renewal also excludes that claim when the Worker is shared with other calls. The claim is uncommitted, so no other connection can see its lease. The caller's transaction protects it until the commit publishes the row with its outcome. The Worker's other rows are renewed as before.</p>
+<p>Renewal remains enabled outside an atomic block on that database, including when autocommit is turned off. On MySQL, a <code>run_once()</code> call with autocommit off and no atomic block still stalls renewal of a shared Worker's other tasks. Such callers must not share their Worker with other calls.</p>
+<p>Tasks executing inside a caller's atomic block must not commit behind Django's back, including through raw transaction-control SQL or implicitly committing DDL. Such a commit makes the claim visible while its task is still running, and nothing renews its lease.</p>
+<p>SQLite's single write lock still makes every other connection's write wait while the caller's transaction is open on the worker's database. This includes lease renewal, outcome writes, reaper requeues and other claims, whether or not a Worker is shared.</p>
 <p>A callback can still run after the attempt has lost its lease.
 The ownership check then drops its outcome write and logs
 <code>task_lease_lost</code>. A callback is not a safe place for external side

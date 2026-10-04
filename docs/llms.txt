@@ -161,13 +161,14 @@ Operational facts to get right:
   path, so admin change permission does not become permission to run any
   callable. `@schedulable` takes effect only when its module is imported, and
   django-ox imports each installed app's `tasks` module.
-  `django_ox.stored.create_schedule` and `update_schedule` are the
-  write path; `objects.create()` skips validation because Django's `save()`
-  does not call `full_clean()`. A stored schedule carries `start_time` as its
-  activation boundary, so retiming reschedules from the moment of the change
-  rather than firing a tick that already passed, and re-enabling a paused
-  schedule does not replay the ticks it missed. `starting_deadline_seconds`
-  drops a tick later than that instead of running it however stale.
+  `django_ox.stored.create_schedule`, `create_schedules` and
+  `update_schedule` are the write path; `objects.create()` skips validation
+  because `save()` does not call `full_clean()`. A stored schedule carries
+  `start_time` as its activation boundary, so retiming reschedules from the
+  moment of the change rather than firing a tick that already passed, and
+  re-enabling a paused schedule does not replay the ticks it missed.
+  `starting_deadline_seconds` drops a tick later than that instead of running
+  it however stale.
 - `python manage.py ox_health` checks database availability. Its
   `--max-backlog`, `--max-age` and `--worker-timeout` thresholds are for fleet
   alerting, not per-container liveness. Last-claim age can fail on an idle

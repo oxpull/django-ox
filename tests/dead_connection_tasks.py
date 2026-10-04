@@ -146,6 +146,56 @@ def survives_a_statement_error():
     return "kept"
 
 
+@task
+def gives_its_connection_back():
+    """
+    Query, then close this thread's connection, so the attempt ends holding
+    none and the outcome write is what opens the next. Calls
+    STATE["gave_it_back"] first, when a test has put one there.
+    """
+    with connections["default"].cursor() as cursor:
+        cursor.execute("SELECT 1")
+    connections["default"].close()
+    told = STATE.get("gave_it_back")
+    if told is not None:
+        told()
+    return "gave it back"
+
+
+@task
+def works_on_through_a_restart_in_process(give_back):
+    """
+    For a worker on a thread of the test's own process. Query, hand the
+    connection back when `give_back`, set STATE["ready"], wait for
+    STATE["go"] while the test ends every session, and return with no
+    further query: the outcome write is the first to find out.
+    """
+    with connections["default"].cursor() as cursor:
+        cursor.execute("SELECT 1")
+    if give_back:
+        connections["default"].close()
+    STATE["ready"].set()
+    STATE["go"].wait(60)
+    return "succeeded anyway"
+
+
+@task
+def queries_after_its_session_ended():
+    """
+    For a worker on a thread of the test's own process. Query, hand this
+    session to the test's STATE["end_session"], which has it ended from
+    outside, then query again on the dead connection, catch the error and
+    return. STATE["flagged"] is whether Django flagged the connection.
+    """
+    own = session_id()
+    STATE["end_session"](own)
+    try:
+        session_id()
+    except DatabaseError:
+        STATE["flagged"] = connections["default"].errors_occurred
+    return "succeeded anyway"
+
+
 # -- a connection that died unnoticed ----------------------------------------
 
 

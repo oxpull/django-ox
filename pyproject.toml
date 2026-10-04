@@ -63,6 +63,10 @@ dev = [
     "mypy>=1.16",
     "django-stubs>=6.0",
     "psycopg[binary,pool]>=3.2",
+    # The pool extra above takes any psycopg_pool. A worker on Django's
+    # PostgreSQL pool discards the pool's idle connections with
+    # ConnectionPool.drain(), which psycopg_pool has from 3.3.
+    "psycopg-pool>=3.3",
     "prometheus-client",
     # The oracle for ox_import_beat_schedules, which reads beat's crontabs
     # with its own implementation of Celery's grammar. The tests import it

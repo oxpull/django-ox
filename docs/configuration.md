@@ -420,19 +420,17 @@ python manage.py ox_prune --older-than 7d
 | `--include-failed` | off | Also delete FAILED and LOST rows. By default they are kept, because they hold the per-attempt tracebacks and can be retried. |
 | `--batch-size` | `1000` | Rows per DELETE statement, so pruning a large table never takes a long lock or builds a giant IN clause. Must be at least 1. |
 | `--dry-run` | off | Report how many rows would be deleted without deleting any. |
-| `--format` | `text` | `json` prints one object on stdout instead of the two report lines: `queue`, `cutoff`, `statuses`, `task_rows`, `tick_rows` and `dry_run`. `queue` is `null` when no `--queue` is given, `cutoff` is ISO 8601, and `statuses` is a list. On a database error during deletion, the object is printed too, with counts of rows already deleted in committed batches, before the same non-zero exit. |
+| `--format` | `text` | `json` prints one object on stdout; warnings stay on stderr. Ordinary keys: `queue`, `cutoff`, `statuses`, `task_rows`, `tick_rows`, `dry_run`, `unreadable_tick_rows`, `anchor_tick_rows`, `unreadable_ticks`. `queue` is `null` without `--queue`; `cutoff` is ISO 8601; `statuses` is a list. `unreadable_ticks` lists at most 100 `{pk, schedule_name, reason}` entries; counts cover all encountered unreadable rows, not a census. Purge keys: `purge_unreadable_ticks`, `schedule_keys`, `tick_pks`, `tick_rows`, `unreadable_ticks`, `kept_ticks`, `missing_tick_pks`, `dry_run`. Database errors during deletion still print committed-batch results before non-zero exit. |
 | `--database` | the alias `OxTask` writes to | Database alias to prune. The rows it reads and the rows it deletes are on that one alias. |
+| `--purge-unreadable-ticks` | off | Remove unreadable ticks targeted by `--schedule-key` or `--tick-pk`; a target is required. No schedule or task rows are removed. MySQL key matching follows the tick table's collation. Cannot combine with `--queue`, `--older-than` or `--include-failed`; `--batch-size`, `--database`, `--format` and `--dry-run` remain available. Stop affected dispatchers first. Preview with `--dry-run`, which lists rows without deleting them. |
+| `--schedule-key KEY` | none | With `--purge-unreadable-ticks`, select unreadable ticks by settings schedule name or `db:<pk>` for a stored schedule. Repeatable. MySQL uses the tick table's collation, possibly matching case, accent or trailing-space variants. Inspect `--dry-run`, or target individual rows with `--tick-pk`. PostgreSQL and SQLite match exactly. |
+| `--tick-pk PK` | none | With `--purge-unreadable-ticks`, target one tick by primary key. Repeatable. Use this when the schedule key cannot be read, including SQLite bytes. Readable rows are kept and reported. Missing or out-of-range keys report `No tick row N.` without preventing removal of other targets. |
 
-Only SUCCESSFUL and DISCARDED rows (and, with `--include-failed`, FAILED and
-LOST rows) whose `finished_at` is past the cutoff are deleted. READY, WAITING
-and RUNNING rows are never touched, whatever their age. Rows from the
-recurring-schedule tick
-log are pruned with the same cutoff, always keeping each schedule's most
-recent tick; that row anchors missed-tick recovery and deleting it would
-make the schedule re-anchor. The latest tick row of a schedule that has
-been removed from settings is kept by the same rule; such rows are
-harmless and can be deleted by hand if unwanted. See
-[Recurring tasks](recurring-tasks.md#missed-ticks).
+Only SUCCESSFUL and DISCARDED task rows past the `finished_at` cutoff are deleted, plus FAILED and LOST rows with `--include-failed`. READY, WAITING and RUNNING rows are never touched. Ordinary tick pruning uses the same cutoff but preserves every unreadable tick and each schedule's newest readable tick, whatever its age. A tick that becomes newest during pruning is also preserved.
+
+This rule also preserves history for schedules removed from settings. Such rows are harmless; removing their history by hand is possible but can affect recovery. Preserved unreadable ticks produce warnings without failing ordinary pruning or `--dry-run`; database failures still exit non-zero. Warnings identify the first 100 encountered rows by primary key, key and reason. Counts describe encountered rows, not a complete census. See [Recurring tasks](recurring-tasks.md#missed-ticks).
+
+To remove unreadable ticks, stop the workers that dispatch the affected schedules. Preview with `ox_prune --purge-unreadable-ticks --schedule-key KEY --dry-run`, or use `--tick-pk PK` if the key cannot be read. Check the listed rows and the tasks those ticks recorded. Run the same command without `--dry-run`, then restart the workers. Removing history can repeat a tick or cause re-anchoring that skips the next tick. Tick deletion uses the command's own `DELETE` and sends no delete signals.
 
 `--queue` narrows the task rows, not the tick log. A run for one queue
 prunes every schedule's old ticks at its own cutoff, so when queues are

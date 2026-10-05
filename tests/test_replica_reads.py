@@ -38,7 +38,7 @@ from django.db import OperationalError, connections
 from django.utils import timezone
 
 from django_ox import actions, metrics, stats
-from django_ox.models import OxTask
+from django_ox.models import OxScheduleTick, OxTask
 
 # The replica is `default` and the primary is `alt`, so a statement that
 # routes itself lands somewhere a pinned one does not. Both aliases are
@@ -186,6 +186,65 @@ class TestUnderAReplicaThatIsBehind:
         with budget_on(REPLICA, 100):
             call_command("ox_prune", "--older-than", "1d", "--batch-size", "3")
         assert OxTask.objects.using(PRIMARY).count() == 0
+
+    def _old_ticks(self):
+        """
+        Two old ticks and a recent one of one schedule on the primary, and
+        on the replica a snapshot from before the recent one. Their keys.
+        """
+        now = timezone.now()
+        primary = OxScheduleTick.objects.using(PRIMARY)
+        pks = []
+        for days in (40, 30, 1):
+            when = now - timedelta(days=days)
+            tick = primary.create(
+                schedule_name="k", scheduled_for=when, created_at=when
+            )
+            pks.append(tick.pk)
+            if days != 1:
+                OxScheduleTick.objects.using(REPLICA).create(
+                    pk=tick.pk, schedule_name="k", scheduled_for=when, created_at=when
+                )
+        return pks
+
+    def test_prune_deletes_tick_rows_on_the_primary(self):
+        first, second, newest = self._old_ticks()
+        out = StringIO()
+        with no_statement_on(REPLICA):
+            call_command("ox_prune", "--older-than", "7d", stdout=out)
+        assert "Deleted 2 schedule tick row(s)" in out.getvalue()
+        primary = OxScheduleTick.objects.using(PRIMARY)
+        assert list(primary.values_list("pk", flat=True)) == [newest]
+        # Nothing was deleted on the replica: it is still the snapshot.
+        replica = OxScheduleTick.objects.using(REPLICA)
+        assert sorted(replica.values_list("pk", flat=True)) == [first, second]
+
+    def test_a_named_removal_deletes_tick_rows_on_the_primary(self):
+        first, second, newest = self._old_ticks()
+        # The primary is SQLite whatever the suite runs on, and keeps text
+        # that is not a date. The replica is given a row under the same key
+        # that reads, which a removal sent there would leave in place.
+        with connections[PRIMARY].cursor() as cursor:
+            cursor.execute(
+                "UPDATE django_ox_oxscheduletick SET scheduled_for = 'banana' "
+                "WHERE id = %s",
+                [first],
+            )
+        out = StringIO()
+        with no_statement_on(REPLICA):
+            call_command(
+                "ox_prune",
+                "--purge-unreadable-ticks",
+                "--tick-pk",
+                str(first),
+                stdout=out,
+                stderr=StringIO(),
+            )
+        assert out.getvalue().startswith("Removed 1 unreadable schedule tick row(s):")
+        primary = OxScheduleTick.objects.using(PRIMARY)
+        assert sorted(primary.values_list("pk", flat=True)) == [second, newest]
+        replica = OxScheduleTick.objects.using(REPLICA)
+        assert sorted(replica.values_list("pk", flat=True)) == [first, second]
 
     def test_health_reports_the_primary_backlog(self):
         self._backlog(40)

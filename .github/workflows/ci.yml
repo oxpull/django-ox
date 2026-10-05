@@ -232,6 +232,79 @@ jobs:
       # the sqlite job.
       - run: timeout -s ABRT 1500 python -m pytest -q
 
+  # The stored-row reader decodes a date and time by one rule on every driver.
+  # psycopg2 and mysqlclient read some of the values it refuses (PostgreSQL's
+  # 'infinity' as the largest datetime, a MySQL zero date as None), so the
+  # reader's tests run on each of them as well as on psycopg 3 and PyMySQL.
+  # Only the reader's file: it is the code the driver changes, and these legs
+  # install the driver the suite's other legs leave out. Django prefers
+  # psycopg 3 when both are installed, so psycopg is not installed here.
+  test-postgres-psycopg2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: postgres psycopg2 (stored-row reader)
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ox
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DJANGO_SETTINGS_MODULE: tests.settings_postgres
+      PYTHONFAULTHANDLER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e . "Django~=6.1.0" pytest pytest-django psycopg2-binary prometheus-client "celery>=5.6"
+      - run: python -c "from django.db.backends.postgresql import base; assert base.Database.__name__ == 'psycopg2', base.Database"
+      - run: timeout -s ABRT 1500 python -m pytest -q tests/test_stored_read.py
+
+  test-mysql-mysqlclient:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: mysql mysqlclient (stored-row reader)
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: ox
+          MYSQL_DATABASE: oxtest
+        ports:
+          - 33069:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pox"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DJANGO_SETTINGS_MODULE: tests.settings_mysql
+      PYTHONFAULTHANDLER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.14"
+      - run: sudo apt-get update && sudo apt-get install -y libmysqlclient-dev pkg-config
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e . "Django~=6.1.0" pytest pytest-django mysqlclient prometheus-client "celery>=5.6"
+      # tests/settings_mysql.py registers PyMySQL only when mysqlclient is
+      # missing; this leg installs no PyMySQL, so MySQLdb is mysqlclient.
+      - run: python -c "import MySQLdb, sys; assert 'pymysql' not in sys.modules"
+      - run: timeout -s ABRT 1500 python -m pytest -q tests/test_stored_read.py
+
   # A >= install resolves to the newest release and cannot test a floor. This
   # leg pins the floor with == so a regression at the bottom of the supported
   # range fails here.
@@ -494,7 +567,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [test-sqlite, test-postgres, test-postgres-naive, test-postgres-pooled, test-backport-floor, test-pool-floor, wagtail-smoke, test-mysql, lint, types, docs, packaging, zizmor]
+    needs: [test-sqlite, test-postgres, test-postgres-naive, test-postgres-pooled, test-backport-floor, test-pool-floor, wagtail-smoke, test-mysql, test-postgres-psycopg2, test-mysql-mysqlclient, lint, types, docs, packaging, zizmor]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

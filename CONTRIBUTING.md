@@ -25,9 +25,7 @@ docker run -d --name ox-pg -e POSTGRES_PASSWORD=ox -p 54329:5432 postgres:16
 DJANGO_SETTINGS_MODULE=tests.settings_postgres .venv/bin/python -m pytest
 ```
 
-Run both before opening a PR; CI tests every supported Python and Django
-version on SQLite and PostgreSQL, and the oldest and newest corners on
-MySQL 8.
+Run both before opening a PR. CI tests every supported Python and Django version on SQLite and PostgreSQL, and the oldest and newest corners on MySQL 8. Separate psycopg2 and mysqlclient jobs are configured to test only the stored-row reader.
 
 ## Style
 

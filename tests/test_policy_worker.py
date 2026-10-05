@@ -24,6 +24,7 @@ from django_ox.exceptions import TaskTimeout
 from django_ox.models import OxTask
 
 from . import policy_tasks, signal_tasks
+from .conftest import assert_counts_down_from_its_arming
 from .policy_tasks import notes
 from .tasks import fail_always
 from .test_policy import SIGNAL_TASKS, assert_is_the_declared_task, tasks_setting
@@ -339,10 +340,10 @@ def test_every_retry_gets_a_fresh_deadline(policy_log):
     stored = row(result)
     assert (stored.status, stored.attempts) == ("FAILED", 2)
     first, second = notes(policy_log)
-    # The whole three seconds at the start of each attempt, although the
+    # The whole three seconds from each attempt's own arming, although the
     # first spent half of them before failing.
-    assert 2.5 < first["remaining"] <= 3
-    assert 2.5 < second["remaining"] <= 3
+    assert_counts_down_from_its_arming(first["countdown"], 3)
+    assert_counts_down_from_its_arming(second["countdown"], 3)
     assert second["deadline"] - first["deadline"] > 1.4
 
 

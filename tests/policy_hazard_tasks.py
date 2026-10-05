@@ -10,6 +10,11 @@ writes on the rows up against those records, so a second invocation, an
 overlap or a write from the wrong epoch shows up as a record that should not
 be there rather than as a final status that happens to look right.
 
+A body under a timeout also records the watchdog's own account of the
+attempt (tasks.countdown, _times_out): when it armed the timeout and for
+which deadline, on the monotonic clock it enforces the deadline with, which
+is the clock a timeout is measured on.
+
 A body that has to wait for the test waits on a gate: a file beside the log
 that the test creates. Every wait has a limit, so a gate that is never opened
 costs a bounded wait rather than a hung worker, and the test then fails on
@@ -33,7 +38,7 @@ from django_ox.models import OxTask
 
 from .dead_connection_tasks import end_connection
 from .policy_tasks import note, policy_task, retry_now
-from .tasks import _busy
+from .tasks import _busy, countdown, watched
 
 #: The longest any body waits for a gate or for its siblings. Far past what
 #: any of these tests needs, so reaching it means the scenario did not happen.
@@ -41,6 +46,9 @@ GATE_LIMIT = 60.0
 
 #: How many concurrent attempts the mixed-policy test runs in one worker.
 MIXED = 6
+
+#: How long a body that starts late holds back its start record.
+LATE = 2.0
 
 
 def _log_path():
@@ -309,16 +317,51 @@ def outlives_its_lease(context, seconds):
     return "outlived"
 
 
-@policy_task(takes_context=True, max_attempts=2, timeout=7, backoff=retry_now)
-def times_out_past_its_lease(context):
-    _claim(context)
-    if context.attempt > 1:
-        _end(context)
-        return "second"
+def _times_out(context, late=0.0):
+    """
+    Run until the timeout strikes, and record the attempt on the watchdog's
+    own clock: when it armed the timeout and for which deadline, when the
+    body began and noted its start, when the watchdog decided the timeout
+    (its grace starts then) and when the timeout landed here. `late` holds
+    the start record back that many seconds, as a slow first query would.
+    """
+    began = time.monotonic()
+    worker, watch = watched()
+    if late:
+        _wait(lambda: time.monotonic() - began >= late)
+    _claim(
+        context,
+        began=began,
+        noted=time.monotonic(),
+        armed=watch.started,
+        deadline=watch.deadline,
+        timeout=watch.timeout,
+    )
     try:
         _busy(60)
     finally:
+        _end(
+            context,
+            struck=time.monotonic(),
+            fired=watch.fired,
+            grace_at=watch.grace_at,
+            grace=worker.timeouts.grace,
+        )
+
+
+@policy_task(takes_context=True, max_attempts=2, timeout=7, backoff=retry_now)
+def times_out_past_its_lease(context):
+    if context.attempt > 1:
+        _claim(context)
         _end(context)
+        return "second"
+    _times_out(context)
+    return "never"
+
+
+@policy_task(takes_context=True, max_attempts=1, timeout=7)
+def times_out_after_a_late_start(context, late):
+    _times_out(context, late)
     return "never"
 
 
@@ -449,11 +492,12 @@ def _mixed_started():
 
 
 def _mixed(context):
-    remaining = django_ox.remaining()
+    reading = countdown()
     deadline = django_ox.deadline()
     _claim(
         context,
-        remaining=remaining,
+        remaining=reading["remaining"],
+        countdown=reading,
         deadline=None if deadline is None else deadline.timestamp(),
     )
     if context.attempt == 1:

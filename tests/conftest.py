@@ -95,6 +95,20 @@ def wait_for(predicate, timeout=5.0, interval=0.02):
     return False
 
 
+def assert_counts_down_from_its_arming(reading, timeout):
+    """
+    A tasks.countdown() reading: the watchdog armed `timeout` seconds,
+    before the body read remaining(), and remaining() counted down to that
+    deadline. Nothing here bounds the time from the arming to the read, which
+    is the worker's own path to the task body and as long as it happens to be.
+    """
+    armed, deadline = reading["armed"], reading["deadline"]
+    assert (reading["timeout"], armed + timeout) == (timeout, deadline), reading
+    assert armed <= reading["before"], reading
+    left = reading["remaining"]
+    assert deadline - reading["after"] <= left <= deadline - reading["before"], reading
+
+
 _worker_threads: list[tuple[Worker, threading.Thread]] = []
 
 

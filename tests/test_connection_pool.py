@@ -2110,6 +2110,13 @@ def stuck_batch(add_alias):
         )
     pool = connections[ALIAS].pool
     connections[ALIAS].close()
+    # As in `claimed`: the claims ran before the pool's first connection was
+    # ready, so the pool grows in the background, and that connection can
+    # arrive between a test's two reads of pool_available. Wait until every
+    # connection the pool holds is available before a test compares counts.
+    assert wait_for(
+        lambda: (stats := pool.get_stats())["pool_available"] == stats["pool_size"]
+    ), pool.get_stats()
     return worker, watches, pool
 
 

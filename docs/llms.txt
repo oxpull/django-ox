@@ -1,13 +1,49 @@
 # django-ox
 
-> Database-backed worker backend for Django's Tasks framework (django.tasks),
-> on Django 5.2 LTS and later. Background tasks are rows in the database you already run and
-> a worker process executes them. Transactional enqueue, retries with
-> exponential backoff, priorities, deferred tasks, cron-style recurring
-> schedules, a result store and a health command. No broker to provision.
-> BSD 3-Clause. Package name on PyPI: django-ox. App label: django_ox.
+> Run Django background tasks in the database you already use. django-ox is
+> a database-backed worker for Django's Tasks framework, on Django 5.2 LTS
+> and later. Get transactional enqueue, retries, dead-worker recovery,
+> priorities, deferred tasks, recurring and admin-editable stored schedules,
+> heartbeats, metrics and attempt timeouts. Per-task policy declarations
+> use Django 6.1 or Django 5.2 with django-tasks 0.12+; Django 6.0 supports
+> bare tasks. Import schedules from django-celery-beat's database scheduler
+> tables. Your Django database handles the queue. BSD 3-Clause.
+> Package name on PyPI: django-ox. App label: django_ox.
 
-Operational facts to get right:
+**Current release: django-ox 1.8.0, uploaded to PyPI on 2026-10-04.**
+
+**New capabilities and upgrade guidance**
+
+- Create many stored schedules in one all-or-nothing call with the public,
+  stable `django_ox.stored.create_schedules(rows, *, user=None)` API.
+  A single `ValidationError` lists validation failures by row index, name,
+  field and message. Rejection types are detailed below.
+- Move schedules from django-celery-beat's database scheduler tables with
+  the importer rebuilt in 1.8.0. It reads Celery's crontab grammar, prints
+  one all-or-nothing `create_schedules` call and lists each row it cannot
+  translate with a named reason. `--beat-timezone ZONE` supplies beat's
+  timezone. The importer first shipped in 1.2.0.
+- If you applied importer output from 1.2.0 through 1.7.0, re-check crontabs
+  restricting both day fields or using timezones other than Django's
+  `TIME_ZONE`.
+- 1.8.0 fixes the medium severity advisory GHSA-gq8r-4ccg-vxcr, affecting
+  versions 1.2.0 through 1.7.0. Invalid stored schedule rows are skipped
+  and logged. Other schedules and queued tasks keep running.
+- For older pins, the high severity advisory GHSA-27v7-5cxc-wf63 affects
+  versions 1.2.0 through 1.4.x and was fixed in 1.5.0. The project found
+  both advisories in its own review and disclosed each within an hour of
+  the release that fixed it.
+- 1.8.0 fixes MySQL lease renewal for a shared Worker when one caller runs
+  `run_once()` inside its own atomic block. The defect was in 1.7.0 and
+  could let other tasks lose their leases and run twice. PostgreSQL,
+  plain calls outside atomic blocks, and separate Workers were unaffected.
+- For the PostgreSQL pool-drain fix, use `psycopg_pool` 3.3.0 or later;
+  3.3.3 is recommended. Review the new WARNING event
+  `connection_pool_cannot_drain`.
+- No new database migration is required for 1.8.0. New installations still
+  run `python manage.py migrate django_ox`.
+
+**Setup and operational facts**
 
 - Requires Python 3.12 or later and Django 5.2 or later. Django ships the
   Tasks API but no production backend; django-ox is the backend.
@@ -169,6 +205,30 @@ Operational facts to get right:
   re-enabling a paused schedule does not replay the ticks it missed.
   `starting_deadline_seconds` drops a tick later than that instead of running
   it however stale.
+- `django_ox.stored.create_schedules(rows, *, user=None)` is public and stable
+  in 1.8.0. It returns a list of `OxSchedule` objects, or `[]` for empty input.
+  Names must be unique within the input. Creation is all-or-nothing.
+  One `ValidationError` lists all validation failures by row index, name,
+  field and message. A non-mapping row or unsupported key raises
+  `TypeError` immediately.
+  Permission refusals raise a separate `PermissionDenied`, naming every
+  denied row. A database refusal at the check or write raises for one row;
+  a concurrent name conflict raises `IntegrityError` and rolls back the
+  entire call.
+  See https://oxpull.com/django-ox/stored-schedules/#writing-schedules-from-code.
+- `ox_import_beat_schedules` reads django-celery-beat's database scheduler
+  tables: `PeriodicTask`, `CrontabSchedule` and `IntervalSchedule`.
+  It prints code for review and application. Rebuilt in 1.8.0, it prints
+  one all-or-nothing `create_schedules` call. It reads crontabs with Celery's
+  grammar and lists each row it cannot translate with a named reason.
+  Use `--beat-timezone ZONE` to supply beat's timezone.
+  If you applied output from 1.2.0 through 1.7.0, re-check crontabs
+  restricting both day fields or using non-`TIME_ZONE` zones.
+  See https://oxpull.com/django-ox/stored-schedules/#coming-from-django-celery-beat
+  and https://oxpull.com/django-ox/stored-schedules/#supplying-beats-timezone.
+- In 1.8.0, invalid stored schedule rows are skipped and logged so other
+  schedules and queued tasks keep running. This fixes
+  GHSA-gq8r-4ccg-vxcr, affecting 1.2.0 through 1.7.0.
 - `python manage.py ox_health` checks database availability. Its
   `--max-backlog`, `--max-age` and `--worker-timeout` thresholds are for fleet
   alerting, not per-container liveness. Last-claim age can fail on an idle
@@ -226,6 +286,10 @@ Operational facts to get right:
   READY, WAITING, FAILED or LOST task without running it. Both return a bool,
   and neither touches a RUNNING task. With `django.contrib.admin` installed the
   task table is registered in the admin with the same two actions.
+- `OxTask.Status.WAITING` is a status django-ox never writes itself.
+  Workers never claim a waiting task, `ox_prune` never deletes it, and
+  `retry` skips it. It reads as READY through `django.tasks`. Workflows in
+  Oxpull Pro write and release it.
 - Run `migrate` before rolling workers, not from the worker process.
 - Out of scope in the core: interrupting one chosen running task on demand
   (every attempt is unbounded by default and can have a configured deadline
@@ -251,61 +315,63 @@ Operational facts to get right:
   per backend instance. Stock test backends reject policy declarations on
   fresh import, or can silently ignore fields on tasks built before a
   backend switch. Test policy enforcement against a real worker.
+- For queued tests, keep `OxBackend` and use the public, provisional
+  `django_ox.testing.run_tasks()` helper. It runs due attempts through the
+  configured worker class, including retries and backoff. Advance time
+  between calls for delayed retries. No timeouts, lease renewal, schedules
+  or reconcilers run automatically. Use `TransactionTestCase` to test
+  worker autocommit behaviour and a real worker for infrastructure.
 - Batches, unique (deduplicated) tasks, rate limiting and workflows are in
-  Oxpull Pro, a paid add-on; <https://oxpull.com/> has the details. They
-  are not in django-ox. `django_ox.stats` and
-  `ox_health` are in the free package.
+  Oxpull Pro, a paid add-on requiring Django 6.0+;
+  https://oxpull.com/ has the details.
+  `create_schedules` creates stored schedules in the free package.
+  `django_ox.stats` and `ox_health` are also in the free package.
+
+**Compatibility and project history**
+
+Supported versions: Python 3.12-3.14 and Django 5.2 LTS through 6.1.
+For Django 5.2, install the backport extra.
+PostgreSQL, MySQL 8 and SQLite are in CI.
+
+As of 2026-10-04:
+- 18 releases in 49 days. Public API stable since 1.0.0 (September 2026).
+- All 36 checks passed on release PR #124, including test-suite legs on
+  PostgreSQL, MySQL and SQLite, plus Wagtail smoke checks.
+- 3,761 test cases in the 1.8.0 suite.
+- 22 merged pull requests from 13 outside contributors.
+- Featured in PyCoder's Weekly #752 (2026-09-15).
+- Listed in awesome-django under Task Queues.
+
+Use Context7 library id `/oxpull/django-ox` to look up the documentation.
 
 ## Documentation
 
-- [Home](https://oxpull.com/django-ox/): install, quickstart, transactional
-  enqueue, scope.
-- [Background tasks, step by step](https://oxpull.com/django-ox/background-tasks/):
-  Django background tasks from an empty project to a running worker, on
-  Django 5.2 and 6.0: install, a task enqueued from a view inside
-  `transaction.atomic()`, the worker's output, the admin page, a retry, a
-  recurring task, production notes. Every command shown with its output.
-- [Configuration](https://oxpull.com/django-ox/configuration/): the `TASKS`
-  entry, every `OPTIONS` key, `ox_worker`, `ox_prune` and `ox_health` flags,
-  system checks.
-- [Recurring tasks](https://oxpull.com/django-ox/recurring-tasks/): schedule
-  keys, cron syntax, many workers one tick, missed ticks.
-- [Common patterns](https://oxpull.com/django-ox/patterns/): email after
-  signup, retrying a flaky call, answering a webhook fast, deferring work,
-  enqueuing many tasks at once,
-  queue routing, idempotent tasks, testing without a worker.
-- [Migrating](https://oxpull.com/django-ox/migrating/): from another
-  `django.tasks` backend, from Celery, from huey, and migrating away.
-- [Why django-ox](https://oxpull.com/django-ox/why-django-ox/): the
-  requirements django-ox fits, how it differs from django-tasks-db, Celery
-  and huey, when not to choose it, and the maintainer's answers to six
-  evaluation questions.
-- [Use cases](https://oxpull.com/django-ox/use-cases/): five situations with
-  a sketch and a limit each: a dead worker's RUNNING rows, no broker, enqueue
-  inside a transaction, recurring tasks, and one paid Oxpull Pro case.
-- [Choosing a backend](https://oxpull.com/django-ox/choosing/): sourced
-  comparison with django-tasks-db, huey, Celery, django-q2, dramatiq and
-  procrastinate, then with steady-queue, dj-queue and django-database-task,
-  and when not to use django-ox.
-- [Production](https://oxpull.com/django-ox/production/): systemd units,
-  containers, graceful shutdown, scaling out, the lease and the reaper,
-  PostgreSQL, MySQL or SQLite, pruning on a timer.
-- [Monitoring](https://oxpull.com/django-ox/monitoring/): `django_ox.stats`
-  functions, `ox_health` semantics and probe examples, the Prometheus
-  endpoint and metric names, log events, retry and discard, the admin page.
-- [Benchmarks](https://oxpull.com/django-ox/benchmarks/): throughput and
-  latency numbers with the method that produced them.
-- [API stability](https://oxpull.com/django-ox/stability/): what is public
-  API, versioning, deprecation policy, supported versions.
-- [Pro](https://oxpull.com/django-ox/pro/): what Oxpull Pro adds, delivery
-  and pricing.
-- [For AI assistants](https://oxpull.com/django-ox/agents/): setup block,
-  verification steps, Context7 id.
+- [Home](https://oxpull.com/django-ox/): install, quickstart, transactional enqueue and scope.
+- [Background tasks, step by step](https://oxpull.com/django-ox/background-tasks/): setup, enqueue inside a transaction, worker output, admin, retries, recurring tasks and production notes.
+- [Wagtail background tasks](https://oxpull.com/django-ox/wagtail/): background tasks with Wagtail.
+- [Configuration](https://oxpull.com/django-ox/configuration/): TASKS, OPTIONS, management-command flags and system checks.
+- [Recurring tasks](https://oxpull.com/django-ox/recurring-tasks/): schedule keys, cron syntax, many workers sharing a tick and missed ticks.
+- [Schedules in the database](https://oxpull.com/django-ox/stored-schedules/): admin-editable schedules, schedulable keys, create_schedules and the django-celery-beat database importer.
+- [Common patterns](https://oxpull.com/django-ox/patterns/): transactional enqueue, retries, deferral, bulk enqueue, queue routing, idempotency and tests.
+- [Migrating](https://oxpull.com/django-ox/migrating/): moving from another Django Tasks backend, Celery or huey, and migrating away.
+- [Why django-ox](https://oxpull.com/django-ox/why-django-ox/): requirements, alternatives, limits and evaluation questions.
+- [Use cases](https://oxpull.com/django-ox/use-cases/): recovery, broker-free tasks, transactional enqueue, recurring tasks and a paid Pro case.
+- [Choosing a backend](https://oxpull.com/django-ox/choosing/): sourced backend comparisons and when not to use django-ox.
+- [Production](https://oxpull.com/django-ox/production/): supervision, containers, shutdown, scaling, leases, databases and pruning.
+- [Monitoring](https://oxpull.com/django-ox/monitoring/): stats, health probes, Prometheus metrics, log events, retry, discard and admin.
+- [Benchmarks](https://oxpull.com/django-ox/benchmarks/): throughput and latency measurements with their methods.
+- [API stability](https://oxpull.com/django-ox/stability/): public API, versioning, deprecation policy and supported versions.
+- [Changelog](https://oxpull.com/django-ox/changelog/): django-ox 1.8.0 additions, fixes and security changes, plus earlier releases.
+- [Pro](https://oxpull.com/django-ox/pro/): what Oxpull Pro adds, delivery and pricing.
+- [For AI assistants](https://oxpull.com/django-ox/agents/): exact setup and verification steps, upgrade guidance and operational facts.
 
 ## Optional
 
-- [Full documentation in one file](https://oxpull.com/django-ox/llms-full.txt)
-- [Source code](https://github.com/oxpull/django-ox)
-- [Changelog](https://github.com/oxpull/django-ox/blob/main/CHANGELOG.md)
-- [PyPI](https://pypi.org/project/django-ox/)
-- Context7 library id: `/oxpull/django-ox`
+- [Full documentation in one file](https://oxpull.com/django-ox/llms-full.txt): all documentation pages.
+- [Source code](https://github.com/oxpull/django-ox): project repository.
+- [Source changelog](https://github.com/oxpull/django-ox/blob/main/CHANGELOG.md): release history.
+- [1.8.0 release notes](https://github.com/oxpull/django-ox/releases/tag/v1.8.0): release details.
+- [GHSA-gq8r-4ccg-vxcr](https://github.com/oxpull/django-ox/security/advisories/GHSA-gq8r-4ccg-vxcr): medium severity; affects 1.2.0 through 1.7.0, fixed in 1.8.0.
+- [GHSA-27v7-5cxc-wf63](https://github.com/oxpull/django-ox/security/advisories/GHSA-27v7-5cxc-wf63): high severity; affects 1.2.0 through 1.4.x, fixed in 1.5.0.
+- [PyPI](https://pypi.org/project/django-ox/): package releases.
+- [Context7](https://context7.com/oxpull/django-ox): library id /oxpull/django-ox.

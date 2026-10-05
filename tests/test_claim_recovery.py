@@ -935,16 +935,18 @@ def test_a_pass_that_failed_outside_the_claim_starts_no_look(
     step, settings, caplog, monkeypatch
 ):
     """
-    The loop's handler catches the database errors of reap and dispatch as
-    well as the claim's. Only the claim's can leave a row RUNNING under this
-    worker's id, so only the claim's starts a look.
+    The loop's handler catches the database errors of reap as well as the
+    claim's, and dispatch's own handler catches dispatch's. Only the claim's
+    can leave a row RUNNING under this worker's id, so only the claim's
+    starts a look.
     """
     caplog.set_level(logging.WARNING, logger="django_ox")
     _budget(settings, 1)
     worker = Worker(lock_timeout=LOCK_TIMEOUT, poll_interval=0.05, batch=True)
     real = getattr(worker, step)
-    # A DatabaseError out of dispatch is its own handler's; an InterfaceError
-    # is not a DatabaseError and reaches the loop's.
+    # Out of dispatch an InterfaceError, which is not a DatabaseError: a
+    # connection closed under the pass is the database's all the same, and
+    # dispatch's handler takes it as it takes any other.
     error = OperationalError if step == "reap" else InterfaceError
     failed = []
 
@@ -972,8 +974,15 @@ def test_a_pass_that_failed_outside_the_claim_starts_no_look(
     thread.join(timeout=60)
 
     assert failed == [step]
-    (poll,) = _events(caplog, "worker_poll_failed", worker)
-    assert poll.claim_recovery is None
+    polls = _events(caplog, "worker_poll_failed", worker)
+    if step == "reap":
+        (poll,) = polls
+        assert poll.claim_recovery is None
+    else:
+        # The claim ran in the pass dispatch failed in, so the loop's
+        # handler never saw it.
+        assert _events(caplog, "schedule_dispatch_failed", worker)
+        assert polls == []
     assert looks == []
     assert _row(result).status == OxTask.Status.SUCCESSFUL
 

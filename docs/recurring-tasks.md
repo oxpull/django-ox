@@ -301,11 +301,7 @@ across backends:
 python manage.py check
 ```
 
-Database acceptance is determined at dispatch after validation. Alert on
-`schedule_dispatch_error` for schedule-scoped failures and
-`schedule_dispatch_failed` for abandoned passes. For stored schedules,
-also alert on `schedule_row_skipped` and `schedule_source_unavailable`.
-Use these events for schedule health monitoring.
+Database acceptance is determined at dispatch after validation. Alert on `schedule_dispatch_error`, `schedule_dispatch_failed` and `schedule_tick_unreadable`. For stored schedules, also alert on `schedule_row_skipped`, `schedule_source_unavailable` and `schedule_boundary_heal_failed`. These report schedule-scoped failures, abandoned passes, unusable history, skipped rows, source failures and blocked boundary healing.
 
 To see what has actually dispatched, read the tick log:
 

@@ -369,14 +369,9 @@ schedule fires its first due tick. Use a long-running worker for more
 frequent schedule checks, but missed ticks are still coalesced; this does not
 guarantee that every tick runs. See [Missed ticks](recurring-tasks.md#missed-ticks).
 
-An unreachable server, a lost or changed database session, or a database
-error escaping a shared dispatch read does not count as an empty batch pass.
-Failed polling passes and abandoned dispatch passes are retried, as they are
-for a long-running worker. A batch keeps retrying until a dispatch pass
-completes and the normal queue-drain and idle conditions hold. A failed
-shared read, failed rollback or unusable session abandons the dispatch pass,
-logs `schedule_dispatch_failed` at WARNING and keeps the batch open until a
-pass completes.
+Failed polling and abandoned dispatch passes do not count as empty batch passes. An unreachable server, lost or changed session, failed shared read, failed rollback or unusable connection causes retries. Other unhandled dispatch exceptions now do too: unlike 1.8.0, they log `schedule_dispatch_failed` with `category=unexpected_exception` instead of ending the worker with exit 1.
+
+The batch keeps claiming queued work and retries dispatch once per schedule interval. Draining the queue does not end it while dispatch remains owed. Normal completion requires a completed dispatch pass and the usual drain and idle conditions. This includes a custom schedule source whose store fails after startup. Direct calls to `dispatch_schedules()` still raise. There is no failure threshold or new exit code; stopping the batch can return 0 despite continuing dispatch failures.
 
 A failure inside one schedule's transaction is reported as
 `schedule_dispatch_error` at ERROR if rollback succeeds and the same
@@ -390,13 +385,7 @@ each pass is abandoned at that schedule, preventing later schedules from
 being reached and holding the batch open. `schedule_dispatch_failed` does
 not identify the schedule being processed.
 
-Alert on `schedule_dispatch_error` and `schedule_dispatch_failed`, plus
-`schedule_row_skipped` and `schedule_source_unavailable` for stored schedules,
-regardless of the batch's exit. Each `--batch` invocation starts a new worker,
-so a schedule that keeps failing logs its first-failure traceback on every run
-and no `schedule_dispatch_recovered` event carries across runs; alert on the
-presence of `schedule_dispatch_error` in each run. Give the job runner a
-timeout: it is what bounds a run against a failing database.
+Alert on `schedule_dispatch_error`, `schedule_dispatch_failed` and `schedule_tick_unreadable`. For stored schedules, also alert on `schedule_row_skipped`, `schedule_source_unavailable` and `schedule_boundary_heal_failed`. Alert regardless of batch exit. Each invocation starts a new worker: continuing schedule failures get a first-failure traceback each run, and `schedule_dispatch_recovered` does not carry across runs. Alert on `schedule_dispatch_error` in each run. Give the job runner its own timeout for database, schedule-source and package faults. Clean termination does not prove successful dispatch.
 
 Both flags run a single process. `--processes` above 1 is rejected, because
 the supervisor restarts a worker that exits on its own; for more throughput in

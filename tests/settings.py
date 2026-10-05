@@ -106,13 +106,14 @@ if "OX_TEST_LOG_FILE" in os.environ:
 # A worker process started from the test suite writes bare messages. A test
 # that times the worker from a record, rather than from when it got round to
 # reading the line, asks for a format that carries the record's timestamp. One
-# that reads which event a line was asks for %(event)s, which a record logged
-# without one shows as "-".
+# that reads which event a line was asks for %(event)s, and one that reads
+# the fields a line names for %(fields)s: a record logged without either
+# shows it as "-".
 if "OX_TEST_LOG_FORMAT" in os.environ:
     LOGGING["formatters"] = {
         "test": {
             "format": os.environ["OX_TEST_LOG_FORMAT"],
-            "defaults": {"event": "-"},
+            "defaults": {"event": "-", "fields": "-"},
         }
     }
     LOGGING["handlers"]["console"]["formatter"] = "test"

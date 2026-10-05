@@ -2048,11 +2048,7 @@ across backends:
 python manage.py check
 ```
 
-Database acceptance is determined at dispatch after validation. Alert on
-`schedule_dispatch_error` for schedule-scoped failures and
-`schedule_dispatch_failed` for abandoned passes. For stored schedules,
-also alert on `schedule_row_skipped` and `schedule_source_unavailable`.
-Use these events for schedule health monitoring.
+Database acceptance is determined at dispatch after validation. Alert on `schedule_dispatch_error`, `schedule_dispatch_failed` and `schedule_tick_unreadable`. For stored schedules, also alert on `schedule_row_skipped`, `schedule_source_unavailable` and `schedule_boundary_heal_failed`. These report schedule-scoped failures, abandoned passes, unusable history, skipped rows, source failures and blocked boundary healing.
 
 To see what has actually dispatched, read the tick log:
 
@@ -2770,19 +2766,8 @@ Worth knowing before you turn it on:
   such a write tells a worker to look. Set
   `OPTIONS["SCHEDULE_RECONCILE_INTERVAL"]` if you want that sooner; it is one
   indexed read of a small table.
-- **One extra query per pass.** Workers read a single row to learn whether
-  anything changed. They re-read the schedules when it did and at each
-  reconcile interval. If the change marker cannot be read, full reads still
-  run at each reconcile interval.
-- **Unreadable or invalid rows are skipped.** A row is left out if a value
-  cannot be converted, its start or end cannot be compared with the worker's
-  clock, or it cannot be built. The other schedules and the queue keep
-  running. The skip is logged as `schedule_row_skipped` with `schedule_pk`,
-  `schedule` and `reason`. If the name cannot be read, `schedule` may be
-  `None`. A conversion failure's reason names the column. Each row is logged
-  once, then at most once a minute per worker while it stays skipped. A skip
-  during the locked dispatch read includes a traceback only on its first
-  line.
+- **Marker reads and reconciles.** Workers read one change-marker row per pass. They re-read schedules when it changes and at `SCHEDULE_RECONCILE_INTERVAL`, normally 60 seconds. If the marker cannot be read, full reads still run at that interval. Stored schedule reads use more CPU than 1.8.0, and full reconciles now use batched queries. Reconciles do not run every tick. Latest tick decoding costs CPU each pass. Dispatch statement counts are unchanged, both with and without a due tick.
+- **Stored values django-ox cannot use.** Workers skip unreadable or invalid rows, including incomparable boundaries and a maximum `boundary_generation`; other schedules and the queue continue. `schedule_row_skipped` carries `schedule_pk`, `schedule`, `fields` and `reason`. An unreadable name may be `None`. Stored-value reasons name the field, quote its value and explain the problem. Reporting is once, then at most once a minute per row per worker. Locked dispatch skips include a traceback only on the first line.
 - **Skipped rows need repair.** Skipping does not repair invalid values. Find
   the row by `schedule_pk` and correct it in the admin change form or with
   `update_schedule`. Use SQL if the value is one the ORM cannot read. To pause
@@ -2797,23 +2782,16 @@ Worth knowing before you turn it on:
   and the same connection remains usable, later schedules are still attempted.
   The failed schedule is retried on subsequent passes under the usual
   due-tick and deadline rules; only its reporting is rate-limited.
-- **Database read failures are not bad rows.** A database error during a full
-  schedule read or a shared dispatch read, such as a lost connection, missing
-  table or lock error, is not attributed to an individual row. It stops the
-  pass rather than skipping a row.
-- **An abandoned pass stops further traversal.** A `django.db.DatabaseError`
-  escaping a shared dispatch read, failed rollback or unusable connection is
-  reported as `schedule_dispatch_failed`. The stored source's marker read and
-  boundary heal retain their own events. An unreadable change-marker value
-  reports `schedule_source_unavailable` once, then at most once a minute while
-  it remains unreadable, and the worker reads the schedules in full at each
-  reconcile interval during that time. A database error on the marker read
-  reports the same event on every dispatch pass, and the worker keeps using
-  the last schedules it read. A failed boundary heal reports
-  `schedule_boundary_heal_failed`. Dispatch is retried on a later pass.
-  Ticks already committed are not undone. Alert on `schedule_row_skipped`,
-  `schedule_dispatch_error`, `schedule_dispatch_failed` and
-  `schedule_source_unavailable`.
+- **Database read failures are not bad rows.** Database errors during full schedule or shared dispatch reads, including connection, missing-table and lock errors, stop the pass. They are not attributed to a row. Server-side errors propagate unchanged. In autocommit, recognized value-local failures may be isolated by diagnostic re-reads while the connection remains usable.
+
+  Inside a transaction, diagnostic re-reads are restricted: PostgreSQL requires a usable transaction; SQLite permits only its recognized UTF-8 decoding refusal; MySQL permits none. Unwind through the transaction or savepoint boundary before further queries where required. Reads create no savepoints. `update_schedule` and `delete_schedule` have their own atomic blocks; source reads and `ox_prune` do not. Unlike 1.8.0, a source read inside your transaction can leave a server error for you to roll back.
+- **An abandoned pass stops further traversal.** An escaping `django.db.Error`, other unhandled exception, failed rollback or unusable connection reports `schedule_dispatch_failed`. Dispatch retries on a later pass; committed ticks remain committed. Marker reads and boundary heals retain their own events.
+
+  An unreadable marker reports `schedule_source_unavailable` once, then at most once a minute; full reads continue at each reconcile interval. A database error on the marker read reports every pass while workers use the last schedules read. Failed boundary healing reports `schedule_boundary_heal_failed`, first with a traceback, then counted summaries at most once a minute per row per worker. Healing retries each pass; the affected schedule cannot dispatch meanwhile.
+
+  An unreadable newest tick within the pass's bound skips only its schedule with `schedule_tick_unreadable`. A settings schedule can also be blocked by its unreadable earliest tick. History is not treated as absent. The pass completes, so this skip does not hold a batch open. Follow the recovery procedure under [Configuration](configuration.md#ox_prune).
+
+  Alert on `schedule_dispatch_error`, `schedule_dispatch_failed` and `schedule_tick_unreadable`. For stored schedules, also alert on `schedule_row_skipped`, `schedule_source_unavailable` and `schedule_boundary_heal_failed`.
 - **`manage.py check` cannot see rows.** Checks run before `migrate`, so a bad
   schedule in the database is a log line, not a start-up error.
   Settings-declared schedules still fail fast for errors their checks can
@@ -2840,21 +2818,20 @@ failures. The full set, with every field, is on the
 | --- | --- |
 | `schedule_dispatched` | A tick enqueued its task. |
 | `schedule_tick_dropped` | A tick was past its starting deadline. Carries `late_seconds`. |
-| `schedule_row_skipped` | A row could not be built. A skip during a periodic full read carries `schedule`, `schedule_pk` and `reason`. A skip during the locked dispatch read carries `schedule_pk` and a traceback. |
+| `schedule_row_skipped` | A row holds values django-ox cannot use, has incomparable boundaries, or cannot be built. Full and locked reads carry `schedule`, `schedule_pk`, `fields` and `reason`. Reporting is rate-limited; locked reads include a traceback only on the first line. |
 | `schedule_dispatch_error` | A schedule-scoped failure, database or not. Its tick and task rolled back, and the pass continues. The schedule is retried under the usual due-tick and deadline rules. Reporting is rate-limited. |
-| `schedule_dispatch_failed` | A dispatch pass was abandoned. It is retried on a later pass. Reporting is rate-limited. |
+| `schedule_dispatch_failed` | A pass was abandoned and will be retried. `category` distinguishes `database` from `unexpected_exception`. Reporting is rate-limited. |
 | `schedule_dispatch_recovered` | A schedule that had failed on this worker committed a tick again. Carries `failures`. |
+| `schedule_dispatch_resumed` | A pass completed after abandoned passes. Carries their total in `failures`. |
+| `schedule_tick_unreadable` | A schedule was skipped because required tick history could not be read. History was not treated as absent; other schedules continue. |
+| `schedule_tick_readable` | This worker read the history again after skipped passes. Carries their total in `failures`. |
 
 Pausing a stored schedule preserves its failure state on each worker; deleting
 the row drops it without an event. A paused, fixed and resumed row reports
 `schedule_dispatch_recovered` when it next commits a tick on a worker that
 retained its failure state.
 
-Alert on `schedule_row_skipped`, `schedule_dispatch_error`,
-`schedule_dispatch_failed` and `schedule_source_unavailable`, regardless of a
-batch's exit code. `schedule_row_skipped` usually means a task key was removed
-from the code while a row still names it. A row can pass validation and still
-fail at dispatch, so that event alone is not enough.
+Alert on `schedule_dispatch_error`, `schedule_dispatch_failed` and `schedule_tick_unreadable`. For stored schedules, also alert on `schedule_row_skipped`, `schedule_source_unavailable` and `schedule_boundary_heal_failed`. Alert regardless of a batch's exit code. For `schedule_row_skipped`, inspect `fields` and `reason`: an unregistered task key is one possible cause. A row can pass validation and still fail at dispatch, so skip alerts alone are insufficient.
 
 Read `failures` and `suppressed` on dispatch failure events rather than
 counting log lines. `ox_health` has no schedule check, and a rolled-back
@@ -4327,14 +4304,9 @@ schedule fires its first due tick. Use a long-running worker for more
 frequent schedule checks, but missed ticks are still coalesced; this does not
 guarantee that every tick runs. See [Missed ticks](recurring-tasks.md#missed-ticks).
 
-An unreachable server, a lost or changed database session, or a database
-error escaping a shared dispatch read does not count as an empty batch pass.
-Failed polling passes and abandoned dispatch passes are retried, as they are
-for a long-running worker. A batch keeps retrying until a dispatch pass
-completes and the normal queue-drain and idle conditions hold. A failed
-shared read, failed rollback or unusable session abandons the dispatch pass,
-logs `schedule_dispatch_failed` at WARNING and keeps the batch open until a
-pass completes.
+Failed polling and abandoned dispatch passes do not count as empty batch passes. An unreachable server, lost or changed session, failed shared read, failed rollback or unusable connection causes retries. Other unhandled dispatch exceptions now do too: unlike 1.8.0, they log `schedule_dispatch_failed` with `category=unexpected_exception` instead of ending the worker with exit 1.
+
+The batch keeps claiming queued work and retries dispatch once per schedule interval. Draining the queue does not end it while dispatch remains owed. Normal completion requires a completed dispatch pass and the usual drain and idle conditions. This includes a custom schedule source whose store fails after startup. Direct calls to `dispatch_schedules()` still raise. There is no failure threshold or new exit code; stopping the batch can return 0 despite continuing dispatch failures.
 
 A failure inside one schedule's transaction is reported as
 `schedule_dispatch_error` at ERROR if rollback succeeds and the same
@@ -4348,13 +4320,7 @@ each pass is abandoned at that schedule, preventing later schedules from
 being reached and holding the batch open. `schedule_dispatch_failed` does
 not identify the schedule being processed.
 
-Alert on `schedule_dispatch_error` and `schedule_dispatch_failed`, plus
-`schedule_row_skipped` and `schedule_source_unavailable` for stored schedules,
-regardless of the batch's exit. Each `--batch` invocation starts a new worker,
-so a schedule that keeps failing logs its first-failure traceback on every run
-and no `schedule_dispatch_recovered` event carries across runs; alert on the
-presence of `schedule_dispatch_error` in each run. Give the job runner a
-timeout: it is what bounds a run against a failing database.
+Alert on `schedule_dispatch_error`, `schedule_dispatch_failed` and `schedule_tick_unreadable`. For stored schedules, also alert on `schedule_row_skipped`, `schedule_source_unavailable` and `schedule_boundary_heal_failed`. Alert regardless of batch exit. Each invocation starts a new worker: continuing schedule failures get a first-failure traceback each run, and `schedule_dispatch_recovered` does not carry across runs. Alert on `schedule_dispatch_error` in each run. Give the job runner its own timeout for database, schedule-source and package faults. Clean termination does not prove successful dispatch.
 
 Both flags run a single process. `--processes` above 1 is rejected, because
 the supervisor restarts a worker that exits on its own; for more throughput in
@@ -6284,15 +6250,18 @@ The message text is not part of the contract. The keys are.
 | `lease_renew_recovered` | INFO | On a pooled PostgreSQL database, renewal succeeded on its private connection again. Includes counts of successful fallback renewals and missed renewals during the degraded period. |
 | `schedule_dispatched` | INFO | A recurring tick enqueued its task. |
 | `schedule_tick_dropped` | WARNING | A tick was past its starting deadline and was not run. Carries `late_seconds`. Each worker reports a given tick once, not once per dispatch pass, so a schedule that stays droppable does not repeat the warning every second. |
-| `schedule_row_skipped` | WARNING | A row could not be converted, its start or end could not be compared with the worker's clock, or it could not be built. Carries `schedule`, `schedule_pk` and `reason` during both full reads and locked dispatch reads. Logged once, then at most once a minute per row per worker while the row stays skipped. A locked dispatch skip includes a traceback only on its first line. |
+| `schedule_row_skipped` | WARNING | A stored row holds a stored value django-ox cannot use, has incomparable boundaries, or cannot be built. Carries `schedule`, `schedule_pk`, `fields` and `reason` on full and locked dispatch reads. This includes `boundary_generation` at its column's maximum. Logged once, then at most once a minute per row per worker. Locked dispatch skips include a traceback only on the first line. |
 | `schedule_dispatch_error` | ERROR | A schedule-scoped failure, database or not, from any schedule source. This includes a tick that cannot be derived or bounds that cannot be compared with the worker's clock. If a dispatch transaction was started, it rolled back and the same database connection remains usable. The rest of the pass continues. The schedule is retried under the usual due-tick and deadline rules. The first failure has a traceback; continued failures produce at most one summary per 60 seconds. Carries `schedule`, `database`, `error`, `failures` and `suppressed`. |
 | `schedule_dispatch_recovered` | INFO | A schedule that had been logging `schedule_dispatch_error` on this worker committed a tick again, by enqueueing a task or recording a first-sighting anchor. Logged once per run of failures. Carries `schedule`, `database` and `failures`, the number of failed attempts in that run. |
 | `schedule_dispatch_callback_failed` | WARNING | A `transaction.on_commit` callback registered by a `task_enqueued` receiver raised after the dispatch transaction committed. The task is enqueued, the tick is recorded and the dispatch is counted; the failure is the callback's. Carries `task_id`. |
-| `schedule_dispatch_failed` | WARNING | A dispatch pass was abandoned: a `django.db.DatabaseError` escaped a shared read, rollback failed, the database session changed, or the connection was unusable after rollback. The stored source's marker read and boundary heal retain their own events below. Dispatch is retried on the next pass; an unusable connection is dropped, and the claim still runs. The first abandoned pass has a traceback; continued failures produce at most one summary per 60 seconds. Carries `database`, `error`, `failures` and `suppressed`. |
+| `schedule_dispatch_failed` | WARNING | A dispatch pass was abandoned. `category=database` covers `django.db.Error`, including `InterfaceError`; `unexpected_exception` covers other unhandled exceptions. Failed rollback, a changed session or an unusable connection also abandons the pass. An unusable connection is dropped; claiming still runs. Dispatch is retried one schedule interval later. Each category gets a first traceback, then summaries at most once per minute. Carries `worker_id`, `database`, `category`, `error`, `failures` and `suppressed`. Marker reads and boundary heals retain their own events. |
+| `schedule_dispatch_resumed` | INFO | A dispatch pass completed after one or more abandoned passes. Logged once for the completed run of failures, covering both categories. Carries `worker_id`, `database` and `failures`, the total abandoned passes in that run. |
+| `schedule_tick_unreadable` | WARNING | A schedule was skipped this pass because a tick in its history holds a value that cannot be read. Schedule skipped; tick history was not treated as absent: no tick is recorded and no task is enqueued for it, and the other schedules in the pass are dispatched. `phase` is `latest` for the newest tick within the pass's bound, or `anchor` for the earliest tick, which decides a settings-declared schedule's first sighting. The schedule stays skipped until the tick is repaired or removed. Logged once, then at most one summary per 60 seconds per schedule per worker. Carries `schedule`, `schedule_key`, `schedule_pk`, `phase`, `reason`, `tick_pk`, `database`, `failures` and `suppressed`. |
+| `schedule_tick_readable` | INFO | This worker read a schedule's tick history again after skipping it with `schedule_tick_unreadable`. Logged once per run of skipped passes. Carries `worker_id`, `schedule`, `schedule_key`, `schedule_pk`, `database` and `failures`, the number of skipped passes in that run. |
 | `schedule_source_unavailable` | WARNING | The stored schedules or their change marker could not be read. A change marker holding a value that cannot be read is reported once, then at most once a minute while it remains unreadable. During that time, the worker reads the schedules in full at each reconcile interval instead of relying only on the last set it read. A database error on the marker read is reported on every dispatch pass while it lasts, and the worker keeps running on the last set it read. A database error during a full read stops the pass. A stream of this event right after a deploy can mean the code is running ahead of migration `0007`. |
 | `schedule_lock_unavailable` | WARNING | The database gave up waiting for a lock another worker held: a stored schedule's row, or the tick row a settings-declared schedule's dispatch claims. MySQL's lock-wait timeout or a deadlock it resolved against this worker, SQLite's busy timeout, PostgreSQL's `lock_timeout` or a deadlock. The schedule is skipped this pass and its tick fires on a later one if still unclaimed. No traceback; a stream can indicate long dispatch transactions, often from a slow `task_enqueued` receiver. On MySQL with three or more dispatchers, a refused settings schedule can also produce 1213 deadlock warnings when the claimant rolls back and workers queued on its tick key deadlock; read these beside `schedule_dispatch_error` for the same schedule. |
 | `schedule_boundary_healed` | INFO | A stored schedule's timing had changed without its activation boundary moving, so the boundary was moved onto the current timing. Expected after a bulk update; repeated for one schedule is not. |
-| `schedule_boundary_heal_failed` | WARNING | That move failed and will be retried. |
+| `schedule_boundary_heal_failed` | WARNING | The database refused the boundary move. That schedule cannot dispatch while healing is pending; other schedules continue. Healing is retried every dispatch pass. The first warning includes a traceback; later warnings summarize at most once a minute per row per worker. Carries `schedule_pk`, `error`, `failures` and `suppressed`. Check database errors, constraints, triggers, permissions and locks. |
 | `worker_error` | ERROR | The execution wrapper itself raised (an internal worker error, not a task failure). A connection-level outcome-write failure whose recovery on a new connection also failed is reported as `task_outcome_unrecorded` instead. |
 | `worker_claim_released` | WARNING | A claim raised an error even though it had committed. This worker returned the row to `READY` and refunded 1 attempt. Includes `task_id`, `task_path`, `queue`, `attempt` after the refund, `worker_id`, `old_epoch`, `new_epoch`, `refunded_attempts` and `reason` set to `claim_outcome_unknown`. |
 | `worker_claim_recovery_failed` | WARNING | A recovery read could not run or finish while `Worker.run()` was stopping, including when another claim of the same Worker remained in flight past the five-second claim-wait budget or began during the look. Includes a traceback; the exception text identifies claim interference. `claim_recovery` is always `expired`: the worker is stopping without another recovery retry. Rows the look released before giving up are `READY`, each logged as `worker_claim_released`. Any unrecovered row is then left to the reaper. |
@@ -6380,13 +6349,19 @@ A failed connect while recording a stuck attempt logs
 | `refunded_attempts` | `worker_claim_released` | Number of attempts refunded by this release. Always 1. |
 | `attempts` | `worker_claim_release_refused` | The stored attempt count on the row whose release was refused. No attempt was refunded. |
 | `worker_ids` | `worker_claim_release_refused` | The stored worker-id history on the row whose release was refused. It must contain one entry per attempt and end with the recovering worker's id. |
-| `schedule` | `schedule_dispatched`, `schedule_row_skipped`, `schedule_dispatch_error`, `schedule_dispatch_recovered`, `schedule_dispatch_callback_failed`, `schedule_tick_dropped`, `schedule_lock_unavailable` for a settings-declared schedule | The schedule's name, from `SCHEDULES` or from its row. For `schedule_row_skipped`, this may be `None` if the row's name could not be read. |
-| `schedule_pk` | `schedule_row_skipped`, `schedule_lock_unavailable` for a stored schedule, `schedule_boundary_healed` | The stored schedule's row id. Absent for a settings-declared schedule, which has no row. |
+| `schedule` | `schedule_dispatched`, `schedule_row_skipped`, `schedule_dispatch_error`, `schedule_dispatch_recovered`, `schedule_dispatch_callback_failed`, `schedule_tick_dropped`, `schedule_tick_unreadable`, `schedule_tick_readable`, `schedule_lock_unavailable` for a settings-declared schedule | The schedule's name, from `SCHEDULES` or from its row. For `schedule_row_skipped`, this may be `None` if the row's name could not be read. |
+| `schedule_pk` | `schedule_row_skipped`, `schedule_lock_unavailable` for a stored schedule, `schedule_boundary_healed`, `schedule_boundary_heal_failed`, `schedule_tick_unreadable`, `schedule_tick_readable` | The stored schedule's row id. Absent for a settings-declared schedule, which has no row; on `schedule_tick_unreadable` and `schedule_tick_readable` it is `None` for one. |
 | `scheduled_for`, `late_seconds` | `schedule_tick_dropped` | The tick that was dropped, and how late it was when the deadline rejected it. |
-| `reason` | `schedule_row_skipped` | Why the row could not be used, during either a full read or a locked dispatch read. For a value that could not be converted, the reason names the column. |
+| `reason` | `schedule_row_skipped` | Why a full or locked read rejected the row. Stored-value reasons name the field, quote its bounded value and explain the problem, including a maximum `boundary_generation`. Unregistered task keys are identified against this process's registry. |
+| `fields` | `schedule_row_skipped` | Fields rejected by the guarded reader, in model order, as a list. Includes a maximum `boundary_generation`. Empty for build failures, including unregistered task keys, or when the read cannot identify a field. |
+| `reason` | `schedule_tick_unreadable`, `schedule_tick_history_removed` | Why the tick could not be read. Names the column and quotes the stored value, escaped and shortened. |
+| `schedule_key` | `schedule_tick_unreadable`, `schedule_tick_readable` | The key the schedule's ticks are recorded under: a settings-declared schedule's name, or `db:<pk>` for a stored schedule. |
+| `phase` | `schedule_tick_unreadable` | Worker: `latest` for the newest tick within the pass's bound; `anchor` for a settings schedule's earliest tick. Admin: always `latest`. Absent from prune records. |
+| `tick_pk` | `schedule_tick_unreadable` | The primary key of the tick row that could not be read, or `None` when it could not be determined. |
+| `category` | `schedule_dispatch_failed` | What abandoned the pass: `database` or `unexpected_exception`. |
 | `queues` | `worker_started` | The worker's queues. |
 | `concurrency` | `worker_started`, `connection_pool_too_small` | The worker's task-thread concurrency, set by `--concurrency`. |
-| `database` | `connection_pool_too_small`, `worker_connection_hint`, `schedule_dispatch_error`, `schedule_dispatch_failed`, `schedule_dispatch_recovered` | The worker's database alias: `--database`, or the alias used to write `OxTask`. |
+| `database` | `connection_pool_too_small`, `worker_connection_hint`, `schedule_dispatch_error`, `schedule_dispatch_failed`, `schedule_dispatch_resumed`, `schedule_dispatch_recovered`, `schedule_tick_unreadable`, `schedule_tick_readable`, `schedule_tick_history_removed` | Worker: `--database`, or the alias used to write `OxTask`. Prune: the alias the command worked on. Admin: the schedule's write alias. |
 | `vendor` | `worker_connection_hint` | Django's name for the database engine, such as `postgresql` or `mysql`. |
 | `max_size` | `connection_pool_too_small` | The effective pool maximum. `pool=True` means 4. For a non-empty mapping, use `max_size`; if absent or `None`, use `min_size`, defaulting to 4. The sizing check skips values that are not an `int` of at least 1. It excludes booleans and floats such as `10.0`. |
 | `recommended_max_size` | `connection_pool_too_small` | `concurrency + 1`: one pooled connection per task thread and one for the poll loop. This does not reserve fallback capacity or validate the server budget. |
@@ -6402,9 +6377,9 @@ A failed connect while recording a stuck attempt logs
 | `worker_indexes` | `supervisor_killed_workers` | The slots that were killed. |
 | `parent_pid` | `worker_orphaned` | The supervisor pid the worker was started under. |
 | `exit_code` | `supervisor_stopped` | The code the supervisor exits with. |
-| `error` | `lease_renew_degraded`, `lease_renew_fallback`, `lease_renew_missed`, `watchdog_connection_unavailable`, `schedule_dispatch_error`, `schedule_dispatch_failed`, `heartbeat_write_failed`, `heartbeat_invalidate_failed` | Schedule dispatch: the exception class name of the latest failure. Heartbeat: the operating-system error text from the failed update or removal. Renewal and watchdog: the private-connection failure reason, except that a pool-first renewal tick reports that the pool was tried first and gives the remaining lease time. |
-| `failures` | `schedule_dispatch_error`, `schedule_dispatch_failed`, `schedule_dispatch_recovered` | On `schedule_dispatch_error`, total failed attempts in this schedule's current run of failures on this worker, including the first. On `schedule_dispatch_failed`, total abandoned passes in the current outage. On `schedule_dispatch_recovered`, failed attempts in the run that just ended. |
-| `suppressed` | `schedule_dispatch_error`, `schedule_dispatch_failed` | Failures counted since the previous report and not logged individually. Zero on the first report of a run. |
+| `error` | `lease_renew_degraded`, `lease_renew_fallback`, `lease_renew_missed`, `watchdog_connection_unavailable`, `schedule_dispatch_error`, `schedule_dispatch_failed`, `schedule_boundary_heal_failed`, `heartbeat_write_failed`, `heartbeat_invalidate_failed` | Schedule dispatch and boundary heal: the exception class name of the latest failure. Heartbeat: the operating-system error text from the failed update or removal. Renewal and watchdog: the private-connection failure reason, except that a pool-first renewal tick reports that the pool was tried first and gives the remaining lease time. |
+| `failures` | `schedule_dispatch_error`, `schedule_dispatch_failed`, `schedule_dispatch_resumed`, `schedule_dispatch_recovered`, `schedule_boundary_heal_failed`, `schedule_tick_unreadable`, `schedule_tick_readable` | Totals for the current run on this worker, including the first failure. Dispatch errors and heal failures count attempts per schedule. Dispatch failures count abandoned passes separately per `category`; resumed counts both categories together. Dispatch recovered counts that schedule's failed attempts. Worker tick-unreadable records count skipped passes; tick-readable records give the final total. Absent from admin and prune records. |
+| `suppressed` | `schedule_dispatch_error`, `schedule_dispatch_failed`, `schedule_boundary_heal_failed`, `schedule_tick_unreadable` | Failures since the previous report that were not logged individually, including the attempt triggering a summary. Zero on the first report. Dispatch failures count separately per `category`. Tick records carry this only on workers. |
 | `fallback` | `lease_renew_degraded` | `succeeded` if pooled renewal succeeded; `failed` if fallback did not renew the leases. |
 | `fallback_error` | `lease_renew_degraded`, `lease_renew_missed`, `watchdog_connection_unavailable` | The fallback failure reason. On `lease_renew_degraded`, present when `fallback` is `failed`. A borrowed renewal statement failure is reported as "the renewal statement failed". |
 | `missed` | `lease_renew_missed` | Missed renewal ticks since the last `lease_renew_degraded` or `lease_renew_missed` record, or since recovery if more recent. |
@@ -6446,14 +6421,7 @@ connection check establishes usability, not that the failure was caused by
 invalid arguments or will recur. There is no consecutive-failure cutoff:
 several failed schedules do not prevent an attempt at a later healthy one.
 
-A failed rollback, changed session or unusable connection abandons the pass.
-So does a `django.db.DatabaseError` escaping a shared read, such as the
-schedule source's full read or the tick-log read before traversal. A
-non-database exception from the schedule source stops the worker with a
-traceback and exit 1; a `django.db.InterfaceError` escaping that read is
-reported as `worker_poll_failed` instead. The stored source's marker read and
-boundary heal retain their separate handling and events. Any exception
-escaping dispatch leaves the pass incomplete, whatever its class.
+A failed rollback, changed session or unusable connection abandons the pass. So does a `django.db.Error` escaping a shared read, including the schedule source's full read or the tick-log read before traversal. Other unhandled exceptions report `schedule_dispatch_failed` with `category=unexpected_exception`; the worker continues. `KeyboardInterrupt` and `SystemExit` still stop it. The stored source's marker read and boundary heal retain separate handling and events. An unreadable tick skips its schedule without abandoning the pass. Any exception escaping dispatch leaves the pass incomplete.
 
 An abandoned pass reports `schedule_dispatch_failed` and stops further
 traversal. It does not undo earlier committed ticks. Normal batch-empty
@@ -6497,10 +6465,9 @@ pause and is dropped without an event only when the row is deleted. If a
 paused row is fixed and resumed, its next successful tick commit on that
 worker reports `schedule_dispatch_recovered`.
 
-`schedule_dispatch_failed` uses the same first-traceback and later-summary
-pattern at WARNING, per worker. Its `failures` counts abandoned passes in
-the outage. A completed dispatch pass ends the outage, so the next abandoned
-pass is reported in full. There is no pass recovery event.
+`schedule_dispatch_failed` uses the first-traceback and later-summary pattern at WARNING, per worker, separately for each `category`. A completed pass reports `schedule_dispatch_resumed` with the total abandoned passes across both categories. It ends the failure run; the next abandoned pass is reported in full.
+
+`schedule_boundary_heal_failed` follows this pattern per stored row per worker. Only reporting is throttled; healing is retried every pass. Successful healing reports `schedule_boundary_healed`. Reporting state also clears if another writer moves the boundary, the row disappears, stops reading, or its fields refuse the digest. There is no separate heal-recovery event.
 
 These events do not include schedule arguments as fields. The first traceback
 includes the database's own error message, which can quote part of a rejected
@@ -6512,20 +6479,7 @@ and `suppressed` rather than treating each log line as one failed attempt.
 
 ## Monitoring recipes
 
-- **Alerting.** Alert on `ready_count` and `oldest_ready_age` (via
-  `ox_health` thresholds or the functions directly), and on
-  `failure_rate` rising above your normal baseline. Use last-claim age
-  only for fleet alerting on queues with steady traffic. Throughput is
-  better as a dashboard line than an alert: its healthy value depends
-  entirely on offered load. Also alert on `schedule_dispatch_error` and
-  `schedule_dispatch_failed`, plus `schedule_row_skipped` for stored
-  schedules. For stored schedules, also alert on
-  `schedule_source_unavailable`: a failed marker read leaves dispatch running
-  from the cached set rather than abandoning the pass. Read `failures` and
-  `suppressed` rather than counting dispatch error log lines. A rejected
-  dispatch leaves no task or tick row. `ox_health` has no schedule check, and
-  neither `worker_batch_empty` nor batch exit 0 certifies that every schedule
-  dispatched.
+- **Alerting.** Alert on `ready_count` and `oldest_ready_age` through `ox_health` thresholds or function calls, and on above-baseline `failure_rate`. Use last-claim age only for fleet alerts on steady-traffic queues. Keep throughput on dashboards; healthy values depend on offered load. Alert on `schedule_dispatch_error`, `schedule_dispatch_failed` and `schedule_tick_unreadable`. For stored schedules, also alert on `schedule_row_skipped`, `schedule_source_unavailable` and `schedule_boundary_heal_failed`. Failed marker reads use cached schedules without abandoning dispatch. Read `failures` and `suppressed`, not log-line counts. Rejected dispatch leaves no task or tick. `ox_health` cannot check schedules; neither `worker_batch_empty` nor batch exit 0 certifies every schedule dispatched.
 - **Prometheus.** Mount `django_ox.urls` and scrape `/ox/metrics`, or
   register `django_ox.metrics.collector()` with a registry you already run.
   Both are covered [above](#prometheus).
@@ -7343,13 +7297,7 @@ python manage.py ox_health
 OK: backlog=0 oldest_age=none last_claim_age=none
 ```
 
-`manage.py check` reports schedule and backend policy errors through
-`django_ox.E002` to `E005`, `E010` and `E011`, and warnings through
-`django_ox.W003` and `django_ox.W004`, before deployment.
-Database acceptance of schedule arguments is determined at dispatch;
-alert on `schedule_dispatch_error` and `schedule_dispatch_failed` at runtime.
-Review `django_ox.W003` and `django_ox.W004` warnings too; `W004` asks for
-a non-bool integer from 1 to 32767 while retaining compatible legacy values.
+`manage.py check` reports schedule and backend policy errors through `django_ox.E002` to `E005`, `E010` and `E011`, and warnings through `django_ox.W003` and `django_ox.W004`, before deployment. Database acceptance of schedule arguments is determined at dispatch. Alert on `schedule_dispatch_error`, `schedule_dispatch_failed` and `schedule_tick_unreadable`. For stored schedules, also alert on `schedule_row_skipped`, `schedule_source_unavailable` and `schedule_boundary_heal_failed`. Review `django_ox.W003` and `django_ox.W004` warnings too; `W004` asks for a non-bool integer from 1 to 32767 while retaining compatible legacy values.
 
 Invalid per-task fields raise `InvalidTask` (`InvalidTaskError` on the
 backport) when the task is built, normally at import, rather than appearing

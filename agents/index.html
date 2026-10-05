@@ -781,6 +781,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#upgrade-to-180" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade to 1.8.0
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#facts-to-get-right" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -796,6 +807,17 @@
     <span class="md-ellipsis">
       
         How to verify it works
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#compatibility-and-project-history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Compatibility and project history
       
     </span>
   </a>
@@ -886,6 +908,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#upgrade-to-180" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade to 1.8.0
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#facts-to-get-right" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -901,6 +934,17 @@
     <span class="md-ellipsis">
       
         How to verify it works
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#compatibility-and-project-history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Compatibility and project history
       
     </span>
   </a>
@@ -939,11 +983,17 @@
 
 
 <h1 id="for-ai-assistants">For AI assistants</h1>
-<p>Exact steps for setting up django-ox in an existing Django project, the facts
-to get right while doing it, and how to prove it works. Machine-readable
-copies: <a href="../llms.txt">llms.txt</a> (facts and links) and
-<a href="../llms-full.txt">llms-full.txt</a> (every page of this site in one file).
-Context7 library id: <code>/oxpull/django-ox</code>.</p>
+<p>Exact steps for setting up django-ox in an existing Django project, the
+facts to get right while doing it, and how to prove it works.</p>
+<p><strong>django-ox 1.8.0, released 2026-10-04:</strong> create many stored schedules in
+one all-or-nothing call, use the rebuilt django-celery-beat database importer,
+and keep other schedules and queued tasks running when a stored row is invalid.
+See <a href="#upgrade-to-180">Upgrade to 1.8.0</a>.
+<strong>18 releases in 49 days; public API stable since 1.0.0 (September 2026).</strong>
+Explore the <a href="#compatibility-and-project-history">test suite, contributors and project history</a>.</p>
+<p>Run Django background tasks in the database your project already uses:
+transactional enqueue, retries, dead-worker recovery, recurring schedules
+and monitoring, without a separate broker.</p>
 <h2 id="set-up-django-ox-in-this-project">Set up django-ox in this project</h2>
 <p>Requires Python 3.12+ and Django 5.2+. Check before installing:</p>
 <div class="highlight"><pre><span></span><code>python -c "import django, sys; print(django.__version__, sys.version.split()[0])"
@@ -1013,6 +1063,38 @@ supervisor:</p>
     <span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
+<h2 id="upgrade-to-180">Upgrade to 1.8.0</h2>
+<p>Create many stored schedules in one all-or-nothing call, or bring schedules
+across from django-celery-beat's database scheduler tables with the rebuilt
+importer.</p>
+<p>Before rolling out the upgrade:</p>
+<ul>
+<li><strong>No new database migration is required for 1.8.0.</strong> New installations
+  still run the setup migration above.</li>
+<li><strong>Upgrade affected installations for GHSA-gq8r-4ccg-vxcr.</strong> This medium
+  severity advisory affects versions 1.2.0 through 1.7.0 and is fixed in
+  1.8.0. Invalid stored schedule rows are now skipped and logged.
+  Other schedules and queued tasks keep running.</li>
+<li><strong>For Django's PostgreSQL pool, use <code>psycopg_pool</code> 3.3.0 or later;
+  3.3.3 is recommended.</strong> Review the pool-drain fix's WARNING event
+  <code>connection_pool_cannot_drain</code> in worker logs.</li>
+<li><strong>Re-check previously imported schedules.</strong> If you applied output from
+  the importer in 1.2.0 through 1.7.0, re-check crontabs restricting both
+  day fields or using timezones other than Django's <code>TIME_ZONE</code>.</li>
+<li><strong>Review shared-Worker MySQL use.</strong> 1.8.0 fixes lease renewal when one
+  caller runs <code>run_once()</code> inside its own atomic block. The defect was in
+  1.7.0 and could let other tasks lose their leases and run twice.
+  PostgreSQL, plain <code>run_once()</code> calls outside atomic blocks, and separate
+  Workers were unaffected.</li>
+</ul>
+<p>Earlier security history also matters when upgrading an older pin:
+the high severity advisory GHSA-27v7-5cxc-wf63 affects 1.2.0 through
+1.4.x and was fixed in 1.5.0. The project found both advisories in its own
+review and disclosed each within an hour of the release that fixed it.</p>
+<p>Read the <a href="../changelog/">1.8.0 changelog</a>,
+<a href="https://github.com/oxpull/django-ox/releases/tag/v1.8.0">GitHub release notes</a>,
+<a href="https://github.com/oxpull/django-ox/security/advisories/GHSA-gq8r-4ccg-vxcr">1.8.0 security advisory</a>
+and <a href="https://github.com/oxpull/django-ox/security/advisories/GHSA-27v7-5cxc-wf63">earlier security advisory</a>.</p>
 <h2 id="facts-to-get-right">Facts to get right</h2>
 <ul>
 <li><code>QUEUES</code> sits beside <code>OPTIONS</code>, not inside it. Inside <code>OPTIONS</code> it is
@@ -1121,6 +1203,33 @@ supervisor:</p>
   activation boundary stale. Retiming a stored schedule reschedules it from
   the moment of the change, and re-enabling a paused one does not replay what
   it missed.</li>
+<li><code>django_ox.stored.create_schedules(rows, *, user=None)</code> is public and stable
+  in 1.8.0. It returns a list of <code>OxSchedule</code> objects, or <code>[]</code> for empty input.
+  Names must be unique within the input. Creation is all-or-nothing.
+  One <code>ValidationError</code> lists all validation failures by row index, name,
+  field and message. A non-mapping row or unsupported key raises
+  <code>TypeError</code> immediately.
+  Permission refusals raise a separate <code>PermissionDenied</code>, naming every
+  denied row. A database refusal at the check or write raises for one row;
+  a concurrent name conflict raises <code>IntegrityError</code> and rolls back the
+  entire call.
+  See <a href="../stored-schedules/#writing-schedules-from-code">Writing schedules from code</a>.</li>
+<li><code>ox_import_beat_schedules</code> reads django-celery-beat's database scheduler
+  tables: <code>PeriodicTask</code>, <code>CrontabSchedule</code> and <code>IntervalSchedule</code>.
+  It prints code for review and application. First shipped in 1.2.0 and
+  rebuilt in 1.8.0, it now prints one all-or-nothing <code>create_schedules</code> call
+  and lists each row it cannot translate with a named reason. It reads
+  crontabs with Celery's grammar. Use <code>--beat-timezone ZONE</code> to supply
+  beat's timezone.
+  Its <code>--database</code> flag selects the alias holding the django-celery-beat
+  tables, defaulting to the alias <code>OxSchedule</code> reads from.
+  If you applied importer output from 1.2.0 through 1.7.0, re-check crontabs
+  restricting both day fields or using non-<code>TIME_ZONE</code> zones.
+  See <a href="../stored-schedules/#coming-from-django-celery-beat">Coming from django-celery-beat</a>
+  and <a href="../stored-schedules/#supplying-beats-timezone">Supplying beat's timezone</a>.</li>
+<li>In 1.8.0, invalid stored schedule rows are skipped and logged so other
+  schedules and queued tasks keep running. This fixes
+  GHSA-gq8r-4ccg-vxcr, affecting 1.2.0 through 1.7.0.</li>
 <li><code>ox_prune --older-than 7d</code> deletes finished rows; FAILED rows stay unless
   <code>--include-failed</code>. READY, WAITING and RUNNING rows are never deleted.</li>
 <li>For per-container loop-liveness, pair <code>ox_worker --heartbeat-file PATH</code>
@@ -1164,6 +1273,10 @@ supervisor:</p>
   WAITING, FAILED or LOST task without running it. Neither touches a RUNNING task.
   With <code>django.contrib.admin</code> installed, the task table appears in the admin
   with the same two actions.</li>
+<li><code>OxTask.Status.WAITING</code> is a status django-ox never writes itself.
+  Workers never claim a waiting task, <code>ox_prune</code> never deletes it, and
+  <code>retry</code> skips it. It reads as READY through <code>django.tasks</code>. Workflows in
+  Oxpull Pro write and release it.</li>
 <li>A particular running task cannot be interrupted on demand. Each attempt
   can have a task, queue or backend execution timeout. Every table lives
   on the database your router sends <code>OxTask</code> to.</li>
@@ -1186,8 +1299,9 @@ supervisor:</p>
   worker. See <a href="../patterns/#run-queued-tasks-in-tests">Run queued tasks in tests</a>
   for transaction and callback differences.</li>
 <li>Batches, unique tasks, rate limiting and workflows are in
-  <a href="../pro/">Oxpull Pro</a>, a paid add-on. <code>django_ox.stats</code> and <code>ox_health</code>
-  are in django-ox.</li>
+  <a href="../pro/">Oxpull Pro</a>, a paid add-on requiring Django 6.0+.
+  <code>create_schedules</code> creates stored schedules in the free package.
+  <code>django_ox.stats</code> and <code>ox_health</code> are also in django-ox.</li>
 </ul>
 <h2 id="how-to-verify-it-works">How to verify it works</h2>
 <p>Define a task in any installed app:</p>
@@ -1219,14 +1333,38 @@ With <code>DEBUG = True</code>, Django's own <code>Task id=... state=RUNNING</co
 </code></pre></div>
 <p><code>python manage.py ox_health --worker-timeout 60</code> now exits 0 and reports a
 recent <code>last_claim_age</code>. Stop the worker with Ctrl-C; it drains and exits 0.</p>
+<h2 id="compatibility-and-project-history">Compatibility and project history</h2>
+<p>django-ox supports Python 3.12-3.14 and Django 5.2 LTS through 6.1.
+For Django 5.2, install the backport extra.
+PostgreSQL, MySQL 8 and SQLite are in CI. The licence is BSD 3-Clause.</p>
+<p>As of 2026-10-04, django-ox has shipped <strong>18 releases in 49 days</strong>.
+Its <strong>public API has been stable since 1.0.0 (September 2026)</strong>.</p>
+<ul>
+<li><strong>All 36 checks passed on release PR #124</strong>, including test-suite legs
+  on PostgreSQL, MySQL and SQLite, plus Wagtail smoke checks.</li>
+<li><strong>3,761 test cases in the 1.8.0 suite.</strong></li>
+<li><strong>22 merged pull requests from 13 outside contributors.</strong></li>
+<li>Featured in PyCoder's Weekly #752 (2026-09-15).
+  Listed in awesome-django under Task Queues.</li>
+</ul>
+<p>Machine-readable copies: <a href="../llms.txt">llms.txt</a> contains facts and links;
+<a href="../llms-full.txt">llms-full.txt</a> contains every page of this site in one file.
+Use Context7 library id <code>/oxpull/django-ox</code> to look up the documentation.</p>
 <h2 id="links">Links</h2>
 <ul>
+<li><a href="../changelog/">Changelog</a>: django-ox 1.8.0 and earlier releases.</li>
+<li><a href="https://github.com/oxpull/django-ox/releases/tag/v1.8.0">1.8.0 release notes</a>.</li>
+<li><a href="../stored-schedules/">Schedules in the database</a>:
+  admin-editable schedules, <code>create_schedules</code> and the django-celery-beat
+  database importer.</li>
 <li><a href="../llms.txt">llms.txt</a>: the facts above with links, in the llms.txt shape.</li>
 <li><a href="../llms-full.txt">llms-full.txt</a>: the whole site in one file.</li>
 <li><a href="../configuration/">Configuration</a>, <a href="../production/">Production</a>,
   <a href="../monitoring/">Monitoring</a>, <a href="../patterns/">Common patterns</a>.</li>
-<li>Context7: <code>/oxpull/django-ox</code>. Source:
-  <a href="https://github.com/oxpull/django-ox">github.com/oxpull/django-ox</a>.</li>
+<li><a href="../stability/">API stability</a>: public API and versioning.</li>
+<li><a href="https://context7.com/oxpull/django-ox">Context7</a>:
+  library id <code>/oxpull/django-ox</code>.</li>
+<li><a href="https://github.com/oxpull/django-ox">Source</a>.</li>
 </ul>
 
 

@@ -4826,6 +4826,33 @@ workers.
 Unpooled renewal and watchdog connects do not gain these local deadlines.
 PgBouncer and third-party pools have not been tested.
 
+### Retaining worker connections
+
+With `CONN_MAX_AGE = 0` and no pool, Django closes initialized execution connections before and after each attempt. The next attempt opens another connection; the poll loop keeps its claim connection. Task ORM queries and outcome writing use the same execution connection on the worker's database alias. `worker_connection_hint` reports this setting once at INFO during `Worker.run()` startup on PostgreSQL and MySQL.
+
+To retain connections, configure the worker's alias in a dedicated worker settings module. Launch workers with that module to leave web processes unchanged. For PostgreSQL or MySQL without a pool, set a positive connection age and enable health checks:
+
+```python
+DATABASES["default"]["CONN_MAX_AGE"] = 600
+DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
+```
+
+For PostgreSQL, Django's pool requires psycopg 3, `psycopg_pool` and `CONN_MAX_AGE = 0`; use the pool example above instead of a positive age. MySQL has no Django pool; setting `OPTIONS["pool"]` does not enable one.
+
+Allow pool capacity for task threads and polling, plus the separate renewal, watchdog and stop-time recovery connections described above. Each worker process has its own pool. Retained connections carry session state between tasks; follow the responsibilities below.
+
+Persistence and pooling remain opt-in. The default connection lifecycle, transactions, delivery and schema are unchanged.
+
+### Session state and connection failures
+
+With persistence or pooling, tasks must account for session settings, temporary objects and session locks carried over from earlier tasks. Finish transaction scopes and restore any session state you change. Django's age, usability and autocommit checks are not a comprehensive session reset. With `CONN_MAX_AGE = 0` and no pool, a later task does not inherit that execution session.
+
+Each execution thread keeps its own connection context, separate from other task threads, claiming and renewal. Sharing an execution connection does not make task effects and outcome writing one atomic transaction. Delivery remains at least once with lease fencing; tasks must tolerate retry.
+
+Measured default runs opened one connection per task attempt plus one for polling; ORM queries added no connections. Persistence or PostgreSQL pooling opened two connections in total: one for execution and one for polling, regardless of task count. These counts are exact on PostgreSQL and SQLite; MySQL counting tests allow one extra connection per thread because Django's MySQL backend reads the server version through a throwaway connection the first time a thread uses it. After a server-ended idle session, querying tasks used one extra attempt, then succeeded on a new session. Query-free tasks reconnected at outcome writing without spending an attempt; every task completed. Workers with and without persistence shared a queue: all 40 tasks succeeded, each running once with one claim and one epoch. Both workers ran tasks. These measurements cover same-release batch workers, PostgreSQL, MySQL and SQLite connection counts, PostgreSQL pooling, and PostgreSQL and MySQL idle-session recovery.
+
+Set `CONN_HEALTH_CHECKS = True`; health checks reduce stale-connection failures but cannot prevent later disconnects.
+
 ### psycopg_pool versions and recovery
 
 Use psycopg_pool 3.3.3 or newer with Django's PostgreSQL pool. Version
@@ -6232,6 +6259,7 @@ The message text is not part of the contract. The keys are.
 | `worker_started` | INFO | The run loop starts. |
 | `connection_pool_too_small` | WARNING | Once per `Worker.run()`, after `worker_started` and before threads start: the worker alias's effective PostgreSQL pool maximum is below `concurrency + 1`. Each `--processes` child checks separately. The warning does not resize the pool, refuse startup, measure available server slots, or reserve fallback capacity. |
 | `connection_pool_cannot_drain` | WARNING | Pooled PostgreSQL only. The installed psycopg_pool has no `ConnectionPool.drain()` method, which was added in 3.3.0. Emitted once per `Worker.run()`, after `worker_started` and the `connection_pool_too_small` check, before threads start. Each `--processes` child checks separately. Also emitted at the first sweep of such a pool in a process, for each database alias, unless startup already emitted it in that process. Concurrent first sweeps may emit duplicate warnings. The sweep record is the only notice available to callers of `run_once()` or `run_tasks()`. Idle connections are still tested as in django-ox 1.7.0, preserving restart recovery but also the wait on a connection that stays open without answering. A stop is not read until that test returns. Upgrade psycopg_pool to 3.3.3 or newer. This warning does not refuse startup or change the pool. No traceback. Keys: `event` and `database` always; `worker_id` only on the startup record. |
+| `worker_connection_hint` | INFO | Once at `Worker.run()` startup on PostgreSQL and MySQL when `CONN_MAX_AGE = 0` and no PostgreSQL pool is configured. MySQL ignores pool options. Each attempt opens one execution connection for task queries and outcome writing. Carries `worker_id`, `database` and `vendor`. The hint opens no connection and never stops the worker. See [connection guidance](production.md#retaining-worker-connections). |
 | `task_claimed` | DEBUG | A task was claimed from the queue. |
 | `task_started` | DEBUG | Execution of an attempt begins. |
 | `task_succeeded` | INFO | The task reached SUCCESSFUL. |
@@ -6358,7 +6386,8 @@ A failed connect while recording a stuck attempt logs
 | `reason` | `schedule_row_skipped` | Why the row could not be used, during either a full read or a locked dispatch read. For a value that could not be converted, the reason names the column. |
 | `queues` | `worker_started` | The worker's queues. |
 | `concurrency` | `worker_started`, `connection_pool_too_small` | The worker's task-thread concurrency, set by `--concurrency`. |
-| `database` | `connection_pool_too_small`, `schedule_dispatch_error`, `schedule_dispatch_failed`, `schedule_dispatch_recovered` | The worker's database alias: `--database`, or the alias used to write `OxTask`. |
+| `database` | `connection_pool_too_small`, `worker_connection_hint`, `schedule_dispatch_error`, `schedule_dispatch_failed`, `schedule_dispatch_recovered` | The worker's database alias: `--database`, or the alias used to write `OxTask`. |
+| `vendor` | `worker_connection_hint` | Django's name for the database engine, such as `postgresql` or `mysql`. |
 | `max_size` | `connection_pool_too_small` | The effective pool maximum. `pool=True` means 4. For a non-empty mapping, use `max_size`; if absent or `None`, use `min_size`, defaulting to 4. The sizing check skips values that are not an `int` of at least 1. It excludes booleans and floats such as `10.0`. |
 | `recommended_max_size` | `connection_pool_too_small` | `concurrency + 1`: one pooled connection per task thread and one for the poll loop. This does not reserve fallback capacity or validate the server budget. |
 | `unpooled_connections` | `connection_pool_too_small` | Worst-case additional private-connection budget per worker process in normal operation, not a count of open connections. Always 2: one for lease renewal and one possible timeout-watchdog connection. This does not count the additional private connection used for a stop-time recovery look. A worker whose tasks never use timeouts needs only the first. An absent timeout in `OPTIONS` alone does not establish that, because a task can declare its own. |
@@ -7686,6 +7715,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+**Upgrading:** No database migration is required.
+
+### Added
+
+- Log `worker_connection_hint` once at INFO during `Worker.run()` startup
+  on PostgreSQL without pooling and on MySQL when `CONN_MAX_AGE = 0`.
+  The `django_ox` record includes `worker_id`, `database` and `vendor`.
+  The hint reads settings without opening a connection and does not
+  prevent startup.
+
+  To retain execution connections, set `CONN_MAX_AGE` above zero and
+  `CONN_HEALTH_CHECKS = True` in worker-specific settings.
+  Tasks must restore session state they change.
+  PostgreSQL's Django pool is another option and requires
+  `CONN_MAX_AGE = 0`.
+  See [connection guidance](https://oxpull.com/django-ox/production/#retaining-worker-connections)
+  for session handling and disconnect recovery.
+
+### Compatibility
+
+- Default connection lifecycle, transaction, delivery and schema semantics
+  are unchanged. Persistence and pooling remain opt-in.
+  Workers with and without persistence shared a queue in tests using
+  the same django-ox release.
 
 ## [1.8.0] - 2026-10-04
 

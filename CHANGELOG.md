@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+**Upgrading:** No database migration is required.
+
+### Added
+
+- Log `worker_connection_hint` once at INFO during `Worker.run()` startup
+  on PostgreSQL without pooling and on MySQL when `CONN_MAX_AGE = 0`.
+  The `django_ox` record includes `worker_id`, `database` and `vendor`.
+  The hint reads settings without opening a connection and does not
+  prevent startup.
+
+  To retain execution connections, set `CONN_MAX_AGE` above zero and
+  `CONN_HEALTH_CHECKS = True` in worker-specific settings.
+  Tasks must restore session state they change.
+  PostgreSQL's Django pool is another option and requires
+  `CONN_MAX_AGE = 0`.
+  See [connection guidance](https://oxpull.com/django-ox/production/#retaining-worker-connections)
+  for session handling and disconnect recovery.
+
+### Compatibility
+
+- Default connection lifecycle, transaction, delivery and schema semantics
+  are unchanged. Persistence and pooling remain opt-in.
+  Workers with and without persistence shared a queue in tests using
+  the same django-ox release.
+
 ## [1.8.0] - 2026-10-04
 
 **Upgrading to 1.8.0:** No database migration is required.

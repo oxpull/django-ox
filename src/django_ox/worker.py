@@ -5858,6 +5858,40 @@ class Worker:
             },
         )
 
+    def _hint_if_every_task_reconnects(self) -> None:
+        """
+        Report per-attempt execution connections at PostgreSQL and MySQL startup.
+
+        Log worker_connection_hint once at INFO when CONN_MAX_AGE is zero and
+        PostgreSQL pooling is absent. Read settings without opening a connection
+        or preventing worker startup.
+        """
+        conn = connections[self._db_alias]
+        if conn.vendor not in ("postgresql", "mysql"):
+            return
+        if conn.settings_dict.get("CONN_MAX_AGE", 0) != 0:
+            return
+        if conn.vendor == "postgresql" and _pool_options(self._db_alias) is not None:
+            return
+        logger.info(
+            "Worker %s: database %r opens a new execution connection per "
+            "attempt with CONN_MAX_AGE = 0 on PostgreSQL or MySQL. "
+            "To retain connections, set CONN_MAX_AGE above 0 and "
+            "CONN_HEALTH_CHECKS = True in worker settings. "
+            "Tasks must restore session state they change; a server-ended "
+            "idle session can cost a querying task an extra attempt. "
+            "PostgreSQL's Django pool is another option and requires "
+            "CONN_MAX_AGE = 0.",
+            self.worker_id,
+            self._db_alias,
+            extra={
+                "event": "worker_connection_hint",
+                "worker_id": self.worker_id,
+                "database": self._db_alias,
+                "vendor": conn.vendor,
+            },
+        )
+
     def _warn_if_the_connection_pool_cannot_drain(self) -> None:
         """
         Say so at startup when Django's PostgreSQL connection pool for this
@@ -6061,6 +6095,7 @@ class Worker:
         )
         self._warn_if_the_connection_pool_is_short()
         self._warn_if_the_connection_pool_cannot_drain()
+        self._hint_if_every_task_reconnects()
         in_flight: set[Future[None]] = set()
         last_reap = 0.0
         last_dispatch = 0.0

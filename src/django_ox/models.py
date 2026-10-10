@@ -319,7 +319,24 @@ class OxSchedule(models.Model):
         ]
 
     def __str__(self) -> str:
-        return self.name
+        """
+        The schedule's name, or "pk N" where the name cannot be had as text:
+        bytes SQLite kept in the column, or a name the database holds that
+        the driver cannot decode. For display only. The fallback is never
+        assigned to the field and is no name to look the schedule up by.
+        """
+        from ._stored_read import is_unreadable_value
+
+        try:
+            name = self.name
+        except Exception as exc:
+            using = router.db_for_read(type(self), instance=self)
+            if not is_unreadable_value(exc, using=using):
+                raise
+            return f"pk {self.pk}"
+        if not isinstance(name, str):
+            return f"pk {self.pk}"
+        return name
 
     def clean(self) -> None:
         """

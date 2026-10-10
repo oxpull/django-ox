@@ -1,3 +1,8 @@
+from collections.abc import Sequence
+from functools import partial
+from typing import Any
+
+
 class TaskAbandoned(Exception):
     """
     Recorded against a task whose worker stopped renewing its lease with no
@@ -35,3 +40,58 @@ class TaskTimeout(TimeoutError):
     def __init__(self, message: str = "", *, timeout: float | None = None) -> None:
         super().__init__(message)
         self.timeout = timeout
+
+
+class StoredValueUnreadable(Exception):
+    """
+    A row django-ox stores holds a value that cannot be read back.
+
+    Only a value written around django-ox's own write functions gets there:
+    by SQL, a fixture or a data migration. PostgreSQL keeps a timestamp past
+    year 9999 and 'infinity', SQLite keeps text in an integer column and a
+    date that does not exist, MySQL keeps a zero date outside strict mode.
+    Django's own read of such a row raises a different exception on each
+    database, and on SQLite can read some of them as something else without
+    raising at all, so django-ox reads these rows itself and raises this
+    where it cannot go on without the value.
+
+    ``alias`` is the database the row was read from, ``model`` the model's
+    label, ``pk`` the row's primary key, ``fields`` the names of the fields
+    that did not read (empty when the read could not say which), and
+    ``reason`` what was wrong with them, safe to print. The exception the
+    read itself raised, where there was one, is the ``__cause__``.
+    """
+
+    def __init__(
+        self,
+        *,
+        alias: str = "",
+        model: str = "",
+        pk: Any = None,
+        fields: Sequence[str] = (),
+        reason: str = "",
+    ) -> None:
+        self.alias = alias
+        self.model = model
+        self.pk = pk
+        self.fields = tuple(fields)
+        self.reason = reason
+        super().__init__(
+            f"The {model} row with primary key {pk!r} in database {alias!r} "
+            f"holds a value that cannot be read: {reason}"
+        )
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        # The arguments are keyword-only, which the default reduction, a
+        # call with self.args, cannot pass.
+        return (
+            partial(
+                type(self),
+                alias=self.alias,
+                model=self.model,
+                pk=self.pk,
+                fields=self.fields,
+                reason=self.reason,
+            ),
+            (),
+        )

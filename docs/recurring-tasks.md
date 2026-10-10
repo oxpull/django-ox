@@ -318,6 +318,4 @@ written the first time a worker saw the schedule; it enqueued nothing and marks
 the tick before the first real fire. A schedule-scoped failure rolls back its
 tick row and task, so the tick log alone does not report failed dispatches.
 
-The recovery baseline is each schedule's most recent tick row, which is why
-`ox_prune` always keeps it. See
-[Configuration](configuration.md#ox_prune).
+The recovery baseline is each schedule's most recent tick row. Ordinary `ox_prune` preserves every unreadable tick and each schedule's newest readable tick. Removing history can repeat work or cause re-anchoring. See [Configuration](configuration.md#ox_prune).

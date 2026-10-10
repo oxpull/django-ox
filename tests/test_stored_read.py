@@ -53,6 +53,7 @@ from django.utils import timezone
 from django_ox import _stored_read
 from django_ox._stored_read import (
     TickRead,
+    TickRow,
     UnreadableRow,
     UnreadableValue,
     as_text,
@@ -66,6 +67,7 @@ from django_ox._stored_read import (
     lock_schedule,
     newest_tick_pk,
     read_schedules,
+    read_ticks,
 )
 from django_ox.exceptions import StoredValueUnreadable
 from django_ox.models import OxSchedule, OxScheduleTick
@@ -1488,15 +1490,17 @@ def the_reads():
     keys = ["k0", "k1", "k2"]
     for key in keys:
         a_tick(key, now)
+    every_tick = OxScheduleTick.objects.order_by("pk")
     return {
         "rows": (SCHEDULES, lambda: read_schedules([r.pk for r in rows], using=ALIAS)),
         "newest": (TICKS, lambda: latest_ticks(keys, since, using=ALIAS)),
         "earliest": (TICKS, lambda: earliest_tick("k0", using=ALIAS)),
+        "ticks": (TICKS, lambda: read_ticks(every_tick, using=ALIAS)),
     }
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("read", ["rows", "newest", "earliest"])
+@pytest.mark.parametrize("read", ["rows", "newest", "earliest", "ticks"])
 def test_in_a_transaction_a_read_the_database_refuses_is_raised_as_it_was(read):
     """
     A statement the server refuses ends a PostgreSQL transaction for every
@@ -1576,8 +1580,30 @@ def test_in_a_transaction_a_refused_read_of_one_column_is_raised():
     refusing.assert_raised_as_it_was(caught)
 
 
+@pytest.mark.django_db
+def test_in_a_transaction_a_refused_read_of_the_tick_rows_keys_is_raised():
+    """
+    Tick rows the driver could not hand over are read again as their keys
+    and then by key, and each of those reads is held to the same rule.
+    """
+    only_on("sqlite", "SQLite keeps text its driver cannot decode as UTF-8")
+    a_tick("k", now_ish())
+    insert_tick("bad", NOT_UTF_8)
+    # The rows whole, which the driver fails, and then their keys.
+    refusing = Refusing(TICKS, nth=2)
+
+    with (
+        pytest.raises(DataError) as caught,
+        transaction.atomic(),
+        connection.execute_wrapper(refusing),
+    ):
+        read_ticks(OxScheduleTick.objects.order_by("pk"), using=ALIAS)
+
+    refusing.assert_raised_as_it_was(caught)
+
+
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("read", ["rows", "newest", "earliest"])
+@pytest.mark.parametrize("read", ["rows", "newest", "earliest", "ticks"])
 def test_with_no_transaction_open_a_read_the_database_refuses_is_raised_as_it_was(read):
     """
     With no transaction open the refused statement was a transaction of its
@@ -1695,6 +1721,37 @@ def test_with_no_transaction_open_a_read_that_fails_on_one_key_is_narrowed_to_it
     assert newest_tick_pk("k1", now - timedelta(hours=1), using=ALIAS) == ticks["k1"].pk
     assert answers["k0"] == TickRead("k0", at=now)
     assert answers["k2"] == TickRead("k2", at=now)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_with_no_transaction_open_a_read_that_fails_on_one_tick_row_is_narrowed_to_it():
+    """
+    And for tick rows: the selection is read again as its keys, which
+    always read, and then by key in halves until the row that fails is
+    alone. That row is answered as one whose tick does not read, under the
+    schedule key it carries, and every other row as it stands.
+    """
+    now = now_ish()
+    ticks = [a_tick(f"k{i}", now - timedelta(minutes=i)) for i in range(4)]
+    bad = ticks[2]
+    failing = Failing(TICKS, "scheduled_for", bad.pk)
+    selection = OxScheduleTick.objects.filter(pk__in=[t.pk for t in ticks])
+
+    assert connection.get_autocommit()
+    assert not connection.in_atomic_block
+    with connection.execute_wrapper(failing):
+        rows = read_ticks(selection.order_by("pk"), using=ALIAS)
+
+    # The selection, its rows by key, the half the row is in, the row alone.
+    assert len(failing.failed) == 4
+    assert [row.pk for row in rows] == [tick.pk for tick in ticks]
+    assert rows[2].unreadable
+    assert rows[2].key == "k2"
+    assert rows[2].reason.startswith("scheduled_for could not be read: ")
+    assert type(rows[2].cause) is Failing.RAISES[connection.vendor]
+    for index in (0, 1, 3):
+        tick = ticks[index]
+        assert rows[index] == TickRow(tick.pk, f"k{index}", at=tick.scheduled_for)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2678,3 +2735,163 @@ class TestTheLegacyValuesAreUnreadableOnEveryDriver:
         assert oldest.unreadable
         assert oldest.reason.startswith("scheduled_for holds ")
         assert earliest_tick("healthy", using=ALIAS).at == now
+
+
+@pytest.mark.django_db
+class TestReadingTickRows:
+    def test_reads_each_row_in_the_selections_order_in_one_statement(self):
+        now = now_ish()
+        made = [a_tick(f"k{i % 2}", now - timedelta(minutes=i)) for i in range(5)]
+        selection = OxScheduleTick.objects.order_by("scheduled_for")
+
+        with CaptureQueriesContext(connection) as queries:
+            rows = read_ticks(selection, using=ALIAS)
+
+        assert len(selects(queries, TICKS)) == 1
+        assert [row.pk for row in rows] == [tick.pk for tick in reversed(made)]
+        for row in rows:
+            django = OxScheduleTick.objects.get(pk=row.pk)
+            assert row.key == django.schedule_name
+            assert same(row.at, django.scheduled_for)
+            assert not row.unreadable
+        assert read_ticks(selection, using=ALIAS, limit=2) == rows[:2]
+        assert read_ticks(selection[3:], using=ALIAS, limit=10) == rows[3:]
+
+    @pytest.mark.parametrize(
+        ("vendor", "literal"), UNREADABLE_NEWEST_TICKS + UNREADABLE_OLDEST_TICKS
+    )
+    def test_an_unreadable_tick_is_its_rows_answer_alone(self, vendor, literal):
+        only_on(vendor, "kept by that engine only")
+        now = now_ish()
+        before = a_tick("k", now - timedelta(hours=1))
+        bad = insert_tick("k", literal)
+        after = a_tick("other", now)
+        assert misread(django_earliest("k")) or misread(django_newest("k"))
+
+        rows = read_ticks(OxScheduleTick.objects.order_by("pk"), using=ALIAS)
+
+        assert [row.pk for row in rows] == [before.pk, bad, after.pk]
+        assert rows[0] == TickRow(before.pk, "k", at=before.scheduled_for)
+        assert rows[2] == TickRow(after.pk, "other", at=now)
+        assert rows[1].unreadable
+        assert rows[1].key == "k"
+        assert rows[1].at is None
+        assert rows[1].reason.startswith("scheduled_for holds ")
+        assert isinstance(rows[1].cause, UnreadableValue)
+
+    @pytest.mark.parametrize("position", ["first", "middle", "last"])
+    def test_a_tick_the_driver_cannot_hand_over_is_found_by_halving(self, position):
+        only_on("sqlite", "SQLite keeps text its driver cannot decode as UTF-8")
+        now = now_ish()
+        index = {"first": 0, "middle": 3, "last": 7}[position]
+        pks = []
+        for i in range(8):
+            if i == index:
+                pks.append(insert_tick("bad", NOT_UTF_8))
+            else:
+                pks.append(a_tick(f"k{i}", now - timedelta(minutes=i)).pk)
+
+        # In this test's transaction, and in no savepoint.
+        assert connection.in_atomic_block
+        with CaptureQueriesContext(connection) as queries:
+            rows = read_ticks(OxScheduleTick.objects.order_by("pk"), using=ALIAS)
+
+        assert not savepoints(queries)
+        assert [row.pk for row in rows] == pks
+        for i, row in enumerate(rows):
+            if i == index:
+                assert row.unreadable
+                assert row.key == "bad"
+                assert "UTF-8" in row.reason
+                assert row.reason.startswith("scheduled_for could not be read")
+            else:
+                assert row == TickRow(pks[i], f"k{i}", at=now - timedelta(minutes=i))
+
+    def test_a_key_the_driver_cannot_hand_over_is_its_rows_answer_alone(self):
+        only_on("sqlite", "SQLite keeps text its driver cannot decode as UTF-8")
+        now = now_ish()
+        before = a_tick("k", now - timedelta(hours=1))
+        by_sql(
+            f"INSERT INTO {TICKS} (schedule_name, scheduled_for, task_id, created_at) "  # noqa: S608
+            "VALUES (CAST(X'6B80FF' AS TEXT), '2026-10-05 00:00:00', NULL, "
+            "'2026-10-05 00:00:00')"
+        )
+        after = a_tick("other", now)
+        (bad,) = set(OxScheduleTick.objects.values_list("pk", flat=True)) - {
+            before.pk,
+            after.pk,
+        }
+
+        rows = read_ticks(OxScheduleTick.objects.order_by("pk"), using=ALIAS)
+
+        assert [row.pk for row in rows] == [before.pk, bad, after.pk]
+        assert rows[0] == TickRow(before.pk, "k", at=before.scheduled_for)
+        assert rows[2] == TickRow(after.pk, "other", at=now)
+        assert rows[1].unreadable
+        assert rows[1].key == ""
+        assert rows[1].at is None
+        assert rows[1].reason.startswith("schedule_name could not be read")
+        assert "UTF-8" in rows[1].reason
+
+    @pytest.mark.parametrize(
+        "tick",
+        ["'2026-10-05 00:00:00'", "'banana'", NOT_UTF_8],
+        ids=["tick-reads", "tick-does-not", "tick-not-utf-8"],
+    )
+    def test_a_key_that_is_bytes_is_its_rows_answer_alone(self, tick):
+        # The driver hands bytes over as they are, so nothing raises: the
+        # row is answered as one whose key does not read, whatever its tick.
+        only_on("sqlite", "SQLite keeps bytes where a schedule key should be")
+        now = now_ish()
+        before = a_tick("k", now - timedelta(hours=1))
+        by_sql(
+            f"INSERT INTO {TICKS} (schedule_name, scheduled_for, task_id, created_at) "  # noqa: S608
+            f"VALUES (X'6E696768746C79', {tick}, NULL, '2026-10-05 00:00:00')"
+        )
+        after = a_tick("other", now)
+        (bad,) = set(OxScheduleTick.objects.values_list("pk", flat=True)) - {
+            before.pk,
+            after.pk,
+        }
+
+        rows = read_ticks(OxScheduleTick.objects.order_by("pk"), using=ALIAS)
+
+        assert [row.pk for row in rows] == [before.pk, bad, after.pk]
+        assert rows[0] == TickRow(before.pk, "k", at=before.scheduled_for)
+        assert rows[2] == TickRow(after.pk, "other", at=now)
+        assert rows[1] == TickRow(
+            bad, "", reason="schedule_name holds b'nightly', which is not text"
+        )
+
+    def test_a_column_the_read_does_not_take_is_not_its_concern(self):
+        only_on("postgresql", "PostgreSQL keeps year 10000")
+        now = now_ish()
+        tick = a_tick("k", now)
+        by_sql(
+            f"UPDATE {TICKS} SET created_at = '10000-01-01 00:00:00+00' WHERE id = %s",  # noqa: S608
+            [tick.pk],
+        )
+
+        assert read_ticks(OxScheduleTick.objects.all(), using=ALIAS) == [
+            TickRow(tick.pk, "k", at=now)
+        ]
+
+    def test_inside_a_transaction_the_transaction_still_works_after(self):
+        now = now_ish()
+        a_tick("k0", now)
+        literal = {
+            "postgresql": "'infinity'",
+            "mysql": "'9999-00-00 00:00:00'",
+            "sqlite": NOT_UTF_8,
+        }[connection.vendor]
+        insert_tick("k1", literal)
+
+        with transaction.atomic():
+            with CaptureQueriesContext(connection) as queries:
+                rows = read_ticks(OxScheduleTick.objects.order_by("pk"), using=ALIAS)
+            assert (
+                OxScheduleTick.objects.filter(schedule_name="k0").update(task=None) == 1
+            )
+
+        assert not savepoints(queries)
+        assert [row.unreadable for row in rows] == [False, True]

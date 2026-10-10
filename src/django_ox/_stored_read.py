@@ -987,6 +987,124 @@ def newest_tick_pk(
         return None
 
 
+@dataclass(frozen=True)
+class TickRow:
+    """
+    One tick row as `read_ticks` reads it: its primary key, its schedule
+    key, and `at` when its tick reads or `reason`, safe to print, when it
+    does not. A row whose schedule key is what does not read has `reason`
+    say so and an empty `key`: text the driver cannot hand over, or bytes
+    where the text should be, which SQLite keeps and hands over as they
+    are. No schedule has either for a key.
+    """
+
+    pk: int
+    key: str
+    at: datetime | None = None
+    reason: str | None = None
+    cause: BaseException | None = field(default=None, compare=False, repr=False)
+
+    @property
+    def unreadable(self) -> bool:
+        return self.reason is not None
+
+
+def read_ticks(
+    query: QuerySet[OxScheduleTick], *, using: str, limit: int | None = None
+) -> list[TickRow]:
+    """
+    The tick rows `query` selects, in its order, each answered on its own.
+
+    `query` is the caller's selection, filtered and ordered as it needs, and
+    `limit` caps it. Only each row's key, schedule key and tick are fetched,
+    the tick as text, so a row's other columns cannot fail the read.
+
+    A selection that fails as a whole, on a value the driver cannot hand
+    over, is read again as primary keys, which always read, and then those
+    rows in halves until the one that fails is alone. Those reads are made
+    only after a failure known to be a value's, and only while the
+    connection is known to take another statement (`can_read_on`): an error
+    the database raised is raised as it is, with nothing read after it.
+    """
+    selected = query.annotate(ox_stored_scheduled_for=as_text("scheduled_for"))
+    fetch = selected.values_list("pk", "schedule_name", "ox_stored_scheduled_for")
+    try:
+        fetched = list(fetch if limit is None else fetch[:limit])
+    except Exception as exc:
+        if not can_read_on(exc, using=using):
+            raise
+        keys = query.values_list("pk", flat=True)
+        pks = list(keys if limit is None else keys[:limit])
+        found = _tick_rows(pks, using)
+        return [found[pk] for pk in pks if pk in found]
+    return [_tick_row(pk, key, text, using) for pk, key, text in fetched]
+
+
+def _key_not_text(pk: int, key: object) -> TickRow:
+    """The answer for a tick row whose schedule key is not text."""
+    return TickRow(
+        pk, "", reason=f"schedule_name {_NOT_TEXT.format(value=_shown(key))}"
+    )
+
+
+def _tick_row(pk: int, key: object, text: object, using: str) -> TickRow:
+    """One fetched tick row's answer."""
+    if not isinstance(key, str):
+        return _key_not_text(pk, key)
+    try:
+        at = decode_datetime(text, using)
+    except UnreadableValue as exc:
+        return TickRow(pk, key, reason=f"scheduled_for {exc}", cause=exc)
+    return TickRow(pk, key, at=at)
+
+
+def _tick_rows(pks: list[int], using: str) -> dict[int, TickRow]:
+    """These tick rows by key, or in halves when they do not read as a whole."""
+    if not pks:
+        return {}
+    try:
+        fetched = list(
+            OxScheduleTick.objects.using(using)
+            .filter(pk__in=pks)
+            .annotate(ox_stored_scheduled_for=as_text("scheduled_for"))
+            .values_list("pk", "schedule_name", "ox_stored_scheduled_for")
+        )
+    except Exception as exc:
+        if not can_read_on(exc, using=using):
+            raise
+        if len(pks) == 1:
+            return {pks[0]: _tick_alone(pks[0], using, exc)}
+        middle = len(pks) // 2
+        return {**_tick_rows(pks[:middle], using), **_tick_rows(pks[middle:], using)}
+    return {pk: _tick_row(pk, key, text, using) for pk, key, text in fetched}
+
+
+def _tick_alone(pk: int, using: str, cause: BaseException) -> TickRow:
+    """
+    A tick row that failed to read on its own: its schedule key if that
+    reads, and the tick as what could not be handed over.
+    """
+    try:
+        key = (
+            OxScheduleTick.objects.using(using)
+            .filter(pk=pk)
+            .values_list("schedule_name", flat=True)
+            .first()
+        )
+    except Exception as exc:
+        if not can_read_on(exc, using=using):
+            raise
+        return TickRow(
+            pk,
+            "",
+            reason=f"schedule_name {_NOT_FETCHED.format(error=_error_text(exc))}",
+            cause=exc,
+        )
+    if key is not None and not isinstance(key, str):
+        return _key_not_text(pk, key)
+    return TickRow(pk, key or "", reason=_fetch_failed(cause), cause=cause)
+
+
 def earliest_tick(
     key: str, *, using: str, exclude: Collection[int] = (), lock: bool = False
 ) -> TickRead:

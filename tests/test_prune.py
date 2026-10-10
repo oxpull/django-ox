@@ -286,7 +286,7 @@ class TestPrune:
         # row SELECT, tick SET NULL, and DELETE. Inside the test's own
         # transaction that one is a savepoint, which adds its SAVEPOINT and
         # RELEASE. Then the empty terminating SELECT, and the tick pass adds
-        # its schedule-name SELECT and empty pk SELECT.
+        # its schedule-name SELECT and the empty read of its first batch.
         with django_assert_num_queries(24):
             out = prune("--batch-size=2")
 
@@ -1153,6 +1153,9 @@ class TestPruneJsonFormat:
         assert data["statuses"] == ["SUCCESSFUL", "DISCARDED"]
         assert data["task_rows"] == 1
         assert data["tick_rows"] == 1
+        assert data["unreadable_tick_rows"] == 0
+        assert data["anchor_tick_rows"] == 0
+        assert data["unreadable_ticks"] == []
         assert data["dry_run"] is False
         assert "cutoff" in data
         assert datetime.fromisoformat(data["cutoff"])
@@ -1162,6 +1165,9 @@ class TestPruneJsonFormat:
             "statuses",
             "task_rows",
             "tick_rows",
+            "unreadable_tick_rows",
+            "anchor_tick_rows",
+            "unreadable_ticks",
             "dry_run",
         }
         assert not OxTask.objects.filter(pk=old_ok.pk).exists()

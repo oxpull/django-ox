@@ -199,7 +199,7 @@ python manage.py ox_prune --older-than 7d
 | `--include-failed` | off | Also delete FAILED and LOST rows. By default they are kept: they hold the per-attempt tracebacks and can be retried. |
 | `--batch-size` | `1000` | Rows per DELETE statement, so pruning a large table never takes a long lock or builds a giant IN clause. |
 | `--dry-run` | off | Report how many rows would be deleted without deleting any. |
-| `--format` | `text` | `json` prints one object on stdout instead of the two report lines: `queue`, `cutoff`, `statuses`, `task_rows`, `tick_rows` and `dry_run`. `queue` is `null` when no `--queue` is given, `cutoff` is ISO 8601, and `statuses` is a list. On a database error during deletion, the object is printed too, with counts of rows already deleted in committed batches, before the same non-zero exit. |
+| `--format` | `text` | `json` prints one object on stdout; warnings stay on stderr. Ordinary keys: `queue`, `cutoff`, `statuses`, `task_rows`, `tick_rows`, `dry_run`, `unreadable_tick_rows`, `anchor_tick_rows`, `unreadable_ticks`. `queue` is `null` without `--queue`; `cutoff` is ISO 8601; `statuses` is a list. `unreadable_ticks` lists at most 100 `{pk, schedule_name, reason}` entries; counts cover all encountered unreadable rows, not a census. Purge keys: `purge_unreadable_ticks`, `schedule_keys`, `tick_pks`, `tick_rows`, `unreadable_ticks`, `kept_ticks`, `missing_tick_pks`, `dry_run`. Database errors during deletion still print committed-batch results before non-zero exit. |
 | `--database` | the alias `OxTask` writes to | Database alias to prune. The rows it reads and the rows it deletes are on that one alias. |
 
 Only SUCCESSFUL and DISCARDED rows (and, with `--include-failed`, FAILED and

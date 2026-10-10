@@ -77,13 +77,7 @@ python manage.py ox_health
 OK: backlog=0 oldest_age=none last_claim_age=none
 ```
 
-`manage.py check` reports schedule and backend policy errors through
-`django_ox.E002` to `E005`, `E010` and `E011`, and warnings through
-`django_ox.W003` and `django_ox.W004`, before deployment.
-Database acceptance of schedule arguments is determined at dispatch;
-alert on `schedule_dispatch_error` and `schedule_dispatch_failed` at runtime.
-Review `django_ox.W003` and `django_ox.W004` warnings too; `W004` asks for
-a non-bool integer from 1 to 32767 while retaining compatible legacy values.
+`manage.py check` reports schedule and backend policy errors through `django_ox.E002` to `E005`, `E010` and `E011`, and warnings through `django_ox.W003` and `django_ox.W004`, before deployment. Database acceptance of schedule arguments is determined at dispatch. Alert on `schedule_dispatch_error`, `schedule_dispatch_failed` and `schedule_tick_unreadable`. For stored schedules, also alert on `schedule_row_skipped`, `schedule_source_unavailable` and `schedule_boundary_heal_failed`. Review `django_ox.W003` and `django_ox.W004` warnings too; `W004` asks for a non-bool integer from 1 to 32767 while retaining compatible legacy values.
 
 Invalid per-task fields raise `InvalidTask` (`InvalidTaskError` on the
 backport) when the task is built, normally at import, rather than appearing

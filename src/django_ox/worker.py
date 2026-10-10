@@ -53,7 +53,6 @@ from django.db.models import (
     ExpressionWrapper,
     F,
     JSONField,
-    Max,
     Q,
     QuerySet,
 )
@@ -74,11 +73,13 @@ from django_ox.compat import (
     task_started,
 )
 
+from ._stored_read import TickRead, earliest_tick, latest_ticks, newest_tick_pk
 from .backend import OxBackend
 from .exceptions import TaskAbandoned, TaskTimeout
 from .heartbeat import HeartbeatFile
 from .models import OxScheduleTick, OxTask
 from .schedules import (
+    STORED_KEY_PREFIX,
     Schedule,
     lock_contention,
     schedule_name_collisions,
@@ -319,6 +320,30 @@ class _NotAdmitted(Exception):
     """
 
 
+class _TickUnreadable(Exception):
+    """
+    Raised inside the dispatch transaction when the earliest tick a first
+    sighting is decided by holds a value that does not read.
+
+    Like _NotAdmitted, a way out of a tick row already written: the
+    schedule's transaction rolls back, candidate tick and latch with it,
+    and the pass goes on to the next schedule. Carries the read, for the
+    report.
+    """
+
+    def __init__(self, read: TickRead) -> None:
+        super().__init__(read.reason)
+        self.read = read
+
+
+def _stored_pk(key: str) -> int | None:
+    """The row id in a stored schedule's dispatch key; None for a settings schedule."""
+    if not key.startswith(STORED_KEY_PREFIX):
+        return None
+    digits = key[len(STORED_KEY_PREFIX) :]
+    return int(digits) if digits.isdecimal() else None
+
+
 def _latch_instant() -> datetime:
     """
     The fixed instant a first-sighting latch row is written at.
@@ -398,10 +423,19 @@ class _DispatchReport:
     the database's own message, which on PostgreSQL can quote part of the
     refused value.
 
-    Per pass, the same shape for `schedule_dispatch_failed`: the first
-    abandoned pass of an outage is reported with its traceback, and the
-    passes after it are counted into a summary at most every interval. A
-    completed pass ends the run, so the next outage is reported in full.
+    Per schedule as well, and apart from those, `schedule_tick_unreadable`
+    for a schedule skipped because its tick history holds a value that
+    does not read: in full once, then in summary, then
+    `schedule_tick_readable` on the first pass that reads it again. It is
+    not a dispatch that failed, and reported as one it would end in a
+    recovery only when the schedule next commits a tick.
+
+    Per pass, the same shape for `schedule_dispatch_failed`, kept apart by
+    what abandoned the pass: the database, or an exception nothing
+    expected. The first abandoned pass of each is reported with its
+    traceback, and the passes after it are counted into a summary at most
+    every interval. A completed pass ends the run with one
+    `schedule_dispatch_resumed`, so the next outage is reported in full.
 
     The state is bounded by the schedules that exist: `retain` forgets a
     schedule that is no longer among them. A stored row that is paused
@@ -424,12 +458,14 @@ class _DispatchReport:
         self.db_alias = db_alias
         self.clock = clock
         self._schedules: dict[str, _Failing] = {}
-        self._passes: _Failing | None = None
+        self._unreadable: dict[str, _Failing] = {}
+        self._passes: dict[str, _Failing] = {}
 
     def retain(self, keys: set[str]) -> None:
-        """Forget every failing schedule whose key is not in `keys`."""
-        for key in [k for k in self._schedules if k not in keys]:
-            del self._schedules[key]
+        """Forget every failing or skipped schedule whose key is not in `keys`."""
+        for state in (self._schedules, self._unreadable):
+            for key in [k for k in state if k not in keys]:
+                del state[key]
 
     def schedule_failed(self, schedule: Schedule, exc: BaseException) -> None:
         """One schedule's dispatch failed and the pass goes on without it."""
@@ -495,17 +531,147 @@ class _DispatchReport:
             },
         )
 
-    def pass_failed(self, exc: BaseException) -> None:
-        """A dispatch pass was abandoned."""
+    def tick_unreadable(
+        self,
+        schedule: Schedule,
+        read: TickRead,
+        phase: str,
+        tick_pk: Callable[[], int | None] | None = None,
+    ) -> None:
+        """
+        One schedule was skipped because a tick of its history did not read.
+
+        `phase` is the read that met it: `latest`, the bounded read of the
+        newest tick every pass makes, or `anchor`, the read of the earliest
+        tick that decides a first sighting. `read` says why and, where the
+        read that found it also found its row, which tick row it is.
+        Otherwise `tick_pk` is called to find the row, and only when a line
+        is written: a skipped schedule is met again by every pass, and the
+        line is written at most once in `DISPATCH_FAILURE_REPORT_INTERVAL`.
+        Not finding the row never changes the skip, so a lookup that fails
+        leaves the line without it.
+        """
         now = self.clock()
-        state = self._passes
+        state = self._unreadable.get(schedule.key)
+        which = "newest" if phase == "latest" else "earliest"
         if state is None:
-            self._passes = _Failing(1, 0, now)
+            self._unreadable[schedule.key] = _Failing(1, 0, now)
+            logger.warning(
+                "Schedule %s skipped; its tick history was not treated as "
+                "absent. Its %s tick could not be read: %s",
+                schedule.name,
+                which,
+                read.reason,
+                extra={
+                    "event": "schedule_tick_unreadable",
+                    "schedule": schedule.name,
+                    "schedule_key": schedule.key,
+                    "schedule_pk": _stored_pk(schedule.key),
+                    "phase": phase,
+                    "reason": read.reason,
+                    "tick_pk": self._tick_row(read, tick_pk),
+                    "worker_id": self.worker_id,
+                    "database": self.db_alias,
+                    "failures": 1,
+                    "suppressed": 0,
+                },
+            )
+            return
+        state.failures += 1
+        state.unreported += 1
+        if now - state.reported_at < DISPATCH_FAILURE_REPORT_INTERVAL:
+            return
+        logger.warning(
+            "Schedule %s still skipped: %d more pass(es) since it was last "
+            "reported. Its %s tick could not be read: %s",
+            schedule.name,
+            state.unreported,
+            which,
+            read.reason,
+            extra={
+                "event": "schedule_tick_unreadable",
+                "schedule": schedule.name,
+                "schedule_key": schedule.key,
+                "schedule_pk": _stored_pk(schedule.key),
+                "phase": phase,
+                "reason": read.reason,
+                "tick_pk": self._tick_row(read, tick_pk),
+                "worker_id": self.worker_id,
+                "database": self.db_alias,
+                "failures": state.failures,
+                "suppressed": state.unreported,
+            },
+        )
+        state.reported_at = now
+        state.unreported = 0
+
+    @staticmethod
+    def _tick_row(
+        read: TickRead, lookup: Callable[[], int | None] | None
+    ) -> int | None:
+        """The unreadable tick's row, from the read or else from `lookup`."""
+        if read.pk is not None or lookup is None:
+            return read.pk
+        try:
+            return lookup()
+        except Exception:
+            return None
+
+    def tick_readable(self, schedule: Schedule) -> None:
+        """A schedule's tick history read: if it had been skipped, say so."""
+        state = self._unreadable.pop(schedule.key, None)
+        if state is None:
+            return
+        logger.info(
+            "Schedule %s tick history can be read again after %d skipped pass(es)",
+            schedule.name,
+            state.failures,
+            extra={
+                "event": "schedule_tick_readable",
+                "schedule": schedule.name,
+                "schedule_key": schedule.key,
+                "schedule_pk": _stored_pk(schedule.key),
+                "worker_id": self.worker_id,
+                "database": self.db_alias,
+                "failures": state.failures,
+            },
+        )
+
+    def pass_failed(self, exc: BaseException, *, unexpected: bool = False) -> None:
+        """
+        A dispatch pass was abandoned: by the database, or, `unexpected`, by
+        an exception that is not a database error and that nothing in the
+        pass handled. That is a fault in code, not an outage, and it is
+        reported as neither an outage nor a bad row: it says what it is.
+        """
+        now = self.clock()
+        category = "unexpected_exception" if unexpected else "database"
+        state = self._passes.get(category)
+        if state is None:
+            self._passes[category] = _Failing(1, 0, now)
+            if unexpected:
+                logger.warning(
+                    "Schedule dispatch failed with an unexpected exception (%s); "
+                    "retrying next pass",
+                    type(exc).__name__,
+                    exc_info=exc,
+                    extra={
+                        "event": "schedule_dispatch_failed",
+                        "category": category,
+                        "worker_id": self.worker_id,
+                        "database": self.db_alias,
+                        "error": type(exc).__name__,
+                        "failures": 1,
+                        "suppressed": 0,
+                    },
+                )
+                return
             logger.warning(
                 "Schedule dispatch failed; retrying next pass",
                 exc_info=exc,
                 extra={
                     "event": "schedule_dispatch_failed",
+                    "category": category,
                     "worker_id": self.worker_id,
                     "database": self.db_alias,
                     "error": type(exc).__name__,
@@ -518,26 +684,60 @@ class _DispatchReport:
         state.unreported += 1
         if now - state.reported_at < DISPATCH_FAILURE_REPORT_INTERVAL:
             return
-        logger.warning(
-            "Schedule dispatch still failing: %d more pass(es) abandoned since "
-            "the last report, latest error %s",
-            state.unreported,
-            type(exc).__name__,
-            extra={
-                "event": "schedule_dispatch_failed",
-                "worker_id": self.worker_id,
-                "database": self.db_alias,
-                "error": type(exc).__name__,
-                "failures": state.failures,
-                "suppressed": state.unreported,
-            },
-        )
+        if unexpected:
+            logger.warning(
+                "Schedule dispatch still failing with unexpected exceptions: %d more "
+                "pass(es) abandoned since the last report. Latest error: %s",
+                state.unreported,
+                type(exc).__name__,
+                extra={
+                    "event": "schedule_dispatch_failed",
+                    "category": category,
+                    "worker_id": self.worker_id,
+                    "database": self.db_alias,
+                    "error": type(exc).__name__,
+                    "failures": state.failures,
+                    "suppressed": state.unreported,
+                },
+            )
+        else:
+            logger.warning(
+                "Schedule dispatch still failing: %d more pass(es) abandoned since "
+                "the last report, latest error %s",
+                state.unreported,
+                type(exc).__name__,
+                extra={
+                    "event": "schedule_dispatch_failed",
+                    "category": category,
+                    "worker_id": self.worker_id,
+                    "database": self.db_alias,
+                    "error": type(exc).__name__,
+                    "failures": state.failures,
+                    "suppressed": state.unreported,
+                },
+            )
         state.reported_at = now
         state.unreported = 0
 
     def pass_completed(self) -> None:
-        """A dispatch pass went through every schedule it had."""
-        self._passes = None
+        """
+        A dispatch pass went through every schedule it had. If passes before
+        it had been abandoned, say dispatch is back.
+        """
+        if not self._passes:
+            return
+        failures = sum(state.failures for state in self._passes.values())
+        self._passes = {}
+        logger.info(
+            "Schedule dispatch resumed after %d abandoned pass(es)",
+            failures,
+            extra={
+                "event": "schedule_dispatch_resumed",
+                "worker_id": self.worker_id,
+                "database": self.db_alias,
+                "failures": failures,
+            },
+        )
 
 
 @dataclass(slots=True)
@@ -5112,10 +5312,11 @@ class Worker:
 
     def _latest_ticks(
         self, schedules: list[Schedule], since: datetime
-    ) -> dict[str, datetime]:
+    ) -> dict[str, TickRead]:
         """
         Latest recorded tick per dispatch key, for the pass's schedules,
-        counting only ticks at or after `since`.
+        counting only ticks at or after `since`: for each key the tick, no
+        tick, or a tick that holds a value that does not read.
 
         The bound is what keeps this cheap. Asked for the newest tick per
         schedule over all of history, no database can seek to it: PostgreSQL
@@ -5133,35 +5334,34 @@ class Worker:
         the caller distinguishes that from a schedule with no ticks at all by
         asking.
 
-        One parameter per key, plus the bound. SQLite before 3.32.0 refuses
-        a statement carrying more than 999, and Django splits an IN list
-        only where the backend declares a maximum, which is Oracle. So the
-        keys are read in slices of what the connection allows, and a
-        backend that declares no limit answers None and reads them in one.
+        One grouped statement for as many keys as the connection takes
+        parameters for, one per key plus the bound: SQLite before 3.32.0
+        refuses a statement carrying more than 999, and Django splits an IN
+        list only where the backend declares a maximum, which is Oracle. A
+        backend that declares no limit reads them in one.
+
+        The newest tick comes back as its text and is decoded per key, so a
+        value Django's converter would raise on in the middle of the
+        result, a year past 9999 or a date that does not exist, is that
+        key's answer rather than the end of the read for every key: the
+        caller skips that schedule and dispatches the rest.
+        _stored_read.latest_ticks says how a statement that fails as a
+        whole is narrowed down to its key.
         """
-        keys = [schedule.key for schedule in schedules]
-        limit = connections[self._db_alias].features.max_query_params
-        step = max(limit - 1, 1) if limit else max(len(keys), 1)
-        latest: dict[str, datetime] = {}
-        for start in range(0, len(keys), step):
-            latest.update(
-                {
-                    row["schedule_name"]: row["latest"]
-                    for row in OxScheduleTick.objects.using(self._db_alias)
-                    .filter(
-                        schedule_name__in=keys[start : start + step],
-                        scheduled_for__gte=since,
-                    )
-                    .values("schedule_name")
-                    .annotate(latest=Max("scheduled_for"))
-                }
-            )
-        return latest
+        reads = latest_ticks(
+            [schedule.key for schedule in schedules], since, using=self._db_alias
+        )
+        return {key: read for key, read in reads.items() if not read.absent}
 
     def _anchor_boundary(self, key: str, own_pk: int, now: datetime) -> datetime | None:
         """
         The earliest tick recorded for `key` other than this pass's own row,
         or None when there is none, which makes this pass the first sighting.
+
+        An earliest tick that holds a value that does not read raises
+        _TickUnreadable, both times it is read. It is history whose meaning
+        is lost, not an absence of history: read as none, this pass would
+        anchor the schedule again over a tick it already has.
 
         Called inside the dispatch transaction, after this pass's tick row
         is in. That row is excluded because it is visible in here, and
@@ -5199,32 +5399,34 @@ class Worker:
         tick read, not ox_prune, not the admin. SQLite has one writer, so
         the tick INSERT already serialises first sightings there, and the
         latch is two statements that change nothing.
+
+        Each read is one statement in this transaction, with no savepoint
+        around it: the tick comes back as text and is decoded here, so a
+        value that does not read fails no statement. A read the database
+        itself refuses is raised as it is, and takes this schedule's
+        transaction with it like any other statement of its dispatch.
         """
-        others = (
-            OxScheduleTick.objects.using(self._db_alias)
-            .filter(schedule_name=key)
-            .exclude(pk=own_pk)
-            .order_by("scheduled_for")
-            .values_list("scheduled_for", flat=True)
-        )
-        earliest = others.first()
-        if earliest is not None:
-            return earliest
+        earliest = earliest_tick(key, using=self._db_alias, exclude=(own_pk,))
+        if earliest.unreadable:
+            raise _TickUnreadable(earliest)
+        if not earliest.absent:
+            return earliest.at
         latch = OxScheduleTick.objects.using(self._db_alias).create(
             schedule_name=key,
             scheduled_for=_latch_instant(),
             task_id=None,
             created_at=now,
         )
-        others = others.exclude(pk=latch.pk)
-        features = connections[self._db_alias].features
-        if features.has_select_for_update:
-            others = others.select_for_update(
-                skip_locked=features.has_select_for_update_skip_locked
-            )
-        earliest = others.first()
+        earliest = earliest_tick(
+            key, using=self._db_alias, exclude=(own_pk, latch.pk), lock=True
+        )
+        if earliest.unreadable:
+            # The rollback this raises into takes the latch with it. No
+            # anchor is written, so a worker that waited on the latch reads
+            # the same tick and skips the schedule too.
+            raise _TickUnreadable(earliest)
         OxScheduleTick.objects.using(self._db_alias).filter(pk=latch.pk).delete()
-        return earliest
+        return earliest.at
 
     def _session(self) -> tuple[Any, Any] | None:
         """
@@ -5415,10 +5617,18 @@ class Worker:
 
         The pass fails, and this raises, when the failure is not one
         schedule's: a shared read before the loop (the source's own reads,
-        the bounded tick read), a rollback that did not go through, or a
-        connection that does not answer after one. Nothing is given up on
-        the strength of how many schedules failed before: a run of refused
-        schedules followed by a healthy one leaves the healthy one to fire.
+        the bounded tick read) that the database failed, a rollback that
+        did not go through, or a connection that does not answer after one.
+        Nothing is given up on the strength of how many schedules failed
+        before: a run of refused schedules followed by a healthy one leaves
+        the healthy one to fire.
+
+        A tick in the log that holds a value that does not read is not a
+        failed read. It belongs to the one schedule whose key it carries,
+        and that schedule is skipped, `schedule_tick_unreadable`, until the
+        value is repaired or the tick removed: neither the newest tick nor
+        the anchor is guessed at, since a guess either fires a tick that
+        has already run or anchors the schedule over history it has.
         """
         schedules = self._schedule_source.schedules()
         # Forget schedules that no longer exist, so the failure report
@@ -5479,11 +5689,15 @@ class Worker:
             due.append((schedule, scheduled_for))
         if not due:
             return 0
-        latest = self._latest_ticks(
-            schedules, min(scheduled_for for _, scheduled_for in due)
-        )
+        since = min(scheduled_for for _, scheduled_for in due)
+        latest = self._latest_ticks(schedules, since)
         dispatched = 0
         for schedule, scheduled_for in due:
+            # Absent from the read: nothing recorded within the bound.
+            read = latest.get(schedule.key, TickRead(schedule.key))
+            # The comparisons with the schedule's bounds and its newest
+            # tick are its own, like those above: raised from here, they
+            # would end the pass for every schedule after this one.
             try:
                 if (
                     schedule.start_time is not None
@@ -5493,13 +5707,33 @@ class Worker:
                     continue
                 if schedule.end_time is not None and scheduled_for > schedule.end_time:
                     continue
+                if read.unreadable:
+                    # Its newest tick is there and does not read. Taken as
+                    # no tick, the schedule would fire one already run, or
+                    # anchor again; it is skipped instead, and the rest of
+                    # the pass goes on.
+                    self._dispatch_report.tick_unreadable(
+                        schedule,
+                        read,
+                        "latest",
+                        functools.partial(
+                            newest_tick_pk,
+                            schedule.key,
+                            since,
+                            using=self._db_alias,
+                        ),
+                    )
+                    continue
+                last = read.at
+                if last is not None or not schedule.anchors:
+                    # Nothing more of its history is read this pass.
+                    self._dispatch_report.tick_readable(schedule)
+                if last is not None and scheduled_for <= last and last <= now:
+                    continue
             except DatabaseError:
                 raise
             except Exception as exc:
                 self._dispatch_report.schedule_failed(schedule, exc)
-                continue
-            last = latest.get(schedule.key)
-            if last is not None and scheduled_for <= last and last <= now:
                 continue
             result = None
             # Set once this pass's tick row is in. An IntegrityError arriving
@@ -5656,6 +5890,7 @@ class Worker:
                             anchor = self._anchor_boundary(
                                 current.key, tick_row.pk, now
                             )
+                            self._dispatch_report.tick_readable(schedule)
                             if anchor is None:
                                 first_sighting = True
                             elif scheduled_for < anchor:
@@ -5699,6 +5934,13 @@ class Worker:
                 # rollback took the tick row with it, and the tick stays
                 # unclaimed so a worker with a current view can still act
                 # on it.
+                continue
+            except _TickUnreadable as exc:
+                # The earliest tick, which says whether this is a first
+                # sighting, does not read. The rollback took this pass's
+                # tick row and any latch with it, and nothing was enqueued.
+                # Reported once as what it is, not as a dispatch error too.
+                self._dispatch_report.tick_unreadable(schedule, exc.read, "anchor")
                 continue
             except Exception as exc:
                 if (
@@ -6175,7 +6417,7 @@ class Worker:
                         dispatch_owed = True
                         try:
                             self.dispatch_schedules()
-                        except DatabaseError as exc:
+                        except Error as exc:
                             # The pass was abandoned: a shared read failed,
                             # or a schedule's failure left the connection
                             # unusable (dispatch_schedules says which is
@@ -6187,9 +6429,32 @@ class Worker:
                             # claim reconnects rather than failing on it too
                             # and costing the whole poll pass. Reported in
                             # full at the start of an outage and in summary
-                            # while it lasts.
+                            # while it lasts. django.db.Error rather than
+                            # DatabaseError, for the reason the handler of
+                            # the poll pass gives: a connection closed under
+                            # the pass raises InterfaceError, which is the
+                            # database's as much as any.
                             self._dispatch_report.pass_failed(exc)
                             close_old_connections()
+                        except Exception as exc:
+                            # Not the database's, and not handled anywhere
+                            # in the pass: a fault in code, one of this
+                            # package's readers or a project's schedule
+                            # source, that every schedule's own boundary
+                            # missed. It costs this pass and no more. Out of
+                            # run() it would cost the process, and a
+                            # restart repairs nothing a pass reads: the
+                            # supervisor would restart it into the same
+                            # fault until its restart cap stopped every
+                            # worker, the tasks already queued included. So
+                            # the dispatch stays owed, it is tried again a
+                            # schedule_interval later rather than at once,
+                            # and the claim below still runs. Only this
+                            # call: a fault anywhere else in the loop is
+                            # not caught here, and an exception that is not
+                            # an Exception (KeyboardInterrupt, SystemExit)
+                            # keeps its meaning.
+                            self._dispatch_report.pass_failed(exc, unexpected=True)
                         else:
                             dispatch_owed = False
                             self._dispatch_report.pass_completed()

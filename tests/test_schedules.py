@@ -931,7 +931,7 @@ class TestTheTickReadFitsTheParameterLimit:
             latest = worker._latest_ticks(schedules, at - timedelta(days=1))
         reads = [q for q in captured.captured_queries if "MAX(" in q["sql"].upper()]
         assert len(reads) == 4, "ten keys in slices of three is four reads"
-        assert latest == expected
+        assert {key: read.at for key, read in latest.items()} == expected
 
     def test_a_connection_with_no_limit_reads_them_in_one(self, settings):
         from django.db import connection
@@ -949,7 +949,7 @@ class TestTheTickReadFitsTheParameterLimit:
             )
         reads = [q for q in captured.captured_queries if "MAX(" in q["sql"].upper()]
         assert len(reads) == 1
-        assert latest == expected
+        assert {key: read.at for key, read in latest.items()} == expected
 
     def test_more_keys_than_sqlite_3_31_allows_are_still_read(self, settings):
         # The real limit, set on the live connection: 999 is what SQLite
@@ -976,4 +976,4 @@ class TestTheTickReadFitsTheParameterLimit:
             )
         finally:
             raw.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, before)
-        assert latest == expected
+        assert {key: read.at for key, read in latest.items()} == expected

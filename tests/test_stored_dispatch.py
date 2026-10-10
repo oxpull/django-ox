@@ -1093,11 +1093,14 @@ class TestTheBoundaryIsTimedUnderTheLock:
 
         return base, at
 
-    def _lock_that_waits(self, monkeypatch, during_the_wait):
-        """The first lock taken runs `during_the_wait` before it is granted."""
+    def _lock_that_waits(self, monkeypatch, during_the_wait, lock="_lock_row"):
+        """
+        The first lock taken runs `during_the_wait` before it is granted:
+        the write API's, or with `lock="_current_row"` a worker's.
+        """
         from django_ox import stored
 
-        lock_row = stored._lock_row
+        lock_row = getattr(stored, lock)
         waited = {"done": False}
 
         def lock_row_after_a_wait(pk, alias):
@@ -1106,7 +1109,7 @@ class TestTheBoundaryIsTimedUnderTheLock:
                 during_the_wait(pk)
             return lock_row(pk, alias)
 
-        monkeypatch.setattr(stored, "_lock_row", lock_row_after_a_wait)
+        monkeypatch.setattr(stored, lock, lock_row_after_a_wait)
 
     def test_a_retime_is_timed_from_the_lock_not_from_before_the_wait(
         self, worker, monkeypatch
@@ -1156,7 +1159,7 @@ class TestTheBoundaryIsTimedUnderTheLock:
             OxSchedule.objects.filter(pk=pk).update(enabled=True)
             at(125)
 
-        self._lock_that_waits(monkeypatch, resumed_during_the_wait)
+        self._lock_that_waits(monkeypatch, resumed_during_the_wait, lock="_current_row")
         at(75)
         worker.dispatch_schedules()
         row.refresh_from_db()
@@ -1196,14 +1199,14 @@ class TestTheDeadlineIsJudgedUnderTheLock:
 
         moment = {"now": before}
         monkeypatch.setattr(worker_module.timezone, "now", lambda: moment["now"])
-        lock_row = stored._lock_row
+        current_row = stored._current_row
 
-        def lock_row_after_a_wait(pk, alias):
-            row = lock_row(pk, alias)
+        def current_row_after_a_wait(pk, alias):
+            row = current_row(pk, alias)
             moment["now"] = after
             return row
 
-        monkeypatch.setattr(stored, "_lock_row", lock_row_after_a_wait)
+        monkeypatch.setattr(stored, "_current_row", current_row_after_a_wait)
 
     def test_a_tick_past_its_deadline_once_the_lock_is_granted_is_refused(
         self, worker, monkeypatch
@@ -1246,10 +1249,10 @@ class TestTheRowLockDistinguishesContentionFromTheDatabase:
     def _lock_row_raising(self, monkeypatch, exc):
         from django_ox import stored
 
-        def lock_row(pk, alias):
+        def current_row(pk, alias):
             raise exc
 
-        monkeypatch.setattr(stored, "_lock_row", lock_row)
+        monkeypatch.setattr(stored, "_current_row", current_row)
 
     def test_a_lock_the_database_gave_up_on_skips_the_schedule(
         self, worker, monkeypatch, caplog
@@ -1283,15 +1286,15 @@ class TestTheRowLockDistinguishesContentionFromTheDatabase:
         from .isolation import kill
 
         a_minutely()
-        real_lock_row = stored._lock_row
+        real_current_row = stored._current_row
 
-        def lock_row_on_a_dead_session(pk, alias):
+        def current_row_on_a_dead_session(pk, alias):
             from django.db import connections
 
             kill(connections[alias])
-            return real_lock_row(pk, alias)
+            return real_current_row(pk, alias)
 
-        monkeypatch.setattr(stored, "_lock_row", lock_row_on_a_dead_session)
+        monkeypatch.setattr(stored, "_current_row", current_row_on_a_dead_session)
         with (
             caplog.at_level(logging.WARNING, logger="django_ox"),
             pytest.raises(Error),
@@ -1514,12 +1517,14 @@ class TestARowChangedOutsideTheWriteApiIsFound:
     def test_the_reconcile_reads_the_rows_again(
         self, worker, django_assert_num_queries
     ):
-        # And when it is due, it costs the marker read plus the row read.
+        # And when it is due, it costs the marker read plus the row read:
+        # the keys, which always read, and then the rows a batch of a
+        # hundred at a time.
         a_minutely()
         source = worker._schedule_source
         source._reconcile_interval = 0.0001
         source.schedules()
-        with django_assert_num_queries(2):
+        with django_assert_num_queries(3):
             source.schedules()
 
     def test_a_disabled_row_leaves_the_cache_when_dispatch_finds_it_gone(

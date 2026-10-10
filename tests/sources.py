@@ -1,6 +1,53 @@
 """Schedule sources a test can name in OPTIONS["SCHEDULE_SOURCE"]."""
 
+import builtins
+import os
+
+from django_ox.schedules import SettingsScheduleSource
 from django_ox.stored import DatabaseScheduleSource
+
+
+class FailingReadSource(SettingsScheduleSource):
+    """
+    The settings schedules, read by a dispatch pass through a read that
+    raises: a shared read of the pass that nothing guards, as a reader
+    added later might be. For worker processes, which take their
+    configuration from the environment.
+
+    OX_TEST_SOURCE_RAISES names the exception, a builtin class, and
+    OX_TEST_SOURCE_PASSES how many dispatch passes it fails, or "every".
+    The read made when the worker is built goes through.
+    """
+
+    def __init__(self, options, backend_alias):
+        super().__init__(options, backend_alias)
+        self.reads = 0
+
+    def schedules(self):
+        self.reads += 1
+        error = getattr(builtins, os.environ["OX_TEST_SOURCE_RAISES"])
+        passes = os.environ["OX_TEST_SOURCE_PASSES"]
+        if self.reads > 1 and (passes == "every" or self.reads <= 1 + int(passes)):
+            raise error("a shared read of the dispatch pass failed")
+        return super().schedules()
+
+
+class UnavailableAfterStart(SettingsScheduleSource):
+    """
+    A project's own source whose store answers when the worker is built and
+    never again: every read after the first raises ConnectionError, as a
+    source backed by a service that has gone away would.
+    """
+
+    def __init__(self, options, backend_alias):
+        super().__init__(options, backend_alias)
+        self.reads = 0
+
+    def schedules(self):
+        self.reads += 1
+        if self.reads > 1:
+            raise ConnectionError("the source's own store stopped answering")
+        return super().schedules()
 
 
 class RowSource(DatabaseScheduleSource):

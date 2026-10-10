@@ -27,7 +27,7 @@ import django_ox
 from django_ox.compat import HAS_CORE_TASKS, task
 from django_ox.timeouts import MAX_SECONDS
 
-from .tasks import STATE, _busy
+from .tasks import STATE, _busy, countdown
 
 #: Whether @task forwards keyword arguments to the backend's task class.
 #: Django 6.1 and the 5.2 backport do; Django 6.0 does not.
@@ -206,7 +206,7 @@ def spins_on_emails(seconds):
 def reports_its_deadline_then_fails(pause):
     note(
         attempt="deadline",
-        remaining=django_ox.remaining(),
+        countdown=countdown(),
         deadline=django_ox.deadline().timestamp(),
     )
     time.sleep(pause)
@@ -230,7 +230,7 @@ def succeeds_with_budget_two():
 
 @policy_task(timeout=5)
 def reports_deadline_in_process():
-    STATE["remaining"] = django_ox.remaining()
+    STATE["countdown"] = countdown()
     STATE["deadline"] = django_ox.deadline()
     return "reported"
 

@@ -36,6 +36,7 @@ from django_ox.timeouts import MAX_SECONDS
 from django_ox.worker import Worker
 
 from . import policy_tasks, signal_tasks
+from .conftest import assert_counts_down_from_its_arming
 from .policy_tasks import DECORATOR_TAKES_POLICY
 from .tasks import STATE, add, fail_always
 
@@ -473,14 +474,14 @@ class TestTheWorkerResolvesThePolicyPerAttempt:
         assert not worker.timeouts.enabled
         policy_tasks.reports_deadline_in_process.enqueue()
         assert worker.run_once() is True
-        assert 4 < task_state["remaining"] <= 5
+        assert_counts_down_from_its_arming(task_state["countdown"], 5)
         assert task_state["deadline"] is not None
 
     def test_the_task_timeout_wins_over_the_queue_and_the_worker(self, task_state):
         worker = Worker(task_timeout=60, **NO_WAIT)
         policy_tasks.reports_deadline_in_process.enqueue()
         assert worker.run_once() is True
-        assert 4 < task_state["remaining"] <= 5
+        assert_counts_down_from_its_arming(task_state["countdown"], 5)
 
     def test_the_interpreter_notice_is_given_for_a_task_timeout(
         self, caplog, monkeypatch

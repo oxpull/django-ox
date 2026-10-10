@@ -3,6 +3,7 @@
 import asyncio
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -14,9 +15,51 @@ import django_ox
 from django_ox.compat import task
 from django_ox.exceptions import TaskTimeout
 from django_ox.models import OxTask
+from django_ox.worker import _executing, _live_workers
 
 # Mutable per-test state, reset by the `task_state` fixture.
 STATE: dict[str, object] = {}
+
+
+def watched(*, by_task=False):
+    """
+    The worker running this attempt and its watchdog's entry for it, which
+    the worker wrote when it armed the attempt's timeout, or None when the
+    attempt has no timeout. Found by this thread; with `by_task`, from a
+    coroutine on a thread of asgiref's, by the task the attempt is running.
+    """
+    ident = threading.get_ident()
+    path = _executing.get()
+    found = [
+        (worker, watch)
+        for worker in list(_live_workers)
+        for key, watch in list(worker._watches.items())
+        if (watch.db_task.task_path == path if by_task else key == ident)
+    ]
+    if not found:
+        return None
+    (one,) = found
+    return one
+
+
+def countdown(*, by_task=False):
+    """
+    remaining(), between two readings of the monotonic clock it counts down
+    on, and when the watchdog armed the deadline it counts down to, for how
+    long, on that same clock. Enough to check the countdown without assuming
+    anything about how long the worker took to reach the task body.
+    """
+    before = time.monotonic()
+    left = django_ox.remaining()
+    after = time.monotonic()
+    reading = {"before": before, "remaining": left, "after": after}
+    found = watched(by_task=by_task)
+    if found is not None:
+        _, watch = found
+        reading.update(
+            armed=watch.started, deadline=watch.deadline, timeout=watch.timeout
+        )
+    return reading
 
 
 def _spin(seconds, step=0.005):
@@ -211,9 +254,10 @@ def query_then_hold():
 @task
 def report_deadline():
     at = django_ox.deadline()
+    STATE["countdown"] = reading = countdown()
     return {
         "deadline": None if at is None else at.isoformat(),
-        "remaining": django_ox.remaining(),
+        "remaining": reading["remaining"],
     }
 
 
@@ -230,7 +274,8 @@ async def async_spin(seconds):
 
 @task
 async def async_report_deadline():
-    return django_ox.remaining()
+    STATE["countdown"] = reading = countdown(by_task=True)
+    return reading["remaining"]
 
 
 @task(takes_context=True)

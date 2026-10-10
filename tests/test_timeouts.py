@@ -44,7 +44,11 @@ from django_ox.supervisor import RECYCLE_EXIT_CODE, Supervisor
 from django_ox.timeouts import MAX_SECONDS, task_timeouts_from_options
 from django_ox.worker import WATCHDOG_MAX_WAIT, Worker, _active_tracer
 
-from .conftest import start_worker_thread, wait_for
+from .conftest import (
+    assert_counts_down_from_its_arming,
+    start_worker_thread,
+    wait_for,
+)
 from .tasks import (
     TASK_ROW,
     add,
@@ -791,16 +795,17 @@ def row_count(status):
 
 @pytest.mark.django_db(transaction=True)
 class TestDeadline:
-    # The deadline is set when the attempt starts, so what a task reads back
-    # is the timeout, minus however long the worker took to get from the
-    # enqueue to the task body. SLACK is the room for that: a sixth of the
-    # timeout, which is far more than the trip costs and far less than the
-    # distance to any other number the worker could have used, so a report
-    # derived from something else still fails.
+    # The deadline is set when the attempt is armed, so counted from before
+    # run_once() it is the timeout plus however long the worker took to get
+    # from the enqueue to arming it. SLACK is the room for that: a sixth of
+    # the timeout, which is far more than the trip costs and far less than
+    # the distance to any other number the worker could have used, so a
+    # report derived from something else still fails. What the task reads
+    # back is checked against the arming itself, which needs no room.
     TIMEOUT = 30.0
     SLACK = TIMEOUT / 6
 
-    def test_deadline_and_remaining_inside_a_task(self):
+    def test_deadline_and_remaining_inside_a_task(self, task_state):
         worker = Worker(
             task_timeout=self.TIMEOUT, backoff_initial=0, poll_interval=0.05
         )
@@ -814,17 +819,16 @@ class TestDeadline:
         # which is at or after `before`; it can only be late, never early.
         out = (deadline - before).total_seconds()
         assert self.TIMEOUT <= out <= self.TIMEOUT + self.SLACK, out
-        # What is left of it when the task looks can only be less.
-        assert self.TIMEOUT - self.SLACK <= reported["remaining"] <= self.TIMEOUT
+        # What is left of it when the task looks counts down to it.
+        assert_counts_down_from_its_arming(task_state["countdown"], self.TIMEOUT)
 
-    def test_inside_an_async_task(self):
+    def test_inside_an_async_task(self, task_state):
         worker = Worker(
             task_timeout=self.TIMEOUT, backoff_initial=0, poll_interval=0.05
         )
-        result = async_report_deadline.enqueue()
+        async_report_deadline.enqueue()
         assert worker.run_once()
-        result.refresh()
-        assert self.TIMEOUT - self.SLACK <= result.return_value <= self.TIMEOUT
+        assert_counts_down_from_its_arming(task_state["countdown"], self.TIMEOUT)
 
     def test_none_without_a_timeout_and_outside_a_task(self):
         worker = Worker(backoff_initial=0, poll_interval=0.05)

@@ -45,6 +45,7 @@ from django_ox.exceptions import TaskAbandoned, TaskTimeout
 from django_ox.models import OxTask
 
 from . import policy_hazard_tasks as hazard
+from .conftest import assert_counts_down_from_its_arming
 from .policy_hazard_tasks import gate, read_notes
 
 TIMEOUT_PATH = f"{TaskTimeout.__module__}.{TaskTimeout.__qualname__}"
@@ -312,6 +313,30 @@ def seconds_after(when, since):
     return (when - since).total_seconds()
 
 
+def assert_struck_at_its_deadline(notes, result, timeout):
+    """
+    The first attempt's timeout, as the worker's watchdog measured it, on
+    the monotonic clock it enforces with: armed `timeout` seconds before its
+    deadline and before the body began, decided at or after the deadline,
+    and landed in the body after that decision and within the worker's
+    grace of the deadline. Returns the start and end records.
+
+    The time from the body's start record to the strike is not bounded
+    below by the timeout: whatever ran between the arming and that record
+    came out of the attempt's seconds, and nothing bounds how long it took.
+    """
+    started = starts(notes, result)[0]
+    struck = ends(notes, result)[0]
+    armed, deadline, grace = started["armed"], started["deadline"], struck["grace"]
+    assert (started["timeout"], armed + timeout) == (timeout, deadline), started
+    assert armed <= started["began"] <= started["noted"] <= struck["struck"]
+    assert struck["fired"], struck
+    # The watchdog's grace starts when it decides the timeout.
+    assert deadline + grace <= struck["grace_at"] <= struck["struck"] + grace, struck
+    assert struck["struck"] - deadline < grace, (started, struck)
+    return started, struck
+
+
 def test_two_workers_claiming_at_once_never_share_an_attempt(workers, policy_log):
     kinds = [
         (hazard.race_succeeds, OxTask.Status.SUCCESSFUL, 1),
@@ -414,9 +439,7 @@ def test_renewal_holds_attempts_that_outlast_the_lease(workers, policy_log):
     (error,) = stored.errors
     assert error["exception_class_path"] == TIMEOUT_PATH
     assert "past the 7s timeout" in error["traceback"]
-    first_attempt = starts(notes, times_out)[0]
-    struck = ends(notes, times_out)[0]
-    assert 6.9 < struck["at"] - first_attempt["at"] < 30
+    assert_struck_at_its_deadline(notes, times_out, 7)
 
     stored = row(slow)
     assert (stored.status, stored.attempts, stored.lease_epoch) == (
@@ -438,6 +461,31 @@ def test_renewal_holds_attempts_that_outlast_the_lease(workers, policy_log):
     for process in (first, reaper):
         assert "Reclaimed" not in process.text(), process.text()
         assert "lost its lease" not in process.text(), process.text()
+
+
+def test_a_body_that_starts_late_is_struck_at_the_deadline_armed_before_it(
+    workers, policy_log
+):
+    # Whatever runs between the worker arming the timeout and the body's
+    # start record (a first query opening its connection, a busy
+    # interpreter) comes out of the attempt's seven seconds. This body holds
+    # its record back LATE seconds on purpose: counted from that record the
+    # attempt had five seconds left, and counted from the arming, as the
+    # watchdog counts, it still had exactly seven.
+    result = hazard.times_out_after_a_late_start.enqueue(hazard.LATE)
+    worker = workers.start("one", "--batch")
+    assert worker.wait() == 0, worker.text()
+
+    stored = row(result)
+    assert (stored.status, stored.attempts) == (OxTask.Status.FAILED, 1)
+    (error,) = stored.errors
+    assert error["exception_class_path"] == TIMEOUT_PATH
+    assert "past the 7s timeout" in error["traceback"]
+    notes = read_notes(policy_log)
+    assert_history(stored, notes, result, {worker.pid})
+    started, _ = assert_struck_at_its_deadline(notes, result, 7)
+    assert started["noted"] - started["armed"] >= hazard.LATE
+    assert "ran past its 7s timeout on attempt 1/1" in worker.text()
 
 
 @stops_a_worker
@@ -722,7 +770,7 @@ def test_one_worker_runs_different_policies_side_by_side(workers, policy_log):
     (error,) = stored.errors
     assert error["exception_class_path"] == TIMEOUT_PATH
     assert "past the 1s timeout" in error["traceback"]
-    assert 0 < started(times_out)["remaining"] <= 1
+    assert_counts_down_from_its_arming(started(times_out)["countdown"], 1)
 
     # Its sibling's one second never reached it.
     stored = row(runs_long)
@@ -755,8 +803,10 @@ def test_one_worker_runs_different_policies_side_by_side(workers, policy_log):
     assert (stored.status, stored.attempts) == (OxTask.Status.SUCCESSFUL, 2)
     assert stored.return_value == "second"
     # A fresh five seconds on each attempt, not a sibling's one.
-    for attempt in (1, 2):
-        assert 4 < started(retries, attempt)["remaining"] <= 5
+    first, second = (started(retries, n)["countdown"] for n in (1, 2))
+    assert_counts_down_from_its_arming(first, 5)
+    assert_counts_down_from_its_arming(second, 5)
+    assert first["armed"] < second["armed"]
     (asked,) = callbacks(notes, retries)
     assert asked["callback"] == "now"
 

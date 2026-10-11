@@ -1,0 +1,92 @@
+{
+  "basis": "Longest-processing-time on per-file loaded seconds (SQLite plus PostgreSQL summed), whole files kept together, six shards. Measured on a loaded Mac from the 1.8.0 oxpull suite, so rebalance from CI timings once they exist.",
+  "shards": {
+    "shard1": [
+      "tests_oxpull/test_workflows_hazard_in_flight_fan_in_edges_make_the_gate_cost.py"
+    ],
+    "shard2": [
+      "tests_oxpull/test_heartbeat_file.py",
+      "tests_oxpull/test_policy.py",
+      "tests_oxpull/test_workflows_deferred.py",
+      "tests_oxpull/test_workflows_guarantees.py",
+      "tests_oxpull/test_workflows_hazard_cancel_cas.py",
+      "tests_oxpull/test_workflows_hazard_a_correctly_configured_worker_on_another.py",
+      "tests_oxpull/test_workflows_hazard_a_downstream_node_can_start_while_an_earlier.py",
+      "tests_oxpull/test_workflows_hazard_every_reconciler_tick_row_locks_every_dead.py",
+      "tests_oxpull/test_workflows_hazard_mysql_edge_columns_created_on_a_different.py",
+      "tests_oxpull/test_workflows_hazard_a_workflow_callback_that_becomes_unique.py",
+      "tests_oxpull/test_workflows_hazard_a_unique_enqueue_inside_a_transaction_can.py",
+      "tests_oxpull/test_workflows_hazard_unique_nodes.py",
+      "tests_oxpull/test_workflows_statistics.py"
+    ],
+    "shard3": [
+      "tests_oxpull/test_run_tasks_integration.py",
+      "tests_oxpull/test_schedule_isolation.py",
+      "tests_oxpull/test_upgrade.py",
+      "tests_oxpull/test_workflows.py",
+      "tests_oxpull/test_workflows_cost.py",
+      "tests_oxpull/test_workflows_hazard_discard_promise.py",
+      "tests_oxpull/test_workflows_hazard_reconcile_schedule.py",
+      "tests_oxpull/test_workflows_hazard_cancellation_locks_the_upstreams_that_are.py",
+      "tests_oxpull/test_workflows_hazard_defer_blocked_nodes_is_decided_by_the_node.py",
+      "tests_oxpull/test_workflows_hazard_the_cancellation_transaction_s_lock_order.py",
+      "tests_oxpull/test_workflows_hazard_under_use_tz_false_on_sqlite_or_mysql_every.py",
+      "tests_oxpull/test_workflows_hazard_defer_blocked_nodes_does_not_take_nodes.py",
+      "tests_oxpull/test_workflows_hazard_mysql_repeatable_read_the_cancellation_s.py",
+      "tests_oxpull/test_workflows_hazard_a_dag_that_runs_longer_than_ox_prune_older.py",
+      "tests_oxpull/test_workflows_hazard_add_fires_task_enqueued_before_it_validates.py",
+      "tests_oxpull/test_workflows_hazard_unknown_status.py",
+      "tests_oxpull/test_workflows_one_key_statistics.py"
+    ],
+    "shard4": [
+      "tests_oxpull/test_unique.py",
+      "tests_oxpull/test_worker_subclass.py",
+      "tests_oxpull/test_workflows_at_scale.py",
+      "tests_oxpull/test_workflows_hazard_lost_straggler.py",
+      "tests_oxpull/test_workflows_hazard_prune_membership.py",
+      "tests_oxpull/test_workflows_hazard_a_node_that_builds_workflow_structure_is.py",
+      "tests_oxpull/test_workflows_hazard_deleting_a_workflow_row_cascades_its_edges.py",
+      "tests_oxpull/test_workflows_hazard_rolling_back_migrate_oxpull_0003_or_downgrade.py",
+      "tests_oxpull/test_workflows_hazard_the_reconciler_s_per_workflow_except_exception.py",
+      "tests_oxpull/test_workflows_hazard_a_stored_admin_edited_reconciler_schedule.py",
+      "tests_oxpull/test_workflows_hazard_a_workflow_build_that_raises_part_way_leaves.py",
+      "tests_oxpull/test_workflows_hazard_mysql_repeatable_read_inside_a_caller_s.py",
+      "tests_oxpull/test_workflows_hazard_ox_prune_include_failed_deletes_a_workflow.py",
+      "tests_oxpull/test_workflows_outcome_reconnect.py",
+      "tests_oxpull/test_workflows_reconciler.py"
+    ],
+    "shard5": [
+      "tests_oxpull/test_rate_limit_names.py",
+      "tests_oxpull/test_rate_limits.py",
+      "tests_oxpull/test_workflows_hazard_prune_ungates.py",
+      "tests_oxpull/test_workflows_hazard_on_postgresql_a_worker_class_subclass_of.py",
+      "tests_oxpull/test_workflows_hazard_unique_nodes_let_two_workflows_build_a_dependency.py",
+      "tests_oxpull/test_workflows_hazard_mysql_node_name_uniqueness_follows_the_column.py",
+      "tests_oxpull/test_workflows_hazard_mysql_release_dependents_and_the_cancellation.py",
+      "tests_oxpull/test_workflows_hazard_nodes_the_reconciler_cancels_emit_no_task.py",
+      "tests_oxpull/test_workflows_hazard_seal_lock.py",
+      "tests_oxpull/test_workflows_outcomes.py",
+      "tests_oxpull/test_workflows_waiting.py"
+    ],
+    "shard6": [
+      "tests_oxpull/test_batches.py",
+      "tests_oxpull/test_concurrency.py",
+      "tests_oxpull/test_keys.py",
+      "tests_oxpull/test_prune.py",
+      "tests_oxpull/test_workflows_callers.py",
+      "tests_oxpull/test_workflows_concurrency.py",
+      "tests_oxpull/test_workflows_hazard_add_mysql.py",
+      "tests_oxpull/test_workflows_hazard_mixed_fleet_migration.py",
+      "tests_oxpull/test_workflows_hazard_django_ox_stats_ox_health_and_the_prometheus.py",
+      "tests_oxpull/test_workflows_hazard_mysql_a_gated_claim_whose_scan_spans_an.py",
+      "tests_oxpull/test_workflows_hazard_retrying_a_failed_node_after_one_reconciler.py",
+      "tests_oxpull/test_workflows_hazard_the_reconciler_s_release_sweep_reads_every.py",
+      "tests_oxpull/test_workflows_hazard_postgresql_repeatable_read_concurrent_add.py",
+      "tests_oxpull/test_workflows_hazard_the_stored_cancelled_count_counts_every.py",
+      "tests_oxpull/test_workflows_hazard_with_defer_blocked_nodes_releasing_a_node.py",
+      "tests_oxpull/test_workflows_hazard_a_support_engineer_sets_an_abandoned_open.py",
+      "tests_oxpull/test_workflows_hazard_following_w003_s_hint_verbatim_stops_workers.py",
+      "tests_oxpull/test_workflows_hazard_mariadb_after_a_server_upgrade_from_10_6.py"
+    ]
+  }
+}

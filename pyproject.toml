@@ -77,6 +77,7 @@ dev = [
 [tool.hatch.build.targets.sdist]
 include = [
     "/src/django_ox",
+    "/src/oxpull",
     "/LICENSE",
     "/README.md",
     "/CHANGELOG.md",
@@ -91,7 +92,7 @@ exclude = ["**/__pycache__", "**/*.pyc"]
 path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/django_ox"]
+packages = ["src/django_ox", "src/oxpull"]
 exclude = ["**/__pycache__", "**/*.pyc"]
 
 [tool.pytest.ini_options]
@@ -152,6 +153,10 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Tests assert, use throwaway credentials, and write to temp paths on purpose.
 "tests/**" = ["S101", "S105", "S106", "S108", "S311"]
+# The oxpull suite is held to the narrower exemption it had as its own package.
+"tests_oxpull/**" = ["S101", "S105", "S106"]
+# The installed-wheel tests run pip and python in virtualenvs they create.
+"tests_wheel/**" = ["S101", "S603", "S607", "S608"]
 # Benchmark and maintenance scripts are operator tools, not shipped code.
 "tools/**" = ["T20"]
 
@@ -169,10 +174,10 @@ module = ["django_tasks", "django_tasks.*"]
 ignore_missing_imports = true
 
 [tool.django-stubs]
-django_settings_module = "tests.settings"
+django_settings_module = "tests.settings_typecheck"
 
 [tool.coverage.run]
-source = ["django_ox"]
+source = ["django_ox", "oxpull"]
 branch = true
 
 [tool.coverage.report]

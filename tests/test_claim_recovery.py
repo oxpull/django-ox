@@ -448,8 +448,8 @@ class OneOutcomeUnrecorded(Worker):
         if not self._mine(db_task):
             return super()._write_outcome(db_task, **kwargs)
         if self.how == "declined":
-            # An override that fails closed: nothing written, and False, as
-            # Oxpull Pro answers when a workflow node's record fails.
+            # Fail closed with no writes, as OxpullWorker does when recording
+            # a workflow node fails.
             return False
         if self.how == "raised":
             raise DatabaseError("refused, and the connection still answers")

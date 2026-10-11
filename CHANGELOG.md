@@ -9,7 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Upgrading:** No database migration is required.
 
+### Upgrading earlier `oxpull` installs
+
+If you installed `oxpull` separately, stop the affected processes and back up the database. Uninstall the earlier `oxpull` distribution before upgrading django-ox, then run migrations and restart.
+
+Do not uninstall an earlier `oxpull` distribution after installing django-ox 1.9.0 as a standalone cleanup step: its uninstall record can delete files now supplied by django-ox. The module-free 1.9.0 metapackage does not have that behavior.
+
+If the distributions were installed in the wrong order, remove any remaining earlier `oxpull` distribution and then force-reinstall django-ox. See [Earlier `oxpull` installs](https://oxpull.com/django-ox/migrating/#earlier-oxpull-installs) for the complete sequence and repair commands.
+
+### Changed
+
+- The `oxpull` distribution on PyPI is now a metapackage at version 1.9.0.
+  It supplies no Python module and depends on `django-ox>=1.9.0`.
+  The django-ox distribution supplies the `oxpull` module.
+
 ### Added
+
+- Include the optional `oxpull` app in the django-ox wheel and source distribution under the BSD-3-Clause licence. It provides:
+    - Unique tasks, which deduplicate pending tasks at enqueue time.
+    - Batches.
+    - Rate limiting.
+    - Provisional workflows.
+- Include the app's five migrations and `py.typed` marker. No separate `oxpull` installation is needed to use the app.
 
 - Log `worker_connection_hint` once at INFO during `Worker.run()` startup
   on PostgreSQL without pooling and on MySQL when `CONN_MAX_AGE = 0`.
@@ -26,6 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for session handling and disconnect recovery.
 
 ### Compatibility
+
+- django-ox continues to support Django 5.2 through the `django-tasks` backport.
+- The optional `oxpull` app requires Django 6.0+. Enabling the app or importing its runtime entry points on Django 5.2 raises `ImproperlyConfigured`.
+- Projects that do not enable the optional app do not load it.
+- Existing settings, import paths, task data, the app label, table names, the five `oxpull` migrations and persisted task paths are unchanged.
+- `oxpull.__version__` now equals `django_ox.__version__`.
+- The app's display name is now "Oxpull".
+- The `oxpull` app now enforces its existing Django 6.0+ requirement at load time, raising `ImproperlyConfigured` on Django 5.2; django-ox itself still installs there. The earlier separate `oxpull` 1.8.0 package already declared Django>=6.0 in its metadata. Apart from this load-time check, the app's runtime behavior is unchanged from `oxpull` 1.8.0. One configuration-error message has also been reworded.
 
 - Default connection lifecycle, transaction, delivery and schema semantics
   are unchanged. Persistence and pooling remain opt-in.
@@ -573,8 +602,8 @@ This release preserves the caller's transaction when `run_once()` times out and 
 **Upgrading to 1.5.0:** No database migration is required. Replace every
 worker to apply schedule isolation, dead-connection outcome recovery and the
 timeout-watchdog fix throughout the fleet. Schedule isolation adds no system
-check. When using Oxpull, deploy django-ox and Oxpull only as the tested
-exact-pinned release pair.
+check. For this historical release, installations using `oxpull` required
+the matching tested versions of both distributions, with exact version pins.
 
 If you used `ox_import_beat_schedules`, read the [Security entry](#security)
 before generating or applying output. Upgrade and regenerate saved output.
@@ -859,8 +888,8 @@ connections outside the pool, in addition to `max_size`. Task timeouts (`TASK_TI
 another connection outside the pool. Each worker process can hold up to
 `max_size + 1` server connections, or `max_size + 2` with task timeouts.
 
-No migration. For `oxpull` installations, use `oxpull==1.4.0`,
-which pins `django-ox==1.4.0`.
+No migration. For this historical release, installations using `oxpull`
+required `oxpull` 1.4.0, whose dependency required django-ox 1.4.0 exactly.
 
 ### PostgreSQL pool correction
 
@@ -1020,13 +1049,12 @@ No migration. Upgrade is optional.
 - Update the benchmarks page with measurements against
   django-tasks-db 0.13.0 and recovery after worker death.
 - Update the comparison page and correct the huey entry.
-- Document how to order Oxpull Pro.
 
 ## [1.3.0] - 2026-09-17
 
 **One migration ships with this release.** `0008_waiting` adds a status
 choice and runs no SQL. django-ox never puts a task into the new status by
-itself. An install that doesn't use workflows in Oxpull Pro upgrades and
+itself. An install that doesn't use workflows in `oxpull` upgrades and
 rolls back as it always has.
 
 A 1.2 process doesn't know the new status. Its admin shows a waiting task's
@@ -1040,12 +1068,10 @@ one.
 row whose status is `WAITING`. No worker claims it, the reaper doesn't reap
 it, `ox_prune` doesn't delete it, and retry skips it. django-ox writes that
 status onto no row of its own, and releases no row that holds it. Something
-built on django-ox does both, and on this release that is workflows in Oxpull
-Pro.
+built on django-ox does both, and in this release that is workflows in
+`oxpull`.
 
-Turning workflows on, and turning them off again, is Oxpull Pro configuration,
-and Oxpull's own documentation has those steps. This section is the django-ox
-half. See [Pro](https://oxpull.com/django-ox/pro/).
+Before turning workflows off, follow the documented shutdown procedure so that WAITING nodes are not left without a worker that can release them. See [Earlier `oxpull` installs](https://oxpull.com/django-ox/migrating/#earlier-oxpull-installs) and the [workflow documentation](https://oxpull.com/django-ox/features/workflows/).
 
 `migrate django_ox 0007` refuses while any task is WAITING on the database it
 migrates. A version from before `0008_waiting` can't read a waiting task and
@@ -2085,9 +2111,8 @@ appears on the package page.
 - Packaging metadata now carries a `Documentation` URL, so the
   documentation site is linked directly from the package page.
 - README now carries release and CI status badges, a link to the
-  documentation site, and a scope statement: what the core covers, what is
-  deliberately outside it, and which features belong to the commercial
-  tier.
+  documentation site, and a scope statement distinguishing the core
+  features from those provided by `oxpull`.
 
 ## [0.1.0] - 2026-08-16
 

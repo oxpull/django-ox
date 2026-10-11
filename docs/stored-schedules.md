@@ -709,14 +709,16 @@ Worth knowing before you turn it on:
   due-tick and deadline rules; only its reporting is rate-limited.
 - **Database read failures are not bad rows.** Database errors during full schedule or shared dispatch reads, including connection, missing-table and lock errors, stop the pass. They are not attributed to a row. Server-side errors propagate unchanged. In autocommit, recognized value-local failures may be isolated by diagnostic re-reads while the connection remains usable.
 
-  Inside a transaction, diagnostic re-reads are restricted: PostgreSQL requires a usable transaction; SQLite permits only its recognized UTF-8 decoding refusal; MySQL permits none. Unwind through the transaction or savepoint boundary before further queries where required. Reads create no savepoints. `update_schedule` and `delete_schedule` have their own atomic blocks; source reads and `ox_prune` do not. Unlike 1.8.0, a source read inside your transaction can leave a server error for you to roll back.
+    Inside a transaction, diagnostic re-reads are restricted: PostgreSQL requires a usable transaction; SQLite permits only its recognized UTF-8 decoding refusal; MySQL permits none. Unwind through the transaction or savepoint boundary before further queries where required. Reads create no savepoints. `update_schedule` and `delete_schedule` have their own atomic blocks; source reads and `ox_prune` do not. Unlike 1.8.0, a source read inside your transaction can leave a server error for you to roll back.
+
 - **An abandoned pass stops further traversal.** An escaping `django.db.Error`, other unhandled exception, failed rollback or unusable connection reports `schedule_dispatch_failed`. Dispatch retries on a later pass; committed ticks remain committed. Marker reads and boundary heals retain their own events.
 
-  An unreadable marker reports `schedule_source_unavailable` once, then at most once a minute; full reads continue at each reconcile interval. A database error on the marker read reports every pass while workers use the last schedules read. Failed boundary healing reports `schedule_boundary_heal_failed`, first with a traceback, then counted summaries at most once a minute per row per worker. Healing retries each pass; the affected schedule cannot dispatch meanwhile.
+    An unreadable marker reports `schedule_source_unavailable` once, then at most once a minute; full reads continue at each reconcile interval. A database error on the marker read reports every pass while workers use the last schedules read. Failed boundary healing reports `schedule_boundary_heal_failed`, first with a traceback, then counted summaries at most once a minute per row per worker. Healing retries each pass; the affected schedule cannot dispatch meanwhile.
 
-  An unreadable newest tick within the pass's bound skips only its schedule with `schedule_tick_unreadable`. A settings schedule can also be blocked by its unreadable earliest tick. History is not treated as absent. The pass completes, so this skip does not hold a batch open. Follow the recovery procedure under [Configuration](configuration.md#ox_prune).
+    An unreadable newest tick within the pass's bound skips only its schedule with `schedule_tick_unreadable`. A settings schedule can also be blocked by its unreadable earliest tick. History is not treated as absent. The pass completes, so this skip does not hold a batch open. Follow the recovery procedure under [Configuration](configuration.md#ox_prune).
 
-  Alert on `schedule_dispatch_error`, `schedule_dispatch_failed` and `schedule_tick_unreadable`. For stored schedules, also alert on `schedule_row_skipped`, `schedule_source_unavailable` and `schedule_boundary_heal_failed`.
+    Alert on `schedule_dispatch_error`, `schedule_dispatch_failed` and `schedule_tick_unreadable`. For stored schedules, also alert on `schedule_row_skipped`, `schedule_source_unavailable` and `schedule_boundary_heal_failed`.
+
 - **`manage.py check` cannot see rows.** Checks run before `migrate`, so a bad
   schedule in the database is a log line, not a start-up error.
   Settings-declared schedules still fail fast for errors their checks can

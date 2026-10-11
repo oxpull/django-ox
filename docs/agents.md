@@ -1,22 +1,15 @@
 # For AI assistants
 
-Exact steps for setting up django-ox in an existing Django project, the
-facts to get right while doing it, and how to prove it works.
-
-**django-ox 1.8.0, released 2026-10-04:** create many stored schedules in
-one all-or-nothing call, use the rebuilt django-celery-beat database importer,
-and keep other schedules and queued tasks running when a stored row is invalid.
-See [Upgrade to 1.8.0](#upgrade-to-180).
-**18 releases in 49 days; public API stable since 1.0.0 (September 2026).**
-Explore the [test suite, contributors and project history](#compatibility-and-project-history).
-
 Run Django background tasks in the database your project already uses:
 transactional enqueue, retries, dead-worker recovery, recurring schedules
 and monitoring, without a separate broker.
 
+Exact steps for setting up django-ox in an existing Django project, the
+facts to get right while doing it, and how to prove it works.
+
 ## Set up django-ox in this project
 
-Requires Python 3.12+ and Django 5.2+. Check before installing:
+Requires Python 3.12+ and Django 5.2+. The optional `oxpull` app requires Django 6.0+. Check before installing:
 
 ```
 python -c "import django, sys; print(django.__version__, sys.version.split()[0])"
@@ -110,6 +103,16 @@ TASKS = {
     }
 }
 ```
+
+## Enable the optional app
+
+The `oxpull` app is included in django-ox and requires Django 6.0+. Add `"oxpull"` to `INSTALLED_APPS`, run migrations, and set the relevant alias's `BACKEND` to `"oxpull.backend.OxpullBackend"`.
+
+Unique tasks use `@unique` or `OPTIONS["UNIQUE_TASKS"]`. Batches require a reconciler schedule.
+
+For rate limits or workflows, set that alias's `OPTIONS["WORKER_CLASS"]` to `"oxpull.worker.OxpullWorker"`. Rate limits also need `OPTIONS["RATE_LIMITS"]`. Workflows also need `OPTIONS["WORKFLOWS"] = True` and a reconciler schedule.
+
+Follow the [feature setup](features/index.md) and the relevant feature page. Do not treat the backend or worker setting alone as complete configuration.
 
 ## Upgrade to 1.8.0
 
@@ -325,10 +328,10 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   WAITING, FAILED or LOST task without running it. Neither touches a RUNNING task.
   With `django.contrib.admin` installed, the task table appears in the admin
   with the same two actions.
-- `OxTask.Status.WAITING` is a status django-ox never writes itself.
-  Workers never claim a waiting task, `ox_prune` never deletes it, and
-  `retry` skips it. It reads as READY through `django.tasks`. Workflows in
-  Oxpull Pro write and release it.
+- `OxTask.Status.WAITING` is used by workflows in the optional `oxpull`
+  app. Workers never claim a waiting task, `ox_prune` never deletes it,
+  and `retry` skips it. It reads as READY through `django.tasks`.
+  Workflows write and release this status.
 - A particular running task cannot be interrupted on demand. Each attempt
   can have a task, queue or backend execution timeout. Every table lives
   on the database your router sends `OxTask` to.
@@ -337,11 +340,12 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   validate `PolicyTask` fields on supported Django versions. Neither
   retries, calls backoff callbacks or enforces timeouts. Immediate runs
   even if the enclosing transaction later rolls back, and rejects
-  `run_after`. For queued execution, keep `OxBackend` and use the public,
-  provisional `django_ox.testing.run_tasks()` helper. It runs due attempts
-  through the configured worker class, including retries and backoff.
-  Pass `backend=` for the worker class you need, including the Pro alias
-  for workflows and rate limits. Rows are selected by queue, regardless
+  `run_after`. For queued execution, keep `OxBackend` or `OxpullBackend`
+  and use the public, provisional `django_ox.testing.run_tasks()` helper.
+  It runs due attempts through the configured worker class, including
+  retries and backoff. For workflows and rate limits, pass `backend=`
+  with the alias whose `OPTIONS["WORKER_CLASS"]` is
+  `"oxpull.worker.OxpullWorker"`. Rows are selected by queue, regardless
   of which backend enqueued them. `TestCase` uses savepoints and commit
   callback emulation. Use `TransactionTestCase` to test worker autocommit
   behaviour. Exit caller callback-capture blocks before draining tasks
@@ -350,10 +354,13 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   Test timeout enforcement and worker infrastructure against a real
   worker. See [Run queued tasks in tests](patterns.md#run-queued-tasks-in-tests)
   for transaction and callback differences.
-- Batches, unique tasks, rate limiting and workflows are in
-  [Oxpull Pro](pro.md), a paid add-on requiring Django 6.0+.
-  `create_schedules` creates stored schedules in the free package.
-  `django_ox.stats` and `ox_health` are also in django-ox.
+- [Unique tasks, batches, rate limiting and workflows](features/index.md)
+  are included in django-ox through the optional `oxpull` app and require
+  Django 6.0+. `OxpullBackend`, `OxpullWorker` and the documented
+  unique-task, batch and rate-limit entry points are stable.
+  Workflows are provisional.
+- `create_schedules` creates stored schedules. It, `django_ox.stats` and
+  `ox_health` do not require the optional app.
 
 ## How to verify it works
 
@@ -397,21 +404,13 @@ TaskResultStatus.SUCCESSFUL
 `python manage.py ox_health --worker-timeout 60` now exits 0 and reports a
 recent `last_claim_age`. Stop the worker with Ctrl-C; it drains and exits 0.
 
-## Compatibility and project history
+## Compatibility
 
-django-ox supports Python 3.12-3.14 and Django 5.2 LTS through 6.1.
-For Django 5.2, install the backport extra.
-PostgreSQL, MySQL 8 and SQLite are in CI. The licence is BSD 3-Clause.
+django-ox 1.9.0 supports Django 5.2 LTS through the `django-tasks` backport and Django 6.0 / 6.1 through core `django.tasks`. It requires Python 3.12+. CI covers Python 3.12-3.14, with PostgreSQL, MySQL 8 and SQLite.
 
-As of 2026-10-04, django-ox has shipped **18 releases in 49 days**.
-Its **public API has been stable since 1.0.0 (September 2026)**.
+The optional `oxpull` app is included in the distribution and requires Django 6.0+. Projects that do not enable it can continue using django-ox on Django 5.2.
 
-- **All 36 checks passed on release PR #124**, including test-suite legs
-  on PostgreSQL, MySQL and SQLite, plus Wagtail smoke checks.
-- **3,761 test cases in the 1.8.0 suite.**
-- **22 merged pull requests from 13 outside contributors.**
-- Featured in PyCoder's Weekly #752 (2026-09-15).
-  Listed in awesome-django under Task Queues.
+For existing `oxpull` deployments, follow [Earlier `oxpull` installs](migrating.md#earlier-oxpull-installs).
 
 Machine-readable copies: [llms.txt](llms.txt) contains facts and links;
 [llms-full.txt](llms-full.txt) contains every page of this site in one file.

@@ -92,18 +92,20 @@ statement `SELECT 1` plus Django's backend-specific
 No migration uses `RunSQL`. No query is assembled from row data or user
 input by string formatting.
 
-## Supported versions
+## Version scope
 
-| Version | Supported |
-| ------- | --------- |
-| 1.8.x   | yes       |
-| older   | no        |
+| Release line | Security maintenance |
+| ------------ | -------------------- |
+| 1.9.x        | Current              |
+| Earlier      | Not maintained       |
 
 ## Reporting a vulnerability
 
-Report vulnerabilities privately via GitHub security advisories:
-[Report a vulnerability](https://github.com/oxpull/django-ox/security/advisories/new).
-Do not open a public issue for anything security-sensitive.
+Report vulnerabilities privately through
+[GitHub private vulnerability reporting](https://github.com/oxpull/django-ox/security/advisories/new)
+or by email to support@oxpull.com. Do not open a public issue for
+security-sensitive information.
 
-You will get an acknowledgement within three business days. Please include a
-reproduction or a clear description of the affected code path.
+Include the django-ox and Django versions, whether the optional `oxpull`
+app is enabled, and a reproduction or clear description of the affected
+code path. Omit credentials and unrelated personal data.

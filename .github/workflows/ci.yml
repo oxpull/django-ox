@@ -3,12 +3,52 @@ name: CI
 on:
   push:
     branches: [main]
+    # A release candidate runs the hazard suite on the whole feature matrix.
+    tags: ["rc*"]
   pull_request:
+  schedule:
+    # Nightly: the hazard tests run in full on every push to main and every
+    # night, and on a pull request only when `changes` finds a path they pin.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  # Decides what the oxpull feature suite (tests_oxpull/) needs on this run.
+  # There is no `paths:` filter on the workflow: a filtered-out workflow
+  # reports nothing, and a required check that never reports either blocks the
+  # pull request for good or can be bypassed by filtering. Every job below
+  # stays in the run, and ci-ok at the bottom always reports.
+  #
+  # The rules are in tools/ci/changes.py, where tests/test_ci_changes.py pins
+  # them. They fail towards running more: a path no rule knows runs the
+  # feature suite, and a diff that cannot be computed turns everything on.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      feature: ${{ steps.classify.outputs.feature }}
+      hazard: ${{ steps.classify.outputs.hazard }}
+      full: ${{ steps.classify.outputs.full }}
+      sqlite_cells: ${{ steps.classify.outputs.sqlite_cells }}
+      postgres_cells: ${{ steps.classify.outputs.postgres_cells }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.12"
+      - id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python tools/ci/changes.py
+
   test-sqlite:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -41,6 +81,11 @@ jobs:
       # A run that hangs is cancelled at the job's 30-minute cap with
       # nothing in the log to say where it sat. SIGABRT at 25 minutes
       # makes faulthandler dump every thread's stack to the log first.
+      #
+      # This leg, like the other base-suite legs, runs tests/ only (testpaths).
+      # tests_oxpull/ is the oxpull feature suite, which needs Django 6.0 and
+      # runs in the feature-* jobs. On 5.2 only tests/test_oxpull_gate.py
+      # touches oxpull, to prove it refuses to load.
       - run: timeout -s ABRT 1500 python -m pytest -q --cov
 
   test-postgres:
@@ -305,6 +350,121 @@ jobs:
       - run: python -c "import MySQLdb, sys; assert 'pymysql' not in sys.modules"
       - run: timeout -s ABRT 1500 python -m pytest -q tests/test_stored_read.py
 
+  # The oxpull feature suite (tests_oxpull/), Django 6.0 and later. Six shards
+  # of whole files (tools/ci/shards.json, fitted to measured durations). The
+  # hazard tests (marker `hazard`, every file with "hazard" in its name) are
+  # left out unless `changes` says this run needs them; a shard made only of
+  # hazard files then passes with nothing to run. The 5.2 legs do not appear
+  # here: oxpull refuses to load on 5.2, and testpaths keeps them out.
+  feature-sqlite:
+    needs: changes
+    if: needs.changes.outputs.feature == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: ${{ fromJSON(needs.changes.outputs.sqlite_cells) }}
+        shard: [shard1, shard2, shard3, shard4, shard5, shard6]
+    name: feature sqlite py${{ matrix.cell.python }} dj${{ matrix.cell.django }} ${{ matrix.shard }}
+    env:
+      PYTHONFAULTHANDLER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: ${{ matrix.cell.python }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --group dev -e . "Django~=${{ matrix.cell.django }}.0"
+      # SIGABRT with thread stacks instead of a silent cancellation; see
+      # the sqlite job. shard.py replaces itself with pytest so the signal
+      # reaches pytest.
+      - env:
+          SHARD: ${{ matrix.shard }}
+          HAZARD: ${{ needs.changes.outputs.hazard }}
+        run: timeout -s ABRT 1500 python tools/ci/shard.py run "$SHARD" tests_oxpull.settings --hazard "$HAZARD"
+
+  feature-postgres:
+    needs: changes
+    if: needs.changes.outputs.feature == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: ${{ fromJSON(needs.changes.outputs.postgres_cells) }}
+        shard: [shard1, shard2, shard3, shard4, shard5, shard6]
+    name: feature ${{ matrix.cell.label }} py${{ matrix.cell.python }} dj${{ matrix.cell.django }} ${{ matrix.shard }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ox
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PYTHONFAULTHANDLER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: ${{ matrix.cell.python }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --group dev -e . "Django~=${{ matrix.cell.django }}.0"
+      - run: python -c "import psycopg_pool"
+      - env:
+          SHARD: ${{ matrix.shard }}
+          HAZARD: ${{ needs.changes.outputs.hazard }}
+          SETTINGS: ${{ matrix.cell.settings }}
+        run: timeout -s ABRT 1500 python tools/ci/shard.py run "$SHARD" "$SETTINGS" --hazard "$HAZARD"
+
+  # MySQL: the whole non-hazard suite in one job (about five minutes), then,
+  # when hazard tests are due, the files named for MySQL. Those are the hazard
+  # files that only MySQL can fail, and no shard picks them out.
+  feature-mysql:
+    needs: changes
+    if: needs.changes.outputs.feature == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: feature mysql py3.14 dj6.1
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: ox
+          MYSQL_DATABASE: oxtest
+        ports:
+          - 33069:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pox"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DJANGO_SETTINGS_MODULE: tests_oxpull.settings_mysql
+      PYTHONFAULTHANDLER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --group dev -e . "Django~=6.1.0" PyMySQL
+      - run: timeout -s ABRT 1500 python -m pytest -q -p no:cacheprovider --ds=tests_oxpull.settings_mysql tests_oxpull -m "not hazard"
+      - if: needs.changes.outputs.hazard == 'true'
+        run: timeout -s ABRT 1500 python -m pytest -q -p no:cacheprovider --ds=tests_oxpull.settings_mysql tests_oxpull/test_*mysql*.py
+
   # A >= install resolves to the newest release and cannot test a floor. This
   # leg pins the floor with == so a regression at the bottom of the supported
   # range fails here.
@@ -477,8 +637,9 @@ jobs:
       - run: python -m pip install --group dev -e .
       - run: ruff check .
       - run: ruff format --check .
-      # A model change without its migration must fail before it ships.
-      - run: DJANGO_SETTINGS_MODULE=tests.settings python -m django makemigrations django_ox --check --dry-run
+      # A model change without its migration must fail before it ships. The
+      # settings add oxpull, which tests.settings leaves out for Django 5.2.
+      - run: DJANGO_SETTINGS_MODULE=tests.settings_typecheck python -m django makemigrations django_ox oxpull --check --dry-run
 
   types:
     runs-on: ubuntu-latest
@@ -564,10 +725,16 @@ jobs:
   # job instead of every matrix leg means the protection rule survives
   # matrix changes: add a Python or database to the grid and the rule
   # still reads "ci-ok", with the new legs pulled in through needs.
+  #
+  # It always reports. The jobs that always run must succeed. A job that
+  # `changes` decided this run does not need may be skipped, and only then:
+  # a needed job that is skipped, cancelled, failed or missing from `needs`
+  # fails ci-ok, and so does a job in `needs` that this list does not
+  # classify, so adding a job means deciding which kind it is.
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [test-sqlite, test-postgres, test-postgres-naive, test-postgres-pooled, test-backport-floor, test-pool-floor, wagtail-smoke, test-mysql, test-postgres-psycopg2, test-mysql-mysqlclient, lint, types, docs, packaging, zizmor]
+    needs: [changes, test-sqlite, test-postgres, test-postgres-naive, test-postgres-pooled, test-backport-floor, test-pool-floor, wagtail-smoke, test-mysql, test-postgres-psycopg2, test-mysql-mysqlclient, feature-sqlite, feature-postgres, feature-mysql, lint, types, docs, packaging, zizmor]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -575,8 +742,36 @@ jobs:
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
-          set -euo pipefail
-          printf '%s\n' "$NEEDS_JSON"
-          [ "${{ contains(needs.*.result, 'failure') }}" = "false" ]
-          [ "${{ contains(needs.*.result, 'cancelled') }}" = "false" ]
-          [ "${{ contains(needs.*.result, 'skipped') }}" = "false" ]
+          python3 - <<'PY'
+          import json, os, sys
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          print(json.dumps({k: v["result"] for k, v in needs.items()}, indent=1))
+          always = [
+              "test-sqlite", "test-postgres", "test-postgres-naive",
+              "test-postgres-pooled", "test-backport-floor", "test-pool-floor",
+              "wagtail-smoke", "test-mysql", "test-postgres-psycopg2",
+              "test-mysql-mysqlclient", "lint", "types", "docs", "packaging",
+              "zizmor",
+          ]
+          if needs["changes"]["result"] != "success":
+              sys.exit("the changes job did not succeed: nothing can be trusted")
+          feature = needs["changes"]["outputs"]["feature"] == "true"
+          conditional = ["feature-sqlite", "feature-postgres", "feature-mysql"]
+          bad = []
+          for job in always:
+              if needs[job]["result"] != "success":
+                  bad.append(f"{job}: {needs[job]['result']}")
+          for job in conditional:
+              result = needs[job]["result"]
+              if feature and result != "success":
+                  bad.append(f"{job}: {result} (needed by this change)")
+              if not feature and result not in ("skipped", "success"):
+                  bad.append(f"{job}: {result} (not needed, but it ran and did not pass)")
+          unclassified = set(needs) - set(always) - set(conditional) - {"changes"}
+          if unclassified:
+              bad.append(f"unclassified jobs in needs: {sorted(unclassified)}")
+          if bad:
+              sys.exit("\n".join(bad))
+          print("ok")
+          PY

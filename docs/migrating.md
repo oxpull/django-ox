@@ -139,10 +139,12 @@ Here the enqueue is an `INSERT` on the database that holds `OxTask`, your
 default one. Open the transaction there and the task commits or rolls back
 with the row it belongs to, so there is nothing to wrap.
 
-Queues, priorities and `run_after` map directly. Celery's chains,
-groups and chords, and routing across multiple brokers, are outside the
-package; workflows are in [Oxpull Pro](pro.md), a paid add-on, and chains
-are on its roadmap, undated.
+Queues, priorities and `run_after` map directly. django-ox does not
+implement Celery's chain, group or chord APIs, or routing across multiple
+brokers. [Batches](features/batches.md) provide grouped work, and
+provisional [workflows](features/workflows.md) provide dependency DAGs.
+Both require Django 6.0+ and the optional `oxpull` app. Review their
+semantics rather than treating them as drop-in Celery replacements.
 
 ## From huey
 
@@ -207,6 +209,78 @@ the admin today, see [Schedules in the database](stored-schedules.md).
 | `.schedule(delay=...)` | `run_after` |
 | `retries`, `retry_delay` | Backend defaults in `MAX_ATTEMPTS` and the backoff options, or per-task `max_attempts` and `backoff`. django-ox counts total claims, including the first. Per-task declarations require Django 6.1, or Django 5.2 with django-tasks 0.12+. |
 | `huey.immediate` in tests | Use `django_ox.testing.ImmediateBackend` to run once at enqueue, or `DummyBackend` to record enqueues. Both accept policy declarations without enforcing retries, backoff or timeouts. For queued execution, keep `OxBackend` and use the public, provisional [`run_tasks()`](patterns.md#run-queued-tasks-in-tests) helper. It runs due attempts with retry and backoff policy. Test timeout enforcement against a real worker. |
+
+## Earlier `oxpull` installs
+
+The optional `oxpull` app is included in django-ox 1.9.0 and later. You no longer need a separately installed `oxpull` distribution.
+
+The PyPI `oxpull` 1.9.0 distribution is a compatibility metapackage. It depends on django-ox 1.9.0 or later and contains no Python module. The importable package comes from django-ox.
+
+The former private package index is retired. Remove it and its credentials from installer configuration.
+
+### Upgrade an existing installation
+
+The order matters.
+
+1. Stop every affected worker and other process that enqueues or claims tasks.
+
+2. Back up the database.
+
+3. Uninstall the earlier `oxpull` distribution before upgrading django-ox.
+
+    ```console
+    python -m pip uninstall oxpull
+    ```
+
+4. Remove the former private index and its credentials from your pip configuration, requirements and deployment secrets.
+
+5. Upgrade django-ox.
+
+    ```console
+    python -m pip install -U django-ox
+    ```
+
+6. Run migrations and check the installation.
+
+    ```console
+    python manage.py migrate
+    python -m pip check
+    ```
+
+    For the verified oxpull 1.8.0 schema, the migration run reports "No migrations to apply." Earlier schemas may have migrations to apply.
+
+7. Restart the affected processes with the updated installation and existing application settings.
+
+Keep the existing `INSTALLED_APPS` and `TASKS` configuration. Import paths, task data, the `oxpull` app label, table names, the five migrations and persisted task paths are unchanged.
+
+The optional app requires Django 6.0+. django-ox without that app continues to support Django 5.2.
+
+### Repair an overlapping installation
+
+If you ran `pip install -U oxpull` or `pip install -U django-ox` before removing an earlier `oxpull` distribution, inspect and repair the installation before restarting processes.
+
+If the earlier distribution is still installed, remove it and then restore django-ox's files:
+
+```console
+python -m pip uninstall oxpull
+python -m pip install --force-reinstall --no-deps django-ox
+python -m pip check
+```
+
+Do both steps even if imports still worked before the uninstall. The old distribution can leave stale metadata that makes `pip check` fail, and uninstalling it can remove files now supplied by django-ox.
+
+If you already uninstalled the earlier distribution, restore the files with:
+
+```console
+python -m pip install --force-reinstall --no-deps django-ox
+python -m pip check
+```
+
+The same repair applies if uninstalling the old 0.0.1 stub removed `oxpull/__init__.py`, leaving a namespace import without `oxpull.__version__`.
+
+These package-file failures do not alter the database data. Run migrations and complete the normal checks before restarting.
+
+This shared-file warning concerns earlier distributions that installed an `oxpull` module. Uninstalling the module-free 1.9.0 metapackage does not remove django-ox's module files.
 
 ## Switching over
 

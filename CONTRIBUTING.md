@@ -11,21 +11,49 @@ python -m venv .venv
 
 ## Running the tests
 
-SQLite (default):
+The default pytest command runs `tests/` only, using SQLite:
 
-```
+```sh
 .venv/bin/python -m pytest
 ```
 
-PostgreSQL 16, which exercises the single-statement `SKIP LOCKED` claim
-path:
+To run that suite on PostgreSQL 16, including the single-statement
+`SKIP LOCKED` claim path:
 
-```
+```sh
 docker run -d --name ox-pg -e POSTGRES_PASSWORD=ox -p 54329:5432 postgres:16
 DJANGO_SETTINGS_MODULE=tests.settings_postgres .venv/bin/python -m pytest
 ```
 
-Run both before opening a PR. CI tests every supported Python and Django version on SQLite and PostgreSQL, and the oldest and newest corners on MySQL 8. Separate psycopg2 and mysqlclient jobs are configured to test only the stored-row reader.
+Run both before opening a pull request.
+
+The optional `oxpull` app has a separate suite that requires Django 6.0 or
+later and its own settings:
+
+```sh
+.venv/bin/python -m pytest tests_oxpull --ds=tests_oxpull.settings
+```
+
+For other database configurations, use `--ds=tests_oxpull.settings_postgres`,
+`--ds=tests_oxpull.settings_postgres_pooled` or
+`--ds=tests_oxpull.settings_mysql`. Do not run this suite with `tests.*`
+settings. Add `-m "not hazard"` to exclude tests marked `hazard`; run the
+hazard tests when changing worker, claim, transaction, model, migration or
+workflow behaviour. Workflows are provisional.
+
+Installed-wheel tests are opt-in. They build wheels and virtual environments:
+
+```sh
+.venv/bin/python -m pytest tests_wheel -m wheel
+```
+
+CI configures six shards for the `oxpull` feature suite. Keep feature tests in `tests_oxpull/` and base tests in `tests/`. Changes to shared runtime code must be checked against both suites; a passing base suite alone does not cover the optional app.
+
+Strict type checking covers both `src/django_ox/` and `src/oxpull/`:
+
+```sh
+.venv/bin/mypy --strict src/
+```
 
 ## Style
 
@@ -65,6 +93,8 @@ The project URL check is not cosmetic. A package page cannot be edited after
 upload, so anything wrong in the metadata stays wrong until the next version.
 
 ## Pull requests
+
+Contributions are licensed under the project's BSD-3-Clause licence.
 
 - One change per PR, with tests. Behavior changes need a test that fails
   without the fix.

@@ -2,3 +2,5 @@
 # pip install -r docs/requirements.txt && mkdocs build
 mkdocs>=1.6.1,<2
 mkdocs-material>=9.7.7,<10
+# 1.2.3 depends on properdocs, a second documentation engine; 1.2.2 needs only mkdocs.
+mkdocs-redirects==1.2.2

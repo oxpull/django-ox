@@ -26,3 +26,12 @@ def test_every_nav_page_is_included():
 
 def test_changelog_snippet_is_resolved():
     assert "--8<--" not in OUTPUT.read_text()
+
+
+def test_a_section_index_page_uses_its_directory_url():
+    assert page_url("index.md") == "https://oxpull.com/django-ox/"
+    assert page_url("features/index.md") == "https://oxpull.com/django-ox/features/"
+    assert (
+        page_url("features/batches.md")
+        == "https://oxpull.com/django-ox/features/batches/"
+    )

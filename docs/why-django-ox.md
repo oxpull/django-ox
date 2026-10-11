@@ -47,9 +47,9 @@ Inspect tracebacks and use Retry or Discard on failed tasks. Edit recurring sche
 
 Both provide a `django.tasks` backend. django-ox automatically requeues a dead worker's tasks. huey's guide says mid-execution tasks are lost and aren't retried automatically.
 
-### Do retries and recovery require Pro?
+### Do retries and recovery need the optional app?
 
-No. The free package includes both, plus schedules and Django admin integration. Health checks and metrics are also included.
+No. Retries, dead-worker recovery, schedules, Django admin integration, health checks and metrics work without the optional `oxpull` app.
 
 ### How do I make recovery safe?
 
@@ -59,11 +59,11 @@ Write idempotent tasks. A repeated execution must not duplicate effects such as 
 
 Python 3.12+ and Django 5.2 LTS, 6.0 or 6.1. Django 5.2 uses the `django-tasks` backport. PostgreSQL, MySQL 8 and SQLite run in CI.
 
-### What does Pro add?
+### What does the optional app add?
 
-Batches, unique tasks, shared rate limits and workflows, with maintainer email support.
+[Unique tasks](features/unique-tasks.md), [batches](features/batches.md), [shared rate limits](features/rate-limiting.md) and [workflows](features/workflows.md). The `oxpull` app is included in django-ox and requires Django 6.0+.
 
-Oxpull Pro costs $399 per year, per company, excluding VAT where it applies. Every environment is included. Pro requires Django 6.0+.
+`OxpullBackend`, `OxpullWorker` and the documented unique-task, batch and rate-limit entry points are stable. Workflows are provisional. See the [feature overview](features/index.md) for setup and API status.
 
 [**Get started**](background-tasks.md)
 

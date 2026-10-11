@@ -82,6 +82,28 @@ def read_dunder_version(repo: Path = REPO) -> str | None:
     return match.group(1) if match else None
 
 
+OXPULL_VERSION_IMPORT = re.compile(r"^from django_ox import __version__\s*$", re.M)
+OXPULL_VERSION_LITERAL = re.compile(r"^__version__\s*=", re.M)
+
+
+def check_oxpull_version(repo: Path = REPO) -> tuple[list[str], list[str]]:
+    """oxpull ships in the django-ox distribution, so its __version__ must be
+    django-ox's own and not a second literal that drifts at release."""
+    path = repo / "src" / "oxpull" / "__init__.py"
+    if not path.is_file():
+        return [], []
+    text = path.read_text(encoding="utf-8")
+    if OXPULL_VERSION_LITERAL.search(text) or not OXPULL_VERSION_IMPORT.search(text):
+        return [
+            fail(
+                "src/oxpull/__init__.py does not take __version__ from django_ox. "
+                "Use `from django_ox import __version__`: one distribution has "
+                "one version, and a second literal drifts."
+            )
+        ], []
+    return [], ["oxpull.__version__ is django_ox.__version__"]
+
+
 def read_changelog(repo: Path = REPO) -> tuple[str | None, set[str]]:
     text = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
     headings = re.findall(r"^##\s*\[([^\]]+)\]", text, re.M)
@@ -102,6 +124,16 @@ def read_unreleased(repo: Path = REPO) -> str:
 def read_migrations(repo: Path = REPO) -> set[str]:
     """The migration filenames the source tree declares."""
     directory = repo / "src" / "django_ox" / "migrations"
+    if not directory.is_dir():
+        return set()
+    return {
+        path.name for path in directory.glob("[0-9]*.py") if path.name != "__init__.py"
+    }
+
+
+def read_oxpull_migrations(repo: Path = REPO) -> set[str]:
+    """The oxpull migration filenames the source tree declares."""
+    directory = repo / "src" / "oxpull" / "migrations"
     if not directory.is_dir():
         return set()
     return {
@@ -191,6 +223,10 @@ def check_source(
     else:
         notes.append(f"__version__ and pyproject agree on {version}")
 
+    oxpull_problems, oxpull_notes = check_oxpull_version(repo)
+    problems.extend(oxpull_problems)
+    notes.extend(oxpull_notes)
+
     if newest is None:
         problems.append(fail("CHANGELOG has no released version heading"))
     elif newest != version:
@@ -250,7 +286,10 @@ def check_sdist_ignore_files(path: Path, members: list[str]) -> list[str]:
 
 
 def check_dist(
-    dist: Path, version: str, migrations: set[str] | None = None
+    dist: Path,
+    version: str,
+    migrations: set[str] | None = None,
+    oxpull_migrations: set[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Everything only the built archive can show. Returns (problems, notes)."""
     problems: list[str] = []
@@ -260,6 +299,9 @@ def check_dist(
         return [fail(f"{dist} does not exist; run python -m build first")], notes
 
     expected = read_migrations() if migrations is None else migrations
+    expected_oxpull = (
+        read_oxpull_migrations() if oxpull_migrations is None else oxpull_migrations
+    )
 
     for kind, pattern in (
         ("wheel", "django_ox-*.whl"),
@@ -306,6 +348,29 @@ def check_dist(
                 for tail in tails
                 if tail.startswith("migrations/") and tail != "migrations/__init__.py"
             }
+            for required in ("__init__.py", "backend.py", "models.py", "py.typed"):
+                if f"oxpull/{required}" not in {
+                    name.split("src/", 1)[-1] for name in members
+                }:
+                    problems.append(
+                        fail(f"{path.name} does not contain oxpull/{required}")
+                    )
+            shipped_oxpull = {
+                name.split("oxpull/migrations/", 1)[-1]
+                for name in members
+                if "oxpull/migrations/" in name
+                and not name.endswith("oxpull/migrations/__init__.py")
+                and name.endswith(".py")
+            }
+            for missing in sorted(expected_oxpull - shipped_oxpull):
+                problems.append(
+                    fail(
+                        f"{path.name} is missing oxpull migration {missing}. "
+                        "An upgrade against it leaves the table without the "
+                        "column the code expects."
+                    )
+                )
+
             for missing in sorted(expected - shipped):
                 problems.append(
                     fail(

@@ -8,7 +8,10 @@
 > use Django 6.1 or Django 5.2 with django-tasks 0.12+; Django 6.0 supports
 > bare tasks. Import schedules from django-celery-beat's database scheduler
 > tables. Your Django database handles the queue. BSD 3-Clause.
-> Package name on PyPI: django-ox. App label: django_ox.
+> django-ox 1.9.0 also includes unique tasks, batches, rate limiting and
+> provisional workflows through the optional `oxpull` app, on Django 6.0+.
+> Package name on PyPI: django-ox. Main app label: django_ox.
+> Optional app label: oxpull.
 
 **Current release: django-ox 1.8.0, uploaded to PyPI on 2026-10-04.**
 
@@ -286,10 +289,10 @@
   READY, WAITING, FAILED or LOST task without running it. Both return a bool,
   and neither touches a RUNNING task. With `django.contrib.admin` installed the
   task table is registered in the admin with the same two actions.
-- `OxTask.Status.WAITING` is a status django-ox never writes itself.
-  Workers never claim a waiting task, `ox_prune` never deletes it, and
-  `retry` skips it. It reads as READY through `django.tasks`. Workflows in
-  Oxpull Pro write and release it.
+- `OxTask.Status.WAITING` is used by workflows in the optional `oxpull`
+  app. Workers never claim a waiting task, `ox_prune` never deletes it,
+  and `retry` skips it. It reads as READY through `django.tasks`.
+  Workflows write and release this status.
 - Run `migrate` before rolling workers, not from the worker process.
 - Out of scope in the core: interrupting one chosen running task on demand
   (every attempt is unbounded by default and can have a configured deadline
@@ -321,26 +324,23 @@
   between calls for delayed retries. No timeouts, lease renewal, schedules
   or reconcilers run automatically. Use `TransactionTestCase` to test
   worker autocommit behaviour and a real worker for infrastructure.
-- Batches, unique (deduplicated) tasks, rate limiting and workflows are in
-  Oxpull Pro, a paid add-on requiring Django 6.0+;
-  https://oxpull.com/ has the details.
-  `create_schedules` creates stored schedules in the free package.
-  `django_ox.stats` and `ox_health` are also in the free package.
+- Unique tasks, batches, rate limiting and workflows are included in
+  django-ox through the optional `oxpull` app and require Django 6.0+.
+  `OxpullBackend`, `OxpullWorker` and the documented unique-task, batch
+  and rate-limit entry points are stable. Workflows are provisional.
+  Setup: https://oxpull.com/django-ox/features/
+  `create_schedules` creates stored schedules. It, `django_ox.stats` and
+  `ox_health` do not require the optional app.
 
-**Compatibility and project history**
+**Compatibility**
 
-Supported versions: Python 3.12-3.14 and Django 5.2 LTS through 6.1.
+django-ox 1.9.0 supports Python 3.12-3.14 and Django 5.2 LTS through 6.1.
 For Django 5.2, install the backport extra.
 PostgreSQL, MySQL 8 and SQLite are in CI.
 
-As of 2026-10-04:
-- 18 releases in 49 days. Public API stable since 1.0.0 (September 2026).
-- All 36 checks passed on release PR #124, including test-suite legs on
-  PostgreSQL, MySQL and SQLite, plus Wagtail smoke checks.
-- 3,761 test cases in the 1.8.0 suite.
-- 22 merged pull requests from 13 outside contributors.
-- Featured in PyCoder's Weekly #752 (2026-09-15).
-- Listed in awesome-django under Task Queues.
+The optional `oxpull` app requires Django 6.0+.
+For earlier `oxpull` installations, follow:
+https://oxpull.com/django-ox/migrating/#earlier-oxpull-installs
 
 Use Context7 library id `/oxpull/django-ox` to look up the documentation.
 
@@ -353,16 +353,20 @@ Use Context7 library id `/oxpull/django-ox` to look up the documentation.
 - [Recurring tasks](https://oxpull.com/django-ox/recurring-tasks/): schedule keys, cron syntax, many workers sharing a tick and missed ticks.
 - [Schedules in the database](https://oxpull.com/django-ox/stored-schedules/): admin-editable schedules, schedulable keys, create_schedules and the django-celery-beat database importer.
 - [Common patterns](https://oxpull.com/django-ox/patterns/): transactional enqueue, retries, deferral, bulk enqueue, queue routing, idempotency and tests.
-- [Migrating](https://oxpull.com/django-ox/migrating/): moving from another Django Tasks backend, Celery or huey, and migrating away.
+- [Migrating](https://oxpull.com/django-ox/migrating/): moving from another Django Tasks backend, Celery or huey, upgrading earlier `oxpull` installs, and migrating away.
 - [Why django-ox](https://oxpull.com/django-ox/why-django-ox/): requirements, alternatives, limits and evaluation questions.
-- [Use cases](https://oxpull.com/django-ox/use-cases/): recovery, broker-free tasks, transactional enqueue, recurring tasks and a paid Pro case.
+- [Use cases](https://oxpull.com/django-ox/use-cases/): recovery, broker-free tasks, transactional enqueue, recurring tasks and deduplicating repeated webhooks.
 - [Choosing a backend](https://oxpull.com/django-ox/choosing/): sourced backend comparisons and when not to use django-ox.
 - [Production](https://oxpull.com/django-ox/production/): supervision, containers, shutdown, scaling, leases, databases and pruning.
 - [Monitoring](https://oxpull.com/django-ox/monitoring/): stats, health probes, Prometheus metrics, log events, retry, discard and admin.
 - [Benchmarks](https://oxpull.com/django-ox/benchmarks/): throughput and latency measurements with their methods.
 - [API stability](https://oxpull.com/django-ox/stability/): public API, versioning, deprecation policy and supported versions.
-- [Changelog](https://oxpull.com/django-ox/changelog/): django-ox 1.8.0 additions, fixes and security changes, plus earlier releases.
-- [Pro](https://oxpull.com/django-ox/pro/): what Oxpull Pro adds, delivery and pricing.
+- [Changelog](https://oxpull.com/django-ox/changelog/): django-ox 1.9.0 changes and earlier releases.
+- [Features](https://oxpull.com/django-ox/features/): optional `oxpull` app setup, Django 6.0+ requirements and API stability.
+- [Unique tasks](https://oxpull.com/django-ox/features/unique-tasks/): deduplicate pending work by key and understand when another enqueue creates a task.
+- [Batches](https://oxpull.com/django-ox/features/batches/): group tasks, track progress and run a callback when the batch settles.
+- [Rate limiting](https://oxpull.com/django-ox/features/rate-limiting/): shared limits on task starts, worker configuration and the distinction from concurrency limits.
+- [Workflows](https://oxpull.com/django-ox/features/workflows/): provisional dependency DAGs, worker configuration and workflow execution.
 - [For AI assistants](https://oxpull.com/django-ox/agents/): exact setup and verification steps, upgrade guidance and operational facts.
 
 ## Optional

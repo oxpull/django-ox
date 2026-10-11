@@ -134,8 +134,8 @@ batch open; the stop-time look waits up to five seconds for that claim.
 If the claim is still in flight then, the look gives up with
 `worker_claim_recovery_failed` and a row that landed is left to the reaper.
 `--max-tasks` counts only claims
-that returned; a claim that raised uses no slot. Oxpull Pro also counts
-admission only for a claim that returned, so a released row is counted
+that returned; a claim that raised uses no slot. Rate-limit admission is
+also counted only for a claim that returned, so a released row is counted
 when it is claimed again.
 
 No database statement is added to the ordinary task path. A recovery look
@@ -352,13 +352,15 @@ python manage.py ox_worker --batch --concurrency 4
 "Nothing to claim" is a point-in-time observation by this worker, not a
 guarantee that the queue is empty or a workflow is complete. Future
 `run_after` tasks, backed-off retries, locked tasks and tasks excluded by
-claim filters may remain. With [Oxpull Pro](pro.md), rate-limited READY tasks
-and WAITING workflow children may remain too. A pass that sees due tasks but
-loses them all to other workers isn't empty, and the worker polls again.
-Immediately eligible follow-up work committed before a local task finishes
-can be picked up on a subsequent pass, unless another stop condition wins.
-Batch mode does not wait for later commits, schedule ticks or reconciler
-hand-offs; arrange another run or use a long-running worker for that work.
+claim filters may remain. With the optional `oxpull` app,
+[rate-limited](features/rate-limiting.md) READY tasks and WAITING
+[workflow](features/workflows.md) children may remain too.
+A pass that sees due tasks but loses them all to other workers isn't empty,
+and the worker polls again. Immediately eligible follow-up work committed
+before a local task finishes can be picked up on a subsequent pass, unless
+another stop condition wins. Batch mode does not wait for later commits,
+schedule ticks or reconciler hand-offs; arrange another run or use a
+long-running worker for that work.
 
 Schedules dispatch only while a worker runs. A batch checks them when it
 starts and keeps checking while it runs. Each schedule then enqueues only its
@@ -917,13 +919,11 @@ replacement connections.
 
 ### Rolling out per-task policy
 
-No database migration is required. The attempt-budget column already
-exists, but old and new workers do not execute the same live policy.
+Per-task policy was introduced in django-ox 1.5.0. When upgrading from 1.4.0, use the mixed-fleet guidance below until every worker has been upgraded.
 
-Deploy django-ox 1.5.0 to every producer, worker and other process that
-imports task modules before adding declarations. Deploy Oxpull Pro 1.5.0
-everywhere too if it is installed. Only then enable `max_attempts`,
-`backoff` and `timeout` declarations.
+Per-task policy does not require a migration of either app. Treat it as a mixed-fleet configuration rollout: update every process that enqueues or claims the affected tasks before relying on the new policy.
+
+Earlier `oxpull` installs have their own [upgrade steps](migrating.md#earlier-oxpull-installs). Those package upgrade steps are separate from enabling per-task policy.
 
 | Mixed-fleet case | Behaviour |
 | --- | --- |
@@ -1614,3 +1614,37 @@ your own. Flag reference on the
 [Configuration](configuration.md#ox_prune) page. FAILED rows are kept by
 default so tracebacks survive until you have looked at them; add
 `--include-failed` once that is not needed.
+
+### oxpull_prune
+
+Run `oxpull_prune` to clean up records owned by the optional app:
+
+```console
+python manage.py oxpull_prune
+```
+
+It removes:
+
+- Unique-task lock rows whose tasks are no longer READY or RUNNING, including locks whose tasks were pruned, and locks with a NULL task id. Locks are not aged. Enqueuing the same key also releases a stale lock.
+- Eligible workflow node rows and the edges into them, for workflows that have been COMPLETE longer than `--older-than`.
+- Backstop scan rows for workflows that are COMPLETE or no longer exist.
+
+It never deletes workflow rows or batch members.
+
+For each eligible workflow, pruning first stamps `metadata_retired_at`, once. If a node is still pending, it deletes nothing and tries again on a later run. It repairs unrecorded outcomes, then deletes only nodes whose outcomes are recorded and whose task rows are SUCCESSFUL, DISCARDED or gone.
+
+Nodes whose task rows are FAILED or LOST remain until `ox_prune --include-failed` removes those task rows. A node with no recorded outcome is never deleted.
+
+The options are:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--batch-size` | `1000` | Rows per DELETE. Must be at least 1. A workflow statement deletes at most 1,000 rows. |
+| `--older-than` | `7d` | Workflow retention age. Accepts values such as `7d`, `24h`, `90m`, `45s` or plain seconds. Does not age unique-task locks. |
+| `--dry-run` | Off | Count eligible records without deleting rows or writing retirement stamps. |
+
+There is no `--database` option. The command uses the database assigned by the routers to both the `django_ox` and `oxpull` tables and refuses a split. If the workflow tables do not exist yet, it skips workflow cleanup and reports that `migrate oxpull` is needed.
+
+No ordering with `ox_prune` is required. Running `ox_prune --include-failed` first lets more workflow nodes be removed. A lock whose task `ox_prune` deleted is stale and can also be removed.
+
+The command ends by reporting retained workflow, node and edge counts. See [Monitoring](monitoring.md) for their meaning.

@@ -21,8 +21,8 @@ DOCS = REPO / "docs"
 OUTPUT = DOCS / "llms-full.txt"
 SITE_URL = "https://oxpull.com/django-ox/"
 
-# mkdocs.yml uses a `!relative` tag that yaml.safe_load rejects, and the nav is
-# a flat list, so a line match is simpler and has no dependency.
+# mkdocs.yml uses a `!relative` tag that yaml.safe_load rejects, so a line
+# match is simpler and has no dependency.
 NAV_ENTRY = re.compile(r"^\s+- (?P<title>[^:]+): (?P<file>\S+\.md)\s*$")
 SNIPPET = re.compile(r'^--8<-- "(?P<file>[^"]+)"\s*$')
 
@@ -46,7 +46,11 @@ def nav_pages() -> list[tuple[str, str]]:
 
 def page_url(filename: str) -> str:
     stem = filename.removesuffix(".md")
-    return SITE_URL if stem == "index" else f"{SITE_URL}{stem}/"
+    if stem == "index":
+        return SITE_URL
+    if stem.endswith("/index"):
+        return f"{SITE_URL}{stem.removesuffix('index')}"
+    return f"{SITE_URL}{stem}/"
 
 
 def page_text(filename: str) -> str:

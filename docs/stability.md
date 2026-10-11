@@ -147,6 +147,53 @@ updates `run_after`, rather than preserving its original value as proposal
 See [Configuration](configuration.md#per-task-policy) for validation,
 framework support and precedence.
 
+### Stable: optional `oxpull` app
+
+The stable public surface is:
+
+- `oxpull.backend.OxpullBackend`.
+- Its `UNIQUE_TASKS`, `RATE_LIMITS` and `RATE_REFRESH_INTERVAL` options.
+- `oxpull.worker.OxpullWorker`.
+- `oxpull.unique.unique`.
+- `oxpull.batches.Batch` and `oxpull.batches.BatchProgress`.
+- `oxpull.batches.create`, `oxpull.batches.get` and `oxpull.batches.reconcile`.
+- `Batch.add`, `Batch.seal`, `Batch.progress` and `batch.id`.
+- `oxpull.exceptions.UniqueEnqueueRace`.
+- `oxpull.exceptions.BatchSealed`.
+- `oxpull.exceptions.BatchMemberExists`.
+- The `oxpull_prune` management command.
+- All 16 `oxpull` check ids: `oxpull.E001` through `oxpull.E009`, and `oxpull.W001` through `oxpull.W007`.
+- The `oxpull_*` schema.
+- The non-workflow `oxpull` log events documented under [Log events](monitoring.md#log-events).
+
+`BatchProgress.pruned` is a deprecated alias of `unattributed`. Use `unattributed`; the alias emits `DeprecationWarning` and is marked for removal in 2.0.
+
+### Provisional: workflows
+
+The documented workflow surface is provisional:
+
+- `oxpull.workflows.create`.
+- `oxpull.workflows.get`.
+- `oxpull.workflows.reconcile`.
+- `oxpull.workflows.retained_rows`.
+- `Workflow.add`, `Workflow.seal` and `Workflow.progress`.
+- `WorkflowProgress`.
+- `oxpull.exceptions.WorkflowSealed`.
+- `oxpull.exceptions.WorkflowNodeExists`.
+- `oxpull.exceptions.UnknownWorkflowNode`.
+- The `WORKFLOWS` option.
+- Every `workflow_*` log event.
+
+The provisional tier also applies to the documented results returned by these workflow entry points. A return type's use in documentation does not make unrelated implementation helpers public.
+
+### Not public: workflow internals
+
+Workflow implementation helpers are not public API. In particular, `node_flag`, `runnable_filter_q` and `record_node_outcome` are internal, even though they appear in the module's `__all__`.
+
+Internal contracts between `django_ox` and `oxpull` are tested by the feature
+suite in the same CI. They are not public API and are not maintained through
+a separate dependency pin.
+
 ### Not public
 
 Everything else is an implementation detail and may change in any release
@@ -323,19 +370,24 @@ changelog, and in a security advisory where relevant.
 
 ## Supported Python and Django
 
-Each django-ox release is tested against the matrix below in CI, on SQLite
-and PostgreSQL 16 across the grid and MySQL 8 on the oldest and newest
-corners; these are the supported combinations.
+The `oxpull` app requires Django 6.0+. Its SQLite and PostgreSQL suites cover the Django 6.0 / 6.1 grid on `rc*` tags and in nightly runs. Its MySQL 8 suite runs at Python 3.14 / Django 6.1.
+
+The separate django-ox matrix continues to cover Django 5.2, and its MySQL coverage includes the oldest and newest supported corners. That broader base-app matrix is not a claim that the optional app runs on Django 5.2.
 
 | | Django 5.2 LTS | Django 6.0 | Django 6.1 |
 | --- | --- | --- | --- |
-| **Python 3.12** | tested | tested | tested |
-| **Python 3.13** | tested | tested | tested |
+| **Python 3.12** | `django_ox` tested; `oxpull` not supported | tested | tested |
+| **Python 3.13** | `django_ox` tested; `oxpull` not supported | tested | tested |
 | **Python 3.14** | not supported by Django 5.2 | tested | tested |
 
 Django 6.0 and later ship the Tasks framework in core. The Django 5.2 legs
-install the `django-tasks` backport and run the whole suite against it, which
-is what `django-ox[backport]` pulls in.
+install the `django-tasks` backport and run the `django_ox` suite against it,
+which is what `django-ox[backport]` pulls in. Those legs do not run the
+`oxpull` feature suite.
+
+`oxpull` is not supported on Django 5.2. It raises `ImproperlyConfigured`
+during application startup, before system checks can run. Installing the
+backport does not enable `oxpull` on Django 5.2.
 
 Support for per-task policy declarations differs from support for the
 backend itself:

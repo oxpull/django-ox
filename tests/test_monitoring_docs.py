@@ -20,11 +20,46 @@ _HELPER = re.compile(r'\b(?:_log_extra|_complete)\(\s*"([a-z_]+)"')
 _ROW = re.compile(r"^\| `([a-z_]+)` \|", re.MULTILINE)
 
 
+#: Names built with an f-string, by their template, and every name each one
+#: produces. A template missing here fails the scan rather than going unread.
+FSTRING_NAMES = {
+    "{}_add_{}_retry": {
+        "batch_add_deadlock_retry",
+        "batch_add_serialization_retry",
+        "workflow_add_deadlock_retry",
+        "workflow_add_serialization_retry",
+    },
+    "{}_reconcile_stopped": {"batch_reconcile_stopped", "workflow_reconcile_stopped"},
+    "{}_id": {"batch_id", "workflow_id"},
+}
+
+
+def fstring_names(node: ast.JoinedStr, where: str) -> set[str]:
+    template = "".join(
+        part.value if isinstance(part, ast.Constant) else "{}" for part in node.values
+    )
+    if template not in FSTRING_NAMES:
+        raise AssertionError(
+            f"{where}: f-string name the scanner cannot expand: {template!r}"
+        )
+    return FSTRING_NAMES[template]
+
+
 def emitted_events() -> set[str]:
     events: set[str] = set()
     for path in SRC.rglob("*.py"):
         text = path.read_text()
         events |= set(_INLINE.findall(text)) | set(_HELPER.findall(text))
+        for node in ast.walk(ast.parse(text, filename=str(path))):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key, value in zip(node.keys, node.values, strict=True):
+                if (
+                    isinstance(key, ast.Constant)
+                    and key.value == "event"
+                    and isinstance(value, ast.JoinedStr)
+                ):
+                    events |= fstring_names(value, f"{path}:{value.lineno}")
     return events
 
 
@@ -63,9 +98,32 @@ def _literal_str_keys(node: ast.AST) -> set[str] | None:
     for key in node.keys:
         if isinstance(key, ast.Constant) and isinstance(key.value, str):
             keys.add(key.value)
+        elif isinstance(key, ast.JoinedStr):
+            keys |= fstring_names(key, f"line {key.lineno}")
         else:
             return None
     return keys
+
+
+def _variable_dict_keys(func: ast.AST) -> dict[str, set[str]]:
+    """Keys of each dict a function builds in a local variable."""
+    found: dict[str, set[str]] = {}
+    for node in ast.walk(func):
+        if isinstance(node, ast.Assign | ast.AnnAssign):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    keys = _literal_str_keys(node.value) if node.value else None
+                    if keys is not None:
+                        found.setdefault(target.id, set()).update(keys)
+                elif (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and isinstance(target.slice, ast.Constant)
+                    and isinstance(target.slice.value, str)
+                ):
+                    found.setdefault(target.value.id, set()).add(target.slice.value)
+    return found
 
 
 def log_extra_fixed_keys(helper: ast.FunctionDef) -> set[str]:
@@ -116,14 +174,25 @@ def emitted_extra_keys() -> set[str]:
     fixed = log_extra_fixed_keys(helpers[0])
     keys: set[str] = set()
     for path, tree in trees.items():
+        enclosing: dict[ast.AST, dict[str, set[str]]] = {}
+        for func in ast.walk(tree):
+            if isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
+                local = _variable_dict_keys(func)
+                for inner in ast.walk(func):
+                    enclosing[inner] = local
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             extra_kw = next((kw for kw in node.keywords if kw.arg == "extra"), None)
             if extra_kw is not None:
                 parsed = _literal_str_keys(extra_kw.value)
+                local = enclosing.get(node, {})
                 if parsed is not None:
                     keys |= parsed
+                elif (
+                    isinstance(extra_kw.value, ast.Name) and extra_kw.value.id in local
+                ):
+                    keys |= local[extra_kw.value.id]
                 else:
                     value = extra_kw.value
                     helper = None
@@ -215,6 +284,22 @@ def test_fixed_keys_refuse_an_entry_the_scanner_cannot_read(entry):
     )
     with pytest.raises(AssertionError, match="the scanner cannot read"):
         log_extra_fixed_keys(helper)
+
+
+def test_an_fstring_name_without_a_template_entry_is_refused():
+    node = ast.parse('f"{noun}_unlisted_{event}"', mode="eval").body
+    assert isinstance(node, ast.JoinedStr)
+    with pytest.raises(AssertionError, match="cannot expand"):
+        fstring_names(node, "here")
+
+
+def test_a_dict_built_in_a_variable_is_read_with_its_later_keys():
+    func = ast.parse(
+        "def log():\n"
+        "    extra: dict = {'event': 'e', 'first': 1}\n"
+        "    extra['second'] = 2\n"
+    ).body[0]
+    assert _variable_dict_keys(func) == {"extra": {"event", "first", "second"}}
 
 
 def test_every_emitted_extra_key_is_documented():

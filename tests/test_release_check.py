@@ -22,6 +22,7 @@ from tools.check_release import REPO, check_dist, check_docs, check_source
 
 VERSION = "0.2.0"
 MIGRATIONS = {"0001_initial.py", "0002_oxscheduletick.py", "0003_lease_epoch.py"}
+OXPULL_MIGRATIONS = {"0001_initial.py", "0002_oxpullbatch.py"}
 LICENCE = "BSD 3-Clause License\n\nCopyright (c) 2026, Oxpull\n"
 
 URLS = {
@@ -39,7 +40,16 @@ def _payload(version, migrations):
         "django_ox/worker.py": "class Worker:\n    pass\n",
         "django_ox/models.py": "class OxTask:\n    pass\n",
         "django_ox/migrations/__init__.py": "",
+        "oxpull/__init__.py": "from django_ox import __version__\n",
+        "oxpull/backend.py": "class OxpullBackend:\n    pass\n",
+        "oxpull/models.py": "class OxpullBatch:\n    pass\n",
+        "oxpull/py.typed": "",
+        "oxpull/migrations/__init__.py": "",
     }
+    for name in sorted(OXPULL_MIGRATIONS):
+        payload[f"oxpull/migrations/{name}"] = (
+            "class Migration:\n    dependencies = []\n"
+        )
     for name in sorted(migrations):
         payload[f"django_ox/migrations/{name}"] = (
             "class Migration:\n    dependencies = []\n"
@@ -95,6 +105,7 @@ def _repo(
     urls=None,
     readme_pin=None,
     docs_pin=None,
+    oxpull_init="from django_ox import __version__\n",
 ):
     repo = tmp_path / "repo"
     (repo / "src" / "django_ox").mkdir(parents=True, exist_ok=True)
@@ -109,6 +120,9 @@ def _repo(
     (repo / "src" / "django_ox" / "__init__.py").write_text(
         f'__version__ = "{dunder or version}"\n', encoding="utf-8"
     )
+    if oxpull_init is not None:
+        (repo / "src" / "oxpull").mkdir(parents=True, exist_ok=True)
+        (repo / "src" / "oxpull" / "__init__.py").write_text(oxpull_init, "utf-8")
     if changelog:
         refs = (
             f"\n[{changelog}]: https://github.com/oxpull/django-ox/releases/tag/"
@@ -150,6 +164,26 @@ def test_consistent_source_passes(tmp_path):
 def test_mismatched_dunder_version_fails(tmp_path):
     problems, _ = check_source(_repo(tmp_path, dunder="0.1.2"))
     assert "__version__ is 0.1.2 but pyproject version is 0.2.0" in _messages(problems)
+
+
+def test_oxpull_version_is_derived_from_django_ox(tmp_path):
+    problems, notes = check_source(_repo(tmp_path))
+    assert problems == []
+    assert "oxpull.__version__ is django_ox.__version__" in notes
+
+
+@pytest.mark.parametrize(
+    "init",
+    [
+        '__version__ = "0.2.0"\n',
+        '__version__ = "0.1.0"\n',
+        "",
+        "from somewhere import __version__\n",
+    ],
+)
+def test_a_hardcoded_or_missing_oxpull_version_fails(tmp_path, init):
+    problems, _ = check_source(_repo(tmp_path, oxpull_init=init))
+    assert "does not take __version__ from django_ox" in _messages(problems)
 
 
 def test_stale_changelog_entry_fails(tmp_path):
@@ -247,14 +281,41 @@ def test_an_empty_unreleased_heading_does_not_block(tmp_path):
 
 
 def test_clean_build_passes(tmp_path):
-    problems, notes = check_dist(_dist(tmp_path), VERSION, MIGRATIONS)
+    problems, notes = check_dist(
+        _dist(tmp_path), VERSION, MIGRATIONS, OXPULL_MIGRATIONS
+    )
     assert problems == []
     assert any("django_ox-0.2.0.tar.gz" in note for note in notes)
     assert any("django_ox-0.2.0-py3-none-any.whl" in note for note in notes)
 
 
+def test_a_dropped_oxpull_migration_fails_the_build(tmp_path):
+    dist = _dist(tmp_path)
+    for path in dist.glob("*.whl"):
+        with zipfile.ZipFile(path) as source:
+            kept = {
+                n: source.read(n)
+                for n in source.namelist()
+                if n != "oxpull/migrations/0002_oxpullbatch.py"
+            }
+        with zipfile.ZipFile(path, "w") as target:
+            for name, body in kept.items():
+                target.writestr(name, body)
+    problems, _ = check_dist(dist, VERSION, MIGRATIONS, OXPULL_MIGRATIONS)
+    assert "missing oxpull migration 0002_oxpullbatch.py" in _messages(problems)
+
+
+@pytest.mark.parametrize(
+    "member", ["__init__.py", "backend.py", "models.py", "py.typed"]
+)
+def test_an_archive_without_the_oxpull_package_fails(tmp_path, member):
+    dist = _dist(tmp_path, omit=(f"oxpull/{member}",))
+    problems, _ = check_dist(dist, VERSION, MIGRATIONS, OXPULL_MIGRATIONS)
+    assert f"does not contain oxpull/{member}" in _messages(problems)
+
+
 def test_missing_dist_directory_fails(tmp_path):
-    problems, _ = check_dist(tmp_path / "dist", VERSION, MIGRATIONS)
+    problems, _ = check_dist(tmp_path / "dist", VERSION, MIGRATIONS, OXPULL_MIGRATIONS)
     assert "does not exist" in _messages(problems)
 
 
@@ -267,7 +328,7 @@ def test_a_dropped_migration_fails(tmp_path, dropped):
     that is not there.
     """
     dist = _dist(tmp_path, migrations=MIGRATIONS - {dropped})
-    problems, _ = check_dist(dist, VERSION, MIGRATIONS)
+    problems, _ = check_dist(dist, VERSION, MIGRATIONS, OXPULL_MIGRATIONS)
     text = _messages(problems)
     assert f"is missing migration {dropped}" in text
     # Caught in both archives; either one can be the thing that gets installed.
@@ -277,28 +338,32 @@ def test_a_dropped_migration_fails(tmp_path, dropped):
 
 def test_two_versions_staged_together_fails(tmp_path):
     _dist(tmp_path, version="0.1.2")
-    problems, _ = check_dist(_dist(tmp_path), VERSION, MIGRATIONS)
+    problems, _ = check_dist(_dist(tmp_path), VERSION, MIGRATIONS, OXPULL_MIGRATIONS)
     text = _messages(problems)
     assert "holds a django_ox wheel at 0.1.2 as well as 0.2.0" in text
     assert "holds a django_ox sdist at 0.1.2 as well as 0.2.0" in text
 
 
 def test_no_artifact_at_the_declared_version_fails(tmp_path):
-    problems, _ = check_dist(_dist(tmp_path, version="0.1.2"), VERSION, MIGRATIONS)
+    problems, _ = check_dist(
+        _dist(tmp_path, version="0.1.2"), VERSION, MIGRATIONS, OXPULL_MIGRATIONS
+    )
     text = _messages(problems)
     assert "has no django_ox wheel at 0.2.0" in text
     assert "has no django_ox sdist at 0.2.0" in text
 
 
 def test_missing_licence_fails(tmp_path):
-    problems, _ = check_dist(_dist(tmp_path, licence=None), VERSION, MIGRATIONS)
+    problems, _ = check_dist(
+        _dist(tmp_path, licence=None), VERSION, MIGRATIONS, OXPULL_MIGRATIONS
+    )
     assert "does not carry LICENSE" in _messages(problems)
 
 
 @pytest.mark.parametrize("module", ["worker.py", "models.py", "__init__.py"])
 def test_missing_module_fails(tmp_path, module):
     dist = _dist(tmp_path, omit=(f"django_ox/{module}",))
-    problems, _ = check_dist(dist, VERSION, MIGRATIONS)
+    problems, _ = check_dist(dist, VERSION, MIGRATIONS, OXPULL_MIGRATIONS)
     assert f"does not contain django_ox/{module}" in _messages(problems)
 
 

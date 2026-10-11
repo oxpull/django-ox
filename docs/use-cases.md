@@ -112,11 +112,11 @@ Keep schedules in settings, or let your team pause and edit them as [rows in Dja
 
 Schedules need at least one running worker and a usable database. A schedule-scoped failure does not stop later entries if rollback succeeds and the same connection remains usable. After an outage, only the most recent missed tick is enqueued.
 
-## Deduplicate a repeated webhook with Oxpull Pro
+## Deduplicate a repeated webhook
 
 A payment provider sends the same event twice. Your webhook queues the same invoice sync twice. Stop the duplicate at enqueue rather than making the queue do the same work again.
 
-With django-ox alone, these calls create separate tasks:
+Without a unique-task declaration, these calls create separate tasks:
 
 ```python
 from django.tasks import task
@@ -127,20 +127,20 @@ def sync_invoice(invoice_id): ...
 
 
 sync_invoice.enqueue(1001)
-sync_invoice.enqueue(1001)  # django-ox: a second row, a second run
+sync_invoice.enqueue(1001)  # A second row, a second run.
 ```
 
-Oxpull Pro's unique tasks deduplicate inside the task's own transaction. While a task with the same key is READY or RUNNING, enqueueing it again returns the pending task's result without writing another row.
+[Unique tasks](features/unique-tasks.md) deduplicate inside the task's own transaction. While a task with the same key is READY or RUNNING, enqueueing it again returns the pending task's result without writing another row.
 
 Once the task settles, the same call can enqueue again. This prevents duplicate pending work; it does not make external effects exactly-once. Tasks still need to be safe to repeat.
 
-Pro also lets you track a batch through completion, control task starts with shared rate limits, and connect dependent tasks into workflows. You get email support from the maintainer and priority feature requests.
+Unique tasks are included in django-ox through the optional `oxpull` app and require Django 6.0+. Follow the [setup overview](features/index.md), then the [unique-task declaration guide](features/unique-tasks.md).
 
-[Order Oxpull Pro](https://oxpull.com/) for $399 per year, per company, excluding VAT where it applies. Submit the form; your invoice arrives within two business days. Once paid, private package index credentials arrive by email. Installation stays `pip install`. Pro requires Django 6.0+.
+The same app provides [batches](features/batches.md) to track grouped work, [rate limiting](features/rate-limiting.md) to control task starts, and provisional [workflows](features/workflows.md) to connect dependent tasks.
 
 ## When to choose another tool
 
-Choose another backend if you need to revoke a chosen running task, use chains, groups or chords, or exceed the throughput one database can serve. Celery supports revocation and those composition patterns.
+Choose another backend if you need to revoke a chosen running task, require Celery's chain, group or chord APIs, or exceed the throughput one database can serve. django-ox provides [batches](features/batches.md) and provisional [dependency workflows](features/workflows.md), not those Celery APIs.
 
 Transactional enqueue requires the task and model rows to share a database. A separate queue database cannot give you that shared commit.
 

@@ -31,10 +31,11 @@ D. The cold import: a module that passes the new keyword arguments to ``@task``
 E. Both workers on one queue at once, rows enqueued from both sides: every row
    spends exactly its stored budget, whichever worker claims each attempt.
 
-D is why the rollout order is: the new django-ox (and its oxpull pair)
-everywhere first, declarations second. While a fleet is genuinely mixed, a
-declaration has to be import-compatible (``mixapp/compat.py`` in PROJECT below
-is one way) and neither the per-task timeout nor the backoff can be relied on.
+D is why the rollout order is: deploy the new django-ox release everywhere
+first, then add declarations. While a fleet runs mixed versions, declarations
+must remain import-compatible (``mixapp/compat.py`` in PROJECT below shows
+one approach). Do not rely on the per-task timeout or backoff until rollout
+is complete.
 
 Before anything runs, the script establishes which code each side imports:
 the 1.4.0 side must be the PyPI release (no ``direct_url.json``, and when the

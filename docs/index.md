@@ -99,10 +99,15 @@ coming back. The mechanics, and the one case to know about, are in
 - [Monitoring](monitoring.md): a queue-stats API, an `ox_health` command
   for fleet alerting and optional local heartbeat probes, a Prometheus
   endpoint, structured log events, and an admin page with retry and discard.
+- [Unique tasks](features/unique-tasks.md), [batches](features/batches.md),
+  [rate limiting](features/rate-limiting.md) and
+  [workflows](features/workflows.md), through the optional `oxpull` app
+  included in django-ox. These features require Django 6.0+.
+  Workflows are provisional. See [setup and API status](features/index.md).
 
 ## Install
 
-Requires Python 3.12+ and Django 5.2+. Django 6.0 and later ship the Tasks
+Requires Python 3.12+ and Django 5.2+. The optional `oxpull` app requires Django 6.0+. Django 6.0 and later ship the Tasks
 framework in core. On Django 5.2 LTS it comes from the `django-tasks`
 backport, so install the `backport` extra there. **Your own imports differ
 with it**: on Django 6.0+ you write `from django.tasks import task`, and on
@@ -191,9 +196,10 @@ That is the whole integration. Next steps:
 
 ## Scope
 
-The core is finite on purpose: a durable queue, a worker, recurring
-schedules, and monitoring, with nothing extra to operate. Design
-decisions to know before you commit:
+django-ox provides a durable queue, a worker, recurring schedules and
+monitoring in your existing database. Its optional `oxpull` app adds
+coordination features without a separate broker. Design decisions to know
+before you commit:
 
 - A queued task can be discarded before a worker claims it, and a failed
   one retried, from the admin or with `django_ox.actions`. Attempt
@@ -203,16 +209,19 @@ decisions to know before you commit:
   interrupted on demand. See [Task timeouts](production.md#task-timeouts)
   for enforcement and its limits.
 - Every django-ox table lives on one database, the one your router sends
-`OxTask` to. A queue on a different database from the rows it refers to gives
-up the transactional enqueue.
+  `OxTask` to. A queue on a different database from the rows it refers to gives
+  up the transactional enqueue.
 - Worker concurrency is a thread pool, which fits I/O-bound tasks. For
   CPU-bound work, run `--processes N --concurrency 1`, which is N worker
   processes under one supervisor. See
   [Production](production.md#threads-and-processes).
 
-Batches, unique tasks, rate limiting and workflows are in [Oxpull Pro](pro.md), a paid add-on; <https://oxpull.com/> has the details.
-Metrics stay in this package: `django_ox.stats` and `ox_health` are free and
-stay free.
+[Unique tasks, batches, rate limiting and workflows](features/index.md)
+are included in django-ox through the optional `oxpull` app and require
+Django 6.0+. Workflows are provisional.
+
+Metrics and health checks are included: `django_ox.stats` and `ox_health`
+do not require the optional app.
 
 ## License
 

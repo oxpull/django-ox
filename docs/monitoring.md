@@ -61,6 +61,16 @@ functions.
 (`oldest_ready_age`).** Neither works alone. Depth looks fine while one poisoned
 task starves the queue. Age looks fine during a flood of fresh work.
 
+### Retained workflow rows
+
+`oxpull.workflows.retained_rows()` returns `RetainedRows(workflows, nodes, edges)`: three plain counts from the `oxpull` database.
+
+These counts cover workflows whose retirement has begun, identified by `metadata_retired_at`, and the node and edge rows still retained for them. Retained nodes include those whose task rows are FAILED or LOST and can still move through retry, and those whose outcomes were not recorded before their task rows were deleted. Edges into those nodes are retained too.
+
+Counts that only grow can indicate task rows that `ox_prune --include-failed` has not removed, or workflows with a node still pending. `oxpull_prune` prints these counts at the end of every run.
+
+This workflow API and its documented result are provisional.
+
 ## Health checks: ox_health
 
 `ox_health` has two modes. With no flags, it checks only that the database
@@ -654,18 +664,62 @@ The same shape reads `oldest_ready_age()` or `failure_rate()` per queue.
 
 ## Log events
 
-The worker logs through the standard library logger named `django_ox`. No
-logging dependency, no imposed format. Configure handlers and formatters in
-`LOGGING` as usual. The `django_ox.testing` backends also emit
-`task_policy_inert`. The `run_tasks()` helper emits worker events,
-`run_tasks_timeout_inert` and `run_tasks_callback_failed` as described below.
+The `django_ox` worker logs through the standard library logger named
+`django_ox`. The `oxpull` worker uses `oxpull`; batch and workflow operations
+also use `oxpull.batches` and `oxpull.workflows`. No logging dependency, no
+imposed format. Configure handlers and formatters in `LOGGING` as usual.
+The `django_ox.testing` backends also emit `task_policy_inert`. The
+`run_tasks()` helper emits worker events, `run_tasks_timeout_inert` and
+`run_tasks_callback_failed` as described below.
 
 Lifecycle events carry an `extra` dictionary with stable keys, so a JSON
 formatter that serialises record attributes gets consistent fields to index.
 The message text is not part of the contract. The keys are.
 
+For task lifecycle events, `attempt` is the task's attempt count. For
+`batch_complete_serialization_retry`, `workflow_complete_serialization_retry`,
+`workflow_seal_serialization_retry` and `workflow_reconcile_conflict_retry`,
+it is the transaction attempt number instead.
+
+The optional app emits 31 distinct log events. Non-workflow events are stable; every `workflow_*` event is provisional.
+
+An `attempt` value on `batch_add_deadlock_retry`, `batch_add_serialization_retry`, `workflow_add_deadlock_retry` or `workflow_add_serialization_retry` is a transaction attempt number, not a task execution attempt.
+
+A stopped reconciler sweep is not a completed sweep. Check `visited_count`, `unvisited_count` and `remaining_seconds`. If every tick stops before visiting all sealed objects, give the reconciler's queue a longer `TASK_TIMEOUTS` entry.
+
 | Event | Level | When |
 | --- | --- | --- |
+| `batch_add_deadlock_retry` | WARNING | `Batch.add()` owns its transaction, lost a deadlock and is running the transaction again. Keys: `batch_id`, `task_path`, `attempt` |
+| `batch_add_serialization_retry` | WARNING | `Batch.add()` owns its transaction, lost a PostgreSQL serialization failure and is running the transaction again. Keys: `batch_id`, `task_path`, `attempt` |
+| `batch_complete_serialization_retry` | INFO | Batch completion encountered a serialization failure and is retrying its transaction. |
+| `batch_completed` | INFO | A batch completed, with failed and unattributed member counts. |
+| `batch_reconcile_failed` | ERROR | A batch could not be reconciled. Includes a traceback. |
+| `batch_reconcile_stopped` | WARNING | A reconciler tick under a task timeout stopped before visiting every sealed batch. A later tick visits the rest. If every tick stops, give the reconciler's queue a longer `TASK_TIMEOUTS` entry. Keys: `visited_count`, `unvisited_count`, `remaining_seconds` |
+| `rate_limit_closed` | WARNING | Consecutive failures to count against a rate limit have closed admission under that limit until its counter accepts a write again. |
+| `rate_limit_reopened` | WARNING | A rate-limit counter accepts writes again, so admission under that limit has resumed. |
+| `rate_limit_row_adopted` | INFO | The database collation treats a configured limit name and a stored window-row name as equal, so the limit uses that row. |
+| `rate_limit_uncounted` | WARNING | A task runs without being counted against a rate limit because counting failed or its window repeatedly rolled during counting attempts. |
+| `workflow_add_deadlock_retry` | WARNING | `Workflow.add()` owns its transaction, lost a deadlock and is running the transaction again. Keys: `workflow_id`, `task_path`, `attempt` |
+| `workflow_add_serialization_retry` | WARNING | `Workflow.add()` owns its transaction, lost a PostgreSQL serialization failure and is running the transaction again. Keys: `workflow_id`, `task_path`, `attempt` |
+| `workflow_backstop_skipped` | INFO | The workflow backstop could not lock some rows and will try them again. |
+| `workflow_complete_serialization_retry` | INFO | Workflow completion encountered a serialization failure and is retrying its transaction. |
+| `workflow_completed` | INFO | A workflow completed, with failed, cancelled and unattributed node counts. |
+| `workflow_nodes_cancelled` | INFO | Unreachable workflow nodes were cancelled. |
+| `workflow_nodes_released` | DEBUG (worker), INFO (reconciler) | A worker released dependent workflow nodes, or the reconciler released nodes that no worker released. |
+| `workflow_outcome_retry` | INFO | Recording a workflow node's outcome encountered a lock conflict and is being retried. |
+| `workflow_outcome_unrecorded` | ERROR | A workflow node's outcome could not be recorded after the reported number of tries. The task row is unchanged, and the reaper will reclaim it. Includes a traceback. |
+| `workflow_reconcile_conflict_retry` | INFO | A workflow transaction run by the reconciler or by `oxpull_prune` lost a deadlock or serialization failure and is running again. `conflict` is `deadlock` or `serialization_failure`. `workflow_id` is absent only for `oxpull_prune`'s scan-row cleanup. |
+| `workflow_reconcile_failed` | ERROR | A workflow could not be reconciled. Includes a traceback. |
+| `workflow_reconcile_stopped` | WARNING | A reconciler tick under a task timeout stopped before visiting every sealed workflow. A later tick visits the rest. If every tick stops, give the reconciler's queue a longer `TASK_TIMEOUTS` entry. Keys: `visited_count`, `unvisited_count`, `remaining_seconds` |
+| `workflow_records_repaired` | INFO | The reconciler or `oxpull_prune` recorded previously unrecorded node outcomes. `node_count` is the number of node records repaired. |
+| `workflow_release_backstop_failed` | ERROR | The workflow release backstop failed. The same tick still cancels nodes and completes workflows. Includes a traceback. |
+| `workflow_release_deferred` | WARNING | Workflow node task rows could not be released after repeated lock conflicts. The reconciler will retry them. |
+| `workflow_release_failed` | WARNING | A worker could not release a task's dependents, or a workflow node could not be rechecked after `add()`. The reconciler will retry the release. |
+| `workflow_release_skip_overflow` | WARNING | A workflow's skip queue is full, so some nodes were not queued. The reconciler's pass over waiting nodes still finds them. |
+| `workflow_release_skip_unqueued` | WARNING | Workflow nodes could not be queued for the reconciler to retry. Its pass over waiting nodes still finds them. |
+| `workflow_schema_check_failed` | WARNING | The worker could not check the workflow schema before starting. |
+| `workflow_seal_serialization_retry` | INFO | Sealing a workflow encountered a serialization failure and is retrying its transaction. |
+| `workflow_session_bounds_not_restored` | WARNING | The session's lock-wait and statement bounds could not be restored, so the connection was closed. |
 | `worker_started` | INFO | The run loop starts. |
 | `connection_pool_too_small` | WARNING | Once per `Worker.run()`, after `worker_started` and before threads start: the worker alias's effective PostgreSQL pool maximum is below `concurrency + 1`. Each `--processes` child checks separately. The warning does not resize the pool, refuse startup, measure available server slots, or reserve fallback capacity. |
 | `connection_pool_cannot_drain` | WARNING | Pooled PostgreSQL only. The installed psycopg_pool has no `ConnectionPool.drain()` method, which was added in 3.3.0. Emitted once per `Worker.run()`, after `worker_started` and the `connection_pool_too_small` check, before threads start. Each `--processes` child checks separately. Also emitted at the first sweep of such a pool in a process, for each database alias, unless startup already emitted it in that process. Concurrent first sweeps may emit duplicate warnings. The sweep record is the only notice available to callers of `run_once()` or `run_tasks()`. Idle connections are still tested as in django-ox 1.7.0, preserving restart recovery but also the wait on a connection that stays open without answering. A stop is not read until that test returns. Upgrade psycopg_pool to 3.3.3 or newer. This warning does not refuse startup or change the pool. No traceback. Keys: `event` and `database` always; `worker_id` only on the startup record. |
@@ -761,6 +815,28 @@ A failed connect while recording a stuck attempt logs
 
 | Key | Present on | Meaning |
 | --- | --- | --- |
+| `batch_id` | `batch_complete_serialization_retry`, `batch_completed`, `batch_reconcile_failed` | The batch identifier. |
+| `failed_count` | `batch_completed`, `workflow_completed` | The number of failed batch members or workflow nodes. |
+| `unattributed_count` | `batch_completed`, `workflow_completed` | The number of batch members or workflow nodes reported as unattributed. |
+| `limit` | `rate_limit_closed`, `rate_limit_reopened`, `rate_limit_row_adopted`, `rate_limit_uncounted` | The configured rate-limit name. |
+| `failures` | `rate_limit_closed` | The number of consecutive counting failures that caused admission under the limit to close. |
+| `stored_as` | `rate_limit_row_adopted` | The name stored on the window row that the database collation treats as equal to the configured limit name. |
+| `row_count` | `workflow_backstop_skipped` | The number of rows the workflow backstop could not lock. |
+| `table` | `workflow_backstop_skipped` | The table containing the rows the workflow backstop could not lock. |
+| `workflow_id` | `workflow_complete_serialization_retry`, `workflow_completed`, `workflow_nodes_cancelled`, `workflow_reconcile_failed`, `workflow_records_repaired`, `workflow_release_skip_overflow`, `workflow_seal_serialization_retry`; conditionally on `workflow_reconcile_conflict_retry` and `workflow_release_skip_unqueued` | The affected workflow. On `workflow_reconcile_conflict_retry`, it is absent only for `oxpull_prune`'s scan-row cleanup. |
+| `cancelled_count` | `workflow_completed`, `workflow_nodes_cancelled` | The number of cancelled nodes reported by the event. |
+| `released_count` | `workflow_nodes_released` | The number of workflow nodes released. |
+| `try_number` | `workflow_outcome_retry` | The try number for recording the workflow node's outcome. |
+| `dropped_status` | `workflow_outcome_unrecorded` | The outcome status that could not be recorded. |
+| `tries` | `workflow_outcome_unrecorded` | The number of tries made to record the workflow node's outcome. |
+| `conflict` | `workflow_reconcile_conflict_retry` | The transaction conflict being retried: `deadlock` or `serialization_failure`. |
+| `node_count` | `workflow_records_repaired` | On `workflow_records_repaired`, the number of node records repaired by the reconciler or `oxpull_prune`. |
+| `task_count` | `workflow_release_deferred`, `workflow_release_skip_unqueued` | For a deferred release, the upper bound on task rows that could not be released. For a queue failure, the number of nodes that could not be queued for retry. |
+| `dropped_count` | `workflow_release_skip_overflow` | The number of nodes not queued because the workflow's skip queue was full. |
+| `attempt` | `batch_add_deadlock_retry`, `batch_add_serialization_retry`, `workflow_add_deadlock_retry`, `workflow_add_serialization_retry` | For the four `*_add_*_retry` events, the transaction attempt number, not the task execution attempt. |
+| `visited_count` | `batch_reconcile_stopped`, `workflow_reconcile_stopped` | The number of sealed batches or workflows visited before the reconciler sweep stopped. |
+| `unvisited_count` | `batch_reconcile_stopped`, `workflow_reconcile_stopped` | The number not visited before the sweep stopped. |
+| `remaining_seconds` | `batch_reconcile_stopped`, `workflow_reconcile_stopped` | The remaining task-timeout budget when the reconciler stopped the sweep. |
 | `event` | all events | The event name from the table above. |
 | `worker_id` | Worker events except `heartbeat_write_failed`, `schedule_source_unavailable`, `schedule_boundary_healed`, `schedule_boundary_heal_failed`, `schedule_row_skipped` and `schedule_lock_unavailable` for a stored schedule; also `run_tasks_callback_failed`; includes `worker_claim_released` | Unique id of the worker emitting the record. With `--processes`, the slot number is the last part of the id. A Worker used in a process forked after its creation takes a new id in the child, retaining any `-<slot>` suffix; the parent keeps its id. An at-fork hook re-identifies the child. If the fork runs no at-fork hook, as with uWSGI's default, a pid check re-identifies it at its first `claim_one()`, claim, recovery look or `run()`; until then, the child's copy can still report the parent's id. Fork before claiming: handing an already-claimed row to a child for execution is unsupported, because the child's new id cannot renew the parent's lease and the reaper can requeue the row while the child runs it. This identity handling does not make arbitrary native forks safe. `ox_worker --processes` starts fresh children rather than forking them. Settings-declared `schedule_lock_unavailable` events carry this key. Records from `run_tasks()` use the drain worker's hostname-pid-random id, created for each call. `task_policy_inert` and `run_tasks_timeout_inert` omit this key. On `worker_claim_released`, identifies the worker that made the unconfirmed claim and released it. |
 | `worker_class` | `claim_filter_sql_missing` | The Worker subclass's class name. |

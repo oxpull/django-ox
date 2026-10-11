@@ -49,6 +49,12 @@ markdown_extensions:
   - pymdownx.snippets:
       base_path: !relative $config_dir
 
+plugins:
+  - search
+  - redirects:
+      redirect_maps:
+        pro.md: features/index.md
+
 nav:
   - Home: index.md
   - Background tasks, step by step: background-tasks.md
@@ -56,6 +62,12 @@ nav:
   - Configuration: configuration.md
   - Recurring tasks: recurring-tasks.md
   - Schedules in the database: stored-schedules.md
+  - Task coordination:
+      - Overview: features/index.md
+      - Unique tasks: features/unique-tasks.md
+      - Batches: features/batches.md
+      - Rate limiting: features/rate-limiting.md
+      - Workflows: features/workflows.md
   - Common patterns: patterns.md
   - Migrating: migrating.md
   - Why django-ox: why-django-ox.md
@@ -65,6 +77,5 @@ nav:
   - Monitoring: monitoring.md
   - Benchmarks: benchmarks.md
   - API stability: stability.md
-  - Pro: pro.md
   - For AI assistants: agents.md
   - Changelog: changelog.md

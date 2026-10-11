@@ -619,7 +619,7 @@ def _run_one(
         if attempt.moved is not None:
             raise attempt.moved
         # The outcome write's own callbacks, which a worker's commit of that
-        # write would run: Pro releases a workflow node's dependents here.
+        # write would run: `oxpull` releases a workflow node's dependents here.
         failed = attempt.commit()
         if failed is not None:
             raise failed[1]

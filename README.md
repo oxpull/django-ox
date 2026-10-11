@@ -9,7 +9,7 @@
 
 Stop running Redis to send an email. django-ox runs Django's Tasks framework in your existing database, where a dead worker doesn't mean lost tasks. Run a worker process, not a separate broker.
 
-Supports Django 5.2 LTS through the `django-tasks` backport, and Django 6.0 / 6.1 through core `django.tasks`. Requires Python 3.12+.
+Supports Django 5.2 LTS through the `django-tasks` backport, and Django 6.0 / 6.1 through core `django.tasks`. Requires Python 3.12+. The optional `oxpull` app provides task-coordination features and requires Django 6.0+.
 
 ## Install
 
@@ -60,9 +60,19 @@ In the [published benchmarks](https://oxpull.com/django-ox/benchmarks/), 2,000 o
 
 CI covers Python 3.12 to 3.14, Django 5.2 to 6.1, PostgreSQL, MySQL and SQLite. Open source under the BSD 3-Clause licence.
 
-Need to coordinate work across tasks? [Oxpull Pro](https://oxpull.com/) adds batches, unique tasks, rate limiting and workflows.
+django-ox 1.9.0 includes the optional `oxpull` app for [unique tasks, batches, rate limiting and workflows](https://oxpull.com/django-ox/features/). The app requires Django 6.0+. Projects that do not enable it can continue using django-ox on Django 5.2.
 
 Documentation: <https://oxpull.com/django-ox/>
+
+## Task coordination
+
+### Enable the optional app
+
+Add `"oxpull"` to `INSTALLED_APPS`, run migrations, and use `"oxpull.backend.OxpullBackend"` for the task aliases that need its features. No separate package installation is needed.
+
+Unique tasks deduplicate pending tasks at enqueue time. Batches also need a reconciler schedule. Rate limits need `OPTIONS["RATE_LIMITS"]` and `"oxpull.worker.OxpullWorker"` as the alias's `OPTIONS["WORKER_CLASS"]`. Workflows need `OPTIONS["WORKFLOWS"] = True`, `OxpullWorker` and a reconciler schedule. Workflows are created at runtime, not declared as workflow definitions in settings.
+
+See the [feature setup](https://oxpull.com/django-ox/features/) and, for an existing installation, [Earlier `oxpull` installs](https://oxpull.com/django-ox/migrating/#earlier-oxpull-installs).
 
 ## One fewer service to run
 
@@ -93,19 +103,23 @@ limit, keeping the full traceback of every attempt.
 ## Measured
 
 [The benchmarks page](https://oxpull.com/django-ox/benchmarks/) compares
-django-ox with `django-tasks-db`, another database backend for the Tasks
-framework, on one machine with both arms on Django core `django.tasks` and
-PostgreSQL 16: backlog drain at two queue depths with matched worker
-processes, enqueue latency, bulk enqueue, worker death under repeated SIGKILL
-with restarts, and exception retry. Every figure there is a median over five
-interleaved runs with its range, computed from the raw JSON files committed
-beside the page, and every run is reported.
+django-ox 1.3.0 with `django-tasks-db` 0.13.0, another database backend
+for the Tasks framework, in runs dated 2026-09-19. Both use Django core
+`django.tasks`, PostgreSQL 16 in Docker on an Apple M1 Max, no-op task
+bodies and package defaults except `LOCK_TIMEOUT` of 15 seconds for the
+kill test. It covers backlog drain at two queue depths with one and four
+workers per backend, bulk enqueue of 10,000 rows in one transaction,
+worker death under repeated SIGKILL with restarts, and exception retry.
+The drain comparison uses five interleaved runs per backend per cell;
+the kill test uses five trials with 20 worker kills each. The bulk
+enqueue result includes its run range. Raw JSON files are downloadable
+from the repository.
 
 ## How it compares
 
 The four backends a Django team is most likely to shortlist. Every cell about
-another project comes from that project's own documentation or issue tracker,
-each carrying a link and the date it was read on the
+another project comes from that project's own documentation, source code or
+issue tracker, each carrying a link and the date it was read on the
 [Choosing a task backend](https://oxpull.com/django-ox/choosing/) page.
 
 | | django-ox | django-tasks-db | Celery | huey |
@@ -116,6 +130,10 @@ each carrying a link and the date it was read on the
 | Worker killed mid-task | **Retried.** The lease expires and the task goes back on the queue | **Stuck.** The task stays `RUNNING`, never retried and never failed. Issue #5 has been open since 2024-06-11. | **Lost** when the child process is killed, even with `acks_late` | **Lost.** "will not be retried automatically" |
 | Retries and backoff | **Exponential by default**, keeping every attempt's traceback. Per-task budget and backoff on Django 6.1 or Django 5.2 with django-tasks 0.12+ | **None** | Yes | Yes |
 | Recurring schedules | **Cron or a fixed interval, and no scheduler process.** Editable in the Django admin, limited to the tasks your code exposes | **None** | `celery beat`, a separate process you must run exactly one of | Yes |
+| Unique tasks / deduplicated enqueue | **Yes.** `@unique` returns the existing result while a match is READY or RUNNING. All four features below require the optional `oxpull` app and `OxpullBackend` on Django 6.0+ | **Business logic.** Issue #164 closed as a duplicate; maintainer: "handled by your business logic" | **No general built-in.** The cookbook's custom lock prevents concurrent runs, not duplicate enqueues | **Not enqueue dedup.** huey's own `lock_task()` prevents concurrent runs |
+| Batch completion callback | **Yes.** `on_complete` is enqueued once all member rows are settled or gone, whatever the outcome; `on_success` requires all to succeed. Callback execution is at least once | **None.** "Task Groups" discussion #58 open since 2024-06-20, with 0 comments | **Success callback; failure errback.** `chord` needs a supported result backend; a failed member produces `ChordError`, and an errback attached to the callback runs instead | **Includes failures.** huey's own `chord()` includes permanent failures; a member lost to abrupt shutdown prevents the callback |
+| Rate limits shared across workers | **Yes.** Database-backed start windows shared by `OxpullWorker` instances, with bounded overshoot; not concurrency limits | Not claimed | **Per-worker only.** `Task.rate_limit` is not a shared budget | **Yes.** huey's own `rate_limit()` uses a counter in shared storage, checked when the task runs |
+| Dependency workflows | **Yes, provisional.** `depends_on` lets a node run only after every upstream succeeds | Not claimed | **Yes.** `chain` / `link` run the next task after success | **Yes.** huey's own pipelines with `.then()` skip the remaining success pipeline after a failure |
 
 The full version has six more backends, a footnote and a date on every cell,
 and a [section on when django-ox is the wrong choice](https://oxpull.com/django-ox/choosing/#when-not-to-use-django-ox).
@@ -361,11 +379,12 @@ path, so admin access does not become permission to run anything. See
 
 ## Scope
 
-The core is finite on purpose: a durable queue, a worker, recurring
-schedules, monitoring, and nothing else to operate. Interrupting one chosen
-running task on demand is outside the current scope. Attempt deadlines can
-be set with `TASK_TIMEOUT`, per queue with `TASK_TIMEOUTS`, or per task
-with `timeout` on Django 6.1 or Django 5.2 with django-tasks 0.12+.
+django-ox provides a durable queue, a worker, recurring schedules and
+monitoring. The optional `oxpull` app adds task-coordination features.
+Interrupting one chosen running task on demand is outside the current scope.
+Attempt deadlines can be set with `TASK_TIMEOUT`, per queue with
+`TASK_TIMEOUTS`, or per task with `timeout` on Django 6.1 or Django 5.2
+with django-tasks 0.12+.
 See [Task timeouts](https://oxpull.com/django-ox/production/#task-timeouts)
 for enforcement and its limits.
 
@@ -381,15 +400,17 @@ at another alias works there and nothing warns, so leave it unset unless you
 mean it. See
 [Read replicas](https://oxpull.com/django-ox/configuration/#read-replicas).
 
-Batches, unique tasks, rate limiting and workflows are in
-[Oxpull Pro](https://oxpull.com/django-ox/pro/), a paid add-on; <https://oxpull.com/> has the details. Metrics stay in this
-package: `django_ox.stats` and `ox_health` are free and stay free.
+The optional `oxpull` app creates its own tables. It does not change any django-ox table, column, index, constraint or migration.
+
+Workflows do write task rows. They insert blocked nodes as WAITING tasks. Cancellation sets a READY or WAITING task to DISCARDED by a compare-and-set on the task row's status and lease epoch. Release moves a WAITING task to READY and updates `run_after`; `run_after` is never NULL. Revival of a DISCARDED node is not supported.
+
+`django_ox.stats` and `ox_health` remain available without enabling `oxpull`.
 
 ## Stability
 
-What counts as public API, the versioning and deprecation policy,
-and the supported Python and Django versions are documented in
-[the stability policy](https://oxpull.com/django-ox/stability/).
+`OxpullBackend`, its unique-task and rate-limit options, `OxpullWorker`, the unique-task decorator and the documented batches API are stable. Workflow APIs, the `WORKFLOWS` option and `workflow_*` log events are provisional. The [stability policy](https://oxpull.com/django-ox/stability/) lists the public surfaces in each tier.
+
+What counts as public API, the versioning and deprecation policy, and the guarantees attached to each tier are covered by [the stability policy](https://oxpull.com/django-ox/stability/).
 
 ## License
 

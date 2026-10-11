@@ -209,9 +209,13 @@ and inside a `transaction.atomic()` opened on the database that holds
 `OxTask` it commits or rolls back with the rest of the work you write there,
 as `enqueue()` does.
 
-This is a bulk insert and nothing more. Grouping the
-tasks, reading their progress as one number and firing a callback when the
-last one settles is a [batch](pro.md), in Oxpull Pro.
+This is a bulk insert and nothing more. To group tasks, read their
+progress as one number and fire a callback when the last one settles,
+use a [batch](features/batches.md). Batches start with `oxpull.batches.create()`; the returned batch has `add()`, `seal()` and `progress()`. They use the optional `oxpull` app and require a reconciler schedule. See [Batches](features/batches.md) for setup and guarantees.
+
+`enqueue_many()` does not accept unique tasks: it raises `InvalidTask`
+and names the task. See [Unique tasks](features/unique-tasks.md) for
+deduplicated enqueue.
 
 ## Keep slow work off the fast queue
 
@@ -333,7 +337,7 @@ Test timeout enforcement and worker infrastructure against a real worker.
 run_tasks(*, backend="default", queues=None, max_tasks=None, raise_failures=False) -> list[TaskResult]
 ```
 
-All arguments are keyword-only. `backend` must name an `OxBackend` alias. It selects the worker class and its default queues, including a configured `WORKER_CLASS`. Rows are claimed by queue, regardless of which backend enqueued them. Aliases sharing queues share work. For Pro workflows and rate limits, pass the Pro alias as `backend`.
+All arguments are keyword-only. `backend` must name an `OxBackend` or `OxpullBackend` alias. It selects the worker class and its default queues, including a configured `WORKER_CLASS`. Rows are claimed by queue, regardless of which backend enqueued them. Aliases sharing queues share work. For workflows and rate limits, pass the alias whose `OPTIONS["WORKER_CLASS"]` is `"oxpull.worker.OxpullWorker"`.
 
 `queues=None` uses the worker's queues. An empty list does the same. Empty backend `QUEUES` means every queue. An explicit list restricts claiming to those queues.
 
@@ -402,7 +406,7 @@ class DelayedTaskTests(TestCase):
             self.assertEqual([result.return_value for result in results], [5])
 ```
 
-For retries, advance time between calls by at least the configured backoff delay. Freezing a later time does not drain every retry. Each new retry is scheduled relative to that frozen instant. A zero backoff can retry within one call. Pro rate-limit windows use the database clock, which this patch does not advance.
+For retries, advance time between calls by at least the configured backoff delay. Freezing a later time does not drain every retry. Each new retry is scheduled relative to that frozen instant. A zero backoff can retry within one call. Rate-limit windows use the database clock, which this patch does not advance.
 
 ### Transactions and callbacks
 
@@ -434,9 +438,14 @@ Use a real worker to test timeout enforcement and worker infrastructure. `run_ta
 
 Timeouts are inert. `deadline()` and `remaining()` return `None`. A configured timeout produces `run_tasks_timeout_inert` once per task path per call. A hanging body or callback hangs the test.
 
-## Not in the core
+## Optional coordination features
 
-Batches, unique or deduplicated tasks, rate limiting and workflows are in
-[Oxpull Pro](pro.md), a paid add-on. Metrics are in the
-free tier: `django_ox.stats` and `manage.py ox_health` ship in the core. Chains
-are on the Pro roadmap, undated.
+[Unique tasks](features/unique-tasks.md), [batches](features/batches.md),
+[rate limiting](features/rate-limiting.md) and
+[workflows](features/workflows.md) are included in django-ox through the
+optional `oxpull` app. They require Django 6.0+.
+`OxpullBackend`, `OxpullWorker` and the documented unique-task, batch and
+rate-limit entry points are stable. Workflows are provisional.
+See the [feature overview](features/index.md) for setup.
+
+`django_ox.stats` and `manage.py ox_health` do not require the optional app.

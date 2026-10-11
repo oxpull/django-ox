@@ -129,8 +129,8 @@ def _on_a_thread(target, name):
 
 class CountsAfterClaiming(Worker):
     """
-    Counts every claim it makes on a row of its own after the base claim has
-    returned, as Oxpull Pro counts a rate-limited admission: an UPDATE whose
+    Counts every claim it makes on its own row after the base claim has
+    returned, as OxpullWorker counts a rate-limited admission: an UPDATE whose
     row lock a caller's transaction holds until it commits.
     """
 
@@ -230,11 +230,13 @@ def _two_callers(worker, *, wait_for_a, pause=1.0):
 )
 def test_an_override_waiting_on_a_callers_transaction_holds_up_no_claim(settings):
     """
-    X3-1 without Oxpull Pro. One Worker shared by two threads, whose
-    claim_one() override updates a row after the base claim. B's transaction
-    holds that row's lock after B's first run_once(); A's run_once() claims
-    and then waits for it; B's second run_once() must not wait for A, or
-    neither ever finishes: the database cannot see a lock held in Python.
+    A post-claim row update must not hold up another claim in the same worker.
+
+    Two threads share one Worker whose claim_one() override updates a row
+    after the base claim. B's transaction holds that row's lock after B's
+    first run_once(). A claims a task and then waits for the row lock.
+    B's second run_once() must not wait for A: the database cannot detect
+    a dependency on a Python lock, so that cycle would leave both waiting.
     """
     _budget(settings, 3)
     counter = tasks.record.enqueue("counter")
@@ -266,7 +268,7 @@ def test_an_override_waiting_on_a_callers_transaction_holds_up_no_claim(settings
 
 def test_a_claim_waiting_on_sqlites_write_lock_holds_up_no_claim(settings, monkeypatch):
     """
-    X3-2. On SQLite, B's transaction holds the write lock after its first
+    On SQLite, B's transaction holds the write lock after its first
     run_once(); A's claim waits for it in the busy handler; B's second
     run_once() must go ahead, so that B can commit and A's claim can land,
     rather than wait for A until A's busy timeout gives up. PostgreSQL and

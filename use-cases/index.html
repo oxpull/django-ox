@@ -439,6 +439,200 @@
   
   
   
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Task coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Task coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/unique-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Unique tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/batches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Batches
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/rate-limiting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rate limiting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../patterns/" class="md-nav__link">
         
@@ -625,10 +819,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#deduplicate-a-repeated-webhook-with-oxpull-pro" class="md-nav__link">
+  <a href="#deduplicate-a-repeated-webhook" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Deduplicate a repeated webhook with Oxpull Pro
+        Deduplicate a repeated webhook
       
     </span>
   </a>
@@ -796,33 +990,6 @@
   
   
     <li class="md-nav__item">
-      <a href="../pro/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Pro
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    <li class="md-nav__item">
       <a href="../agents/" class="md-nav__link">
         
   
@@ -941,10 +1108,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#deduplicate-a-repeated-webhook-with-oxpull-pro" class="md-nav__link">
+  <a href="#deduplicate-a-repeated-webhook" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Deduplicate a repeated webhook with Oxpull Pro
+        Deduplicate a repeated webhook
       
     </span>
   </a>
@@ -1064,9 +1231,9 @@ With Django's PostgreSQL pool, check
 <p>Every worker dispatches due schedules. A unique constraint on the schedule name and tick time prevents workers from enqueueing the same tick twice.</p>
 <p>Keep schedules in settings, or let your team pause and edit them as <a href="../stored-schedules/">rows in Django admin</a>. See <a href="../recurring-tasks/">Recurring tasks</a> for the configuration.</p>
 <p>Schedules need at least one running worker and a usable database. A schedule-scoped failure does not stop later entries if rollback succeeds and the same connection remains usable. After an outage, only the most recent missed tick is enqueued.</p>
-<h2 id="deduplicate-a-repeated-webhook-with-oxpull-pro">Deduplicate a repeated webhook with Oxpull Pro</h2>
+<h2 id="deduplicate-a-repeated-webhook">Deduplicate a repeated webhook</h2>
 <p>A payment provider sends the same event twice. Your webhook queues the same invoice sync twice. Stop the duplicate at enqueue rather than making the queue do the same work again.</p>
-<p>With django-ox alone, these calls create separate tasks:</p>
+<p>Without a unique-task declaration, these calls create separate tasks:</p>
 <div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>
 
 
@@ -1075,14 +1242,14 @@ With Django's PostgreSQL pool, check
 
 
 <span class="n">sync_invoice</span><span class="o">.</span><span class="n">enqueue</span><span class="p">(</span><span class="mi">1001</span><span class="p">)</span>
-<span class="n">sync_invoice</span><span class="o">.</span><span class="n">enqueue</span><span class="p">(</span><span class="mi">1001</span><span class="p">)</span>  <span class="c1"># django-ox: a second row, a second run</span>
+<span class="n">sync_invoice</span><span class="o">.</span><span class="n">enqueue</span><span class="p">(</span><span class="mi">1001</span><span class="p">)</span>  <span class="c1"># A second row, a second run.</span>
 </code></pre></div>
-<p>Oxpull Pro's unique tasks deduplicate inside the task's own transaction. While a task with the same key is READY or RUNNING, enqueueing it again returns the pending task's result without writing another row.</p>
+<p><a href="../features/unique-tasks/">Unique tasks</a> deduplicate inside the task's own transaction. While a task with the same key is READY or RUNNING, enqueueing it again returns the pending task's result without writing another row.</p>
 <p>Once the task settles, the same call can enqueue again. This prevents duplicate pending work; it does not make external effects exactly-once. Tasks still need to be safe to repeat.</p>
-<p>Pro also lets you track a batch through completion, control task starts with shared rate limits, and connect dependent tasks into workflows. You get email support from the maintainer and priority feature requests.</p>
-<p><a href="https://oxpull.com/">Order Oxpull Pro</a> for $399 per year, per company, excluding VAT where it applies. Submit the form; your invoice arrives within two business days. Once paid, private package index credentials arrive by email. Installation stays <code>pip install</code>. Pro requires Django 6.0+.</p>
+<p>Unique tasks are included in django-ox through the optional <code>oxpull</code> app and require Django 6.0+. Follow the <a href="../features/">setup overview</a>, then the <a href="../features/unique-tasks/">unique-task declaration guide</a>.</p>
+<p>The same app provides <a href="../features/batches/">batches</a> to track grouped work, <a href="../features/rate-limiting/">rate limiting</a> to control task starts, and provisional <a href="../features/workflows/">workflows</a> to connect dependent tasks.</p>
 <h2 id="when-to-choose-another-tool">When to choose another tool</h2>
-<p>Choose another backend if you need to revoke a chosen running task, use chains, groups or chords, or exceed the throughput one database can serve. Celery supports revocation and those composition patterns.</p>
+<p>Choose another backend if you need to revoke a chosen running task, require Celery's chain, group or chord APIs, or exceed the throughput one database can serve. django-ox provides <a href="../features/batches/">batches</a> and provisional <a href="../features/workflows/">dependency workflows</a>, not those Celery APIs.</p>
 <p>Transactional enqueue requires the task and model rows to share a database. A separate queue database cannot give you that shared commit.</p>
 <p>For CPU-bound work, the thread pool is not enough on its own. Use <code>--processes N</code> and measure your workload.</p>
 <p><a href="../background-tasks/"><strong>Follow the step-by-step guide</strong></a> to install django-ox and run your first tasks.</p>

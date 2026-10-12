@@ -1,0 +1,1447 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Database-backed worker backend for Django's Tasks framework.">
+      
+      
+      
+        <link rel="canonical" href="https://oxpull.com/django-ox/features/batches/">
+      
+      
+        <link rel="prev" href="../unique-tasks/">
+      
+      
+        <link rel="next" href="../rate-limiting/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Batches - django-ox</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/brand.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  
+    
+  
+  
+  
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="django-ox">
+  <meta property="og:title" content="Batches - django-ox">
+  <meta property="og:description" content="Database-backed worker backend for Django's Tasks framework.">
+  <meta property="og:url" content="https://oxpull.com/django-ox/features/batches/">
+  <meta property="og:image" content="https://oxpull.com/django-ox/assets/social-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="django-ox: the production worker for Django Tasks. Your database is the queue.">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Batches - django-ox">
+  <meta name="twitter:description" content="Database-backed worker backend for Django's Tasks framework.">
+  <meta name="twitter:image" content="https://oxpull.com/django-ox/assets/social-card.png">
+
+  <link rel="apple-touch-icon" href="../../assets/favicon.png">
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#batches" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="django-ox" class="md-header__button md-logo" aria-label="django-ox" data-md-component="logo">
+      
+  <img src="../../assets/mark-ox.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            django-ox
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Batches
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/oxpull/django-ox" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="django-ox" class="md-nav__button md-logo" aria-label="django-ox" data-md-component="logo">
+      
+  <img src="../../assets/mark-ox.png" alt="logo">
+
+    </a>
+    django-ox
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/oxpull/django-ox" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../background-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background tasks, step by step
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../wagtail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wagtail background tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../recurring-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recurring tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../stored-schedules/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schedules in the database
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Task coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Task coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../unique-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Unique tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Batches
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Batches
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#behaviour" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Behaviour
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#batch-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batch API
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-wide-a-batch-can-be" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How wide a batch can be
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rate-limiting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rate limiting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../patterns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Common patterns
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migrating/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrating
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-django-ox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Why django-ox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../use-cases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Use cases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../choosing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing a backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../production/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmarks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../stability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API stability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    For AI assistants
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#behaviour" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Behaviour
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#batch-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batch API
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-wide-a-batch-can-be" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How wide a batch can be
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="batches">Batches</h1>
+<p>A batch groups tasks and fires a callback once every member's row is settled or gone. Completion describes the recorded task rows, not proof that every member has stopped executing.</p>
+<p>See the <a href="../">feature overview</a> for setup, requirements, and compatibility.</p>
+<p>Batches derive completion from task rows rather than signals.
+Batch state is derived by querying member task rows, never accumulated
+from <code>task_finished</code>: a counter decremented by that signal hangs forever
+whenever a worker dies mid-task, which is exactly what batches exist to
+survive. The reconciler asks the rows instead, so it cannot miss a task
+however it died. Completion is a compare-and-set on the batch status,
+with the callbacks enqueued inside that same transaction. The rowcount
+picks a single winner among racing reconcilers, so the callbacks are
+enqueued once however many reconcilers race. They then run like any other
+task, which is at least once: a callback that is retried runs again. A
+crash mid-pass either leaves the batch sealed for the next tick or has
+already committed the completion and its callbacks together.
+These guarantees require the <a href="../unique-tasks/#database-routing-constraints">database-routing constraints</a>.</p>
+<p><code>OxpullBatchMember.task_id</code> is a bare UUID, not a ForeignKey, so task pruning
+cannot cascade through membership or be blocked by a membership foreign-key constraint. The completion query uses the ORM rather than
+SQL text, so <code>django_ox</code> table and column names come from model
+metadata rather than hard-coded names.</p>
+<h2 id="behaviour">Behaviour</h2>
+<p>A batch groups tasks and fires a callback once every member's row is
+settled (SUCCESSFUL, FAILED, LOST or DISCARDED) or gone; a row in any
+other status, including one unrecognised by django-ox 1.9.0, holds it open:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">oxpull</span><span class="w"> </span><span class="kn">import</span> <span class="n">batches</span>
+
+
+<span class="n">batch</span> <span class="o">=</span> <span class="n">batches</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="s2">"nightly-invoices"</span><span class="p">,</span> <span class="n">on_complete</span><span class="o">=</span><span class="n">summarize_run</span><span class="p">)</span>
+<span class="n">batch</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">send_invoice</span><span class="p">,</span> <span class="mi">42</span><span class="p">)</span>
+<span class="n">batch</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">send_invoice</span><span class="p">,</span> <span class="mi">43</span><span class="p">)</span>
+<span class="n">batch</span><span class="o">.</span><span class="n">seal</span><span class="p">()</span>
+
+<span class="n">batch</span><span class="o">.</span><span class="n">progress</span><span class="p">()</span>  <span class="c1"># BatchProgress(total=2, pending=1, succeeded=1, failed=0)</span>
+<span class="n">batches</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">batch</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>
+</code></pre></div>
+<p>Completion is detected by a reconciler task, which runs once a minute through
+django-ox's schedule dispatch (<code>OPTIONS["SCHEDULES"]</code>). Batches need this schedule; without it a batch never
+completes:</p>
+<div class="highlight"><pre><span></span><code><span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"oxpull.backend.OxpullBackend"</span><span class="p">,</span>
+        <span class="s2">"OPTIONS"</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">"SCHEDULES"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">"oxpull-batch-reconcile"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="s2">"task"</span><span class="p">:</span> <span class="s2">"oxpull.batches.reconcile"</span><span class="p">,</span>
+                    <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"* * * * *"</span><span class="p">,</span>
+                <span class="p">},</span>
+            <span class="p">},</span>
+        <span class="p">},</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The schedule may sit on any django-ox backend. Without one anywhere,
+<code>manage.py check</code> reports <code>oxpull.W002</code>, and <code>create()</code> and <code>seal()</code>
+refuse with <code>ImproperlyConfigured</code> naming the block above, so a batch
+cannot be left sealed with nothing to complete it. The refusal reads
+the settings of the process that calls, so the <code>SCHEDULES</code> block has to
+be present in every process that calls <code>create()</code> or <code>seal()</code>, web
+processes included, not only in the one that runs the scheduler. A
+deployment whose web settings omit it, because only the worker's carry
+the schedules, refuses every <code>create()</code> from the web;
+declaring the same block there changes nothing about which process
+runs the reconciler. <code>seal()</code> on a batch that is already SEALED or
+COMPLETE raises <code>BatchSealed</code> whatever the settings say.</p>
+<p>Semantics, all deliberate:</p>
+<ul>
+<li><strong>Sealing freezes membership.</strong> <code>add()</code> enqueues the task and writes the
+  membership row in one transaction, so the two commit or roll back
+  together. <code>seal()</code> snapshots the member count; after that, <code>add()</code>
+  raises <code>BatchSealed</code>. There is no un-seal and no reopen, and a batch
+  that is never sealed never completes. On MySQL, an <code>add()</code> that loses
+  an InnoDB deadlock reissues its own transaction, up to five times.
+  Called inside your <code>atomic()</code> block it cannot: InnoDB has rolled your
+  transaction back too, the error propagates, and it is your transaction
+  to retry. A reissue enqueues again, so <code>task_enqueued</code> fires once per
+  attempt, the first time for a row the rollback then discarded; a
+  receiver deferred with <code>transaction.on_commit</code> sees only the row that
+  committed, which is the rule for that signal in any case.</li>
+<li><strong><code>on_complete</code> fires once every member's row is settled (SUCCESSFUL,
+  FAILED, LOST or DISCARDED) or gone, whatever the outcome; a row in any
+  other status holds the batch open. <code>on_success</code> fires in addition, and
+  only when every member's outcome is known and none of them failed.</strong>
+  Finished is read off the row, not off the code; the bullet on what
+  complete means says what that leaves open. There is no failed state
+  for the batch itself: completion is completion, and <code>failed_count</code>
+  plus the absent <code>on_success</code> is how a bad run reads.</li>
+<li><strong>Callbacks are ordinary tasks.</strong> They are enqueued in the same
+  transaction that completes the batch, then retry and fail like any
+  other task. The batch stores their ids and does not supervise them.
+  A callback must be a <code>@task</code> on a django-ox backend, and is stored as
+  its dotted path: <code>create()</code> refuses a callback that carries <code>using()</code>
+  overrides, because only the path is kept and the overrides would be
+  dropped in silence. Set them on the decorator instead. A callback
+  cannot be a unique task either: two batches finishing with the same
+  callback and arguments would share one task, and one batch's callback
+  would never run. A stored callback that became unique after
+  <code>create()</code> is refused at completion instead, and its batch stays
+  SEALED, logged at each tick, until the callback is made non-unique
+  again; existing batches do not complete before then.</li>
+<li><strong>A retry is not a finish.</strong> A member with attempts remaining goes back
+  to READY, and a batch never completes past a member that will run
+  again.</li>
+<li><strong>A member that outlives <code>LOCK_TIMEOUT</code> reads by its row, not by what
+  it did.</strong> When the worker running a member stops renewing its lease,
+  the reaper takes the task back. With attempts remaining the row returns
+  to READY and its lease epoch moves, which drops the old attempt's
+  result. With no attempts left the row is recorded as LOST, which says
+  the attempt went unobserved and nothing about its outcome, so the batch
+  counts that member as unattributed rather than failed: <code>on_complete</code>
+  fires, <code>on_success</code> is withheld, and <code>failed_count</code> is unchanged.
+  Renewal keeps the lease only while it reaches the database on time.
+  With Django's PostgreSQL pool, renewal needs a connection: the worker
+  normally opens one outside the pool with a bounded deadline, with a
+  short pooled fallback if needed. Sizing <code>LOCK_TIMEOUT</code> alone does not
+  prevent a reclaim; a <code>task_reclaimed</code> warning in the worker log is
+  the symptom.</li>
+<li><strong>Complete is a reading of the rows, not proof that every member has
+  stopped running.</strong> The reconciler completes a batch at the tick where
+  it finds every member's row settled or gone. A member recorded LOST
+  may still be executing: its worker stopped renewing the lease, the
+  code kept going, and django-ox lets that execution write SUCCESSFUL
+  or FAILED onto its own row afterwards. The worker's bounded
+  recycle produces this on purpose when a member outlives <code>LOCK_TIMEOUT</code>
+  on its last attempt. So <code>on_complete</code> is not a barrier against a
+  member that is still running, and teardown in <code>on_complete</code> has to
+  tolerate one.
+  <code>on_success</code> fires only when every member's row is SUCCESSFUL, which
+  is the one outcome a running member cannot still have. Two things
+  follow. Member outcomes and the batch's totals are not final at
+  COMPLETE: a straggler can turn a LOST member SUCCESSFUL after
+  <code>failed_count</code> was written and the callback enqueued, and <code>progress()</code>
+  shows the new count. And an operator retry that commits during the
+  completing transaction can leave a READY member on a COMPLETE batch
+  whose callback is already enqueued: the reconciler re-reads the counts
+  under the batch row's lock, but <code>django_ox.actions.retry</code> writes the
+  member's task row and takes no batch lock, so the two writes cannot be
+  ordered.</li>
+<li><strong>A batch sealed with no members completes at the first tick</strong>, and
+  both callbacks fire.</li>
+<li><strong>The reconciler runs on the backend whose <code>SCHEDULES</code> name it.</strong>
+  django-ox rebinds a scheduled task to that backend at load. Its queue
+  name comes from the default task backend's <code>QUEUES</code>: <code>"default"</code> when
+  that list has it, otherwise the first entry. A queue the scheduling
+  backend does not accept is refused at load with <code>ImproperlyConfigured</code>
+  naming the schedule. Set <code>queue_name</code> in the schedule to put it
+  somewhere specific.</li>
+<li><strong>Latency is one tick.</strong> Cron granularity is one minute, so a callback
+  lands up to about a minute after the last member finishes. Completion
+  is decided by reading the member task rows, which is what makes it
+  impossible to miss a member whose worker died without a word.</li>
+<li><strong>Pruned members read as finished, but not as successful.</strong> By
+  default <code>ox_prune</code> deletes SUCCESSFUL and DISCARDED rows that finished
+  more than <code>--older-than</code> ago (7 days), and FAILED and LOST rows too
+  under <code>--include-failed</code>. A membership row whose task is gone counts
+  as finished, the sealed <code>total_count</code> keeps totals honest, and
+  <code>BatchProgress.unattributed</code> reports how many are no longer
+  attributable to success or failure. Those members are why <code>on_success</code>
+  needs every outcome to be known: a pruned row could have been the one
+  that failed, so the batch completes and <code>on_complete</code> fires while
+  <code>on_success</code> is withheld. That includes the default prune. A batch
+  that stays open longer than <code>--older-than</code>, because it is wide, its
+  members are throttled, or the reconciler was down, loses its members'
+  SUCCESSFUL rows and completes without <code>on_success</code>. Set <code>--older-than</code>
+  above the longest batch you run. <code>BatchProgress.pruned</code> is deprecated
+  and will be removed in 2.0. It returns the same number as
+  <code>unattributed</code> and emits a <code>DeprecationWarning</code> when read.</li>
+<li><strong>A discarded member is finished, and the run is not clean.</strong>
+  <code>django_ox.actions.discard</code> closes a task an operator does not want
+  run. That member is terminal, so it never holds the batch open, but it
+  is cancelled work rather than work that was done. It counts as
+  unattributed, not as failed, and <code>on_success</code> is withheld.
+  <code>on_complete</code> still fires, so cleanup still runs.</li>
+<li><strong>Retrying a member reopens the wait, not the membership.</strong>
+  <code>django_ox.actions.retry</code> puts a FAILED or LOST member back on the
+  queue. The batch stays SEALED until that attempt settles, and no
+  callback fires in the meantime. Retrying a member of a batch that has
+  already completed does not reopen it, and its callbacks have already
+  fired.</li>
+</ul>
+<h2 id="batch-api">Batch API</h2>
+<p>Start with <code>oxpull.batches.create()</code>. It returns a <code>Batch</code> with an <code>id</code> and the methods <code>add()</code>, <code>seal()</code> and <code>progress()</code>. Use <code>oxpull.batches.get(batch.id)</code> to retrieve the batch.</p>
+<p><code>Batch.add()</code> raises <code>oxpull.exceptions.BatchMemberExists</code> if the task is already a member of that batch. Adding to a sealed batch raises <code>oxpull.exceptions.BatchSealed</code>.</p>
+<p><code>Batch.progress()</code> returns <code>BatchProgress(total, pending, succeeded, failed)</code>, read from the member task rows when called. Before sealing, <code>total</code> is the live member count. After sealing, it is the sealed snapshot.</p>
+<p>The result also exposes:</p>
+<ul>
+<li><code>unattributed</code>: <code>max(total - pending - succeeded - failed, 0)</code>. This covers members whose task rows <code>ox_prune</code> deleted, LOST members and DISCARDED members.</li>
+<li><code>finished</code>: <code>total - pending</code>.</li>
+<li><code>pruned</code>: a deprecated alias of <code>unattributed</code> that emits <code>DeprecationWarning</code>. Use <code>unattributed</code> in new code.</li>
+</ul>
+<p>These batch entry points, result fields and exceptions are stable.</p>
+<h2 id="how-wide-a-batch-can-be">How wide a batch can be</h2>
+<p>Measured to <strong>1,000,000 members</strong> in a single batch, on SQLite,
+PostgreSQL 16 and MySQL 8, with every count checked against the task rows
+rather than against what the API reports about itself. The completion
+query is a subquery, not an expanded list of ids, so it binds one
+parameter whatever the width, on every database and at every width
+measured, and cannot run into SQLite's variable limit or PostgreSQL's
+parameter ceiling.</p>
+<p>At a million members the costs separate sharply by database:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>SQLite</th>
+<th>PostgreSQL 16</th>
+<th>MySQL 8</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>seal, inside a caller's transaction</td>
+<td>34 ms</td>
+<td>0.7 s</td>
+<td><strong>28 s</strong></td>
+</tr>
+<tr>
+<td>reconcile</td>
+<td>4.9 s</td>
+<td>0.4 s</td>
+<td>7.3 s</td>
+</tr>
+<tr>
+<td>finish all members</td>
+<td>4.8 s</td>
+<td>9.1 s</td>
+<td>27.6 s</td>
+</tr>
+</tbody>
+</table>
+<p>The seal row is the cost of a locking count: a row lock per member
+wherever the database offers one, and a million InnoDB locks in one
+transaction is where that shows (0.24 s at 100,000 members, 28 s at a
+million). <code>seal()</code> now takes that count only when it is called inside a
+caller's transaction, where the caller's snapshot could predate a member
+committed since. Called outside a transaction it counts with a single
+<code>COUNT(*)</code>: on a million-member batch, timing the two statements alone
+with fresh statistics, the locking read took 12 s on MySQL 8 and 0.55 s
+on PostgreSQL 16, the <code>COUNT(*)</code> 0.7 s and 0.03 s, and the whole <code>seal()</code>
+call outside a transaction 0.74 s and 0.03 s. SQLite counts either
+way, which is why it is the cheapest of the three at exactly the point
+the other two are dearest. If you seal batches that wide on MySQL from
+inside a transaction, budget for it, split them, or seal outside the
+transaction.</p>
+<p>Measured on an arm64 macOS host, with PostgreSQL 16 and MySQL 8 in
+Docker on localhost and SQLite on a local file, one process at a time
+and each width against an empty database. The individual-batch figures were measured on the earlier separate <code>oxpull</code> package: its 0.3.1 release on SQLite and PostgreSQL, and its unpublished 0.4.0 build on MySQL, with the same batch code. The fifty-batch sweep and the task-table figures below it are from the 2026-08-19 runs on pre-release code of that separate <code>oxpull</code> package labelled 0.1.0. These are historical measurements, not a new benchmark of the combined distribution.</p>
+<p>Reconciler cost tracks the member count: from 100,000 members to a
+million, the pass that completes a batch grows 7.5x on PostgreSQL, 14x on
+SQLite and 13x on MySQL. The slowest reconciler pass measured at 100,000
+members is the completing one: 0.56 s on MySQL, 0.34 s on SQLite and
+55 ms on PostgreSQL, against a one-minute tick. Fifty sealed batches of
+5,000 members each cost 667 ms per pass on PostgreSQL and 319 ms on
+SQLite while their members are still pending, which is what every tick
+costs until they finish.</p>
+<p>One thing to know if your task table is large. On PostgreSQL the planner
+hashes the batch's members and scans the task table, so a reconciler pass
+costs roughly in proportion to that table rather than to the batch: about
+2.3 ms against 5,000 task rows and about 38 ms against a million, per
+sealed batch. Two levers, both yours: prune finished tasks with
+<code>ox_prune</code>, which you want anyway, or lower <code>random_page_cost</code>. At 1.1
+the planner picks a nested loop unaided and the same work took 6.4 ms
+instead of 36 ms. SQLite probes the primary key per member, so the same
+table growth costs it 3x rather than 16.6x.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../unique-tasks/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Unique tasks">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Unique tasks
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../rate-limiting/" class="md-footer__link md-footer__link--next" aria-label="Next: Rate limiting">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Rate limiting
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.footer"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

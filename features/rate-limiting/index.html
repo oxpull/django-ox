@@ -1,0 +1,1480 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Database-backed worker backend for Django's Tasks framework.">
+      
+      
+      
+        <link rel="canonical" href="https://oxpull.com/django-ox/features/rate-limiting/">
+      
+      
+        <link rel="prev" href="../batches/">
+      
+      
+        <link rel="next" href="../workflows/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Rate limiting - django-ox</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/brand.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  
+    
+  
+  
+  
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="django-ox">
+  <meta property="og:title" content="Rate limiting - django-ox">
+  <meta property="og:description" content="Database-backed worker backend for Django's Tasks framework.">
+  <meta property="og:url" content="https://oxpull.com/django-ox/features/rate-limiting/">
+  <meta property="og:image" content="https://oxpull.com/django-ox/assets/social-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="django-ox: the production worker for Django Tasks. Your database is the queue.">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Rate limiting - django-ox">
+  <meta name="twitter:description" content="Database-backed worker backend for Django's Tasks framework.">
+  <meta name="twitter:image" content="https://oxpull.com/django-ox/assets/social-card.png">
+
+  <link rel="apple-touch-icon" href="../../assets/favicon.png">
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#rate-limiting" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="django-ox" class="md-header__button md-logo" aria-label="django-ox" data-md-component="logo">
+      
+  <img src="../../assets/mark-ox.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            django-ox
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Rate limiting
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/oxpull/django-ox" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="django-ox" class="md-nav__button md-logo" aria-label="django-ox" data-md-component="logo">
+      
+  <img src="../../assets/mark-ox.png" alt="logo">
+
+    </a>
+    django-ox
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/oxpull/django-ox" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../background-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background tasks, step by step
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../wagtail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wagtail background tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../recurring-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recurring tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../stored-schedules/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schedules in the database
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Task coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Task coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../unique-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Unique tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../batches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Batches
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rate limiting
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rate limiting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#behaviour" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Behaviour
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deployment-guarantees" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deployment guarantees
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-guarantee" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The guarantee
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#claim-cost" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Claim cost
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#throttled-work-reads-as-backlog-because-it-is" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Throttled work reads as backlog, because it is
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#database-aliases-and-pools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Database aliases and pools
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../patterns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Common patterns
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migrating/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrating
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-django-ox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Why django-ox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../use-cases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Use cases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../choosing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing a backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../production/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmarks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../stability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API stability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    For AI assistants
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#behaviour" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Behaviour
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deployment-guarantees" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deployment guarantees
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-guarantee" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The guarantee
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#claim-cost" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Claim cost
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#throttled-work-reads-as-backlog-because-it-is" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Throttled work reads as backlog, because it is
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#database-aliases-and-pools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Database aliases and pools
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="rate-limiting">Rate limiting</h1>
+<p>Rate limiting controls task claims through <code>OxpullWorker</code>. Its guarantee depends on the workers applying the limit and recording claims; the bound and its assumptions are described below.</p>
+<p>See the <a href="../">feature overview</a> for setup, requirements, and compatibility.</p>
+<p>Rate limiting coordinates workers through database state. Every decision is a
+compare-and-set resolved by a rowcount, never a check-then-act: the
+window roll is an UPDATE conditioned on the window id, so exactly one
+worker among any number opens a window and the losers report zero rows
+and keep the view they read. The increment that counts an admission is
+deliberately unconditional, because by the time it runs the attempt is
+already spent and a statement that could refuse would burn it. What stops
+a worker taking a second token is not that statement but the next
+refresh, which every worker is required to make before its next limited
+claim.</p>
+<p>The window's clock is the database's, on every database and under any
+<code>USE_TZ</code> setting. <code>window_started_at</code> is written with <code>Now()</code> and is only
+ever compared against <code>Now()</code> in the same statement family, so there is
+no second writer for it to agree with and no per-host clock in the
+decision. A worker's own clock decides only when to look, which can waste
+a statement but can never admit a task. A database clock that steps
+backwards delays the next roll by the size of the step and under-admits;
+one that steps forwards rolls the window early and releases its capacity
+ahead of schedule, by at most one window per step. Neither compounds: the
+window re-anchors to database time on the next roll.</p>
+<h2 id="behaviour">Behaviour</h2>
+<p>A rate limit caps how often a task starts. Give it a name, a capacity,
+and the tasks or queues it covers:</p>
+<div class="highlight"><pre><span></span><code><span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"oxpull.backend.OxpullBackend"</span><span class="p">,</span>
+        <span class="s2">"QUEUES"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"default"</span><span class="p">,</span> <span class="s2">"sms"</span><span class="p">,</span> <span class="s2">"reports"</span><span class="p">],</span>
+        <span class="s2">"OPTIONS"</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">"WORKER_CLASS"</span><span class="p">:</span> <span class="s2">"oxpull.worker.OxpullWorker"</span><span class="p">,</span>
+            <span class="s2">"RATE_LIMITS"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="c1"># Both tasks draw on one budget of 100 per minute.</span>
+                <span class="s2">"stripe"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="s2">"limit"</span><span class="p">:</span> <span class="mi">100</span><span class="p">,</span>
+                    <span class="s2">"per"</span><span class="p">:</span> <span class="mi">60</span><span class="p">,</span>
+                    <span class="s2">"tasks"</span><span class="p">:</span> <span class="p">[</span>
+                        <span class="s2">"myapp.billing.charge_card"</span><span class="p">,</span>
+                        <span class="s2">"myapp.billing.refund_card"</span><span class="p">,</span>
+                    <span class="p">],</span>
+                <span class="p">},</span>
+                <span class="s2">"reports"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="s2">"limit"</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>
+                    <span class="s2">"per"</span><span class="p">:</span> <span class="mi">3600</span><span class="p">,</span>
+                    <span class="s2">"tasks"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"myapp.reports.build_monthly"</span><span class="p">],</span>
+                <span class="p">},</span>
+                <span class="c1"># A whole queue, whatever runs on it.</span>
+                <span class="s2">"sms"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"limit"</span><span class="p">:</span> <span class="mi">500</span><span class="p">,</span> <span class="s2">"per"</span><span class="p">:</span> <span class="mi">60</span><span class="p">,</span> <span class="s2">"queues"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"sms"</span><span class="p">]},</span>
+            <span class="p">},</span>
+        <span class="p">},</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>A limit is declared in settings. A worker imports no task modules, so a
+limit written next to its task would be enforced only when something else
+happened to import that module first. Declared here, it is visible to
+every worker and to <code>manage.py check</code>.</p>
+<p><code>RATE_LIMITS</code>, <code>UNIQUE_TASKS</code> and <code>@unique</code> take effect only with
+<code>oxpull.backend.OxpullBackend</code>. On an alias still using
+<code>django_ox.backend.OxBackend</code>, nothing reads these settings:
+<code>manage.py check</code> is clean, and nothing is throttled or deduplicated.</p>
+<p>For aliases using <code>OxpullBackend</code>, <code>WORKER_CLASS</code> is required: it makes
+<code>ox_worker</code> run the worker that applies the limits. Configuring limits
+without it is a hard system check error (<code>oxpull.E006</code>). <code>per</code> is whole
+seconds, or a <code>timedelta</code> of at least one second. A limit that covers
+nothing, names a queue the backend does not accept, or lists a <code>tasks</code>
+path that is not a task is <code>oxpull.E005</code>. These checks run only for
+aliases whose <code>BACKEND</code> is <code>oxpull.backend.OxpullBackend</code>.</p>
+<h2 id="deployment-guarantees">Deployment guarantees</h2>
+<p>Rate limits are applied in <code>OxpullWorker.claim_one()</code>, not enforced by a database constraint. The base <code>Worker</code> claims tasks without applying the limit or recording a count.</p>
+<p>Deploy django-ox 1.9.0 and use <code>OxpullWorker</code> in every process that claims limited tasks before relying on the guarantee. <code>manage.py check</code> reads only its own process's settings and cannot verify which worker other processes run.</p>
+<h2 id="the-guarantee">The guarantee</h2>
+<blockquote>
+<p>For a limit of N admissions per period P, with W <code>ox_worker</code> processes
+claiming from the queues that carry the limit's tasks, the number of
+task attempts started in any one window is at most N + W - 1 + U.
+U is the number of admissions whose count did not land: one for each
+count that raised, and one for each count that the window rolled out
+from under five times in a row. Each one is logged at warning as
+<code>rate_limit_uncounted</code>; alert on that event, and U is the number of
+times it fired in the window. Add one for each worker process that
+dies between claiming a limited task and recording it. With a single
+worker process, no such death and every count landed, the limiter is
+exact: at most N per window.</p>
+<p>A window is one generation of the limit's shared counter row: it opens
+when a worker rolls the row and lasts P. It is not every interval of
+length P. Windows are contiguous, so an arbitrary interval of length P
+that spans a boundary can carry up to 2(N + W - 1 + U). The limiter
+therefore bounds a long-run average of (N + W - 1 + U)/P and an
+instantaneous burst of 2(N + W - 1 + U).</p>
+<p>A count that cannot be written is logged and the attempt runs. Three
+admissions in a row that the counter did not record close the limit
+for that worker process, whether each increment raised or ran and
+matched no row. A closed limit admits nothing until a write lands,
+which the next refresh probes for. The run and the closed state are
+per process, and only an increment that lands ends the run, so a
+counter that fails on every other admission closes after three of
+them rather than admitting through the fault.</p>
+</blockquote>
+<p>The W - 1 is structural. The budget has to be read before the claim,
+because the claim UPDATE spends a retry attempt and a lease epoch and
+neither can be given back; between reading "this limit has room" and the
+claim landing, another worker can take the last token. Closing that gap
+would mean burning attempts on tasks that never ran.</p>
+<p>W is yours to know, not ours. One <code>ox_worker</code> process is one claimer, and
+under <code>--processes N</code> each child is a claimer. Size against the bound
+rather than against the capacity. For a ceiling of T attempts in one
+window, configure <strong><code>limit = T - (W - 1)</code></strong>. For a ceiling of T across
+any interval of one period, including one that straddles a boundary,
+halve it: <strong><code>limit = T // 2 - (W - 1)</code></strong>. Both assume U is zero, which
+holds while <code>rate_limit_uncounted</code> is not firing; every time it fires,
+the window it fired in can carry one attempt more than the ceiling.
+Scaling workers up loosens a limit that is left alone, and each worker
+that dies mid-claim costs one more admission.</p>
+<p>Semantics, all deliberate:</p>
+<ul>
+<li><strong>It limits attempt starts, not completions and not concurrency.</strong> Ten
+  per minute on a task that runs for ten minutes will have a hundred
+  attempts running at once. "At most K running" is a concurrency limit,
+  which is a different mechanism.</li>
+<li><strong>Retries count.</strong> A reaped or failed attempt that goes back to READY
+  consumes another admission when it is claimed again. That is correct
+  for what limits usually protect: a retry is another call to the third
+  party.</li>
+<li><strong>A throttled task stays READY.</strong> It is not claimed, not locked, and it
+  spends no attempt and no lease epoch. It is indistinguishable from any
+  other queued task, and nothing in the reaper, the lease or the timeouts
+  interacts with it.</li>
+<li><strong>A throttled task does not hold up anything else.</strong> The exclusion is
+  applied inside the claim's candidate select on all three claim paths,
+  ahead of its ordering and its limit, so a worker whose limit is
+  exhausted still claims other tasks and other queues on the same pass.</li>
+<li><strong>Windows are fixed and anchored at first use</strong>, so a P-length interval
+  straddling a boundary can carry twice the capacity. If what you are
+  protecting counts per fixed minute, size N at half your true ceiling or
+  accept the doubling.</li>
+<li><strong>A task may belong to several limits.</strong> It is admitted only when every
+  one of them has room, and admitting it increments every one.</li>
+<li><strong><code>limit: 0</code> blocks the limit entirely.</strong> It is a supported pause
+  switch, and it holds unique keys open, holds batches open, and drives
+  the ready-age metric up for as long as it is set.</li>
+<li><strong>Capacity is settings, not data.</strong> A change takes effect for a worker
+  when that worker restarts. During a rolling change of <code>limit</code>,
+  admissions are bounded by the larger of the two capacities. During a
+  rolling change of <code>per</code>, the bound is set by the shorter period until
+  the last worker on it is gone: the window row carries no period, so a
+  worker on the shorter one rolls the shared window as soon as its own
+  period allows, and every worker then counts against the fresh window.
+  Change <code>per</code> in its own deploy, and expect the shorter period to hold
+  until that deploy finishes.</li>
+<li><strong>A limit's name spans every backend.</strong> Its window row is keyed on the
+  name alone, so two backends that use the same name share a window and
+  count each other's admissions. Give a limit meant for one backend a name
+  only that backend uses. A name with a different <code>per</code> on two backends is
+  warning <code>oxpull.W005</code>, and that limit is not enforced as configured.
+  Each backend rolls the shared window at its own period. Each roll
+  restarts the count, so a backend on a longer period can admit more than
+  its limit in that period. A different <code>limit</code> with the same <code>per</code> is
+  warning <code>oxpull.W004</code>. Each backend then stops when the shared count
+  reaches its own <code>limit</code>. That shared budget can be deliberate.</li>
+<li><strong>A limit's name is matched by the database's collation.</strong> The name is
+  the primary key of the limit's window row, so on MySQL's case-folding
+  collations renaming <code>Stripe</code> to <code>stripe</code> is not a rename: the worker
+  finds the row it already has and carries on counting on it. On
+  PostgreSQL and SQLite the spelling is the identity, and a renamed limit
+  starts a fresh window. Within one backend, names that differ only by case
+  are refused at <code>check</code> as <code>oxpull.E005</code>. Anything else the database folds
+  (<code>Café</code> and <code>cafe</code> on MySQL) is refused at the worker's first refresh,
+  before it claims, naming both. Across backends, names that differ only by
+  case or accents are warning <code>oxpull.W006</code>. MySQL's default collation
+  counts them on one window, and PostgreSQL and SQLite count them on two. On
+  one backend, <code>oxpull.W006</code> also covers names that differ only by accents,
+  or by case and accents, such as <code>stripe</code> and <code>stripé</code>. On MySQL's default
+  collation, the worker refuses such a pair too. When <code>check</code> compares
+  names, it drops accents from Latin and Greek letters only. It does not
+  catch other folds MySQL's default collation makes, such as <code>ø</code> into <code>o</code>.
+  Spell a name the same way on every backend.</li>
+<li><strong>Renaming a limited task detaches its queued rows.</strong> The limit matches
+  on the task path stored in the row, so rows enqueued under the old path
+  claim unthrottled. List both paths under the limit for one release.</li>
+<li><strong>A counter that cannot be written closes its limit.</strong> One failed count
+  is logged and the claimed task is returned for execution: the claim is
+  already committed by then, and losing a count is better than losing
+  the task. The same holds for any database failure after the claim, the
+  re-read after a window rolled under the count included, and for that
+  re-read finding the limit's row gone: the loss is logged as
+  <code>rate_limit_uncounted</code> and the claimed task is returned for execution.
+  Before the claim a failure ends the pass with nothing spent, and a
+  missing row propagates as <code>ImproperlyConfigured</code>. Three unrecorded
+  admissions in a row under one limit stop it admitting altogether,
+  because a counter that never advances is not a limit, and every
+  refresh would read room that is not there. An increment that raised
+  and one that ran but matched no row both count; only an increment that
+  lands ends the run. The refresh probes the row and the limit reopens
+  when a write lands, without a worker restart.</li>
+</ul>
+<h2 id="claim-cost">Claim cost</h2>
+<p>Nothing when it is unused. With no limits configured, and no backend on the
+database declaring <code>WORKFLOWS</code>, the claim emits django-ox's own SQL,
+statement for statement. The suite asserts that by capturing both.
+See <a href="../workflows/#claim-cost">workflow claim cost</a> for the work a <code>WORKFLOWS</code> backend adds to every claim on that database.
+With limits configured, a task that no limit covers costs one
+refresh SELECT per cooldown interval
+(<code>RATE_REFRESH_INTERVAL</code>, 0.25 s by default), shared by every claim in
+it. A limited task costs two extra statements: that refresh and one
+increment. A window roll costs a third. One roll lands per window per
+limit across the whole fleet; a worker that reads the expired window
+before the winner's write commits spends one more UPDATE, which matches
+no row.</p>
+<p>The state is one row per limit name in <code>oxpull_oxpullratewindow</code>,
+forever. The table does not grow with traffic and needs no pruning.</p>
+<h2 id="throttled-work-reads-as-backlog-because-it-is">Throttled work reads as backlog, because it is</h2>
+<p><code>django_ox.stats.oldest_ready_age</code> and the Prometheus ready-age gauge
+climb for as long as work is throttled. A queue-age alert tuned before
+rate limiting was introduced will fire. That is the limiter working, not
+a stuck queue: alert on the age of queues that carry no limited tasks, or
+raise the threshold above the longest period you configured.</p>
+<p>Two interactions matter when you combine features. A throttled <code>@unique</code>
+task keeps its key, so throttling extends the dedup window; that is what
+"unique while pending" means, and releasing the key would let duplicates
+stack up behind the throttle. And a batch does not complete past a
+throttled member, so a limit sets the floor on how long the batch runs.
+On one worker, a 1,000-member batch under a limit of 10 per minute fills
+100 windows, and the hundredth opens 99 minutes after the first. The
+batch completes once its last member finishes, plus one reconciler tick.
+Size batches against limits.</p>
+<h2 id="database-aliases-and-pools">Database aliases and pools</h2>
+<p>Rate-limit window reads and writes use the alias returned by <code>oxpull_db_alias()</code>. See <a href="../workflows/#worker-database-aliases-and-pools">worker database aliases and pools</a> for the recording alias's pool requirements and the limits of the worker's startup warning.</p>
+<p>Use the same database alias for task rows and rate-limit windows: <code>OxpullWorker</code> reads the window on that alias. See the <a href="../unique-tasks/#database-routing-constraints">database-routing constraints</a>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../batches/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Batches">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Batches
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../workflows/" class="md-footer__link md-footer__link--next" aria-label="Next: Workflows">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Workflows
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.footer"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

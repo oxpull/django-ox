@@ -13,7 +13,7 @@
         <link rel="canonical" href="https://oxpull.com/django-ox/patterns/">
       
       
-        <link rel="prev" href="../stored-schedules/">
+        <link rel="prev" href="../features/workflows/">
       
       
         <link rel="next" href="../migrating/">
@@ -437,6 +437,200 @@
       
   
   
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Task coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Task coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/unique-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Unique tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/batches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Batches
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/rate-limiting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rate limiting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
     
   
   
@@ -660,10 +854,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#not-in-the-core" class="md-nav__link">
+  <a href="#optional-coordination-features" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Not in the core
+        Optional coordination features
       
     </span>
   </a>
@@ -882,33 +1076,6 @@
     
   
     API stability
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../pro/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Pro
   
 
     
@@ -1162,10 +1329,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#not-in-the-core" class="md-nav__link">
+  <a href="#optional-coordination-features" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Not in the core
+        Optional coordination features
       
     </span>
   </a>
@@ -1356,9 +1523,12 @@ bind) inside one transaction, so a call of 5,000 commits all 5,000 or none,
 and inside a <code>transaction.atomic()</code> opened on the database that holds
 <code>OxTask</code> it commits or rolls back with the rest of the work you write there,
 as <code>enqueue()</code> does.</p>
-<p>This is a bulk insert and nothing more. Grouping the
-tasks, reading their progress as one number and firing a callback when the
-last one settles is a <a href="../pro/">batch</a>, in Oxpull Pro.</p>
+<p>This is a bulk insert and nothing more. To group tasks, read their
+progress as one number and fire a callback when the last one settles,
+use a <a href="../features/batches/">batch</a>. Batches start with <code>oxpull.batches.create()</code>; the returned batch has <code>add()</code>, <code>seal()</code> and <code>progress()</code>. They use the optional <code>oxpull</code> app and require a reconciler schedule. See <a href="../features/batches/">Batches</a> for setup and guarantees.</p>
+<p><code>enqueue_many()</code> does not accept unique tasks: it raises <code>InvalidTask</code>
+and names the task. See <a href="../features/unique-tasks/">Unique tasks</a> for
+deduplicated enqueue.</p>
 <h2 id="keep-slow-work-off-the-fast-queue">Keep slow work off the fast queue</h2>
 <p>Give slow tasks their own queue and run a separate worker for it, so a batch of
 report builds cannot delay password resets.</p>
@@ -1445,7 +1615,7 @@ Test timeout enforcement and worker infrastructure against a real worker.</p>
 <p><code>django_ox.testing.run_tasks()</code> is public and provisional. Keep <code>OxBackend</code> in your test settings and create its tables through migrations. Use this helper to run queued tasks without a worker process.</p>
 <div class="highlight"><pre><span></span><code><span class="n">run_tasks</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">backend</span><span class="o">=</span><span class="s2">"default"</span><span class="p">,</span> <span class="n">queues</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">max_tasks</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">raise_failures</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">TaskResult</span><span class="p">]</span>
 </code></pre></div>
-<p>All arguments are keyword-only. <code>backend</code> must name an <code>OxBackend</code> alias. It selects the worker class and its default queues, including a configured <code>WORKER_CLASS</code>. Rows are claimed by queue, regardless of which backend enqueued them. Aliases sharing queues share work. For Pro workflows and rate limits, pass the Pro alias as <code>backend</code>.</p>
+<p>All arguments are keyword-only. <code>backend</code> must name an <code>OxBackend</code> or <code>OxpullBackend</code> alias. It selects the worker class and its default queues, including a configured <code>WORKER_CLASS</code>. Rows are claimed by queue, regardless of which backend enqueued them. Aliases sharing queues share work. For workflows and rate limits, pass the alias whose <code>OPTIONS["WORKER_CLASS"]</code> is <code>"oxpull.worker.OxpullWorker"</code>.</p>
 <p><code>queues=None</code> uses the worker's queues. An empty list does the same. Empty backend <code>QUEUES</code> means every queue. An explicit list restricts claiming to those queues.</p>
 <p>Each attempt uses the configured worker's claim and execution methods on the caller's thread and database connection. It runs due <code>READY</code> rows that pass the worker's claim filters. Future <code>run_after</code> values, pending retry delays and other statuses are left alone. Tasks enqueued by tasks or their emulated commit callbacks can run in the same call. Async task bodies can see the test's uncommitted rows. Worker outcome recording, backoff and lifecycle signals apply.</p>
 <p>The return value is a list of framework <code>TaskResult</code> objects in attempt order. Each object captures that attempt's recorded state. Retries produce separate results. Failures are recorded without raising by default. With <code>raise_failures=True</code>, the same exception is raised after recording and attempt callbacks, including for retryable failures. Later tasks are left unclaimed. A retried attempt's result is <code>READY</code> (a retry is pending), and reading its <code>return_value</code> raises, following the framework's rule for unfinished results.</p>
@@ -1500,7 +1670,7 @@ Test timeout enforcement and worker infrastructure against a real worker.</p>
             <span class="n">results</span> <span class="o">=</span> <span class="n">run_tasks</span><span class="p">(</span><span class="n">raise_failures</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">([</span><span class="n">result</span><span class="o">.</span><span class="n">return_value</span> <span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">results</span><span class="p">],</span> <span class="p">[</span><span class="mi">5</span><span class="p">])</span>
 </code></pre></div>
-<p>For retries, advance time between calls by at least the configured backoff delay. Freezing a later time does not drain every retry. Each new retry is scheduled relative to that frozen instant. A zero backoff can retry within one call. Pro rate-limit windows use the database clock, which this patch does not advance.</p>
+<p>For retries, advance time between calls by at least the configured backoff delay. Freezing a later time does not drain every retry. Each new retry is scheduled relative to that frozen instant. A zero backoff can retry within one call. Rate-limit windows use the database clock, which this patch does not advance.</p>
 <h3 id="transactions-and-callbacks">Transactions and callbacks</h3>
 <p><code>TestCase</code> holds database transactions open. <code>run_tasks()</code> uses savepoints on every connection already inside an atomic block when an attempt starts. Task-owned atomic blocks still follow Django's rules. Under <code>TransactionTestCase</code> in autocommit, no savepoints or callback emulation are added. Writes and commit callbacks then follow worker autocommit behaviour. pytest-django equivalents are <code>transactional_db</code> and <code>django_db(transaction=True)</code>.</p>
 <p>In an atomic block, commit callbacks registered by the body run when the body finishes, before outcome recording. Callbacks registered during outcome handling run afterwards. This emulates a commit without committing the transaction. The caller's existing callbacks stay pending. If application code enqueues through <code>on_commit()</code>, exit <code>captureOnCommitCallbacks(execute=True)</code> before calling <code>run_tasks()</code>.</p>
@@ -1521,11 +1691,15 @@ Test timeout enforcement and worker infrastructure against a real worker.</p>
 </ul>
 <p>Use a real worker to test timeout enforcement and worker infrastructure. <code>run_tasks()</code> runs no poll loop, thread pool, lease renewal, timeout watchdog, reaper, schedule dispatcher or process recycling. It does not dispatch reconcilers. Enqueue scheduled tasks and reconcilers explicitly if the test needs their work.</p>
 <p>Timeouts are inert. <code>deadline()</code> and <code>remaining()</code> return <code>None</code>. A configured timeout produces <code>run_tasks_timeout_inert</code> once per task path per call. A hanging body or callback hangs the test.</p>
-<h2 id="not-in-the-core">Not in the core</h2>
-<p>Batches, unique or deduplicated tasks, rate limiting and workflows are in
-<a href="../pro/">Oxpull Pro</a>, a paid add-on. Metrics are in the
-free tier: <code>django_ox.stats</code> and <code>manage.py ox_health</code> ship in the core. Chains
-are on the Pro roadmap, undated.</p>
+<h2 id="optional-coordination-features">Optional coordination features</h2>
+<p><a href="../features/unique-tasks/">Unique tasks</a>, <a href="../features/batches/">batches</a>,
+<a href="../features/rate-limiting/">rate limiting</a> and
+<a href="../features/workflows/">workflows</a> are included in django-ox through the
+optional <code>oxpull</code> app. They require Django 6.0+.
+<code>OxpullBackend</code>, <code>OxpullWorker</code> and the documented unique-task, batch and
+rate-limit entry points are stable. Workflows are provisional.
+See the <a href="../features/">feature overview</a> for setup.</p>
+<p><code>django_ox.stats</code> and <code>manage.py ox_health</code> do not require the optional app.</p>
 
 
 
@@ -1555,7 +1729,7 @@ are on the Pro roadmap, undated.</p>
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../stored-schedules/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Schedules in the database">
+          <a href="../features/workflows/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Workflows">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
@@ -1565,7 +1739,7 @@ are on the Pro roadmap, undated.</p>
                 Previous
               </span>
               <div class="md-ellipsis">
-                Schedules in the database
+                Workflows
               </div>
             </div>
           </a>

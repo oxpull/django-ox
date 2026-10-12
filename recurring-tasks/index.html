@@ -625,6 +625,200 @@
   
   
   
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Task coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Task coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/unique-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Unique tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/batches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Batches
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/rate-limiting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rate limiting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../patterns/" class="md-nav__link">
         
@@ -850,33 +1044,6 @@
     
   
     API stability
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../pro/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Pro
   
 
     
@@ -1445,11 +1612,7 @@ expression, arguments that are not JSON-serializable, and duplicate names
 across backends:</p>
 <div class="highlight"><pre><span></span><code>python manage.py check
 </code></pre></div>
-<p>Database acceptance is determined at dispatch after validation. Alert on
-<code>schedule_dispatch_error</code> for schedule-scoped failures and
-<code>schedule_dispatch_failed</code> for abandoned passes. For stored schedules,
-also alert on <code>schedule_row_skipped</code> and <code>schedule_source_unavailable</code>.
-Use these events for schedule health monitoring.</p>
+<p>Database acceptance is determined at dispatch after validation. Alert on <code>schedule_dispatch_error</code>, <code>schedule_dispatch_failed</code> and <code>schedule_tick_unreadable</code>. For stored schedules, also alert on <code>schedule_row_skipped</code>, <code>schedule_source_unavailable</code> and <code>schedule_boundary_heal_failed</code>. These report schedule-scoped failures, abandoned passes, unusable history, skipped rows, source failures and blocked boundary healing.</p>
 <p>To see what has actually dispatched, read the tick log:</p>
 <div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django_ox.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">OxScheduleTick</span>
 
@@ -1461,9 +1624,7 @@ Use these events for schedule health monitoring.</p>
 written the first time a worker saw the schedule; it enqueued nothing and marks
 the tick before the first real fire. A schedule-scoped failure rolls back its
 tick row and task, so the tick log alone does not report failed dispatches.</p>
-<p>The recovery baseline is each schedule's most recent tick row, which is why
-<code>ox_prune</code> always keeps it. See
-<a href="../configuration/#ox_prune">Configuration</a>.</p>
+<p>The recovery baseline is each schedule's most recent tick row. Ordinary <code>ox_prune</code> preserves every unreadable tick and each schedule's newest readable tick. Removing history can repeat work or cause re-anchoring. See <a href="../configuration/#ox_prune">Configuration</a>.</p>
 
 
 

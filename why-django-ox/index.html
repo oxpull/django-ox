@@ -439,6 +439,200 @@
   
   
   
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Task coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Task coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/unique-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Unique tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/batches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Batches
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/rate-limiting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rate limiting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../patterns/" class="md-nav__link">
         
@@ -632,10 +826,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#do-retries-and-recovery-require-pro" class="md-nav__link">
+  <a href="#do-retries-and-recovery-need-the-optional-app" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Do retries and recovery require Pro?
+        Do retries and recovery need the optional app?
       
     </span>
   </a>
@@ -665,10 +859,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#what-does-pro-add" class="md-nav__link">
+  <a href="#what-does-the-optional-app-add" class="md-nav__link">
     <span class="md-ellipsis">
       
-        What does Pro add?
+        What does the optional app add?
       
     </span>
   </a>
@@ -868,33 +1062,6 @@
   
   
     <li class="md-nav__item">
-      <a href="../pro/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Pro
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    <li class="md-nav__item">
       <a href="../agents/" class="md-nav__link">
         
   
@@ -1047,10 +1214,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#do-retries-and-recovery-require-pro" class="md-nav__link">
+  <a href="#do-retries-and-recovery-need-the-optional-app" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Do retries and recovery require Pro?
+        Do retries and recovery need the optional app?
       
     </span>
   </a>
@@ -1080,10 +1247,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#what-does-pro-add" class="md-nav__link">
+  <a href="#what-does-the-optional-app-add" class="md-nav__link">
     <span class="md-ellipsis">
       
-        What does Pro add?
+        What does the optional app add?
       
     </span>
   </a>
@@ -1210,15 +1377,15 @@
 </table>
 <h3 id="django-ox-vs-huey">django-ox vs huey</h3>
 <p>Both provide a <code>django.tasks</code> backend. django-ox automatically requeues a dead worker's tasks. huey's guide says mid-execution tasks are lost and aren't retried automatically.</p>
-<h3 id="do-retries-and-recovery-require-pro">Do retries and recovery require Pro?</h3>
-<p>No. The free package includes both, plus schedules and Django admin integration. Health checks and metrics are also included.</p>
+<h3 id="do-retries-and-recovery-need-the-optional-app">Do retries and recovery need the optional app?</h3>
+<p>No. Retries, dead-worker recovery, schedules, Django admin integration, health checks and metrics work without the optional <code>oxpull</code> app.</p>
 <h3 id="how-do-i-make-recovery-safe">How do I make recovery safe?</h3>
 <p>Write idempotent tasks. A repeated execution must not duplicate effects such as charges.</p>
 <h3 id="which-versions-can-i-use">Which versions can I use?</h3>
 <p>Python 3.12+ and Django 5.2 LTS, 6.0 or 6.1. Django 5.2 uses the <code>django-tasks</code> backport. PostgreSQL, MySQL 8 and SQLite run in CI.</p>
-<h3 id="what-does-pro-add">What does Pro add?</h3>
-<p>Batches, unique tasks, shared rate limits and workflows, with maintainer email support.</p>
-<p>Oxpull Pro costs $399 per year, per company, excluding VAT where it applies. Every environment is included. Pro requires Django 6.0+.</p>
+<h3 id="what-does-the-optional-app-add">What does the optional app add?</h3>
+<p><a href="../features/unique-tasks/">Unique tasks</a>, <a href="../features/batches/">batches</a>, <a href="../features/rate-limiting/">shared rate limits</a> and <a href="../features/workflows/">workflows</a>. The <code>oxpull</code> app is included in django-ox and requires Django 6.0+.</p>
+<p><code>OxpullBackend</code>, <code>OxpullWorker</code> and the documented unique-task, batch and rate-limit entry points are stable. Workflows are provisional. See the <a href="../features/">feature overview</a> for setup and API status.</p>
 <p><a href="../background-tasks/"><strong>Get started</strong></a></p>
 <h3 id="sources-and-test-setup">Sources and test setup</h3>
 <p>Oxpull's 2026-09-19 benchmark compares django-ox 1.3.0 with django-tasks-db 0.13.0. Tests used PostgreSQL 16 in Docker, an Apple M1 Max and no-op tasks.</p>

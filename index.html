@@ -581,6 +581,200 @@
   
   
   
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Task coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Task coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="features/unique-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Unique tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="features/batches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Batches
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="features/rate-limiting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rate limiting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="features/workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="patterns/" class="md-nav__link">
         
@@ -806,33 +1000,6 @@
     
   
     API stability
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="pro/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Pro
   
 
     
@@ -1129,9 +1296,14 @@ coming back. The mechanics, and the one case to know about, are in
 <li><a href="monitoring/">Monitoring</a>: a queue-stats API, an <code>ox_health</code> command
   for fleet alerting and optional local heartbeat probes, a Prometheus
   endpoint, structured log events, and an admin page with retry and discard.</li>
+<li><a href="features/unique-tasks/">Unique tasks</a>, <a href="features/batches/">batches</a>,
+  <a href="features/rate-limiting/">rate limiting</a> and
+  <a href="features/workflows/">workflows</a>, through the optional <code>oxpull</code> app
+  included in django-ox. These features require Django 6.0+.
+  Workflows are provisional. See <a href="features/">setup and API status</a>.</li>
 </ul>
 <h2 id="install">Install</h2>
-<p>Requires Python 3.12+ and Django 5.2+. Django 6.0 and later ship the Tasks
+<p>Requires Python 3.12+ and Django 5.2+. The optional <code>oxpull</code> app requires Django 6.0+. Django 6.0 and later ship the Tasks
 framework in core. On Django 5.2 LTS it comes from the <code>django-tasks</code>
 backport, so install the <code>backport</code> extra there. <strong>Your own imports differ
 with it</strong>: on Django 6.0+ you write <code>from django.tasks import task</code>, and on
@@ -1197,9 +1369,10 @@ django-tasks 0.12+.</p>
   semantics.</li>
 </ul>
 <h2 id="scope">Scope</h2>
-<p>The core is finite on purpose: a durable queue, a worker, recurring
-schedules, and monitoring, with nothing extra to operate. Design
-decisions to know before you commit:</p>
+<p>django-ox provides a durable queue, a worker, recurring schedules and
+monitoring in your existing database. Its optional <code>oxpull</code> app adds
+coordination features without a separate broker. Design decisions to know
+before you commit:</p>
 <ul>
 <li>A queued task can be discarded before a worker claims it, and a failed
   one retried, from the admin or with <code>django_ox.actions</code>. Attempt
@@ -1209,16 +1382,18 @@ decisions to know before you commit:</p>
   interrupted on demand. See <a href="production/#task-timeouts">Task timeouts</a>
   for enforcement and its limits.</li>
 <li>Every django-ox table lives on one database, the one your router sends
-<code>OxTask</code> to. A queue on a different database from the rows it refers to gives
-up the transactional enqueue.</li>
+  <code>OxTask</code> to. A queue on a different database from the rows it refers to gives
+  up the transactional enqueue.</li>
 <li>Worker concurrency is a thread pool, which fits I/O-bound tasks. For
   CPU-bound work, run <code>--processes N --concurrency 1</code>, which is N worker
   processes under one supervisor. See
   <a href="production/#threads-and-processes">Production</a>.</li>
 </ul>
-<p>Batches, unique tasks, rate limiting and workflows are in <a href="pro/">Oxpull Pro</a>, a paid add-on; <a href="https://oxpull.com/">https://oxpull.com/</a> has the details.
-Metrics stay in this package: <code>django_ox.stats</code> and <code>ox_health</code> are free and
-stay free.</p>
+<p><a href="features/">Unique tasks, batches, rate limiting and workflows</a>
+are included in django-ox through the optional <code>oxpull</code> app and require
+Django 6.0+. Workflows are provisional.</p>
+<p>Metrics and health checks are included: <code>django_ox.stats</code> and <code>ox_health</code>
+do not require the optional app.</p>
 <h2 id="license">License</h2>
 <p>BSD 3-Clause.</p>
 

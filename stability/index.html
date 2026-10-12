@@ -16,7 +16,7 @@
         <link rel="prev" href="../benchmarks/">
       
       
-        <link rel="next" href="../pro/">
+        <link rel="next" href="../agents/">
       
       
         
@@ -439,6 +439,200 @@
   
   
   
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Task coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Task coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/unique-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Unique tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/batches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Batches
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/rate-limiting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rate limiting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../patterns/" class="md-nav__link">
         
@@ -758,33 +952,6 @@
   
   
     <li class="md-nav__item">
-      <a href="../pro/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Pro
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    <li class="md-nav__item">
       <a href="../agents/" class="md-nav__link">
         
   
@@ -1000,15 +1167,12 @@ export names this page does not list; those names are not public.</p>
   <code>(args, kwargs)</code> call shape, the input-order return and the
   all-or-nothing write. <code>INSERT_CHUNK_SIZE</code> is exported for reading; its
   value may change.</li>
-<li><strong>The exceptions</strong> <code>django_ox.exceptions.TaskAbandoned</code>, recorded against
-  tasks whose worker stopped reporting with no attempts left (it records the
-  lost lease, not a cause of failure), and <code>django_ox.exceptions.TaskTimeout</code>,
-  a <code>TimeoutError</code> raised inside a sync task at its execution deadline and
-  recorded against a timed-out attempt. The timeout comes from the task's
-  own declaration, then its queue's <code>TASK_TIMEOUTS</code> entry, then
-  <code>TASK_TIMEOUT</code>. Async tasks are cancelled and their timeout is recorded
-  with <code>TaskTimeout</code>.</li>
-<li><strong>The structured-log contract</strong>: the event names and stable <code>extra</code> keys
+<li>
+<p><strong>The exceptions</strong> <code>django_ox.exceptions.TaskAbandoned</code>, recorded when a worker stops reporting with no attempts left, identifies a lost lease rather than its cause. <code>django_ox.exceptions.TaskTimeout</code> is a <code>TimeoutError</code> raised inside a sync task at its execution deadline and recorded against the timed-out attempt. Timeout precedence is the task declaration, its queue's <code>TASK_TIMEOUTS</code> entry, then <code>TASK_TIMEOUT</code>. Async tasks are cancelled and their timeout is recorded with <code>TaskTimeout</code>.</p>
+<p><code>django_ox.exceptions.StoredValueUnreadable</code> is raised by <code>update_schedule</code> when a change would leave a stored value django-ox cannot use. Attributes are <code>alias</code>, <code>model</code>, <code>pk</code>, <code>fields</code> and <code>reason</code>. <code>model</code> is <code>"django_ox.OxSchedule"</code>; <code>fields</code> is a tuple, possibly empty; <code>reason</code> is escaped, bounded and one line. The original exception, when available, is <code>__cause__</code>; <code>__notes__</code> explains recovery. Attributes survive pickling. It is not a <code>django.db.DatabaseError</code>. Caller-input and readable validation failures remain <code>ValidationError</code>; database failures retain their exceptions. Direct ORM loading is outside this guarantee.</p>
+</li>
+<li>
+<p><strong>The structured-log contract</strong>: the event names and stable <code>extra</code> keys
   documented on the <a href="../monitoring/">Monitoring</a> page. This includes the
   policy events and keys, even though the declaration API is provisional.
   It also includes <code>worker_claim_released</code>,
@@ -1019,7 +1183,8 @@ export names this page does not list; those names are not public.</p>
   <code>worker_ids</code>. On <code>worker_poll_failed</code>, <code>claim_recovery</code> is <code>"pending"</code>
   while a recovery read is owed, or <code>null</code> otherwise; with psycopg2 it
   is always <code>null</code>. On <code>worker_claim_recovery_failed</code> and
-  <code>worker_claim_recovery_expired</code>, it is always <code>"expired"</code>.</li>
+  <code>worker_claim_recovery_expired</code>, it is always <code>"expired"</code>.</p>
+</li>
 <li><strong>The testing helpers</strong> <code>django_ox.testing.ImmediateBackend</code>,
   <code>django_ox.testing.DummyBackend</code> and <code>django_ox.testing.run_tasks</code>.
   The backends accept policy declarations but do not enforce retries,
@@ -1047,6 +1212,46 @@ updates <code>run_after</code>, rather than preserving its original value as pro
 <h1 id="142-suggests">142 suggests.</h1>
 <p>See <a href="../configuration/#per-task-policy">Configuration</a> for validation,
 framework support and precedence.</p>
+<h3 id="stable-optional-oxpull-app">Stable: optional <code>oxpull</code> app</h3>
+<p>The stable public surface is:</p>
+<ul>
+<li><code>oxpull.backend.OxpullBackend</code>.</li>
+<li>Its <code>UNIQUE_TASKS</code>, <code>RATE_LIMITS</code> and <code>RATE_REFRESH_INTERVAL</code> options.</li>
+<li><code>oxpull.worker.OxpullWorker</code>.</li>
+<li><code>oxpull.unique.unique</code>.</li>
+<li><code>oxpull.batches.Batch</code> and <code>oxpull.batches.BatchProgress</code>.</li>
+<li><code>oxpull.batches.create</code>, <code>oxpull.batches.get</code> and <code>oxpull.batches.reconcile</code>.</li>
+<li><code>Batch.add</code>, <code>Batch.seal</code>, <code>Batch.progress</code> and <code>batch.id</code>.</li>
+<li><code>oxpull.exceptions.UniqueEnqueueRace</code>.</li>
+<li><code>oxpull.exceptions.BatchSealed</code>.</li>
+<li><code>oxpull.exceptions.BatchMemberExists</code>.</li>
+<li>The <code>oxpull_prune</code> management command.</li>
+<li>All 16 <code>oxpull</code> check ids: <code>oxpull.E001</code> through <code>oxpull.E009</code>, and <code>oxpull.W001</code> through <code>oxpull.W007</code>.</li>
+<li>The <code>oxpull_*</code> schema.</li>
+<li>The non-workflow <code>oxpull</code> log events documented under <a href="../monitoring/#log-events">Log events</a>.</li>
+</ul>
+<p><code>BatchProgress.pruned</code> is a deprecated alias of <code>unattributed</code>. Use <code>unattributed</code>; the alias emits <code>DeprecationWarning</code> and is marked for removal in 2.0.</p>
+<h3 id="provisional-workflows">Provisional: workflows</h3>
+<p>The documented workflow surface is provisional:</p>
+<ul>
+<li><code>oxpull.workflows.create</code>.</li>
+<li><code>oxpull.workflows.get</code>.</li>
+<li><code>oxpull.workflows.reconcile</code>.</li>
+<li><code>oxpull.workflows.retained_rows</code>.</li>
+<li><code>Workflow.add</code>, <code>Workflow.seal</code> and <code>Workflow.progress</code>.</li>
+<li><code>WorkflowProgress</code>.</li>
+<li><code>oxpull.exceptions.WorkflowSealed</code>.</li>
+<li><code>oxpull.exceptions.WorkflowNodeExists</code>.</li>
+<li><code>oxpull.exceptions.UnknownWorkflowNode</code>.</li>
+<li>The <code>WORKFLOWS</code> option.</li>
+<li>Every <code>workflow_*</code> log event.</li>
+</ul>
+<p>The provisional tier also applies to the documented results returned by these workflow entry points. A return type's use in documentation does not make unrelated implementation helpers public.</p>
+<h3 id="not-public-workflow-internals">Not public: workflow internals</h3>
+<p>Workflow implementation helpers are not public API. In particular, <code>node_flag</code>, <code>runnable_filter_q</code> and <code>record_node_outcome</code> are internal, even though they appear in the module's <code>__all__</code>.</p>
+<p>Internal contracts between <code>django_ox</code> and <code>oxpull</code> are tested by the feature
+suite in the same CI. They are not public API and are not maintained through
+a separate dependency pin.</p>
 <h3 id="not-public">Not public</h3>
 <p>Everything else is an implementation detail and may change in any release
 without notice. That covers the <code>django_ox.worker.Worker</code> internals, the cron
@@ -1181,8 +1386,8 @@ has no filter for it. Bulk discards skip it, and <code>queue_stats()</code>, the
 process that shares a database before anything writes the new status. The
 release notes name the value, say how it reads through <code>django.tasks</code>, and
 give the upgrade and rollback steps.</p>
-<p>Pin accordingly: <code>django-ox~=1.8.0</code> accepts patch releases only;
-<code>django-ox~=1.3</code> accepts the current major line.</p>
+<p>Pin accordingly: <code>django-ox~=1.9.0</code> accepts patch releases only;
+<code>django-ox~=1.9</code> accepts the current major line.</p>
 <h2 id="deprecation-policy">Deprecation policy</h2>
 <p>When a public surface is going to be removed or changed incompatibly, and
 a compatible path exists, it is deprecated before removal rather than
@@ -1198,9 +1403,8 @@ dropped outright:</p>
 vulnerability open may change in a patch release. That is documented in the
 changelog, and in a security advisory where relevant.</p>
 <h2 id="supported-python-and-django">Supported Python and Django</h2>
-<p>Each django-ox release is tested against the matrix below in CI, on SQLite
-and PostgreSQL 16 across the grid and MySQL 8 on the oldest and newest
-corners; these are the supported combinations.</p>
+<p>The <code>oxpull</code> app requires Django 6.0+. Its SQLite and PostgreSQL suites cover the Django 6.0 / 6.1 grid on <code>rc*</code> tags and in nightly runs. Its MySQL 8 suite runs at Python 3.14 / Django 6.1.</p>
+<p>The separate django-ox matrix continues to cover Django 5.2, and its MySQL coverage includes the oldest and newest supported corners. That broader base-app matrix is not a claim that the optional app runs on Django 5.2.</p>
 <table>
 <thead>
 <tr>
@@ -1213,13 +1417,13 @@ corners; these are the supported combinations.</p>
 <tbody>
 <tr>
 <td><strong>Python 3.12</strong></td>
-<td>tested</td>
+<td><code>django_ox</code> tested; <code>oxpull</code> not supported</td>
 <td>tested</td>
 <td>tested</td>
 </tr>
 <tr>
 <td><strong>Python 3.13</strong></td>
-<td>tested</td>
+<td><code>django_ox</code> tested; <code>oxpull</code> not supported</td>
 <td>tested</td>
 <td>tested</td>
 </tr>
@@ -1232,8 +1436,12 @@ corners; these are the supported combinations.</p>
 </tbody>
 </table>
 <p>Django 6.0 and later ship the Tasks framework in core. The Django 5.2 legs
-install the <code>django-tasks</code> backport and run the whole suite against it, which
-is what <code>django-ox[backport]</code> pulls in.</p>
+install the <code>django-tasks</code> backport and run the <code>django_ox</code> suite against it,
+which is what <code>django-ox[backport]</code> pulls in. Those legs do not run the
+<code>oxpull</code> feature suite.</p>
+<p><code>oxpull</code> is not supported on Django 5.2. It raises <code>ImproperlyConfigured</code>
+during application startup, before system checks can run. Installing the
+backport does not enable <code>oxpull</code> on Django 5.2.</p>
 <p>Support for per-task policy declarations differs from support for the
 backend itself:</p>
 <table>
@@ -1356,13 +1564,13 @@ part of the tested matrix.</p>
         
         
           
-          <a href="../pro/" class="md-footer__link md-footer__link--next" aria-label="Next: Pro">
+          <a href="../agents/" class="md-footer__link md-footer__link--next" aria-label="Next: For AI assistants">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Pro
+                For AI assistants
               </div>
             </div>
             <div class="md-footer__button md-icon">

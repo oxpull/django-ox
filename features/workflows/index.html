@@ -1,0 +1,1797 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Database-backed worker backend for Django's Tasks framework.">
+      
+      
+      
+        <link rel="canonical" href="https://oxpull.com/django-ox/features/workflows/">
+      
+      
+        <link rel="prev" href="../rate-limiting/">
+      
+      
+        <link rel="next" href="../../patterns/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Workflows - django-ox</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/brand.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  
+    
+  
+  
+  
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="django-ox">
+  <meta property="og:title" content="Workflows - django-ox">
+  <meta property="og:description" content="Database-backed worker backend for Django's Tasks framework.">
+  <meta property="og:url" content="https://oxpull.com/django-ox/features/workflows/">
+  <meta property="og:image" content="https://oxpull.com/django-ox/assets/social-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="django-ox: the production worker for Django Tasks. Your database is the queue.">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Workflows - django-ox">
+  <meta name="twitter:description" content="Database-backed worker backend for Django's Tasks framework.">
+  <meta name="twitter:image" content="https://oxpull.com/django-ox/assets/social-card.png">
+
+  <link rel="apple-touch-icon" href="../../assets/favicon.png">
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#workflows" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="django-ox" class="md-header__button md-logo" aria-label="django-ox" data-md-component="logo">
+      
+  <img src="../../assets/mark-ox.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            django-ox
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Workflows
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/oxpull/django-ox" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="django-ox" class="md-nav__button md-logo" aria-label="django-ox" data-md-component="logo">
+      
+  <img src="../../assets/mark-ox.png" alt="logo">
+
+    </a>
+    django-ox
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/oxpull/django-ox" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../background-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background tasks, step by step
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../wagtail/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wagtail background tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../recurring-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recurring tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../stored-schedules/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schedules in the database
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Task coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Task coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../unique-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Unique tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../batches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Batches
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rate-limiting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rate limiting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Workflows
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#behaviour" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Behaviour
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#workflow-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Workflow API
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#waiting-and-release" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Waiting and release
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-claim-still-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The claim still checks
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#failure-cancellation-and-completion" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure, cancellation and completion
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-reconcilers-backstop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The reconciler's backstop
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#retention" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retention
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#claim-cost" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Claim cost
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transactions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#not-supported" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Not supported
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#turning-workflows-off" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Turning workflows off
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#draining-the-waiting-nodes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Draining the waiting nodes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deployment-order" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deployment order
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#worker-database-aliases-and-pools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worker database aliases and pools
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Worker database aliases and pools">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#renewal-and-watchdog-connections" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Renewal and watchdog connections
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rolling-upgrades" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rolling upgrades
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../patterns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Common patterns
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migrating/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrating
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-django-ox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Why django-ox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../use-cases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Use cases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../choosing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing a backend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../production/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmarks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../stability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API stability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    For AI assistants
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#behaviour" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Behaviour
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#workflow-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Workflow API
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#waiting-and-release" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Waiting and release
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-claim-still-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The claim still checks
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#failure-cancellation-and-completion" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure, cancellation and completion
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-reconcilers-backstop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The reconciler's backstop
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#retention" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retention
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#claim-cost" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Claim cost
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transactions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#not-supported" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Not supported
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#turning-workflows-off" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Turning workflows off
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#draining-the-waiting-nodes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Draining the waiting nodes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deployment-order" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deployment order
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#worker-database-aliases-and-pools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worker database aliases and pools
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Worker database aliases and pools">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#renewal-and-watchdog-connections" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Renewal and watchdog connections
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rolling-upgrades" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rolling upgrades
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="workflows">Workflows</h1>
+<p>Workflows connect tasks through dependencies, keeping dependent nodes waiting until they can be released. Workflows are provisional in django-ox 1.9.0. The sections below describe release, completion, retention, and safe shutdown.</p>
+<p>See the <a href="../">feature overview</a> for setup, requirements, Django 5.2 behaviour, and the stability policy.</p>
+<h2 id="behaviour">Behaviour</h2>
+<p>A workflow is a set of tasks with dependencies. A node runs only after every
+node it depends on has succeeded.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">oxpull</span><span class="w"> </span><span class="kn">import</span> <span class="n">workflows</span>
+
+<span class="n">flow</span> <span class="o">=</span> <span class="n">workflows</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="s2">"nightly"</span><span class="p">,</span> <span class="n">on_complete</span><span class="o">=</span><span class="n">summarize</span><span class="p">)</span>
+<span class="n">flow</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="s2">"extract"</span><span class="p">,</span> <span class="n">extract</span><span class="p">)</span>
+<span class="n">flow</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="s2">"transform-a"</span><span class="p">,</span> <span class="n">transform</span><span class="p">,</span> <span class="s2">"a"</span><span class="p">,</span> <span class="n">depends_on</span><span class="o">=</span><span class="s2">"extract"</span><span class="p">)</span>
+<span class="n">flow</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="s2">"transform-b"</span><span class="p">,</span> <span class="n">transform</span><span class="p">,</span> <span class="s2">"b"</span><span class="p">,</span> <span class="n">depends_on</span><span class="o">=</span><span class="s2">"extract"</span><span class="p">)</span>
+<span class="n">flow</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="s2">"load"</span><span class="p">,</span> <span class="n">load</span><span class="p">,</span> <span class="n">depends_on</span><span class="o">=</span><span class="p">[</span><span class="s2">"transform-a"</span><span class="p">,</span> <span class="s2">"transform-b"</span><span class="p">])</span>
+<span class="n">flow</span><span class="o">.</span><span class="n">seal</span><span class="p">()</span>
+
+<span class="n">flow</span><span class="o">.</span><span class="n">progress</span><span class="p">()</span>  <span class="c1"># WorkflowProgress(total=4, pending=4, blocked=3, ...)</span>
+</code></pre></div>
+<p>A node's backend must declare <code>WORKFLOWS</code> and run <code>OxpullWorker</code>. The
+reconciler must be on a schedule. <code>add()</code> refuses a node whose backend does
+not declare <code>WORKFLOWS</code> or runs another worker class. <code>create()</code> and <code>seal()</code>
+refuse when no schedule runs the reconciler.
+Keep workflow tables and their task rows on the same database. See the <a href="../unique-tasks/#database-routing-constraints">database-routing constraints</a>.</p>
+<div class="highlight"><pre><span></span><code><span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">"default"</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"oxpull.backend.OxpullBackend"</span><span class="p">,</span>
+        <span class="s2">"OPTIONS"</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">"WORKFLOWS"</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+            <span class="s2">"WORKER_CLASS"</span><span class="p">:</span> <span class="s2">"oxpull.worker.OxpullWorker"</span><span class="p">,</span>
+            <span class="s2">"SCHEDULES"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">"oxpull-workflow-reconcile"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="s2">"task"</span><span class="p">:</span> <span class="s2">"oxpull.workflows.reconcile"</span><span class="p">,</span>
+                    <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"* * * * *"</span><span class="p">,</span>
+                <span class="p">},</span>
+            <span class="p">},</span>
+        <span class="p">},</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>depends_on</code> names nodes already added to the workflow, so a cycle cannot be
+built. A unique task cannot be a node. To make a task unique that workflows
+already use, drain its pending nodes first.</p>
+<h2 id="workflow-api">Workflow API</h2>
+<p>The documented workflow API is provisional:</p>
+<ul>
+<li><code>oxpull.workflows.create()</code></li>
+<li><code>oxpull.workflows.get()</code></li>
+<li><code>oxpull.workflows.reconcile</code></li>
+<li><code>oxpull.workflows.retained_rows()</code></li>
+<li><code>Workflow.add()</code></li>
+<li><code>Workflow.seal()</code></li>
+<li><code>Workflow.progress()</code></li>
+<li><code>WorkflowProgress</code></li>
+</ul>
+<p>The workflow exceptions are also provisional:</p>
+<ul>
+<li><code>oxpull.exceptions.WorkflowSealed</code></li>
+<li><code>oxpull.exceptions.WorkflowNodeExists</code></li>
+<li><code>oxpull.exceptions.UnknownWorkflowNode</code></li>
+</ul>
+<p>They distinguish a sealed workflow, a duplicate node and an unknown node. The <code>WORKFLOWS</code> option and all <code>workflow_*</code> log events have the same provisional status. Workflow implementation helpers are not public API.</p>
+<h2 id="waiting-and-release">Waiting and release</h2>
+<ul>
+<li>A node with no dependencies is enqueued READY.</li>
+<li>A node with dependencies is inserted in django-ox's WAITING status. No
+  worker claims, reaps or prunes a WAITING row.</li>
+<li>An edge is marked satisfied only on proof that its upstream succeeded. The
+  proof is the upstream row, or its recorded outcome once the row is pruned.
+  SUCCESSFUL is final, so the mark stays true after the upstream row is pruned.</li>
+<li>A node moves from WAITING to READY only when every edge into it is marked.
+  The move is a compare-and-set on the row's status and lease epoch.</li>
+<li>The worker that runs a node records its outcome and marks the edges out of
+  it in the transaction that writes the task's result. After that commits,
+  it releases the nodes those edges held.</li>
+<li>A <code>run_after</code> you gave a node stays on its row. The release keeps the
+  later of now and that time, so a released node shows a <code>run_after</code>.</li>
+<li>The reconciler releases what a worker missed. When release owns its
+  transaction, it makes two attempts per chunk of node IDs. If both attempts
+  lose a lock conflict, the nodes wait for the reconciler.</li>
+</ul>
+<p>SQLite is supported. Django uses DEFERRED transactions by default.
+  <code>OPTIONS["transaction_mode"]</code> can change that mode.</p>
+<p>Under DEFERRED transactions, a read-to-write lock conflict can return
+  <code>SQLITE_BUSY</code> immediately, without waiting for the busy handler.
+  After both release attempts lose a lock conflict, release logs
+  <code>workflow_release_deferred</code> at WARNING level. The reconciler retries
+  the deferred nodes.</p>
+<p>Reconciler cadence affects workflow latency. The documented schedule
+  runs once a minute. Keep the reconciler scheduled and monitor
+  <code>workflow_release_deferred</code>.</p>
+<h2 id="the-claim-still-checks">The claim still checks</h2>
+<p>The claim refuses a READY node while an edge into it is not marked and its
+upstream row is missing or not SUCCESSFUL. A missing upstream row is never
+taken as success. This covers READY rows no release made, such as a django-ox
+retry or an UPDATE by hand. What it costs is below.</p>
+<h2 id="failure-cancellation-and-completion">Failure, cancellation and completion</h2>
+<ul>
+<li>A node does not run while one of its upstreams is failed, lost or
+  discarded. In a sealed workflow the reconciler discards that node.</li>
+<li>An upstream whose row is gone counts as dead only when its outcome was
+  recorded as dead. With nothing recorded, the nodes downstream of it wait.</li>
+<li>A sealed workflow completes once no node is pending. WAITING, READY and
+  RUNNING nodes are pending, as is any status unrecognised by django-ox 1.9.0.</li>
+<li>Completion counts each node by its recorded outcome. A success or a failure
+  still counts after <code>ox_prune</code> deletes the row. A node whose row went before
+  anything recorded it counts as unattributed.</li>
+<li>The reconciler records any outcome a worker did not record, and completes
+  the workflow on a later tick.</li>
+<li><code>on_complete</code> and <code>on_success</code> are enqueued in the transaction that
+  completes the workflow. <code>on_success</code> is enqueued only when nothing failed
+  and nothing is unattributed.</li>
+<li>A django-ox retry of a node after its workflow completed runs that node.
+  The nodes downstream of it stay discarded, and the workflow stays COMPLETE.</li>
+</ul>
+<h2 id="the-reconcilers-backstop">The reconciler's backstop</h2>
+<p>Each tick pages through open and sealed workflows, one visit each in turn. A
+visit marks edges whose upstream succeeded, records outcomes, and releases
+waiting nodes. After five seconds, or a quarter of what its task timeout
+leaves, a tick starts no further visit or page. Its first page always runs,
+and a page that has started runs to its end. The retries of the queue below
+come first and are not counted.</p>
+<p>On PostgreSQL and MySQL each write waits at most one second for a lock. On
+PostgreSQL each of its statements runs at most two seconds. On MySQL that
+bound applies to SELECT statements only. The page reads have no time bound. A
+row the backstop cannot lock goes to a queue that later ticks retry first. The
+next pass reads it again too, so the backstop never gives up on a row.</p>
+<p>For SQLite release deferrals and their effect on workflow latency,
+see <a href="#waiting-and-release">Waiting and release</a>.</p>
+<h2 id="retention">Retention</h2>
+<p><code>oxpull_prune</code> keeps batch members. For workflows it follows these rules.</p>
+<ul>
+<li>It considers a workflow only once it is COMPLETE and completed longer ago
+  than <code>--older-than</code>.</li>
+<li>It stamps the workflow as retired, then deletes nothing while any node is
+  pending, such as a node retried after completion.</li>
+<li>It deletes a node, with the edges into it, only when the node's outcome is
+  recorded and its task row is SUCCESSFUL, DISCARDED or gone.</li>
+<li>A FAILED or LOST node stays, with the edges into it, while its row exists.
+  A retry of it is still checked. It goes once <code>ox_prune --include-failed</code>
+  deletes the row.</li>
+<li>A node with no recorded outcome is never deleted.</li>
+<li>The workflow row stays.</li>
+<li>A later run passes over a retired workflow whose node rows are all gone. It
+  also passes over one that keeps only recorded FAILED or LOST nodes and nodes
+  with no recorded outcome. It sends statements for one workflow only while
+  it has something to do there.</li>
+<li>A run still reads the row of every workflow that completed before the
+  cutoff, and the task row of every node it keeps. Its count of kept rows can
+  read the whole node table. Those reads grow with the tables.</li>
+<li>It prints how many node and edge rows it keeps. <code>workflows.retained_rows()</code>
+  returns the same counts for monitoring.</li>
+</ul>
+<h2 id="claim-cost">Claim cost</h2>
+<p>Nothing where no backend on the database declares <code>WORKFLOWS</code>. Workflows
+then add no conjunct to a claim and no statement to a worker. The suite
+asserts that against the base worker's statements.</p>
+<p>With <code>WORKFLOWS</code> on a worker's own backend, its claim probes the edge
+table's <code>oxpull_wf_edge_down_idx</code> once for every candidate row it judges.
+The table is <code>oxpull_oxpullworkflowedge</code> and the index is on
+<code>(downstream_task_id, satisfied)</code>. Every candidate, not only the nodes: a
+task that is in no workflow pays the probe, and the probe finds nothing.
+That is what the option being the switch costs. A workflow is created at
+run time. A cached "there are no workflows" would be a window in which a
+node runs out of order. Closing that window with a query per claim pass
+would cost more than the probe it replaced.</p>
+<p>The reach is the database, not the backend. Wherever any backend on the
+database declares <code>WORKFLOWS</code>, every <code>OxpullWorker</code> there records node
+outcomes, because a claim is scoped to queues and not to backends. For a
+worker whose own backend does not declare it, that is one column more on the
+statement returning the claimed row. Nothing else, for a task that is no
+node. Such a worker also looks for the node table every 30 seconds until it
+is there, then stops: a cost per worker, not per claim.</p>
+<p>The cost is per candidate row, not per blocked node. A blocked node sits in
+WAITING, which no claim reads, so a wide fan-in waiting on one root does not
+make the claims around it dearer. Measured on PostgreSQL with
+<code>EXPLAIN (ANALYZE)</code> at 50 and at 450 blocked nodes, and pinned in the suite.</p>
+<p>The probe stays a probe. On SQLite and MySQL the claim names the index. On
+PostgreSQL the migration sets the column's <code>n_distinct</code>, so the planner's
+estimate stays small. Statistics gathered while a wide fan-in fills the edge
+table do not turn the check into a scan. A plan read on stale statistics is
+not comparable to one read on fresh ones, so the suite runs <code>ANALYZE</code> before
+it measures.</p>
+<p>The state is the edge table. It grows with the nodes you add, and
+<code>oxpull_prune</code> deletes a node's edges with the node, under Retention above.</p>
+<h2 id="transactions">Transactions</h2>
+<ul>
+<li>A call owns its transaction when the connection is in autocommit and no
+  atomic block is open. <code>add()</code> then runs its transaction again after a
+  deadlock or a serialization failure. <code>seal()</code> and completion do so after a
+  serialization failure. The cancellation, the record repair and
+  <code>oxpull_prune</code>'s stamp, deletes and scan row cleanup do so after either.</li>
+<li>Inside your transaction nothing runs again. The error reaches you, and you
+  run your transaction again.</li>
+<li>To add to or seal several workflows in one transaction, take them in
+  ascending id order. Two transactions that take the same workflows in
+  opposite orders can deadlock.</li>
+<li>In that transaction, do not take a locking read or an UPDATE of an existing
+  task row.</li>
+</ul>
+<p>Use <code>django_ox.testing.run_tasks(backend="flows")</code> to run tasks with the workflow backend. Replace <code>"flows"</code> with the alias configured for your workflow backend. <code>run_tasks()</code> uses that alias's configured worker class. An <code>OxpullBackend</code> alias alone does not make the test worker enforce rate limits or release workflow nodes.</p>
+<h2 id="not-supported">Not supported</h2>
+<ul>
+<li>Claiming or running workflow nodes with <code>run_once()</code> or <code>execute()</code> inside
+  a caller's atomic block. Dependents are released by a commit callback of
+  the outcome write. Use <code>run_tasks()</code> for tests instead.</li>
+<li>Deleting workflow, node or edge rows through the ORM or SQL.</li>
+<li>Mixing releases. Every process using django-ox on the database must run
+  django-ox 1.9.0 before any backend declares <code>WORKFLOWS</code>. An older release
+  without WAITING support cannot read that status.</li>
+</ul>
+<h2 id="turning-workflows-off">Turning workflows off</h2>
+<p>Two different things go by that name, and only one of them stays available.</p>
+<p><strong>Stop using workflows.</strong> Drain the waiting nodes, then take <code>WORKFLOWS</code> out
+of <code>OPTIONS</code> and the reconciler out of <code>SCHEDULES</code>. The tables stay, holding
+finished work and nothing running. This is available whenever you want it,
+and django-ox's own rollback needs nothing more.</p>
+<p><strong>Drop the tables.</strong> <code>migrate oxpull</code> back past
+<code>0005_workflow_edge_upstream_idx</code> or <code>0004_workflows</code> drops the tables that
+hold every node, edge and record. Both refuse while any workflow row exists,
+and no command deletes a workflow row: <code>oxpull_prune</code> deletes nodes and edges
+and keeps the row it hangs them on. So this is supported only before the
+first workflow is created. After that the row is there for good.</p>
+<p>The refusal catches a mistake. It does not make a rollback safe while workers
+run.</p>
+<h2 id="draining-the-waiting-nodes">Draining the waiting nodes</h2>
+<p>Take these steps in order, on every database that holds django-ox's tables.</p>
+<ol>
+<li>Stop creating workflows. Stop every call to <code>workflows.create()</code> and
+   <code>add()</code>, then wait for the requests, jobs and transactions already inside
+   one to end.</li>
+<li>End every open workflow. A node leaves WAITING when it is released or
+   discarded. Let the work finish, or close the branches you do not want.
+   <code>django_ox.actions.discard</code> closes one node's task row, WAITING
+   included, and on its next tick the reconciler discards every node below
+   it. No call ends a whole workflow at once.</li>
+<li>Keep the workers and the reconciler running while step 2 runs. Only an
+   <code>OxpullWorker</code> on a backend that declares <code>WORKFLOWS</code> releases a waiting
+   node, and only the reconciler discards a branch. Take the option away
+   before the rows are gone and nothing is left that can move them.</li>
+<li>Stop every process that can write a waiting node, and keep it stopped.
+   That is anything that calls <code>add()</code>. A process already running keeps the
+   settings it started with, so changing settings does not stop one.</li>
+<li>On every alias, not only the one that holds <code>oxpull</code>'s tables, run
+   <code>OxTask.objects.using(alias).filter(status="WAITING").count()</code>. Every
+   count must be 0. A count that will not fall means something is still
+   adding nodes. Find it, stop it, and go back to step 2.</li>
+<li>Take <code>WORKFLOWS</code> out of <code>OPTIONS</code> and the reconciler out of <code>SCHEDULES</code>,
+   in the settings every process starts with, and restart.</li>
+</ol>
+<p>Once no backend declares <code>WORKFLOWS</code>, <code>manage.py check --database &lt;alias&gt;</code>
+reports <code>oxpull.W007</code> for any workflow node still WAITING. Name the alias
+that holds <code>oxpull</code>'s tables. A bare <code>manage.py check</code> reports nothing
+here, because a check that reads a database runs only against an alias you
+name. <code>ox_health</code> and <code>ox_prune</code> pass their own, so both report it without
+the flag. W007 means step 5 was not finished. The hint says to declare
+<code>WORKFLOWS</code> again, which is how you get back a database that can drain:
+declare it, finish step 2, then take it away again. The check reads one
+database, so step 5 is what covers the rest.</p>
+<p>On MySQL, <code>oxpull.E009</code> flags a task-id column on another collation than the
+task table's, and a workflow worker refuses to start.</p>
+<h2 id="deployment-order">Deployment order</h2>
+<p><strong>Turn it on in this order.</strong> A node with dependencies is inserted in django-ox's WAITING
+status. Older django-ox releases without WAITING support
+cannot read or release such a row. Every process on the database must run django-ox 1.9.0
+before the first waiting node is written. For each database that holds the tables:</p>
+<ol>
+<li>Upgrade every process using django-ox against that database to django-ox 1.9.0.
+   That means workers, web and ASGI processes, enqueue-only services, the reconciler
+   and cron jobs.</li>
+<li>Run <code>migrate django_ox</code> and <code>migrate oxpull</code> on that database.</li>
+<li>Check your deploy inventory for processes still running an older release. A process cannot
+   see which django-ox version another process runs.</li>
+<li>Add the workflow settings described above and restart. A running process keeps the settings
+   it started with, so nothing changes until it restarts.</li>
+</ol>
+<p>For this upgrade, install django-ox 1.9.0 on every enqueuing and claiming process before enabling workflows. This is a consistent-fleet upgrade requirement, not a claim that releases 1.3.0 through 1.8.0 lack WAITING support. WAITING was introduced in django-ox 1.3.0.</p>
+<p>Leave step 4 until steps 1 to 3 are done everywhere. Nothing refuses <code>WORKFLOWS</code> on the grounds that a process elsewhere is too old, because no process can see the others.</p>
+<p>Going back to a django-ox from before WAITING is django-ox's own procedure. Its migration is
+the one that refuses while a waiting row exists. Its changelog carries those steps, under
+<strong>Rolling back to 1.2 after workflows have run</strong>:
+<a href="../../changelog/">django-ox changelog</a>.</p>
+<h2 id="worker-database-aliases-and-pools">Worker database aliases and pools</h2>
+<p>For the worker's general connection budget, pool sizing, and renewal fallback requirements, see <a href="../../production/#database-connections-and-postgresql-pooling">database connections and PostgreSQL pooling</a>. The additional alias rules below apply to workflow outcome recording and rate-limit windows.</p>
+<p><code>oxpull</code> reads and writes rate-limit windows and records workflow-node outcomes
+(node records, edge marks, and release) on the alias returned by
+<code>oxpull_db_alias()</code>, which must also hold the django_ox tables. When it differs
+from <code>--database</code>, it needs its own pool and server budget. The worker's
+startup warning does not check that alias or available server slots.</p>
+<h3 id="renewal-and-watchdog-connections">Renewal and watchdog connections</h3>
+<p>The watchdog's own stuck-attempt READY retries and FAILED records for rows
+that are not workflow nodes use its private connection on <code>--database</code>. Its
+workflow-node final FAILED records also use that connection when the
+recording alias matches <code>--database</code>. Among watchdog writes, only a workflow
+node's final FAILED record on a separate alias uses that alias's ordinary
+pooled connection and needs a pooled spare. Task-thread
+workflow-node writes (SUCCESSFUL, edge marks, release) and poll-loop
+rate-window I/O use the recording alias's ordinary pool; ordinary task
+outcome writes use the <code>--database</code> pool; neither uses the watchdog's
+private connection. The separate-alias recording path has not been tested.</p>
+<p>The watchdog uses at most one acquisition sequence per pass: the group of
+stuck attempts it records together. This grouping is unrelated to task batches.</p>
+<p>Nothing needs setting for renewal or the watchdog. To bound task and poll-loop
+connects, which the private-path deadlines do not cover, set
+<code>OPTIONS["connect_timeout"]</code> on the alias. A positive value below 5 seconds
+also shortens private deadlines when it is below their existing budget.</p>
+<p>See <a href="../../production/#database-connections-and-postgresql-pooling">pool sizing, connection handling, and deadline limits</a>
+and <a href="../../monitoring/">monitoring events</a>.
+On pooled PostgreSQL, connection-acquisition failures no longer use
+<code>lease_renew_failed</code>; update alerts. Statement failures still use it.</p>
+<p>After a PostgreSQL restart, tasks that were running at that moment can run again.</p>
+<h3 id="rolling-upgrades">Rolling upgrades</h3>
+<p>For workers on django-ox 0.2.0 through 1.3.1, which are affected by the renewal defect,
+set pools to at least
+<code>concurrency + 2</code>, or <code>concurrency + 3</code> with task timeouts, before rollout,
+or disable their Django pool. Keep that budget until every affected worker has
+stopped. The same mitigation applies while an affected worker remains deployed.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../rate-limiting/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Rate limiting">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Rate limiting
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../../patterns/" class="md-footer__link md-footer__link--next" aria-label="Next: Common patterns">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Common patterns
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.footer"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

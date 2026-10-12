@@ -439,6 +439,200 @@
   
   
   
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Task coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Task coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/unique-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Unique tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/batches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Batches
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/rate-limiting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rate limiting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../patterns/" class="md-nav__link">
         
@@ -556,6 +750,45 @@
       
     </span>
   </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#earlier-oxpull-installs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Earlier oxpull installs
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Earlier oxpull installs">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#upgrade-an-existing-installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade an existing installation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#repair-an-overlapping-installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Repair an overlapping installation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -785,33 +1018,6 @@
   
   
     <li class="md-nav__item">
-      <a href="../pro/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Pro
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    <li class="md-nav__item">
       <a href="../agents/" class="md-nav__link">
         
   
@@ -915,6 +1121,45 @@
       
     </span>
   </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#earlier-oxpull-installs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Earlier oxpull installs
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Earlier oxpull installs">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#upgrade-an-existing-installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade an existing installation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#repair-an-overlapping-installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Repair an overlapping installation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -1131,10 +1376,12 @@ is to wrap every call in <code>transaction.on_commit()</code>.</p>
 <p>Here the enqueue is an <code>INSERT</code> on the database that holds <code>OxTask</code>, your
 default one. Open the transaction there and the task commits or rolls back
 with the row it belongs to, so there is nothing to wrap.</p>
-<p>Queues, priorities and <code>run_after</code> map directly. Celery's chains,
-groups and chords, and routing across multiple brokers, are outside the
-package; workflows are in <a href="../pro/">Oxpull Pro</a>, a paid add-on, and chains
-are on its roadmap, undated.</p>
+<p>Queues, priorities and <code>run_after</code> map directly. django-ox does not
+implement Celery's chain, group or chord APIs, or routing across multiple
+brokers. <a href="../features/batches/">Batches</a> provide grouped work, and
+provisional <a href="../features/workflows/">workflows</a> provide dependency DAGs.
+Both require Django 6.0+ and the optional <code>oxpull</code> app. Review their
+semantics rather than treating them as drop-in Celery replacements.</p>
 <h2 id="from-huey">From huey</h2>
 <p>Closer to django-ox than Celery is, since huey can already store tasks in
 SQLite or Postgres. What changes is the API, and where schedules live.</p>
@@ -1211,6 +1458,60 @@ the admin today, see <a href="../stored-schedules/">Schedules in the database</a
 </tr>
 </tbody>
 </table>
+<h2 id="earlier-oxpull-installs">Earlier <code>oxpull</code> installs</h2>
+<p>The optional <code>oxpull</code> app is included in django-ox 1.9.0 and later. You no longer need a separately installed <code>oxpull</code> distribution.</p>
+<p>The PyPI <code>oxpull</code> 1.9.0 distribution is a compatibility metapackage. It depends on django-ox 1.9.0 or later and contains no Python module. The importable package comes from django-ox.</p>
+<p>The former private package index is retired. Remove it and its credentials from installer configuration.</p>
+<h3 id="upgrade-an-existing-installation">Upgrade an existing installation</h3>
+<p>The order matters.</p>
+<ol>
+<li>
+<p>Stop every affected worker and other process that enqueues or claims tasks.</p>
+</li>
+<li>
+<p>Back up the database.</p>
+</li>
+<li>
+<p>Uninstall the earlier <code>oxpull</code> distribution before upgrading django-ox.</p>
+<div class="highlight"><pre><span></span><code><span class="go">python -m pip uninstall oxpull</span>
+</code></pre></div>
+</li>
+<li>
+<p>Remove the former private index and its credentials from your pip configuration, requirements and deployment secrets.</p>
+</li>
+<li>
+<p>Upgrade django-ox.</p>
+<div class="highlight"><pre><span></span><code><span class="go">python -m pip install -U django-ox</span>
+</code></pre></div>
+</li>
+<li>
+<p>Run migrations and check the installation.</p>
+<div class="highlight"><pre><span></span><code><span class="go">python manage.py migrate</span>
+<span class="go">python -m pip check</span>
+</code></pre></div>
+<p>For the verified oxpull 1.8.0 schema, the migration run reports "No migrations to apply." Earlier schemas may have migrations to apply.</p>
+</li>
+<li>
+<p>Restart the affected processes with the updated installation and existing application settings.</p>
+</li>
+</ol>
+<p>Keep the existing <code>INSTALLED_APPS</code> and <code>TASKS</code> configuration. Import paths, task data, the <code>oxpull</code> app label, table names, the five migrations and persisted task paths are unchanged.</p>
+<p>The optional app requires Django 6.0+. django-ox without that app continues to support Django 5.2.</p>
+<h3 id="repair-an-overlapping-installation">Repair an overlapping installation</h3>
+<p>If you ran <code>pip install -U oxpull</code> or <code>pip install -U django-ox</code> before removing an earlier <code>oxpull</code> distribution, inspect and repair the installation before restarting processes.</p>
+<p>If the earlier distribution is still installed, remove it and then restore django-ox's files:</p>
+<div class="highlight"><pre><span></span><code><span class="go">python -m pip uninstall oxpull</span>
+<span class="go">python -m pip install --force-reinstall --no-deps django-ox</span>
+<span class="go">python -m pip check</span>
+</code></pre></div>
+<p>Do both steps even if imports still worked before the uninstall. The old distribution can leave stale metadata that makes <code>pip check</code> fail, and uninstalling it can remove files now supplied by django-ox.</p>
+<p>If you already uninstalled the earlier distribution, restore the files with:</p>
+<div class="highlight"><pre><span></span><code><span class="go">python -m pip install --force-reinstall --no-deps django-ox</span>
+<span class="go">python -m pip check</span>
+</code></pre></div>
+<p>The same repair applies if uninstalling the old 0.0.1 stub removed <code>oxpull/__init__.py</code>, leaving a namespace import without <code>oxpull.__version__</code>.</p>
+<p>These package-file failures do not alter the database data. Run migrations and complete the normal checks before restarting.</p>
+<p>This shared-file warning concerns earlier distributions that installed an <code>oxpull</code> module. Uninstalling the module-free 1.9.0 metapackage does not remove django-ox's module files.</p>
 <h2 id="switching-over">Switching over</h2>
 <p>The two systems use different tables. Neither reads the other's rows. So if you
 flip the setting and deploy, anything still queued in the old table has nothing

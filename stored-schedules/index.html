@@ -16,7 +16,7 @@
         <link rel="prev" href="../recurring-tasks/">
       
       
-        <link rel="next" href="../patterns/">
+        <link rel="next" href="../features/">
       
       
         
@@ -705,6 +705,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#upgrade-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade checks
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#monitoring" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -718,6 +729,200 @@
     </ul>
   
 </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Task coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Task coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/unique-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Unique tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/batches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Batches
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/rate-limiting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rate limiting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
       
     </li>
   
@@ -954,33 +1159,6 @@
     
   
     API stability
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../pro/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Pro
   
 
     
@@ -1306,6 +1484,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#upgrade-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade checks
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#monitoring" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1391,10 +1580,14 @@ schedule is wired up. If schedules created in the admin never fire on their
 own, check that a backend's <code>OPTIONS</code> sets <code>SCHEDULE_SOURCE</code> to
 <code>django_ox.stored.DatabaseScheduleSource</code>.</p>
 <h2 id="what-a-person-with-admin-access-can-do">What a person with admin access can do</h2>
-<p>They can pick a task from the list you exposed, set its timing and arguments,
-enable it, disable it, and run it once immediately. Disabling a readable row
-alone can pause it even if it no longer validates. This does not repair the row.
-Enabling it again is refused until it is corrected.</p>
+<p>They can pick an exposed task, set its timing and arguments, enable it, disable it, and run it once immediately. Disable can pause a row even when its stored values cannot be read or no longer validate. Pausing does not repair stored values. Enable and Run once refuse invalid rows, name them, and continue with the rest of the selection.</p>
+<p>The list keeps rows needing recovery in their positions and count, selectable by name or <code>pk N</code>. Timing shows "Stored values django-ox cannot use: {fields}"; an invalid enabled value shows "Invalid enabled value". Change and history pages show "Stored schedule needs recovery", with the primary key, name, task key, rejected fields, reasons and repair instructions. There is no form. Disable and Delete are available subject to permissions.</p>
+<p>Some rows keep their ordinary change, history and delete pages for users allowed to change them. Every unreadable value must be replaced by a form save, and Django must return it exactly as stored. Examples are SQLite text or fractions in integer timing fields, and MySQL <code>enabled = 2</code>. Unreadable timestamps and bytes in text columns always use recovery. The form warns about the values; a successful save replaces them and starts a fresh activation boundary.</p>
+<p>Disable pauses by primary key, tells workers and logs "Changed Enabled." Delete also works by primary key, tells workers and logs the deletion. Its confirmation identifies the schedule and explains that deletion does not require reading it. If a selected row disappears or becomes unauthorized before the write, the action counts it as skipped and continues with other rows.</p>
+<p>An unreadable newest tick displays "Unreadable tick history", never "never" or an older tick. The schedule can still be opened, edited, paused, enabled, run or deleted. Its change form, Enable and Run once warn that automatic dispatch may be blocked. They identify <code>ox_prune --purge-unreadable-ticks --schedule-key db:N</code>; follow the stop, preview, inspect and restart procedure under <a href="../configuration/#ox_prune">Configuration</a>.</p>
+<p>Times the active zone cannot display appear in UTC with a label, including after a timezone change. The form labels affected end-time inputs "End time (UTC)". Submitting an unchanged value preserves its instant; clearing it removes the end. If a save is refused after form validation, the error returns on the form without saving or logging a change. If the schedule was deleted meanwhile, Django reports that it does not exist.</p>
+<p>Schedule admin instances on the changelist and change form lack <code>get_queryset()</code> annotations, including <code>last_tick_at</code>. Adapt <code>list_display</code> and <code>readonly_fields</code> consumers before upgrading. Annotation ordering still selects the page.</p>
+<p>Fields named in subclass <code>fields</code> or <code>fieldsets</code> remain read-only for <code>start_time</code>, <code>created_at</code> and <code>updated_at</code>. Layouts built by an overridden <code>get_fieldsets()</code> are not inspected.</p>
 <p>Running one immediately ignores both the pause and the end time: a schedule
 that is disabled or past its <code>end_time</code> still runs.</p>
 <p>They cannot name a task you haven't exposed. The field is a list, not a text box,
@@ -1419,8 +1612,8 @@ code decides what is reachable and the row picks from it.</p>
 <span class="nd">@task</span>
 <span class="k">def</span><span class="w"> </span><span class="nf">run_payroll</span><span class="p">():</span> <span class="o">...</span>
 </code></pre></div>
-<p>Anyone without <code>payroll.run_payroll</code> can see that schedule and cannot change it,
-whatever their permissions on the schedule table.</p>
+<p>Staff can see that schedule, but changing it requires <code>payroll.run_payroll</code>, whatever their schedule-table permissions. With <code>user=</code>, <code>update_schedule</code> checks both the stored entry under its row lock and the validated destination entry before writing. Changing the caller's in-memory <code>task_key</code> grants no permission. If the stored key cannot be read or is not registered in this process, only an active superuser may pause, change or delete it. A change must still end on a registered key; Enable and Run once still require a valid schedule.</p>
+<p>If workers import a task module that the web process doesn't, non-superuser staff cannot pause, change or delete its schedules. Import the same task module when the web process starts so its registry contains those keys. For an emergency pause, use an active superuser or call <code>update_schedule(OxSchedule(pk=pk), enabled=False)</code> without <code>user=</code> from trusted application code.</p>
 <p>Arguments get validated if you say how:</p>
 <div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django</span><span class="w"> </span><span class="kn">import</span> <span class="n">forms</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">django_ox.registry</span><span class="w"> </span><span class="kn">import</span> <span class="n">ArgsForm</span><span class="p">,</span> <span class="n">schedulable</span>
@@ -1579,12 +1772,11 @@ or end cannot be compared with the worker's clock, or it cannot be built.
 Skipping the row does not repair its invalid values. Database acceptance is
 determined at dispatch; a schedule-scoped dispatch failure is reported as
 <code>schedule_dispatch_error</code>.</p>
-<p>To pause a readable row that no longer validates, call <code>update_schedule</code> with
-<code>enabled=False</code> alone. This writes the disabled state without validating the
-rest of the row. It does not repair the row. Enabling it again is refused
-until the row is corrected.</p>
-<p><code>create_schedule</code>, <code>create_schedules</code> and <code>update_schedule</code> take an optional
-<code>user=</code>, and enforce any per-entry permission when you pass one.</p>
+<p>To pause by primary key, including when Django cannot load the row, call <code>update_schedule(OxSchedule(pk=pk), enabled=False)</code>. The call writes the disabled state without validating the whole row. Pausing does not repair stored values; enabling is refused until the row is corrected.</p>
+<p>If the row remains unreadable, the returned instance contains readable fields and defers the others. Accessing those deferred fields can still fail through Django's ordinary reader. An unreadable name displays as <code>pk N</code>; this fallback is never stored or used for authorization. If read-back fails, the exception propagates but the schedule remains paused.</p>
+<p><code>create_schedule</code>, <code>create_schedules</code>, <code>update_schedule</code> and <code>delete_schedule</code> accept optional <code>user=</code> and enforce per-entry permissions when supplied. Calls without <code>user</code> are trusted application code; they perform no user authorization. The admin supplies <code>request.user</code> and applies the same rules.</p>
+<p><code>delete_schedule(schedule, *, user=None)</code> checks the stored key under the row's lock when a user is supplied. An already-deleted row is harmless. Without <code>user</code>, deletion neither reads the row nor checks permission. Write functions use the caller's primary key, including textual keys such as <code>OxSchedule(pk="7")</code>.</p>
+<p>When object-level authorization is needed, the backend receives the whole row from the write alias under the same lock. Accessing an unreadable field raises <code>StoredValueUnreadable</code> and refuses permission, rather than loading replica data. Model-wide permission checks and the active-superuser rule for unknown task keys come first.</p>
 <p>Use <code>create_schedules(rows, *, user=None)</code> for several schedules that should
 exist together, such as schedules added by a migration or the importer's
 output.</p>
@@ -1649,13 +1841,9 @@ for the whole batch.</p>
 <p>Stored-schedule writes reject start and end times outside years 1 to
 9999 in the database's time zone, and reject times with a time zone when
 <code>USE_TZ</code> is off.</p>
-<p>Stored-schedule reads isolate rows whose values cannot be converted,
-whose start or end cannot be compared with the worker's clock, or which
-cannot be built. Other schedules and the queue keep running. Database read
-errors stop the pass rather than being attributed to a row. Skips
-carry the row's key, name when readable, and reason. They are logged once,
-then at most once a minute per row per worker while the row stays skipped.
-Locked dispatch skips include a traceback only on the first line.</p>
+<p>Stored-schedule reads isolate rows holding a stored value django-ox cannot use, incomparable boundaries, or values that cannot build a schedule. Other schedules and the queue keep running. Database read errors stop the pass rather than being attributed to a row. <code>schedule_row_skipped</code> carries <code>schedule_pk</code>, the name when readable, <code>fields</code> and <code>reason</code>. Reporting is once, then at most once a minute per row per worker. Locked dispatch skips include a traceback only on the first line. Rows whose <code>enabled</code> value can be read as false are skipped without a log line.</p>
+<p>PostgreSQL rejects infinite timestamps and dates outside Python's range. MySQL rejects zero dates, zero months or days, and <code>enabled</code> outside 0 and 1. SQLite rejects invalid dates, non-UTF-8 text, bytes in text columns, non-integer values in integer columns, and <code>enabled</code> outside 0 and 1. With <code>USE_TZ = False</code>, SQLite timestamps with offsets are also rejected. These rules apply regardless of driver. SQL NULL <code>end_time</code> still means the schedule never ends.</p>
+<p>All engines reject <code>boundary_generation</code> at its column's maximum: it reads, but cannot increase. SQL can seed one below the maximum. The next heal or API retime succeeds and reaches the maximum; subsequent worker reads skip the row and writes can refuse it. Lower the count with SQL, or delete the schedule and create it again. The API and admin cannot lower it.</p>
 <p>An unreadable change marker reports <code>schedule_source_unavailable</code> once,
 then at most once a minute. The worker reads the schedules in full at each
 reconcile interval while the marker remains unreadable. For any schedule
@@ -1929,56 +2117,40 @@ within the column limit.</p>
   such a write tells a worker to look. Set
   <code>OPTIONS["SCHEDULE_RECONCILE_INTERVAL"]</code> if you want that sooner; it is one
   indexed read of a small table.</li>
-<li><strong>One extra query per pass.</strong> Workers read a single row to learn whether
-  anything changed. They re-read the schedules when it did and at each
-  reconcile interval. If the change marker cannot be read, full reads still
-  run at each reconcile interval.</li>
-<li><strong>Unreadable or invalid rows are skipped.</strong> A row is left out if a value
-  cannot be converted, its start or end cannot be compared with the worker's
-  clock, or it cannot be built. The other schedules and the queue keep
-  running. The skip is logged as <code>schedule_row_skipped</code> with <code>schedule_pk</code>,
-  <code>schedule</code> and <code>reason</code>. If the name cannot be read, <code>schedule</code> may be
-  <code>None</code>. A conversion failure's reason names the column. Each row is logged
-  once, then at most once a minute per worker while it stays skipped. A skip
-  during the locked dispatch read includes a traceback only on its first
-  line.</li>
-<li><strong>Skipped rows need repair.</strong> Skipping does not repair invalid values. Find
-  the row by <code>schedule_pk</code> and correct it in the admin change form or with
-  <code>update_schedule</code>. Use SQL if the value is one the ORM cannot read. To pause
-  a readable row that no longer validates, use <code>update_schedule</code> with
-  <code>enabled=False</code>
-  alone. Enabling it again is refused until it is corrected.</li>
-<li><strong>Dispatch failures have a separate boundary.</strong> A schedule can validate and
+<li><strong>Marker reads and reconciles.</strong> Workers read one change-marker row per pass. They re-read schedules when it changes and at <code>SCHEDULE_RECONCILE_INTERVAL</code>, normally 60 seconds. If the marker cannot be read, full reads still run at that interval. Stored schedule reads use more CPU than 1.8.0, and full reconciles now use batched queries. Reconciles do not run every tick. Latest tick decoding costs CPU each pass. Dispatch statement counts are unchanged, both with and without a due tick.</li>
+<li><strong>Stored values django-ox cannot use.</strong> Workers skip unreadable or invalid rows, including incomparable boundaries and a maximum <code>boundary_generation</code>; other schedules and the queue continue. <code>schedule_row_skipped</code> carries <code>schedule_pk</code>, <code>schedule</code>, <code>fields</code> and <code>reason</code>. An unreadable name may be <code>None</code>. Stored-value reasons name the field, quote its value and explain the problem. Reporting is once, then at most once a minute per row per worker. Locked dispatch skips include a traceback only on the first line.</li>
+<li>
+<p><strong>Skipped rows need repair.</strong> Find the row by <code>schedule_pk</code>. Use its admin form when available, or pass replacements for every caller-writable unreadable field in one <code>update_schedule</code> call. A change writes <code>start_time</code>, <code>updated_at</code> and <code>boundary_for</code> afresh; do not supply them. A change leaving rejected values raises <code>StoredValueUnreadable</code> with <code>.fields</code> and writes nothing. Every successful repair establishes a fresh activation boundary and increments <code>boundary_generation</code>, even for an <code>updated_at</code>-only repair. Ticks due during the unreadable period are not fired afterwards.</p>
+<p>Neither the API nor the admin can repair <code>created_at</code> or <code>boundary_generation</code>. Use SQL to replace unreadable values or lower a maximum count, or delete the schedule and create it again. To pause instead, call <code>update_schedule(OxSchedule(pk=pk), enabled=False)</code>. Pausing does not repair stored values; enabling remains refused until the row is corrected.</p>
+</li>
+<li>
+<p><strong>Dispatch failures have a separate boundary.</strong> A schedule can validate and
   still fail when dispatched. For any schedule source, a tick that cannot be
   derived or bounds that cannot be compared with the worker's clock are
   reported as <code>schedule_dispatch_error</code>. A schedule-scoped failure inside
   the dispatch transaction rolls back its tick and task. If rollback succeeds
   and the same connection remains usable, later schedules are still attempted.
   The failed schedule is retried on subsequent passes under the usual
-  due-tick and deadline rules; only its reporting is rate-limited.</li>
-<li><strong>Database read failures are not bad rows.</strong> A database error during a full
-  schedule read or a shared dispatch read, such as a lost connection, missing
-  table or lock error, is not attributed to an individual row. It stops the
-  pass rather than skipping a row.</li>
-<li><strong>An abandoned pass stops further traversal.</strong> A <code>django.db.DatabaseError</code>
-  escaping a shared dispatch read, failed rollback or unusable connection is
-  reported as <code>schedule_dispatch_failed</code>. The stored source's marker read and
-  boundary heal retain their own events. An unreadable change-marker value
-  reports <code>schedule_source_unavailable</code> once, then at most once a minute while
-  it remains unreadable, and the worker reads the schedules in full at each
-  reconcile interval during that time. A database error on the marker read
-  reports the same event on every dispatch pass, and the worker keeps using
-  the last schedules it read. A failed boundary heal reports
-  <code>schedule_boundary_heal_failed</code>. Dispatch is retried on a later pass.
-  Ticks already committed are not undone. Alert on <code>schedule_row_skipped</code>,
-  <code>schedule_dispatch_error</code>, <code>schedule_dispatch_failed</code> and
-  <code>schedule_source_unavailable</code>.</li>
-<li><strong><code>manage.py check</code> cannot see rows.</strong> Checks run before <code>migrate</code>, so a bad
+  due-tick and deadline rules; only its reporting is rate-limited.</p>
+</li>
+<li>
+<p><strong>Database read failures are not bad rows.</strong> Database errors during full schedule or shared dispatch reads, including connection, missing-table and lock errors, stop the pass. They are not attributed to a row. Server-side errors propagate unchanged. In autocommit, recognized value-local failures may be isolated by diagnostic re-reads while the connection remains usable.</p>
+<p>Inside a transaction, diagnostic re-reads are restricted: PostgreSQL requires a usable transaction; SQLite permits only its recognized UTF-8 decoding refusal; MySQL permits none. Unwind through the transaction or savepoint boundary before further queries where required. Reads create no savepoints. <code>update_schedule</code> and <code>delete_schedule</code> have their own atomic blocks; source reads and <code>ox_prune</code> do not. Unlike 1.8.0, a source read inside your transaction can leave a server error for you to roll back.</p>
+</li>
+<li>
+<p><strong>An abandoned pass stops further traversal.</strong> An escaping <code>django.db.Error</code>, other unhandled exception, failed rollback or unusable connection reports <code>schedule_dispatch_failed</code>. Dispatch retries on a later pass; committed ticks remain committed. Marker reads and boundary heals retain their own events.</p>
+<p>An unreadable marker reports <code>schedule_source_unavailable</code> once, then at most once a minute; full reads continue at each reconcile interval. A database error on the marker read reports every pass while workers use the last schedules read. Failed boundary healing reports <code>schedule_boundary_heal_failed</code>, first with a traceback, then counted summaries at most once a minute per row per worker. Healing retries each pass; the affected schedule cannot dispatch meanwhile.</p>
+<p>An unreadable newest tick within the pass's bound skips only its schedule with <code>schedule_tick_unreadable</code>. A settings schedule can also be blocked by its unreadable earliest tick. History is not treated as absent. The pass completes, so this skip does not hold a batch open. Follow the recovery procedure under <a href="../configuration/#ox_prune">Configuration</a>.</p>
+<p>Alert on <code>schedule_dispatch_error</code>, <code>schedule_dispatch_failed</code> and <code>schedule_tick_unreadable</code>. For stored schedules, also alert on <code>schedule_row_skipped</code>, <code>schedule_source_unavailable</code> and <code>schedule_boundary_heal_failed</code>.</p>
+</li>
+<li>
+<p><strong><code>manage.py check</code> cannot see rows.</strong> Checks run before <code>migrate</code>, so a bad
   schedule in the database is a log line, not a start-up error.
   Settings-declared schedules still fail fast for errors their checks can
   detect. A missing <code>SCHEDULE_SOURCE</code> is not a check error either: leaving it
   out is the default, and a check cannot read the rows that would make it a
-  mistake.</li>
+  mistake.</p>
+</li>
 <li><strong><code>task_enqueued</code> receivers run inside the dispatch transaction</strong>, while the
   worker holds the schedule row's lock. A receiver that takes row locks of its
   own can deadlock against an application transaction that holds those rows and
@@ -1989,6 +2161,30 @@ within the column limit.</p>
   raises, whatever it raises, is logged as <code>schedule_dispatch_callback_failed</code>;
   the task it followed is enqueued and counted.</li>
 </ul>
+<h2 id="upgrade-checks">Upgrade checks</h2>
+<p>Before upgrading, check stored schedule boundaries and tick history if your application uses psycopg2 or mysqlclient. The reader now rejects PostgreSQL infinite timestamps and MySQL zero dates instead of decoding them as datetime endpoints or <code>None</code>. Those values cause schedules to be skipped. Use your actual table names; the queries use Django's defaults.</p>
+<p>With psycopg2, run these PostgreSQL checks for infinite values:</p>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">django_ox_oxschedule</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="n">isfinite</span><span class="p">(</span><span class="n">start_time</span><span class="p">)</span><span class="w"> </span><span class="k">OR</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="n">isfinite</span><span class="p">(</span><span class="n">end_time</span><span class="p">);</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">django_ox_oxscheduletick</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="n">isfinite</span><span class="p">(</span><span class="n">scheduled_for</span><span class="p">);</span>
+</code></pre></div>
+<p>These PostgreSQL queries were validated on PostgreSQL 16 to identify infinite values.</p>
+<p>With mysqlclient, run these MySQL checks:</p>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">django_ox_oxschedule</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">start_time</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NULL</span>
+<span class="w">   </span><span class="k">OR</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">start_time</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">CHAR</span><span class="p">)</span><span class="w"> </span><span class="n">REGEXP</span><span class="w"> </span><span class="s1">'(^0000-|^[0-9]{4}-00-|^[0-9]{4}-[0-9]{2}-00)'</span>
+<span class="w">   </span><span class="k">OR</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">end_time</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">CHAR</span><span class="p">)</span><span class="w"> </span><span class="n">REGEXP</span><span class="w"> </span><span class="s1">'(^0000-|^[0-9]{4}-00-|^[0-9]{4}-[0-9]{2}-00)'</span>
+<span class="w">   </span><span class="k">OR</span><span class="w"> </span><span class="k">DAY</span><span class="p">(</span><span class="n">start_time</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="k">DAY</span><span class="p">(</span><span class="n">LAST_DAY</span><span class="p">(</span><span class="n">start_time</span><span class="p">))</span>
+<span class="w">   </span><span class="k">OR</span><span class="w"> </span><span class="k">DAY</span><span class="p">(</span><span class="n">end_time</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="k">DAY</span><span class="p">(</span><span class="n">LAST_DAY</span><span class="p">(</span><span class="n">end_time</span><span class="p">));</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">django_ox_oxscheduletick</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">scheduled_for</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NULL</span>
+<span class="w">   </span><span class="k">OR</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">scheduled_for</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">CHAR</span><span class="p">)</span><span class="w"> </span><span class="n">REGEXP</span><span class="w"> </span><span class="s1">'(^0000-|^[0-9]{4}-00-|^[0-9]{4}-[0-9]{2}-00)'</span>
+<span class="w">   </span><span class="k">OR</span><span class="w"> </span><span class="k">DAY</span><span class="p">(</span><span class="n">scheduled_for</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="k">DAY</span><span class="p">(</span><span class="n">LAST_DAY</span><span class="p">(</span><span class="n">scheduled_for</span><span class="p">));</span>
+</code></pre></div>
+<p>These MySQL queries were validated on MySQL 8.4.11 with mysqlclient and PyMySQL, not on MySQL 8.0 or MariaDB.</p>
+<p>On SQLite, SQL-inserted bytes in text columns can cause schedules to be skipped. After upgrading, <code>schedule_row_skipped</code> identifies the row, <code>fields</code> and <code>reason</code>. These queries do not check SQLite. <code>ox_prune</code> keeps tick keys stored as bytes; removal requires <code>--tick-pk</code>.</p>
+<p>For an intended unbounded end, call <code>update_schedule(OxSchedule(pk=N), end_time=None)</code>. Replace an invalid start with an operator-chosen valid instant using SQL; do not treat it as absent.</p>
+<p>To remove unreadable ticks, stop affected dispatchers first. Preview with <code>ox_prune --purge-unreadable-ticks --schedule-key KEY --dry-run</code>, or use <code>--tick-pk PK</code> when the key cannot be read. Inspect the listed rows and the tasks those ticks recorded. Run without <code>--dry-run</code>, then restart dispatchers. Removal can repeat a tick or re-anchor a schedule and skip its next tick.</p>
+<p>Rolling back does not repair data; it runs the unchanged legacy timestamp rows again.</p>
 <h2 id="monitoring">Monitoring</h2>
 <p>The events below distinguish dispatched ticks, skipped rows and dispatch
 failures. The full set, with every field, is on the
@@ -2011,7 +2207,7 @@ failures. The full set, with every field, is on the
 </tr>
 <tr>
 <td><code>schedule_row_skipped</code></td>
-<td>A row could not be built. A skip during a periodic full read carries <code>schedule</code>, <code>schedule_pk</code> and <code>reason</code>. A skip during the locked dispatch read carries <code>schedule_pk</code> and a traceback.</td>
+<td>A row holds values django-ox cannot use, has incomparable boundaries, or cannot be built. Full and locked reads carry <code>schedule</code>, <code>schedule_pk</code>, <code>fields</code> and <code>reason</code>. Reporting is rate-limited; locked reads include a traceback only on the first line.</td>
 </tr>
 <tr>
 <td><code>schedule_dispatch_error</code></td>
@@ -2019,11 +2215,23 @@ failures. The full set, with every field, is on the
 </tr>
 <tr>
 <td><code>schedule_dispatch_failed</code></td>
-<td>A dispatch pass was abandoned. It is retried on a later pass. Reporting is rate-limited.</td>
+<td>A pass was abandoned and will be retried. <code>category</code> distinguishes <code>database</code> from <code>unexpected_exception</code>. Reporting is rate-limited.</td>
 </tr>
 <tr>
 <td><code>schedule_dispatch_recovered</code></td>
 <td>A schedule that had failed on this worker committed a tick again. Carries <code>failures</code>.</td>
+</tr>
+<tr>
+<td><code>schedule_dispatch_resumed</code></td>
+<td>A pass completed after abandoned passes. Carries their total in <code>failures</code>.</td>
+</tr>
+<tr>
+<td><code>schedule_tick_unreadable</code></td>
+<td>A schedule was skipped because required tick history could not be read. History was not treated as absent; other schedules continue.</td>
+</tr>
+<tr>
+<td><code>schedule_tick_readable</code></td>
+<td>This worker read the history again after skipped passes. Carries their total in <code>failures</code>.</td>
 </tr>
 </tbody>
 </table>
@@ -2031,11 +2239,7 @@ failures. The full set, with every field, is on the
 the row drops it without an event. A paused, fixed and resumed row reports
 <code>schedule_dispatch_recovered</code> when it next commits a tick on a worker that
 retained its failure state.</p>
-<p>Alert on <code>schedule_row_skipped</code>, <code>schedule_dispatch_error</code>,
-<code>schedule_dispatch_failed</code> and <code>schedule_source_unavailable</code>, regardless of a
-batch's exit code. <code>schedule_row_skipped</code> usually means a task key was removed
-from the code while a row still names it. A row can pass validation and still
-fail at dispatch, so that event alone is not enough.</p>
+<p>Alert on <code>schedule_dispatch_error</code>, <code>schedule_dispatch_failed</code> and <code>schedule_tick_unreadable</code>. For stored schedules, also alert on <code>schedule_row_skipped</code>, <code>schedule_source_unavailable</code> and <code>schedule_boundary_heal_failed</code>. Alert regardless of a batch's exit code. For <code>schedule_row_skipped</code>, inspect <code>fields</code> and <code>reason</code>: an unregistered task key is one possible cause. A row can pass validation and still fail at dispatch, so skip alerts alone are insufficient.</p>
 <p>Read <code>failures</code> and <code>suppressed</code> on dispatch failure events rather than
 counting log lines. <code>ox_health</code> has no schedule check, and a rolled-back
 dispatch leaves no tick row.</p>
@@ -2111,13 +2315,13 @@ dispatch leaves no tick row.</p>
         
         
           
-          <a href="../patterns/" class="md-footer__link md-footer__link--next" aria-label="Next: Common patterns">
+          <a href="../features/" class="md-footer__link md-footer__link--next" aria-label="Next: Overview">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Common patterns
+                Overview
               </div>
             </div>
             <div class="md-footer__button md-icon">

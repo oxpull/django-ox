@@ -83,7 +83,7 @@ def register(username, email):
 
 That is the advantage over sending to a separate broker: the enqueue can share your database transaction. django-tasks-db shares this property too.
 
-The transaction covers the database writes, not email delivery. Make the task safe to repeat.
+The transaction covers the database writes. Email delivery sits outside it, so make the task safe to repeat.
 
 ## Run recurring Django tasks without a scheduler process
 
@@ -114,7 +114,7 @@ Schedules need at least one running worker and a usable database. A schedule-sco
 
 ## Deduplicate a repeated webhook
 
-A payment provider sends the same event twice. Your webhook queues the same invoice sync twice. Stop the duplicate at enqueue rather than making the queue do the same work again.
+A payment provider sends the same event twice. Your webhook queues the same invoice sync twice. Stop the duplicate at enqueue.
 
 Without a unique-task declaration, these calls create separate tasks:
 
@@ -140,7 +140,7 @@ The same app provides [batches](features/batches.md) to track grouped work, [rat
 
 ## When to choose another tool
 
-Choose another backend if you need to revoke a chosen running task, require Celery's chain, group or chord APIs, or exceed the throughput one database can serve. django-ox provides [batches](features/batches.md) and provisional [dependency workflows](features/workflows.md), not those Celery APIs.
+Choose another backend if you need to revoke a chosen running task. Choose another if you require Celery's chain, group or chord APIs, or exceed the throughput one database can serve. django-ox provides [batches](features/batches.md) and provisional [dependency workflows](features/workflows.md).
 
 Transactional enqueue requires the task and model rows to share a database. A separate queue database cannot give you that shared commit.
 

@@ -7,7 +7,7 @@
 
 # Django tasks in your database
 
-Stop running Redis to send an email. django-ox runs Django's Tasks framework in your existing database, where a dead worker doesn't mean lost tasks. Run a worker process, not a separate broker.
+Stop running Redis to send an email. django-ox runs Django's Tasks framework in your existing database. When a worker dies, another worker picks up its tasks. You run one process: the worker.
 
 Supports Django 5.2 LTS through the `django-tasks` backport, and Django 6.0 / 6.1 through core `django.tasks`. Requires Python 3.12+. The optional `oxpull` app provides task-coordination features and requires Django 6.0+.
 
@@ -56,7 +56,9 @@ Inspect attempts and retry or discard tasks in Django admin. Open **Queue overvi
 
 For fleet alerting, `ox_health` turns queue thresholds into an exit code. For local loop-liveness probes, pair `ox_worker --heartbeat-file PATH` with `ox_health --heartbeat-file PATH`, using the same process count. Both health modes support `--format json`. Monitor through `django_ox.stats` or `/ox/metrics`, and clear finished rows with `ox_prune`. Use `--database` on `ox_worker`, `ox_prune` and the database mode of `ox_health` to select the database alias.
 
-In the [published benchmarks](https://oxpull.com/django-ox/benchmarks/), 2,000 of 2,000 tasks finished after 20 worker kills per trial, queue drain was up to 20% faster than django-tasks-db, and enqueueing 10,000 tasks took 0.71 s.
+With pooled or persistent connections, django-ox delivered 1.4 to 1.7× django-tasks-db's throughput at matched Django connection settings. See the [published benchmarks](https://oxpull.com/django-ox/benchmarks/).
+
+<sub>PostgreSQL 16; no-op tasks; django-ox 1.9.0 vs django-tasks-db 0.13.0; medians of five runs.</sub>
 
 CI covers Python 3.12 to 3.14, Django 5.2 to 6.1, PostgreSQL, MySQL and SQLite. Open source under the BSD 3-Clause licence.
 
@@ -70,7 +72,7 @@ Documentation: <https://oxpull.com/django-ox/>
 
 Add `"oxpull"` to `INSTALLED_APPS`, run migrations, and use `"oxpull.backend.OxpullBackend"` for the task aliases that need its features. No separate package installation is needed.
 
-Unique tasks deduplicate pending tasks at enqueue time. Batches also need a reconciler schedule. Rate limits need `OPTIONS["RATE_LIMITS"]` and `"oxpull.worker.OxpullWorker"` as the alias's `OPTIONS["WORKER_CLASS"]`. Workflows need `OPTIONS["WORKFLOWS"] = True`, `OxpullWorker` and a reconciler schedule. Workflows are created at runtime, not declared as workflow definitions in settings.
+Unique tasks deduplicate pending tasks at enqueue time. Batches also need a reconciler schedule. Rate limits need `OPTIONS["RATE_LIMITS"]` and `"oxpull.worker.OxpullWorker"` as the alias's `OPTIONS["WORKER_CLASS"]`. Workflows need `OPTIONS["WORKFLOWS"] = True`, `OxpullWorker` and a reconciler schedule. Workflows are created at runtime.
 
 See the [feature setup](https://oxpull.com/django-ox/features/) and, for an existing installation, [Earlier `oxpull` installs](https://oxpull.com/django-ox/migrating/#earlier-oxpull-installs).
 
@@ -105,7 +107,7 @@ limit, keeping the full traceback of every attempt.
 [The benchmarks page](https://oxpull.com/django-ox/benchmarks/) compares
 django-ox 1.3.0 with `django-tasks-db` 0.13.0, another database backend
 for the Tasks framework, in runs dated 2026-09-19. Both use Django core
-`django.tasks`, PostgreSQL 16 in Docker on an Apple M1 Max, no-op task
+`django.tasks`, PostgreSQL 16 in Docker, no-op task
 bodies and package defaults except `LOCK_TIMEOUT` of 15 seconds for the
 kill test. It covers backlog drain at two queue depths with one and four
 workers per backend, bulk enqueue of 10,000 rows in one transaction,
@@ -255,10 +257,10 @@ This mode checks file metadata without querying the database.
 | `--processes N` | `1` | Expected worker process count. At 1, check `PATH`; above 1, require `PATH.supervisor` and every slot file from `PATH.0` through `PATH.(N-1)` to pass. Requires `--heartbeat-file`. |
 
 A passing file probe means the expected controlling loops have advanced
-recently, not that tasks are progressing. A hung database can make every
-file stale and trigger fleet-wide liveness restarts. Use an existing,
-writable directory private to the container, allow for startup and slot
-replacement, and keep project Django startup database-free. See the
+recently. It does not mean that tasks are progressing. A hung database can
+make every file stale and trigger fleet-wide liveness restarts. Use an
+existing, writable directory private to the container. Allow for startup and
+slot replacement, and keep project Django startup database-free. See the
 [probe guidance](https://oxpull.com/django-ox/monitoring/#health-checks-ox_health)
 before enabling automatic restarts.
 
@@ -274,11 +276,12 @@ actions. The same operations are `django_ox.actions.retry(result_id)` and
 FAILED or LOST task; a discard closes a READY, WAITING, FAILED or LOST task
 without running it. Neither touches a running task.
 
-Open **Queue overview** from the task change list to compare retained status
-counts, eligible READY tasks, the oldest eligible task's age, five-minute
-throughput and failure rate, and time since the last claim. READY includes
-deferred tasks; Eligible ready excludes them. Status totals are retained
-rows, not lifetime counts.
+Open **Queue overview** from the task change list. It shows retained status
+counts, eligible READY tasks and the oldest eligible task's age. It also
+shows five-minute throughput and failure rate, and time since the last
+claim. READY includes
+deferred tasks; Eligible ready excludes them. Status totals count the rows
+still in the table.
 
 Each visit scans retained task rows, so cost grows with retention. The page
 does not refresh automatically. It uses the database alias selected by
@@ -349,16 +352,16 @@ failure is logged as `schedule_dispatch_error`. After rollback, the worker
 continues to later schedules if the same database connection remains usable.
 
 Missed ticks: if every worker was down when a tick passed, the latest
-missed tick fires once on recovery and older ones are skipped, so a
-nightly job still runs after an unlucky deploy window but a backlog never
-stampedes. A newly deployed schedule waits for its next tick rather than
-firing for a time before it existed.
+missed tick fires once on recovery. Older missed ticks are skipped. A
+nightly job still runs after an unlucky deploy window, and a backlog never
+stampedes. A newly deployed schedule waits for its next tick. It does not
+fire for a time before it existed.
 
 Schedules can also live in the database and be edited in the Django admin
-without a deploy, for the cases where whoever needs to pause a job cannot
-ship one. A row names a task the code has exposed rather than an import
-path, so admin access does not become permission to run anything. See
-[Schedules in the database](https://oxpull.com/django-ox/stored-schedules/).
+without a deploy. That is for the cases where whoever needs to pause a job
+cannot ship a deploy. A row names a task the code has exposed. Import paths
+are not accepted, so admin access does not become permission to run anything.
+See [Schedules in the database](https://oxpull.com/django-ox/stored-schedules/).
 
 ## Behavior details
 

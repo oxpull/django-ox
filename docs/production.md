@@ -863,20 +863,31 @@ PgBouncer and third-party pools have not been tested.
 
 ### Retaining worker connections
 
-With `CONN_MAX_AGE = 0` and no pool, Django closes initialized execution connections before and after each attempt. The next attempt opens another connection; the poll loop keeps its claim connection. Task ORM queries and outcome writing use the same execution connection on the worker's database alias. `worker_connection_hint` reports this setting once at INFO during `Worker.run()` startup on PostgreSQL and MySQL.
+Django's default is `CONN_MAX_AGE = 0`. With it and no pool, each task attempt opens a new database connection and closes it after. On a local PostgreSQL that costs about 5 ms a task. The poll loop keeps its own connection. Task queries and the outcome write share the attempt's connection on the worker's database alias.
 
-To retain connections, configure the worker's alias in a dedicated worker settings module. Launch workers with that module to leave web processes unchanged. For PostgreSQL or MySQL without a pool, set a positive connection age and enable health checks:
+When a worker starts on PostgreSQL with that setup, it logs one warning, `worker_connection_hint`, naming the alias and the fix. MySQL gets the same event at INFO. SQLite opens a file and logs nothing.
+
+Pick one of two settings for the worker's alias. Put it in a dedicated worker settings module and launch workers with that module, so web processes stay as they are. To keep connections open between tasks:
 
 ```python
 DATABASES["default"]["CONN_MAX_AGE"] = 600
-DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
 ```
 
-For PostgreSQL, Django's pool requires psycopg 3, `psycopg_pool` and `CONN_MAX_AGE = 0`; use the pool example above instead of a positive age. MySQL has no Django pool; setting `OPTIONS["pool"]` does not enable one.
+On PostgreSQL you can use Django's pool instead. It needs psycopg 3 and `psycopg_pool`, and `CONN_MAX_AGE` stays at 0:
 
-Allow pool capacity for task threads and polling, plus the separate renewal, watchdog and stop-time recovery connections described above. Each worker process has its own pool. Retained connections carry session state between tasks; follow the responsibilities below.
+```python
+DATABASES["default"]["OPTIONS"] = {
+    "pool": {"min_size": 0, "max_size": 16, "timeout": 30}
+}
+```
 
-Persistence and pooling remain opt-in. The default connection lifecycle, transactions, delivery and schema are unchanged.
+Django refuses to open a pool when `CONN_MAX_AGE` is above 0, so use one or the other. MySQL has no Django pool, and `OPTIONS["pool"]` does nothing there.
+
+Each worker process has its own pool. Set `max_size` to at least `concurrency + 1`, and budget the extra connections in [Budget server capacity](#budget-server-capacity). A `max_size` of 16 covers up to 15 task threads in a process.
+
+`CONN_HEALTH_CHECKS = True` tests a kept connection before each use. It costs about 10% throughput. Set it only if your network drops idle connections.
+
+Kept connections carry session state from one task to the next. Follow the rules in the next section.
 
 ### Session state and connection failures
 
@@ -886,7 +897,7 @@ Each execution thread keeps its own connection context, separate from other task
 
 Measured default runs opened one connection per task attempt plus one for polling; ORM queries added no connections. Persistence or PostgreSQL pooling opened two connections in total: one for execution and one for polling, regardless of task count. These counts are exact on PostgreSQL and SQLite; MySQL counting tests allow one extra connection per thread because Django's MySQL backend reads the server version through a throwaway connection the first time a thread uses it. After a server-ended idle session, querying tasks used one extra attempt, then succeeded on a new session. Query-free tasks reconnected at outcome writing without spending an attempt; every task completed. Workers with and without persistence shared a queue: all 40 tasks succeeded, each running once with one claim and one epoch. Both workers ran tasks. These measurements cover same-release batch workers, PostgreSQL, MySQL and SQLite connection counts, PostgreSQL pooling, and PostgreSQL and MySQL idle-session recovery.
 
-Set `CONN_HEALTH_CHECKS = True`; health checks reduce stale-connection failures but cannot prevent later disconnects.
+With `CONN_HEALTH_CHECKS = True`, stale connections fail less often. A health check cannot prevent a disconnect that comes after it.
 
 ### psycopg_pool versions and recovery
 

@@ -9,9 +9,10 @@ documentation, source or issue tracker, with the link in the footnotes and the
 date it was read. Where a project's pages do not say, the cell says so rather
 than guessing.
 
-The comparison is about fit, not ranking. A team that already runs RabbitMQ and
-needs to stop running tasks has a different answer from a team that wants one
-fewer service. The last section says where django-ox is not the right fit.
+The comparison is about fit. It does not rank the tools. A team that already
+runs RabbitMQ and needs to stop running tasks has a different answer from one
+that wants one fewer service. The last section says where django-ox is
+not the right fit.
 
 ## The table
 

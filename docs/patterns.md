@@ -31,7 +31,7 @@ database as the `User` row, your default one, so the task becomes visible to
 workers only when the transaction commits. If `create_user` is rolled back
 further up, the email task disappears with it.
 
-Pass the id, not the object. Arguments are stored as JSON, and a stale copy of a
+Pass the model's id. Arguments are stored as JSON, and a stale copy of a
 model is a bug waiting to happen.
 
 ## Retry a flaky third-party call
@@ -154,7 +154,7 @@ return render(request, "report_pending.html", {"attempts": result.attempts})
 `is_finished` covers the last two. A task whose worker vanished without
 reporting also reads as `FAILED`; [the reaper](production.md#the-reaper)
 explains what that record contains. Return values are stored as JSON, so
-return a URL or an id rather than a file or a model.
+return a URL or an id.
 
 ## Defer work to a specific time
 
@@ -287,10 +287,10 @@ def charge_order(order_id):
         order.save(update_fields=["charged_at"])
 ```
 
-Guard on state you have written, not on a flag you set in memory. The row lock
-serialises concurrent attempts, and the idempotency key covers the gap where the
-charge succeeds but the transaction does not commit. Use one whenever the
-external system offers it.
+Guard on state you have written. Do not guard on a flag you set in memory.
+The row lock serialises concurrent attempts, and the idempotency key covers
+the gap where the charge succeeds but the transaction does not commit. Use
+one whenever the external system offers it.
 
 **Your task is not run inside a transaction.** The worker manages its own for
 claiming and bookkeeping, but your function is called outside them, so

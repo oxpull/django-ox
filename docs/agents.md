@@ -73,8 +73,8 @@ OK: backlog=0 oldest_age=none last_claim_age=none
 `manage.py check` reports schedule and backend policy errors through `django_ox.E002` to `E005`, `E010` and `E011`, and warnings through `django_ox.W003` and `django_ox.W004`, before deployment. Database acceptance of schedule arguments is determined at dispatch. Alert on `schedule_dispatch_error`, `schedule_dispatch_failed` and `schedule_tick_unreadable`. For stored schedules, also alert on `schedule_row_skipped`, `schedule_source_unavailable` and `schedule_boundary_heal_failed`. Review `django_ox.W003` and `django_ox.W004` warnings too; `W004` asks for a non-bool integer from 1 to 32767 while retaining compatible legacy values.
 
 Invalid per-task fields raise `InvalidTask` (`InvalidTaskError` on the
-backport) when the task is built, normally at import, rather than appearing
-as a system-check message.
+backport) when the task is built, normally at import. They do not appear
+as system-check messages.
 
 Start a worker in its own process, next to the web server, under the same
 supervisor:
@@ -212,9 +212,8 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
 
 ## Facts to get right
 
-- `QUEUES` sits beside `OPTIONS`, not inside it. Inside `OPTIONS` it is
-  ignored without warning; the symptom is `InvalidTask: Queue 'X' is not
-  valid for backend.`
+- `QUEUES` sits beside `OPTIONS`. Inside `OPTIONS` it is ignored without
+  warning; the symptom is `InvalidTask: Queue 'X' is not valid for backend.`
 - Tasks use the Tasks-framework API. Import `task` from `django.tasks` on
   Django 6.0+, or `django_tasks` on 5.2 LTS, decorate with `@task`, and call
   `.enqueue(...)`. No django-ox import is needed for declarations.
@@ -227,8 +226,8 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   substitution. Keep `OxBackend` and use the public, provisional
   `django_ox.testing.run_tasks()` helper to test queued execution.
 - The worker imports a task by its dotted path, so the module must be
-  importable in the worker process and the worker runs the same code as the
-  producer; nothing is registered and there is no autodiscovery. `async def`
+  importable in the worker process. The worker runs the same code as the
+  producer. Nothing is registered and there is no autodiscovery. `async def`
   tasks run.
 - Priority and deferral are Django API: `task.using(priority=N)` with N from
   -100 to 100, higher first, and `task.using(run_after=...)` with a timedelta
@@ -239,18 +238,18 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   A second signal forces exit 130; a process that cannot act on signals
   needs SIGKILL.
 - `enqueue()` is one INSERT on the database the router sends `OxTask` to,
-  `default` unless you wrote a router. Two things make the commit joint: a
-  `transaction.atomic()` opened on that database, because a bare `atomic()`
-  opens on `default`; and the caller's own rows written there too. With both,
-  the task and those rows commit or roll back together, and the task is
-  visible to workers only after commit. Do not add `transaction.on_commit()`
-  around it. Rows written on another connection give two transactions, not
-  one.
+  `default` unless you wrote a router. Two things make the commit joint. The
+  first is a `transaction.atomic()` opened on that database, because a bare
+  `atomic()` opens on `default`. The second is the caller's own rows written
+  there too. With both, the task and those rows commit or roll back together,
+  and the task is visible to workers only after commit. Do not add
+  `transaction.on_commit()` around it. Rows written on another connection
+  give two transactions.
 - Many calls of one task go through `django_ox.bulk.enqueue_many(task,
   [(args, kwargs), ...])`: one INSERT per 1,000 rows, one transaction, results
   in input order. Set queue, priority and `run_after` once with `.using(...)`.
 - Execution is at-least-once. Write tasks to be safe to run twice: guard on
-  state already in the database, not on a flag in memory.
+  state already in the database. Do not guard on a flag in memory.
 - The task function runs outside any transaction. Open
   `transaction.atomic()` inside the task when it needs `select_for_update()`.
 - An attempt is consumed at claim time, so a worker dying mid-run uses one.
@@ -261,22 +260,21 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   delays are not capped.
 - The worker schedules lease renewal every `LOCK_TIMEOUT / 3` seconds;
   task length is not bounded by `LOCK_TIMEOUT` while renewals succeed.
-  Renewal needs a database connection: if the worker cannot refresh its
+  Renewal needs a database connection. If the worker cannot refresh its
   lease for `LOCK_TIMEOUT`, the reaper can hand the task to another worker
   even while it is alive.
 - With Django's PostgreSQL pool, provide at least `concurrency + 1` pooled
-  connections per worker process; add a spare pooled connection if fallback
+  connections per worker process. Add a spare pooled connection if fallback
   must work under full load. Budget up to `max_size + 2` server connections
-  per process and database alias in normal operation, including any added spare:
-  one private renewal connection
-  and one possible watchdog connection. A worker whose tasks never use
-  timeouts needs only the first, for `max_size + 1` in normal operation.
-  A worker stopping with recovery pending opens one more private connection
-  for its stop-time recovery look: budget up to `max_size + 3` during that
-  look, or `max_size + 2` if its tasks never use timeouts.
-  An absent timeout in `OPTIONS` does not
-  establish that, because tasks can declare their own. Account for all
-  processes, aliases, other clients and reserved slots.
+  per process and database alias in normal operation, including any added
+  spare. The 2 covers one private renewal connection and one possible
+  watchdog connection. A worker whose tasks never use timeouts needs only
+  the first, for `max_size + 1` in normal operation. A worker stopping with
+  recovery pending opens one more private connection for its stop-time
+  recovery look. Budget up to `max_size + 3` during that look, or
+  `max_size + 2` if its tasks never use timeouts. An absent timeout in
+  `OPTIONS` does not establish that, because tasks can declare their own.
+  Account for all processes, aliases, other clients and reserved slots.
 - The worker polls; `--interval` (default 1.0 s) is the idle sleep, so a task
   starts within one interval of its commit. There is no LISTEN/NOTIFY.
 - Each attempt's timeout comes from the task's `timeout`, then its queue's
@@ -288,31 +286,32 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   later is recorded as failed and the worker exits 75 so its supervisor
   restarts it. The stuck-thread path uses the worker's backoff without
   calling user callbacks. `django_ox.remaining()` reads the seconds left
-  from inside a task, including for a task-declared timeout. On a thread
-  a coverage tool or a debugger is watching (a `sys.settrace` hook, or a
-  `sys.monitoring` tool with events enabled) nothing is raised inside a
-  sync task: the worker logs `timeouts_backstop_only`, a task that returns
-  within `TASK_TIMEOUT_GRACE` is recorded as whatever it did, and one still
-  running then is recorded as failed and recycles the worker. An async task
-  is cancelled at the deadline either way.
-- Claiming: one `UPDATE ... SKIP LOCKED ... RETURNING` statement on
-  PostgreSQL; `SELECT ... FOR UPDATE SKIP LOCKED` on MySQL 8+; an atomic
-  compare-and-set UPDATE on SQLite and other databases without `SKIP LOCKED`.
+  from inside a task, including for a task-declared timeout. A coverage
+  tool or a debugger may be watching a thread (a `sys.settrace` hook, or a
+  `sys.monitoring` tool with events enabled). On such a thread nothing is
+  raised inside a sync task. The worker logs `timeouts_backstop_only`. A
+  task that returns within `TASK_TIMEOUT_GRACE` is recorded as whatever it
+  did. One still running then is recorded as failed and recycles the
+  worker. An async task is cancelled at the deadline either way.
+- Claiming is one `UPDATE ... SKIP LOCKED ... RETURNING` statement on
+  PostgreSQL. On MySQL 8+ it is `SELECT ... FOR UPDATE SKIP LOCKED`. On
+  SQLite and other databases without `SKIP LOCKED` it is an atomic
+  compare-and-set UPDATE.
 - `--concurrency N` is a thread pool in one process. `--processes N` runs N
-  such workers under one supervisor; a worker process that dies is restarted
-  after one second, doubling to 30 s, and more than five deaths of one slot
-  in a minute stops the supervisor with exit 1. CPU-bound work wants
+  such workers under one supervisor. A worker process that dies is restarted
+  after one second, doubling to 30 s. More than five deaths of one slot in a
+  minute stops the supervisor with exit 1. CPU-bound work wants
   `--processes N --concurrency 1`.
-- Recurring tasks go in `OPTIONS["SCHEDULES"]`, with either `cron` or `every`,
-  not both. Every worker dispatches them; there is no scheduler process to
-  start. A tick that passes while every worker is down is enqueued once on
-  recovery, and older missed ticks are skipped.
+- Recurring tasks go in `OPTIONS["SCHEDULES"]`, with `cron` or `every`. Each
+  schedule takes exactly one of the two. Every worker dispatches them; there
+  is no scheduler process to start. A tick that passes while every worker is
+  down is enqueued once on recovery, and older missed ticks are skipped.
 - Schedules can live in the database instead, editable in the admin. Set
   `OPTIONS["SCHEDULE_SOURCE"]` to `"django_ox.stored.DatabaseScheduleSource"`.
-  A row names a key registered with `@schedulable`, never an import path, so
-  admin access does not become permission to run arbitrary code. The decorator
-  takes effect only when its module is imported, and django-ox imports each
-  installed app's `tasks` module. Write rows with
+  A row names a key registered with `@schedulable`. Import paths are not
+  accepted, so admin access does not become permission to run arbitrary
+  code. The decorator takes effect only when its module is imported, and
+  django-ox imports each installed app's `tasks` module. Write rows with
   `django_ox.stored.create_schedule`, `create_schedules` or
   `update_schedule`; `objects.create()` skips validation and leaves the
   activation boundary stale. Retiming a stored schedule reschedules it from
@@ -325,15 +324,15 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   field and message. A non-mapping row or unsupported key raises
   `TypeError` immediately.
   Permission refusals raise a separate `PermissionDenied`, naming every
-  denied row. A database refusal at the check or write raises for one row;
-  a concurrent name conflict raises `IntegrityError` and rolls back the
+  denied row. A database refusal at the check or write raises for one row.
+  A concurrent name conflict raises `IntegrityError` and rolls back the
   entire call.
   See [Writing schedules from code](stored-schedules.md#writing-schedules-from-code).
 - `ox_import_beat_schedules` reads django-celery-beat's database scheduler
   tables: `PeriodicTask`, `CrontabSchedule` and `IntervalSchedule`.
   It prints code for review and application. First shipped in 1.2.0 and
-  rebuilt in 1.8.0, it now prints one all-or-nothing `create_schedules` call
-  and lists each row it cannot translate with a named reason. It reads
+  rebuilt in 1.8.0, it now prints one all-or-nothing `create_schedules` call.
+  It lists each row it cannot translate with a named reason. It reads
   crontabs with Celery's grammar. Use `--beat-timezone ZONE` to supply
   beat's timezone.
   Its `--database` flag selects the alias holding the django-celery-beat
@@ -363,7 +362,7 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
 - Heartbeats are updated at each poll and drain pass head and before every
   claim attempt. A busy pass can make up to `--concurrency` claims, but
   updates occur between claims. Budget for reap and dispatch work plus one
-  claim, the poll interval and scheduling margin, not concurrency
+  claim, the poll interval and scheduling margin. Do not budget concurrency
   multiplied by claim latency. With Django's PostgreSQL connection pool,
   a refused database can hold a pass for the pool's `timeout`, 30 seconds
   by default. Include that wait in the freshness budget.
@@ -378,11 +377,12 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   [heartbeat liveness](monitoring.md#freshness-and-database-isolation) for
   freshness sizing and database-stall restart tradeoffs. Docker and Compose
   outside Swarm mark a container unhealthy when its healthcheck fails. Their
-  restart policies act on process exit rather than healthcheck status.
+  restart policies act on process exit. A failed healthcheck does not
+  restart the container.
 - `path("ox/", include("django_ox.urls"))` mounts `GET /ox/metrics`, the
   queue stats as Prometheus gauges. It has no authentication of its own;
   wrap it with `login_required` or restrict it by network.
-- Run `migrate` before rolling workers, not from the worker.
+- Run `migrate` before rolling workers. Do not run it from the worker.
 - `django_ox.actions.retry(result_id)` requeues a FAILED or LOST task for
   one more attempt. `django_ox.actions.discard(result_id)` closes a READY,
   WAITING, FAILED or LOST task without running it. Neither touches a RUNNING task.

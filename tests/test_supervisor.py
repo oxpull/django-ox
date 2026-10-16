@@ -675,7 +675,10 @@ class TestOrphans:
         thread = start_worker_thread(worker)
         thread.join(timeout=10)
         assert not thread.is_alive()
-        assert [getattr(r, "event", None) for r in caplog.records] == [
+        events = [getattr(r, "event", None) for r in caplog.records]
+        # On PostgreSQL with the default connection settings the worker also
+        # warns once about a new connection for every task.
+        assert [e for e in events if e != "worker_connection_hint"] == [
             "worker_orphaned"
         ]
 

@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.1] - 2026-10-17
+
+**Upgrading:** No database migration is required.
+
+### Changed
+
+- `worker_connection_hint` is now a WARNING on PostgreSQL. A worker with
+  `CONN_MAX_AGE = 0` and no `OPTIONS["pool"]` opens a new connection for every
+  task, about 5 ms each on a local server, and logs one line at startup saying
+  so. To remove it, set `CONN_MAX_AGE = 600` or configure Django's pool and
+  leave `CONN_MAX_AGE` at 0. MySQL keeps the INFO line, and SQLite logs
+  nothing. "Retaining worker connections" in `docs/production.md`
+  lists both settings and the pool size to use.
+- The benchmarks page now reports django-ox 1.9.0 against django-tasks-db 0.13.0
+  at the same connection settings.
+
+### Fixed
+
+- A worker whose database refuses the connection for an outcome write, as a
+  host out of ephemeral ports does under `CONN_MAX_AGE=0`, now tries the write
+  again after waits of 50 ms doubling to 1.6 s, 3.15 s in all, and the waits
+  total at most a tenth of `LOCK_TIMEOUT`. A worker told to stop ends a wait at
+  once.
+
 ## [1.9.0] - 2026-10-12
 
 **Upgrading:** No database migration is required.
@@ -2418,6 +2442,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[1.9.1]: https://github.com/oxpull/django-ox/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/oxpull/django-ox/compare/v1.8.0...v1.9.0
 [1.7.0]: https://github.com/oxpull/django-ox/compare/v1.6.0...v1.7.0
 [1.8.0]: https://github.com/oxpull/django-ox/compare/v1.7.0...v1.8.0

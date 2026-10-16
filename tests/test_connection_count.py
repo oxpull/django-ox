@@ -1,6 +1,6 @@
 """
 How many database connections `ox_worker` opens, and the hint it logs when
-every task attempt opens one.
+every task attempt opens one: a warning on PostgreSQL, an INFO line on MySQL.
 
 At the default CONN_MAX_AGE of 0 Django closes a thread's connections after
 each use, and a task attempt is one use: the execution thread opens a new
@@ -67,6 +67,13 @@ TASKS = 30
 POOL = {"min_size": 1, "max_size": 6}
 LIMIT = 90.0
 HINT = "worker_connection_hint"
+WARNING_TEXT = (
+    "Worker %s: database %r opens a new connection for every task "
+    "because CONN_MAX_AGE is 0 and OPTIONS['pool'] is not set. "
+    "Set CONN_MAX_AGE = 600, or set OPTIONS['pool'] and leave "
+    "CONN_MAX_AGE at 0. See 'Retaining worker connections' in "
+    "the production guide."
+)
 HINT_TEXT = (
     "Worker %s: database %r opens a new execution connection per "
     "attempt with CONN_MAX_AGE = 0 on PostgreSQL or MySQL. "
@@ -391,11 +398,16 @@ class TestWhenTheHintIsGiven:
         needs_driver(vendor)
         add_alias(ENGINE=engine, CONN_MAX_AGE=0, OPTIONS={}, TEST={})
         (record,) = self.hint(caplog)
-        assert record.levelno == logging.INFO
+        # PostgreSQL's connect cost is measured and gets a warning; MySQL's is
+        # not, and stays an INFO line.
+        assert record.levelno == (
+            logging.WARNING if vendor == "postgresql" else logging.INFO
+        )
         assert record.database == ALIAS
         assert record.vendor == vendor
         assert record.worker_id
-        assert record.getMessage() == HINT_TEXT % (record.worker_id, ALIAS)
+        text = WARNING_TEXT if vendor == "postgresql" else HINT_TEXT
+        assert record.getMessage() == text % (record.worker_id, ALIAS)
 
     def test_a_missing_setting_is_the_default_and_gets_it(self, add_alias, caplog):
         pytest.importorskip("psycopg")

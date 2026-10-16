@@ -52,14 +52,14 @@ Of `db_worker`'s worker-specific options, `--backend`, `--interval`,
 
 - Replace `--queue-name` with `--queues`.
 - `--batch` maps by name to `--batch`. In `ox_worker`, it ends after an
-  error-free empty claim pass with no local tasks in flight; it does not
+  error-free empty claim pass with no local tasks in flight. It does not
   wait for future tasks, retry backoff or deferred releases. `db_worker`
   exits with a traceback when the database is unreachable or its tables are
   missing. `ox_worker` keeps retrying. An abandoned dispatch pass prevents
   batch completion until a later dispatch pass completes. A schedule-scoped
   failure is reported as `schedule_dispatch_error` and does not hold the
-  batch open. Exit 0 means the batch finished, not that every schedule
-  enqueued. Give the job a timeout, as
+  batch open. Exit 0 means the batch finished. It does not mean that every
+  schedule enqueued. Give the job a timeout, as
   [Running as a job](production.md#running-as-a-job) explains.
 - `--max-tasks N` maps by name to `--max-tasks N`. In `ox_worker`, every
   claimed attempt consumes one of N, including failed attempts and repeat
@@ -75,7 +75,7 @@ Of `db_worker`'s worker-specific options, `--backend`, `--interval`,
   Use `--queues default` to preserve the old default.
 
 Do not use `--queues '*'` to select all queues. `*` is treated as a literal
-queue name, not a wildcard. Omit `--queues` to run every configured queue.
+queue name. Omit `--queues` to run every configured queue.
 
 ## From Celery
 
@@ -127,8 +127,8 @@ decorator. See [Per-task policy](configuration.md#per-task-policy).
 
 In django-ox, `max_attempts` counts worker claims, including the first.
 A worker that dies after claiming a task consumes an attempt too. Choose
-the budget from that definition rather than copying a retry count from
-another task runner.
+the budget from that definition. Do not copy a retry count from another
+task runner.
 
 One difference in behaviour to read before you switch. With a broker,
 `enqueue` leaves your process immediately. If the surrounding transaction then
@@ -144,7 +144,7 @@ implement Celery's chain, group or chord APIs, or routing across multiple
 brokers. [Batches](features/batches.md) provide grouped work, and
 provisional [workflows](features/workflows.md) provide dependency DAGs.
 Both require Django 6.0+ and the optional `oxpull` app. Review their
-semantics rather than treating them as drop-in Celery replacements.
+semantics. They are not drop-in Celery replacements.
 
 ## From huey
 
@@ -302,7 +302,7 @@ No drain window available? Run both. Old workers keep serving the old table
 while new work goes to django-ox. They cannot see each other's rows.
 
 Both systems run tasks at least once, so your tasks should already be
-idempotent. Confirm it before you start rather than halfway through.
+idempotent. Confirm it before you start.
 
 ## Migrating away
 
@@ -318,13 +318,12 @@ compatibility guarantee. In the other direction, django-ox reads policy
 only from `PolicyTask`; other Task classes inherit its backend defaults
 when rebound with `.using(backend=...)`.
 
-Transactional enqueue also needs deciding on the way in rather than on
-the way out. Enqueueing inside `transaction.atomic()` on the database that
-holds `OxTask` ties the task to that transaction, so it disappears on
-rollback. A broker-based backend cannot do this: the enqueue leaves your
-process the moment you call it. Code that depends on a rollback removing
-a task will behave differently once the queue lives in a broker, and it
-will do so quietly.
+Transactional enqueue also needs deciding on the way in. Enqueueing inside
+`transaction.atomic()` on the database that holds `OxTask` ties the task to
+that transaction, so it disappears on rollback. A broker-based backend
+cannot do this: the enqueue leaves your process the moment you call it. Code
+that depends on a rollback removing a task will behave differently once the
+queue lives in a broker. It will do so quietly.
 
 If you want to keep that option open, wrap enqueues in
 `transaction.on_commit()`, the way a broker-based backend requires. django-ox

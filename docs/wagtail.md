@@ -22,7 +22,7 @@ Wagtail 7.3.x declares Django 6.0 support.
 
 On Django 6.1, pip permits Wagtail 7.3.x, but Wagtail 7.3.4 fails in Wagtail's own search with `OperationalError: unable to use function MATCH`, both with and without django-ox.
 
-Do not use Wagtail 7.3.0 with this setup on Django 5.2 or 6.0. Its dependency constraints resolve `django-tasks` 0.9.0. On Django 6.0, that version crashes during app loading (`django.setup()`) once `TASKS` selects a backend built on core Django's `Task`. Every `manage.py` command and the web process fail, not just migrations.
+Do not use Wagtail 7.3.0 with this setup on Django 5.2 or 6.0. Its dependency constraints resolve `django-tasks` 0.9.0. On Django 6.0, that version crashes during app loading (`django.setup()`) once `TASKS` selects a backend built on core Django's `Task`. Every `manage.py` command and the web process fail.
 
 Upgrade Wagtail before installing django-ox into a Wagtail 7.3.0 environment.
 
@@ -66,7 +66,7 @@ TASKS = {
 }
 ```
 
-If `TASKS` already exists, update its `default` entry rather than replacing other backends. Wagtail's bare `@task()` binds to backend alias `default` and queue `default`.
+If `TASKS` already exists, update its `default` entry. Leave the other backends in place. Wagtail's bare `@task()` binds to backend alias `default` and queue `default`.
 
 Run migrations:
 
@@ -126,13 +126,13 @@ Attempts count claims. The default `MAX_ATTEMPTS` is 3.
 
 Every running worker runs a reaper every `min(30, max(LOCK_TIMEOUT/2, 1))` seconds. With the default 300-second lease and 30-second reaper interval, recovery can take about 330 seconds after the last lease renewal. Recovery requires at least one running worker.
 
-`LOCK_TIMEOUT` and `MAX_ATTEMPTS` belong inside `TASKS["default"]["OPTIONS"]`, not at the top level of Django settings. See [Backend options](configuration.md#options).
+`LOCK_TIMEOUT` and `MAX_ATTEMPTS` belong inside `TASKS["default"]["OPTIONS"]`. Do not put them at the top level of Django settings. See [Backend options](configuration.md#options).
 
 ### Timeouts
 
 Timeouts are opt-in: `TASK_TIMEOUT` defaults to `None`, meaning no backend-wide limit. `TASK_TIMEOUTS` sets per-queue limits. Both belong in the backend's [options](configuration.md#options). On Django 6.1, or Django 5.2 with django-tasks 0.12+, a task's `timeout` declaration takes precedence over both; see [per-task policy](configuration.md#per-task-policy).
 
-Wagtail's frontend-cache purge makes outbound HTTP calls, so consider an appropriate task timeout rather than assuming one is already active.
+Wagtail's frontend-cache purge makes outbound HTTP calls, so consider an appropriate task timeout. Do not assume one is already active.
 
 ### Objects deleted before their tasks run
 

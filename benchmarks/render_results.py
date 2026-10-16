@@ -25,6 +25,15 @@ its own layout, so this script does not produce the page. It does two jobs:
    that mode stops a figure drifting to another value that happens to exist
    elsewhere in the files, and only that mode reads the order of a series.
 
+   The matched-connection run (django-ox 1.9.0 against django-tasks-db 0.13.0,
+   `results-raw-2026-10-14-matched.json`, one summary row per run) is read the
+   same way: per-cell medians, medians of per-round ratios, ranges, CPU per
+   task, drain times, and the wording claims about them. A table row on the
+   page is read cell by cell, and a default-settings figure above 4 workers is
+   refused. The 1.3.0 drain cells and the 100,000-task probe are no longer on
+   the page, so their numbers are no longer sourced; they stay in the old raw
+   file. `--matched FILE` names the matched file.
+
 Usage:
     python render_results.py
     python render_results.py --raw results-raw-2026-09-19.json \
@@ -56,9 +65,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import statistics
 import sys
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -636,12 +647,6 @@ WHITELIST: list[tuple[str, str, str]] = [
     # arithmetic of a percentage, not results.
     ("1", "median - 1) x 100", "constant in the printed rate-difference formula"),
     ("100", "median - 1) x 100", "constant in the printed rate-difference formula"),
-    # The drain headline, "Up to 20% faster queue drain". It is a rounded claim,
-    # not a computed figure, and no row of the drain table reaches it. The cell
-    # behind it is the 100,000-task probe, `e2e_probe` in the raw file: 115.4
-    # against 92.7 tasks/s, 24.5% on those rates. Tied to the headline's words
-    # because the probe band is also written 20%.
-    ("20%", "faster queue drain", "drain headline, under the 100,000-task probe cell (e2e_probe, 115.4 against 92.7 tasks/s)"),
 ]
 
 
@@ -676,13 +681,146 @@ def has_figure(unit: str, figure: str) -> bool:
     return re.search(pattern, unit.lower()) is not None
 
 
+# -- the matched-connection run ---------------------------------------------
+
+SETTING_LABEL = {
+    "P": "Persistent",
+    "PH": "Persistent, health checks",
+    "G": "Pooled",
+    "GH": "Pooled, health checks",
+    "D": "Defaults",
+}
+RETAINED = ("P", "PH", "G", "GH")
+OX, TD = "django-ox", "django-tasks-db"
+
+
+def outward(low: float, high: float) -> tuple[float, float]:
+    """The one-decimal range that contains [low, high]: floor of the low end, ceiling of the high end."""
+    return math.floor(low * 10 + 1e-9) / 10, math.ceil(high * 10 - 1e-9) / 10
+
+
+def row_complete(r: dict) -> bool:
+    """Every task finished: the run is ok, all tasks completed and persisted, nothing ran twice, workers exited 0."""
+    return bool(
+        r["status"] == "ok"
+        and r["completed"] == r["tasks"]
+        and r["after_successful"] == r["tasks"]
+        and r["duplicate_starts"] == 0
+        and r["duplicate_dones"] == 0
+        and r["worker_exit_codes"]
+        and all(c == 0 for c in r["worker_exit_codes"])
+    )
+
+
+class Matched:
+    """The matched-connection run, results-raw-2026-10-14-matched.json: one row per run."""
+
+    def __init__(self, data: dict):
+        self.data = data
+        self.rows: list[dict] = data["rows"]
+        self.cells: list[str] = list(data["cells"])
+        self.by: dict[tuple[str, str, str], dict[int, dict]] = {}
+        for r in self.rows:
+            self.by.setdefault((r["cell"], r["setting"], r["backend"]), {})[r["run"]] = r
+
+    def workload(self, cell: str) -> str:
+        r = next(r for r in self.rows if r["cell"] == cell)
+        return f"{r['tasks']:,} tasks, {r['workers']} workers"
+
+    def workers(self, cell: str) -> int:
+        return int(next(r for r in self.rows if r["cell"] == cell)["workers"])
+
+    def rates(self, cell: str, setting: str, backend: str) -> dict[int, float]:
+        return {
+            run: r["tasks_per_sec"]
+            for run, r in self.by[(cell, setting, backend)].items()
+            if r["tasks_per_sec"] is not None
+        }
+
+    def medians(self, cell: str, setting: str) -> tuple[float, float]:
+        return (
+            median(list(self.rates(cell, setting, OX).values())),
+            median(list(self.rates(cell, setting, TD).values())),
+        )
+
+    def round_ratios(self, cell: str, setting: str) -> list[float]:
+        ox, td = self.rates(cell, setting, OX), self.rates(cell, setting, TD)
+        return [ox[run] / td[run] for run in sorted(set(ox) & set(td))]
+
+    def ratio(self, cell: str, setting: str) -> float:
+        """The median of the per-round ratios."""
+        return median(self.round_ratios(cell, setting))
+
+    def shown(self) -> list[tuple[str, str]]:
+        """The (cell, setting) pairs whose throughput the page may show: retained connections everywhere, defaults at the first cell."""
+        return [(c, s) for c in self.cells for s in RETAINED] + [(self.cells[0], "D")]
+
+    def shown_rows(self) -> list[dict]:
+        keep = set(self.shown())
+        return [r for r in self.rows if (r["cell"], r["setting"]) in keep]
+
+    def ratio_range(self) -> tuple[float, float]:
+        """Outward-rounded range over every retained cell, by the median of per-round ratios (the figure the table shows)."""
+        values = [self.ratio(c, s) for c in self.cells for s in RETAINED]
+        return outward(min(values), max(values))
+
+    def default_range(self) -> tuple[float, float]:
+        c = self.cells[0]
+        ox, td = self.medians(c, "D")
+        return outward(*sorted([self.ratio(c, "D"), ox / td]))
+
+    def cpu_range(self, backend: str) -> tuple[float, float]:
+        values = [
+            r["worker_cpu_ms_per_task"]
+            for r in self.rows
+            if r["backend"] == backend and r["setting"] == "P" and r["worker_cpu_ms_per_task"] is not None
+        ]
+        return min(values), max(values)
+
+    def elapsed(self, cell: str, setting: str, backend: str) -> list[float]:
+        return [r["elapsed_s"] for r in self.by[(cell, setting, backend)].values()]
+
+    def spread(self, backend: str) -> float:
+        """Standard deviation of the default-settings rates over their mean, in percent."""
+        values = list(self.rates(self.cells[0], "D", backend).values())
+        return statistics.pstdev(values) / statistics.mean(values) * 100.0
+
+    def port_rate(self) -> list[float]:
+        """New connections per second in the default-settings rows above 4 workers that opened any."""
+        return [
+            r["sessions_opened"] / r["elapsed_s"]
+            for r in self.rows
+            if r["setting"] == "D" and r["workers"] > 4 and r["sessions_opened"] and r["elapsed_s"]
+        ]
+
+    def interleaved(self) -> tuple[bool, str]:
+        """Five runs per backend and setting, and within each cell the rounds follow one another."""
+        five = all(sorted(runs) == [1, 2, 3, 4, 5] for runs in self.by.values())
+        in_order = True
+        for cell in self.cells:
+            rounds = [r["run"] for r in sorted((r for r in self.rows if r["cell"] == cell), key=lambda r: r["started_utc"])]
+            in_order = in_order and rounds == sorted(rounds)
+        return five and in_order, f"five runs in all {len(self.by)} series: {five}; rounds in time order in every cell: {in_order}"
+
+    def balanced(self) -> tuple[bool, str]:
+        """No arm kept one position: each arm held at least three different positions over its five rounds."""
+        spots: dict[tuple[str, str, str], set[int]] = {}
+        for r in self.rows:
+            spots.setdefault((r["cell"], r["setting"], r["backend"]), set()).add(r["position"])
+        fewest = min(len(v) for v in spots.values())
+        return fewest >= 3, f"fewest distinct positions held by one arm over its five rounds: {fewest}"
+
+
 class PageCheck:
     """Every value the page may quote, computed from the two raw files."""
 
-    def __init__(self, raw: dict, kill: dict, flags: set[str]):
+    def __init__(self, raw: dict, kill: dict, matched: dict, flags: set[str]):
         self.raw = raw
         self.kill = kill
+        self.m = Matched(matched)
         self.flags = flags
+        # (regex over the page text, check of one match -> (holds, what was computed))
+        self.patterns: list[tuple[re.Pattern[str], Callable[[re.Match[str]], tuple[bool, str]]]] = []
         self.pool: dict[str, list[str]] = {}
         # (label, figures that must share one unit, text that switches the
         # requirement on, whether every unit carrying that text must comply)
@@ -692,6 +830,7 @@ class PageCheck:
         self.environment()
         self.performance()
         self.failure()
+        self.matched_section()
 
     def add(self, text: str, label: str) -> None:
         labels = self.pool.setdefault(text, [])
@@ -727,54 +866,9 @@ class PageCheck:
         params = raw["parameters"]
         r = Renderer(raw, self.kill, draft=False, flags=set())
 
-        drains: dict[tuple[int, str], tuple[list[float], list[float]]] = {}
-        for depth in params["depths"]:
-            self.add(f"{depth:,}", "queued tasks in a drain cell, parameters.depths")
-            for topology in params["topologies"]:
-                procs = topology.split("v")[0]
-                self.add(procs, f"worker processes per backend ({topology}), parameters.topologies")
-                ox = r.e2e_values(depth, topology, "ox", "tasks_per_sec")
-                td = r.e2e_values(depth, topology, "tasksdb", "tasks_per_sec")
-                drains[(depth, topology)] = (ox, td)
-                where = f"drain {depth:,} {topology}"
-                for arm, values in (("django-ox", ox), ("django-tasks-db", td)):
-                    self.add(fmt(median(values), 1), f"{where} {arm} median tasks/s")
-                    self.add(fmt(min(values), 1), f"{where} {arm} slowest run")
-                    self.add(fmt(max(values), 1), f"{where} {arm} fastest run")
-                pct = rate_difference(ox, td)
-                pct_text = f"{abs(pct):.1f}%"
-                self.add(pct_text, f"{where} rate difference from the unrounded medians")
-                self.need(
-                    f"{where} row",
-                    f"{depth:,}", cell(ox, 1), cell(td, 1), f"{pct_text} {'faster' if pct > 0 else 'slower'}",
-                )
-        clear = [k for k, (ox, td) in drains.items() if not ranges_overlap(ox, td)]
-        self.statements.append((
-            "No run of one backend overlaps",
-            len(clear) == len(drains),
-            f"runs do not overlap in {len(clear)} of {len(drains)} drain cells",
-        ))
-        ahead = [k for k, (ox, td) in drains.items() if min(ox) > max(td)]
-        self.statements.append((
-            "every django-ox run outperformed every django-tasks-db run",
-            len(ahead) == len(drains),
-            f"django-ox's slowest run beats django-tasks-db's fastest in {len(ahead)} of {len(drains)} drain cells",
-        ))
-        ordered = sorted(raw["e2e"], key=lambda e: parse_ts(e["started_at"]))
-        runs = [e["run"] for e in ordered]
-        per_run = {run: {(e["depth"], e["topology"]) for e in ordered if e["run"] == run} for run in runs}
-        self.statements.append((
-            "ran interleaved, run by run",
-            runs == sorted(runs) and all(cells == set(drains) for cells in per_run.values()),
-            f"every run holds all {len(drains)} drain cells and the runs follow one another, "
-            f"{ordered[0]['started_at']} to {ordered[-1]['finished_at']}",
-        ))
-        self.statements.append((
-            "ran interleaved in one window",
-            runs == sorted(runs) and all(cells == set(drains) for cells in per_run.values()),
-            f"every run holds all {len(drains)} drain cells and the runs follow one another, "
-            f"{ordered[0]['started_at']} to {ordered[-1]['finished_at']}",
-        ))
+        # The 1.3.0 drain cells and the 100,000-task probe left the page when the
+        # matched-connection run replaced them. Their numbers stay in the old raw
+        # file and are no longer sourced here, so none of them can come back.
 
         self.add(str(params["latency_count"]), "latency samples per run, parameters.latency_count")
         for q in ("p50", "p95"):
@@ -815,36 +909,6 @@ class PageCheck:
             self.add(str(count), f"retry {ARM[backend]} tasks ending {status} per run")
             self.add(attempt, f"retry {ARM[backend]} attempt on which every task ended")
             self.need(f"retry {ARM[backend]} row", f"{count} of {rc} {status} on attempt {attempt}")
-
-        probe = raw["probe"]
-        entries = {e["backend"]: e for e in raw["e2e_probe"]}
-        self.add(f"{probe['probe_depth']:,}", "probe depth, probe.probe_depth")
-        self.add(f"{probe['band'] * 100:.0f}%", "probe band, probe.band")
-        figures = []
-        for backend in ("ox", "tasksdb"):
-            e = entries[backend]
-            self.add(fmt(e["tasks_per_sec"], 1), f"probe {ARM[backend]} tasks/s")
-            self.add(fmt(e["seconds"], 1), f"probe {ARM[backend]} seconds")
-            self.add(f"{probe['arms'][backend]['ratio']:.2f}", f"probe {ARM[backend]} rate over its own {probe['deepest_cell_depth']:,}-task median")
-            figures += [
-                f"{fmt(e['tasks_per_sec'], 1)} tasks/s",
-                f"{fmt(e['seconds'], 1)} s",
-                f"= {probe['arms'][backend]['ratio']:.2f}",
-            ]
-        self.need("probe figures", *figures, when=f"{probe['probe_depth']:,}-task probe")
-        probe_backends = sorted(e["backend"] for e in raw["e2e_probe"])
-        drain_runs = {len(ox) for ox, _td in drains.values()} | {len(td) for _ox, td in drains.values()}
-        self.statements.append((
-            f"the {probe['probe_depth']:,}-task run was one pair, not five",
-            probe_backends == ["ox", "tasksdb"] and drain_runs == {5},
-            f"e2e_probe holds {len(probe_backends)} entries ({', '.join(probe_backends)}); "
-            f"runs per backend in the drain cells: {', '.join(map(str, sorted(drain_runs)))}",
-        ))
-        self.statements.append((
-            f"held within {probe['band'] * 100:.0f}%",
-            bool(probe["rate_holds_for_both_arms"]),
-            f"probe.rate_holds_for_both_arms is {probe['rate_holds_for_both_arms']}",
-        ))
 
     def failure(self) -> None:
         kill = self.kill
@@ -938,6 +1002,184 @@ class PageCheck:
             listed = " and ".join([", ".join(map(str, flagged[:-1])), str(flagged[-1])]) if len(flagged) > 1 else str(flagged[0])
             self.need("flagged kill trials, from --flag", f"trials {listed}", when="load flag", every=True)
 
+    def matched_section(self) -> None:
+        m = self.m
+        env = m.data["environment"]
+        self.add(m.data["date"], "matched run date, matched file")
+        assert env["django_tasks_db"] == self.raw["environment"]["packages"]["django-tasks-db"]
+        for key, label in (
+            ("django_ox", "django-ox"),
+            ("django_tasks_db", "django-tasks-db"),
+            ("django", "Django"),
+            ("psycopg", "psycopg"),
+        ):
+            self.add(env[key], f"{label} version, matched environment")
+        self.add(".".join(env["django"].split(".")[:2]), "Django series, matched environment.django")
+        self.add(str(env["payload_bytes"]), "task payload in bytes, matched environment.payload_bytes")
+        for key in ("host", "postgres"):
+            for match in TOKEN.finditer(env[key]):
+                self.add(match.group(), f"matched environment.{key}")
+        for setting, text in m.data["settings"].items():
+            for match in TOKEN.finditer(text):
+                self.add(match.group(), f"matched settings.{setting}")
+
+        for cell in m.cells:
+            r = next(r for r in m.rows if r["cell"] == cell)
+            self.add(f"{r['tasks']:,}", f"tasks in matched cell {cell}")
+            self.add(str(r["workers"]), f"workers in matched cell {cell}")
+
+        lo, hi = m.ratio_range()
+        self.add(f"{lo:.1f}", "headline ratio range, low end rounded down, matched rows")
+        self.add(f"{hi:.1f}", "headline ratio range, high end rounded up, matched rows")
+        dlo, dhi = m.default_range()
+        self.add(f"{dlo:.1f}", "default-settings ratio range, low end rounded down")
+        self.add(f"{dhi:.1f}", "default-settings ratio range, high end rounded up")
+        self.default_text = f"{dlo:.1f} to {dhi:.1f}"
+
+        for cell, setting in m.shown():
+            ox, td = m.medians(cell, setting)
+            ratio = m.ratio(cell, setting)
+            where = f"matched {cell} {setting}"
+            self.add(fmt(ox, 0), f"{where} django-ox median tasks/s")
+            self.add(fmt(td, 0), f"{where} django-tasks-db median tasks/s")
+            self.add(f"{ratio:.2f}", f"{where} median of per-round ratios")
+            tail = [f"{dlo:.1f}", f"{dhi:.1f}"] if setting == "D" else [f"{ratio:.2f}"]
+            self.need(f"{where} row", m.workload(cell), fmt(ox, 0), fmt(td, 0), *tail)
+
+        last_cell = m.cells[-1]
+        for setting in ("P", "G"):
+            for backend in (OX, TD):
+                values = m.elapsed(last_cell, setting, backend)
+                self.add(fmt(min(values), 1), f"{last_cell} {setting} {backend} fastest drain, s")
+                self.add(fmt(max(values), 1), f"{last_cell} {setting} {backend} slowest drain, s")
+                self.add(f"{round(median(values) / 10) * 10}", f"{last_cell} {setting} {backend} median drain to the nearest 10 s")
+        for backend in (OX, TD):
+            low, high = m.cpu_range(backend)
+            self.add(f"{low:.1f}", f"{backend} worker CPU per task, lowest, persistent connections, ms")
+            self.add(f"{high:.1f}", f"{backend} worker CPU per task, highest, persistent connections, ms")
+        for backend in (OX, TD):
+            self.add(f"{round(m.spread(backend))}%", f"{backend} default-settings run-to-run spread (sd/mean)")
+        self.add(f"{round(median(m.port_rate()) / 50) * 50}", "new connections per second at the port ceiling, nearest 50")
+        loads = [r["load_1m_before"] for r in m.rows]
+        self.add(f"{min(loads):.1f}", "lowest one-minute load before a run")
+        self.add(f"{max(loads):.1f}", "highest one-minute load before a run")
+
+        shown = m.shown_rows()
+        self.statements.append((
+            "Every task finished in these runs, with zero duplicate starts or completions",
+            all(row_complete(r) for r in shown),
+            f"{sum(row_complete(r) for r in shown)} of {len(shown)} runs shown completed every task, "
+            "persisted every outcome, repeated none and exited 0",
+        ))
+        ok, why = m.interleaved()
+        self.statements.append(("five interleaved runs", ok, why))
+        ok, why = m.balanced()
+        self.statements.append(("order balanced across rounds", ok, why))
+
+        def num(x: str) -> float:
+            return float(x)
+
+        def headline(g: re.Match[str]) -> tuple[bool, str]:
+            return (num(g[1]), num(g[2])) == (lo, hi), f"matched ratios, outward-rounded: {lo:.1f} to {hi:.1f}"
+
+        self.patterns.append((re.compile(r"(\d\.\d) to (\d\.\d)× (?:the throughput|django-tasks-db)"), headline))
+
+        def workers(g: re.Match[str]) -> tuple[bool, str]:
+            said = {int(x) for x in re.findall(r"\d+", g[1])}
+            have = {m.workers(c) for c in m.cells}
+            return said == have, f"workers in the matched cells: {sorted(have)}"
+
+        self.patterns.append((re.compile(r"across ([\d, ]+ and \d+) workers"), workers))
+
+        def cpu(g: re.Match[str]) -> tuple[bool, str]:
+            a, b = m.cpu_range(OX), m.cpu_range(TD)
+            want = (f"{a[0]:.1f}", f"{a[1]:.1f}", f"{b[0]:.1f}", f"{b[1]:.1f}")
+            return g.groups() == want, f"worker CPU ms per task, persistent connections: {want}"
+
+        self.patterns.append((re.compile(
+            r"worker CPU per task was (\d\.\d) to (\d\.\d) ms for django-ox versus (\d\.\d) to (\d\.\d) ms for django-tasks-db"), cpu))
+
+        def drain(g: re.Match[str]) -> tuple[bool, str]:
+            tasks_ = next(r for r in m.rows if r["cell"] == last_cell)["tasks"]
+            said = g.groups()
+            ranges = {}
+            for setting in ("P", "G"):
+                for backend in (OX, TD):
+                    v = m.elapsed(last_cell, setting, backend)
+                    ranges[(setting, backend)] = (f"{min(v):.1f}", f"{max(v):.1f}", round(median(v) / 10) * 10)
+            want = [
+                f"{tasks_:,}", str(m.workers(last_cell)),
+                str(ranges[("P", OX)][2]), *ranges[("P", OX)][:2],
+                str(ranges[("P", TD)][2]), *ranges[("P", TD)][:2],
+                *ranges[("G", OX)][:2], *ranges[("G", TD)][:2],
+            ]
+            same = ranges[("P", OX)][2] == ranges[("G", OX)][2] and ranges[("P", TD)][2] == ranges[("G", TD)][2]
+            return list(said) == want and same, f"{last_cell} drain: {want}"
+
+        self.patterns.append((re.compile(
+            r"draining ([\d,]+) tasks at (\d+) workers took about (\d+) s for django-ox \((\d+\.\d) to (\d+\.\d) s over five runs\) "
+            r"and about (\d+) s for django-tasks-db \((\d+\.\d) to (\d+\.\d) s\) with persistent connections; "
+            r"with a pool (\d+\.\d) to (\d+\.\d) s vs (\d+\.\d) to (\d+\.\d) s", re.I), drain))
+
+        def spread(g: re.Match[str]) -> tuple[bool, str]:
+            a, b = round(m.spread(OX)), round(m.spread(TD))
+            return int(g[1]) == a == b, f"run-to-run spread, standard deviation over mean: {m.spread(OX):.1f}% and {m.spread(TD):.1f}%"
+
+        self.patterns.append((re.compile(r"spread between runs is (\d+)% on both"), spread))
+
+        def about_default(g: re.Match[str]) -> tuple[bool, str]:
+            return num(g[1]) == dlo, f"default-settings ratio, rounded down: {dlo:.1f}"
+
+        self.patterns.append((re.compile(r"treat this as about (\d\.\d)×"), about_default))
+
+        def ports(g: re.Match[str]) -> tuple[bool, str]:
+            rates = m.port_rate()
+            n = int(g[1])
+            return bool(rates) and n == round(median(rates) / 50) * 50 and all(0.9 * n <= x <= 1.1 * n for x in rates), \
+                f"new connections per second, default settings above 4 workers: {min(rates):.0f} to {max(rates):.0f}, median {median(rates):.0f}"
+
+        self.patterns.append((re.compile(r"about (\d+) new connections a second"), ports))
+
+        def no_throughput(g: re.Match[str]) -> tuple[bool, str]:
+            n = int(g[1])
+            above = [r for r in m.rows if r["setting"] == "D" and r["workers"] > n]
+            below = [r for r in m.rows if r["setting"] == "D" and r["workers"] <= n]
+            bad = sum(row_complete(r) for r in above)
+            return bad == 0 and all(row_complete(r) for r in below) and bool(above), \
+                f"default-settings runs above {n} workers that completed cleanly: {bad} of {len(above)}; at or below: {sum(row_complete(r) for r in below)} of {len(below)}"
+
+        self.patterns.append((re.compile(r"no default-settings throughput above (\d+) workers"), no_throughput))
+
+        def load(g: re.Match[str]) -> tuple[bool, str]:
+            loads = [r["load_1m_before"] for r in m.rows]
+            return (num(g[1]), num(g[2])) == (round(min(loads), 1), round(max(loads), 1)), \
+                f"one-minute load before a run: {min(loads):.2f} to {max(loads):.2f}"
+
+        self.patterns.append((re.compile(r"load average (\d+\.\d) to (\d+\.\d) before a run"), load))
+
+    def table_statements(self, units: list[tuple[int, str]]) -> list[tuple[str, bool, str]]:
+        """Read every matched-run table row: a known workload, a known setting, the figures that go with them."""
+        m = self.m
+        by_label = {m.workload(c): c for c in m.cells}
+        by_setting = {v: k for k, v in SETTING_LABEL.items()}
+        out: list[tuple[str, bool, str]] = []
+        for line, unit in units:
+            if not unit.startswith("|"):
+                continue
+            cells = [c.strip().strip("*").strip() for c in unit.strip("|").split("|")]
+            if len(cells) != 5 or cells[0] not in by_label:
+                continue
+            cell, setting = by_label[cells[0]], by_setting.get(cells[1])
+            name = f"line {line}: {cells[0]} / {cells[1]}"
+            if setting is None or (cell, setting) not in m.shown():
+                out.append((name, False, "this workload and setting is not one the page may show a throughput for"))
+                continue
+            ox, td = m.medians(cell, setting)
+            ratio = self.default_text + "×" if setting == "D" else f"{m.ratio(cell, setting):.2f}×"
+            want = [fmt(ox, 0), fmt(td, 0), ratio]
+            out.append((name, cells[2:] == want, f"expected {' | '.join(want)}"))
+        return out
+
     # -- the page against them -------------------------------------------
 
     def run(self, page: Path, *, require_complete: bool = False) -> int:
@@ -996,9 +1238,14 @@ class PageCheck:
         print()
         print("Statements the page makes about the figures:")
         failed = 0
-        for claim, holds, computed in self.statements:
-            if claim.lower() not in text.lower():
-                continue
+        flat = " ".join(text.split())
+        found_statements = [s for s in self.statements if s[0].lower() in flat.lower()]
+        for pattern, check_one in self.patterns:
+            for match in pattern.finditer(flat):
+                holds, computed = check_one(match)
+                found_statements.append((match.group(), holds, computed))
+        found_statements += self.table_statements(units)
+        for claim, holds, computed in found_statements:
             failed += 0 if holds else 1
             print(f"  {'ok     ' if holds else 'FALSE  '} \"{claim}\": {computed}")
 
@@ -1020,6 +1267,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--raw", default=str(HERE / "results-raw-2026-09-19.json"))
     parser.add_argument("--kill", default=str(HERE / "results-kill-2026-09-19.json"))
+    parser.add_argument("--matched", default=str(HERE / "results-raw-2026-10-14-matched.json"))
     parser.add_argument("--draft", action="store_true", help="prefix rows with review markers")
     parser.add_argument(
         "--flag",
@@ -1043,6 +1291,7 @@ def main() -> int:
         parser.error("--require-complete goes with --check PAGE")
     raw = json.loads(Path(args.raw).read_text())
     kill = json.loads(Path(args.kill).read_text())
+    matched = json.loads(Path(args.matched).read_text())
     flags = {f for f in args.flag.split(",") if f}
     unknown = sorted(flags - flag_keys(kill))
     if unknown:
@@ -1051,7 +1300,7 @@ def main() -> int:
             "Drain cells take no flag: they ran interleaved in one window."
         )
     if args.check:
-        return PageCheck(raw, kill, flags).run(Path(args.check), require_complete=args.require_complete)
+        return PageCheck(raw, kill, matched, flags).run(Path(args.check), require_complete=args.require_complete)
     print(Renderer(raw, kill, draft=args.draft, flags=flags).render(), end="")
     return 0
 

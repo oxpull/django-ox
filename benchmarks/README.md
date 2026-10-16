@@ -221,7 +221,6 @@ Recorded automatically into the raw results JSON at run time
 (`collect_environment()` in `bench.py`). The machine used for the published
 results:
 
-- Apple M1 Max, 10 logical cores, 64 GiB RAM
 - macOS, Python, Django, psycopg and PostgreSQL versions: the `environment`
   block of the published raw file, recorded at run time
 - PostgreSQL 16 (official `postgres:16` image) in Docker Desktop,
@@ -288,7 +287,7 @@ all four ran interleaved, run by run, in one window.
 
 Read this before quoting any number.
 
-- **Single machine, single run day.** One Mac, one OS state, no controlled
+- **Single machine, single run day.** One machine, one OS state, no controlled
   thermal or background-load environment. Numbers describe relative
   behaviour on this hardware; absolute performance elsewhere will differ.
 - **Localhost database.** PostgreSQL runs in Docker on the same machine
@@ -446,9 +445,14 @@ Disclosure, all of it:
   after the clock stopped; 0 is a clean stop on SIGTERM) and
   `stderr_tail`. Files from before 2026-09-19 carry `concurrency` in
   place of `processes`, and their concurrency-4 cell is the legacy cell.
+- `results-raw-2026-10-14-matched.json`: the matched-connection run
+  (django-ox 1.9.0 against django-tasks-db 0.13.0): one summary row per
+  non-warmup run, with the failed and invalid rows and their flags. Not
+  produced by `bench.py`; it was condensed from the per-run files of a
+  separate harness.
 - `render_results.py`: recomputes the results page's figures from
-  `results-raw-<date>.json` and `results-kill-<date>.json`; `--check PAGE`
-  verifies every number on the page against them.
+  `results-raw-<date>.json`, `results-kill-<date>.json` and the matched file;
+  `--check PAGE` verifies every number on the page against them.
 - `docs/benchmarks.md` (in the repository root's docs): the results page.
 - `soak.py` / `soaksite/`: soak and chaos harness (see above).
 - `SOAK-<date>.md` / `soak-results-raw-<date>.json`: its results.

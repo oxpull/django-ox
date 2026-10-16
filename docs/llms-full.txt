@@ -383,7 +383,7 @@ def send_welcome_email(user_id):
 
 Nothing here comes from django-ox. `@task` is the Tasks framework, and the
 function is ordinary Django code. Arguments are stored as JSON, so pass the
-user's id rather than the user.
+user's id.
 
 Try it from the shell before wiring up a view:
 
@@ -794,12 +794,11 @@ ERRORS:
 System check identified 1 issue (0 silenced).
 ```
 
-The worker runs the same validation at startup, so these errors stop startup
-rather than skipping dispatch in silence. The checks do not establish database
-acceptance of arguments; schedule-scoped failures at dispatch are logged as
-`schedule_dispatch_error`. Put `* * * * *` back and restart the worker.
-The startup line now says `schedules=1`, and at the next minute boundary
-the schedule fires:
+The worker runs the same validation at startup, so these errors stop it from
+starting. The checks do not establish database acceptance of arguments;
+schedule-scoped failures at dispatch are logged as `schedule_dispatch_error`.
+Put `* * * * *` back and restart the worker. The startup line now says
+`schedules=1`, and at the next minute boundary the schedule fires:
 
 ```
 2026-09-19 07:59:12,044 INFO django_ox Worker myhost-23929-gJ7A6QmA starting: queues=['default'] concurrency=1 poll=1.0s schedules=1
@@ -855,7 +854,7 @@ in the admin without a deploy.
   `ox_health --heartbeat-file PATH`, using the same `--processes N` on both
   commands. Use an existing, writable directory private to the container.
   A passing file probe means the expected controlling loops have advanced
-  recently, not that tasks are progressing.
+  recently. It does not mean that tasks are progressing.
 
     With no flags, `ox_health` checks that the database answers. Keep that
     dependency check separate from liveness restarts. Queue thresholds turn
@@ -897,13 +896,13 @@ in the admin without a deploy.
   8 take a `SKIP LOCKED` claim path built for many workers. See
   [PostgreSQL, MySQL or SQLite](production.md#postgresql-mysql-or-sqlite).
 - **On a read replica**, django-ox reads its own rows on the database it
-  writes them to, so a lagging replica never hides a task from the worker,
+  writes them to. A lagging replica never hides a task from the worker,
   the result API or `ox_health`. The admin reads the primary too.
   `ox_worker`, `ox_prune` and `ox_health` take `--database` to name the
   alias they work on; leave it unset unless you mean it. Details under
   [Read replicas](configuration.md#read-replicas).
 - **Run `migrate` before rolling workers**, as a deploy step or an init
-  container, not from the worker itself.
+  container. Do not run it from the worker itself.
 
 ## Next steps
 
@@ -953,7 +952,7 @@ Wagtail 7.3.x declares Django 6.0 support.
 
 On Django 6.1, pip permits Wagtail 7.3.x, but Wagtail 7.3.4 fails in Wagtail's own search with `OperationalError: unable to use function MATCH`, both with and without django-ox.
 
-Do not use Wagtail 7.3.0 with this setup on Django 5.2 or 6.0. Its dependency constraints resolve `django-tasks` 0.9.0. On Django 6.0, that version crashes during app loading (`django.setup()`) once `TASKS` selects a backend built on core Django's `Task`. Every `manage.py` command and the web process fail, not just migrations.
+Do not use Wagtail 7.3.0 with this setup on Django 5.2 or 6.0. Its dependency constraints resolve `django-tasks` 0.9.0. On Django 6.0, that version crashes during app loading (`django.setup()`) once `TASKS` selects a backend built on core Django's `Task`. Every `manage.py` command and the web process fail.
 
 Upgrade Wagtail before installing django-ox into a Wagtail 7.3.0 environment.
 
@@ -997,7 +996,7 @@ TASKS = {
 }
 ```
 
-If `TASKS` already exists, update its `default` entry rather than replacing other backends. Wagtail's bare `@task()` binds to backend alias `default` and queue `default`.
+If `TASKS` already exists, update its `default` entry. Leave the other backends in place. Wagtail's bare `@task()` binds to backend alias `default` and queue `default`.
 
 Run migrations:
 
@@ -1057,13 +1056,13 @@ Attempts count claims. The default `MAX_ATTEMPTS` is 3.
 
 Every running worker runs a reaper every `min(30, max(LOCK_TIMEOUT/2, 1))` seconds. With the default 300-second lease and 30-second reaper interval, recovery can take about 330 seconds after the last lease renewal. Recovery requires at least one running worker.
 
-`LOCK_TIMEOUT` and `MAX_ATTEMPTS` belong inside `TASKS["default"]["OPTIONS"]`, not at the top level of Django settings. See [Backend options](configuration.md#options).
+`LOCK_TIMEOUT` and `MAX_ATTEMPTS` belong inside `TASKS["default"]["OPTIONS"]`. Do not put them at the top level of Django settings. See [Backend options](configuration.md#options).
 
 ### Timeouts
 
 Timeouts are opt-in: `TASK_TIMEOUT` defaults to `None`, meaning no backend-wide limit. `TASK_TIMEOUTS` sets per-queue limits. Both belong in the backend's [options](configuration.md#options). On Django 6.1, or Django 5.2 with django-tasks 0.12+, a task's `timeout` declaration takes precedence over both; see [per-task policy](configuration.md#per-task-policy).
 
-Wagtail's frontend-cache purge makes outbound HTTP calls, so consider an appropriate task timeout rather than assuming one is already active.
+Wagtail's frontend-cache purge makes outbound HTTP calls, so consider an appropriate task timeout. Do not assume one is already active.
 
 ### Objects deleted before their tasks run
 
@@ -4205,7 +4204,7 @@ database as the `User` row, your default one, so the task becomes visible to
 workers only when the transaction commits. If `create_user` is rolled back
 further up, the email task disappears with it.
 
-Pass the id, not the object. Arguments are stored as JSON, and a stale copy of a
+Pass the model's id. Arguments are stored as JSON, and a stale copy of a
 model is a bug waiting to happen.
 
 ## Retry a flaky third-party call
@@ -4328,7 +4327,7 @@ return render(request, "report_pending.html", {"attempts": result.attempts})
 `is_finished` covers the last two. A task whose worker vanished without
 reporting also reads as `FAILED`; [the reaper](production.md#the-reaper)
 explains what that record contains. Return values are stored as JSON, so
-return a URL or an id rather than a file or a model.
+return a URL or an id.
 
 ## Defer work to a specific time
 
@@ -4461,10 +4460,10 @@ def charge_order(order_id):
         order.save(update_fields=["charged_at"])
 ```
 
-Guard on state you have written, not on a flag you set in memory. The row lock
-serialises concurrent attempts, and the idempotency key covers the gap where the
-charge succeeds but the transaction does not commit. Use one whenever the
-external system offers it.
+Guard on state you have written. Do not guard on a flag you set in memory.
+The row lock serialises concurrent attempts, and the idempotency key covers
+the gap where the charge succeeds but the transaction does not commit. Use
+one whenever the external system offers it.
 
 **Your task is not run inside a transaction.** The worker manages its own for
 claiming and bookkeeping, but your function is called outside them, so
@@ -4682,14 +4681,14 @@ Of `db_worker`'s worker-specific options, `--backend`, `--interval`,
 
 - Replace `--queue-name` with `--queues`.
 - `--batch` maps by name to `--batch`. In `ox_worker`, it ends after an
-  error-free empty claim pass with no local tasks in flight; it does not
+  error-free empty claim pass with no local tasks in flight. It does not
   wait for future tasks, retry backoff or deferred releases. `db_worker`
   exits with a traceback when the database is unreachable or its tables are
   missing. `ox_worker` keeps retrying. An abandoned dispatch pass prevents
   batch completion until a later dispatch pass completes. A schedule-scoped
   failure is reported as `schedule_dispatch_error` and does not hold the
-  batch open. Exit 0 means the batch finished, not that every schedule
-  enqueued. Give the job a timeout, as
+  batch open. Exit 0 means the batch finished. It does not mean that every
+  schedule enqueued. Give the job a timeout, as
   [Running as a job](production.md#running-as-a-job) explains.
 - `--max-tasks N` maps by name to `--max-tasks N`. In `ox_worker`, every
   claimed attempt consumes one of N, including failed attempts and repeat
@@ -4705,7 +4704,7 @@ Of `db_worker`'s worker-specific options, `--backend`, `--interval`,
   Use `--queues default` to preserve the old default.
 
 Do not use `--queues '*'` to select all queues. `*` is treated as a literal
-queue name, not a wildcard. Omit `--queues` to run every configured queue.
+queue name. Omit `--queues` to run every configured queue.
 
 ## From Celery
 
@@ -4757,8 +4756,8 @@ decorator. See [Per-task policy](configuration.md#per-task-policy).
 
 In django-ox, `max_attempts` counts worker claims, including the first.
 A worker that dies after claiming a task consumes an attempt too. Choose
-the budget from that definition rather than copying a retry count from
-another task runner.
+the budget from that definition. Do not copy a retry count from another
+task runner.
 
 One difference in behaviour to read before you switch. With a broker,
 `enqueue` leaves your process immediately. If the surrounding transaction then
@@ -4774,7 +4773,7 @@ implement Celery's chain, group or chord APIs, or routing across multiple
 brokers. [Batches](features/batches.md) provide grouped work, and
 provisional [workflows](features/workflows.md) provide dependency DAGs.
 Both require Django 6.0+ and the optional `oxpull` app. Review their
-semantics rather than treating them as drop-in Celery replacements.
+semantics. They are not drop-in Celery replacements.
 
 ## From huey
 
@@ -4932,7 +4931,7 @@ No drain window available? Run both. Old workers keep serving the old table
 while new work goes to django-ox. They cannot see each other's rows.
 
 Both systems run tasks at least once, so your tasks should already be
-idempotent. Confirm it before you start rather than halfway through.
+idempotent. Confirm it before you start.
 
 ## Migrating away
 
@@ -4948,13 +4947,12 @@ compatibility guarantee. In the other direction, django-ox reads policy
 only from `PolicyTask`; other Task classes inherit its backend defaults
 when rebound with `.using(backend=...)`.
 
-Transactional enqueue also needs deciding on the way in rather than on
-the way out. Enqueueing inside `transaction.atomic()` on the database that
-holds `OxTask` ties the task to that transaction, so it disappears on
-rollback. A broker-based backend cannot do this: the enqueue leaves your
-process the moment you call it. Code that depends on a rollback removing
-a task will behave differently once the queue lives in a broker, and it
-will do so quietly.
+Transactional enqueue also needs deciding on the way in. Enqueueing inside
+`transaction.atomic()` on the database that holds `OxTask` ties the task to
+that transaction, so it disappears on rollback. A broker-based backend
+cannot do this: the enqueue leaves your process the moment you call it. Code
+that depends on a rollback removing a task will behave differently once the
+queue lives in a broker. It will do so quietly.
 
 If you want to keep that option open, wrap enqueues in
 `transaction.on_commit()`, the way a broker-based backend requires. django-ox
@@ -5134,7 +5132,7 @@ def register(username, email):
 
 That is the advantage over sending to a separate broker: the enqueue can share your database transaction. django-tasks-db shares this property too.
 
-The transaction covers the database writes, not email delivery. Make the task safe to repeat.
+The transaction covers the database writes. Email delivery sits outside it, so make the task safe to repeat.
 
 ## Run recurring Django tasks without a scheduler process
 
@@ -5165,7 +5163,7 @@ Schedules need at least one running worker and a usable database. A schedule-sco
 
 ## Deduplicate a repeated webhook
 
-A payment provider sends the same event twice. Your webhook queues the same invoice sync twice. Stop the duplicate at enqueue rather than making the queue do the same work again.
+A payment provider sends the same event twice. Your webhook queues the same invoice sync twice. Stop the duplicate at enqueue.
 
 Without a unique-task declaration, these calls create separate tasks:
 
@@ -5191,7 +5189,7 @@ The same app provides [batches](features/batches.md) to track grouped work, [rat
 
 ## When to choose another tool
 
-Choose another backend if you need to revoke a chosen running task, require Celery's chain, group or chord APIs, or exceed the throughput one database can serve. django-ox provides [batches](features/batches.md) and provisional [dependency workflows](features/workflows.md), not those Celery APIs.
+Choose another backend if you need to revoke a chosen running task. Choose another if you require Celery's chain, group or chord APIs, or exceed the throughput one database can serve. django-ox provides [batches](features/batches.md) and provisional [dependency workflows](features/workflows.md).
 
 Transactional enqueue requires the task and model rows to share a database. A separate queue database cannot give you that shared commit.
 
@@ -5214,9 +5212,10 @@ documentation, source or issue tracker, with the link in the footnotes and the
 date it was read. Where a project's pages do not say, the cell says so rather
 than guessing.
 
-The comparison is about fit, not ranking. A team that already runs RabbitMQ and
-needs to stop running tasks has a different answer from a team that wants one
-fewer service. The last section says where django-ox is not the right fit.
+The comparison is about fit. It does not rank the tools. A team that already
+runs RabbitMQ and needs to stop running tasks has a different answer from one
+that wants one fewer service. The last section says where django-ox is
+not the right fit.
 
 ## The table
 
@@ -6242,20 +6241,31 @@ PgBouncer and third-party pools have not been tested.
 
 ### Retaining worker connections
 
-With `CONN_MAX_AGE = 0` and no pool, Django closes initialized execution connections before and after each attempt. The next attempt opens another connection; the poll loop keeps its claim connection. Task ORM queries and outcome writing use the same execution connection on the worker's database alias. `worker_connection_hint` reports this setting once at INFO during `Worker.run()` startup on PostgreSQL and MySQL.
+Django's default is `CONN_MAX_AGE = 0`. With it and no pool, each task attempt opens a new database connection and closes it after. On a local PostgreSQL that costs about 5 ms a task. The poll loop keeps its own connection. Task queries and the outcome write share the attempt's connection on the worker's database alias.
 
-To retain connections, configure the worker's alias in a dedicated worker settings module. Launch workers with that module to leave web processes unchanged. For PostgreSQL or MySQL without a pool, set a positive connection age and enable health checks:
+When a worker starts on PostgreSQL with that setup, it logs one warning, `worker_connection_hint`, naming the alias and the fix. MySQL gets the same event at INFO. SQLite opens a file and logs nothing.
+
+Pick one of two settings for the worker's alias. Put it in a dedicated worker settings module and launch workers with that module, so web processes stay as they are. To keep connections open between tasks:
 
 ```python
 DATABASES["default"]["CONN_MAX_AGE"] = 600
-DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
 ```
 
-For PostgreSQL, Django's pool requires psycopg 3, `psycopg_pool` and `CONN_MAX_AGE = 0`; use the pool example above instead of a positive age. MySQL has no Django pool; setting `OPTIONS["pool"]` does not enable one.
+On PostgreSQL you can use Django's pool instead. It needs psycopg 3 and `psycopg_pool`, and `CONN_MAX_AGE` stays at 0:
 
-Allow pool capacity for task threads and polling, plus the separate renewal, watchdog and stop-time recovery connections described above. Each worker process has its own pool. Retained connections carry session state between tasks; follow the responsibilities below.
+```python
+DATABASES["default"]["OPTIONS"] = {
+    "pool": {"min_size": 0, "max_size": 16, "timeout": 30}
+}
+```
 
-Persistence and pooling remain opt-in. The default connection lifecycle, transactions, delivery and schema are unchanged.
+Django refuses to open a pool when `CONN_MAX_AGE` is above 0, so use one or the other. MySQL has no Django pool, and `OPTIONS["pool"]` does nothing there.
+
+Each worker process has its own pool. Set `max_size` to at least `concurrency + 1`, and budget the extra connections in [Budget server capacity](#budget-server-capacity). A `max_size` of 16 covers up to 15 task threads in a process.
+
+`CONN_HEALTH_CHECKS = True` tests a kept connection before each use. It costs about 10% throughput. Set it only if your network drops idle connections.
+
+Kept connections carry session state from one task to the next. Follow the rules in the next section.
 
 ### Session state and connection failures
 
@@ -6265,7 +6275,7 @@ Each execution thread keeps its own connection context, separate from other task
 
 Measured default runs opened one connection per task attempt plus one for polling; ORM queries added no connections. Persistence or PostgreSQL pooling opened two connections in total: one for execution and one for polling, regardless of task count. These counts are exact on PostgreSQL and SQLite; MySQL counting tests allow one extra connection per thread because Django's MySQL backend reads the server version through a throwaway connection the first time a thread uses it. After a server-ended idle session, querying tasks used one extra attempt, then succeeded on a new session. Query-free tasks reconnected at outcome writing without spending an attempt; every task completed. Workers with and without persistence shared a queue: all 40 tasks succeeded, each running once with one claim and one epoch. Both workers ran tasks. These measurements cover same-release batch workers, PostgreSQL, MySQL and SQLite connection counts, PostgreSQL pooling, and PostgreSQL and MySQL idle-session recovery.
 
-Set `CONN_HEALTH_CHECKS = True`; health checks reduce stale-connection failures but cannot prevent later disconnects.
+With `CONN_HEALTH_CHECKS = True`, stale connections fail less often. A health check cannot prevent a disconnect that comes after it.
 
 ### psycopg_pool versions and recovery
 
@@ -7759,7 +7769,7 @@ A stopped reconciler sweep is not a completed sweep. Check `visited_count`, `unv
 | `worker_started` | INFO | The run loop starts. |
 | `connection_pool_too_small` | WARNING | Once per `Worker.run()`, after `worker_started` and before threads start: the worker alias's effective PostgreSQL pool maximum is below `concurrency + 1`. Each `--processes` child checks separately. The warning does not resize the pool, refuse startup, measure available server slots, or reserve fallback capacity. |
 | `connection_pool_cannot_drain` | WARNING | Pooled PostgreSQL only. The installed psycopg_pool has no `ConnectionPool.drain()` method, which was added in 3.3.0. Emitted once per `Worker.run()`, after `worker_started` and the `connection_pool_too_small` check, before threads start. Each `--processes` child checks separately. Also emitted at the first sweep of such a pool in a process, for each database alias, unless startup already emitted it in that process. Concurrent first sweeps may emit duplicate warnings. The sweep record is the only notice available to callers of `run_once()` or `run_tasks()`. Idle connections are still tested as in django-ox 1.7.0, preserving restart recovery but also the wait on a connection that stays open without answering. A stop is not read until that test returns. Upgrade psycopg_pool to 3.3.3 or newer. This warning does not refuse startup or change the pool. No traceback. Keys: `event` and `database` always; `worker_id` only on the startup record. |
-| `worker_connection_hint` | INFO | Once at `Worker.run()` startup on PostgreSQL and MySQL when `CONN_MAX_AGE = 0` and no PostgreSQL pool is configured. MySQL ignores pool options. Each attempt opens one execution connection for task queries and outcome writing. Carries `worker_id`, `database` and `vendor`. The hint opens no connection and never stops the worker. See [connection guidance](production.md#retaining-worker-connections). |
+| `worker_connection_hint` | WARNING on PostgreSQL, INFO on MySQL | Once at `Worker.run()` startup, so once per worker process, on PostgreSQL and MySQL when `CONN_MAX_AGE = 0` and no PostgreSQL pool is configured. MySQL ignores pool options. Each attempt opens one execution connection for task queries and outcome writing. Carries `worker_id`, `database` and `vendor`. The hint opens no connection and never stops the worker. See [connection guidance](production.md#retaining-worker-connections). |
 | `task_claimed` | DEBUG | A task was claimed from the queue. |
 | `task_started` | DEBUG | Execution of an attempt begins. |
 | `task_succeeded` | INFO | The task reached SUCCESSFUL. |
@@ -8202,48 +8212,90 @@ also resolve to `other`.
 
 # Benchmarks
 
-## Queue drain and worker recovery
+## 1.4 to 1.7× the throughput of django-tasks-db with retained connections
+
+django-ox is a database-backed worker for Django's Tasks framework.
+
+### More tasks per second at matched connection settings
+
+With pooled or persistent connections, django-ox delivered 1.4 to 1.7× django-tasks-db's throughput across 4, 8 and 16 workers.
+
+Every task finished in these runs, with zero duplicate starts or completions.
+
+With persistent connections, worker CPU per task was 1.0 to 1.4 ms for django-ox versus 1.5 to 2.1 ms for django-tasks-db.
+
+<small>PostgreSQL 16; no-op tasks; django-ox 1.9.0 vs django-tasks-db 0.13.0; medians of five runs.</small>
+
+<small>Rates are medians of five interleaved runs; ratios are medians of per-round ratios. The test machine had background load; see How we measured.</small>
+
+Retain worker connections to speed up both backends: `CONN_MAX_AGE = 600`, or `OPTIONS["pool"]` with `CONN_MAX_AGE = 0`. Django 6.0 rejects a pool with nonzero `CONN_MAX_AGE`; see [Retaining worker connections](production.md#retaining-worker-connections).
+
+Both backends ran the same settings in each row. Rates are tasks per second.
+
+| Workload | Setting | django-ox, tasks/s | django-tasks-db, tasks/s | Ratio |
+|---|---|---:|---:|---:|
+| 20,000 tasks, 4 workers | Persistent | 1,771 | 1,211 | **1.46×** |
+| 20,000 tasks, 4 workers | Persistent, health checks | 1,590 | 1,123 | **1.42×** |
+| 20,000 tasks, 4 workers | Pooled | 1,718 | 1,216 | **1.41×** |
+| 20,000 tasks, 4 workers | Pooled, health checks | 1,561 | 1,127 | **1.40×** |
+| 20,000 tasks, 8 workers | Persistent | 2,668 | 1,735 | **1.53×** |
+| 20,000 tasks, 8 workers | Persistent, health checks | 2,324 | 1,594 | **1.45×** |
+| 20,000 tasks, 8 workers | Pooled | 2,569 | 1,724 | **1.51×** |
+| 20,000 tasks, 8 workers | Pooled, health checks | 2,269 | 1,556 | **1.47×** |
+| 20,000 tasks, 16 workers | Persistent | 3,065 | 1,959 | **1.54×** |
+| 20,000 tasks, 16 workers | Persistent, health checks | 2,693 | 1,787 | **1.50×** |
+| 20,000 tasks, 16 workers | Pooled | 3,011 | 1,938 | **1.55×** |
+| 20,000 tasks, 16 workers | Pooled, health checks | 2,625 | 1,786 | **1.46×** |
+| 100,000 tasks, 16 workers | Persistent | 3,358 | 1,989 | **1.69×** |
+| 100,000 tasks, 16 workers | Persistent, health checks | 2,884 | 1,816 | **1.59×** |
+| 100,000 tasks, 16 workers | Pooled | 3,289 | 1,952 | **1.68×** |
+| 100,000 tasks, 16 workers | Pooled, health checks | 2,833 | 1,815 | **1.57×** |
+
+<small>Persistent: `CONN_MAX_AGE = 600`. Persistent, health checks: the same with `CONN_HEALTH_CHECKS = True`. Pooled: `OPTIONS["pool"]` with `CONN_MAX_AGE = 0`. Pooled, health checks: the same with `CONN_HEALTH_CHECKS = True`.</small>
+
+Draining 100,000 tasks at 16 workers took about 30 s for django-ox (29.7 to 30.1 s over five runs) and about 50 s for django-tasks-db (49.3 to 51.2 s) with persistent connections; with a pool 30.2 to 30.5 s vs 49.9 to 51.6 s.
+
+### Default connection settings
+
+| Workload | Setting | django-ox, tasks/s | django-tasks-db, tasks/s | Ratio |
+|---|---|---:|---:|---:|
+| 20,000 tasks, 4 workers | Defaults | 430 | 373 | **1.1 to 1.2×** |
+
+<small>`CONN_MAX_AGE = 0` and no pool. Spread is the standard deviation of the five rates divided by their mean.</small>
+
+The spread between runs is 9% on both, so treat this as about 1.1×.
+
+## Worker recovery, enqueue and retries (django-ox 1.3.0)
 
 ### 2,000 of 2,000 tasks finished
 
-Every django-ox kill-test trial finished with zero tasks stuck. django-tasks-db left 13 to 19 tasks stuck RUNNING per trial.
+Every django-ox 1.3.0 kill-test trial finished with zero tasks stuck. django-tasks-db left 13 to 19 tasks stuck RUNNING per trial.
 
-<small>Five trials, each with 20 worker kills and replacements, with LOCK_TIMEOUT set to 15 s.</small>
+<small>Five trials, each with 20 worker kills and replacements, with LOCK_TIMEOUT set to 15 s. The wallpaper process rendered during kill trials 2 and 3 only; kill counts were unaffected.</small>
 
 Execution is at-least-once. The trials recorded 7 repeated effects across 10,000 tasks. Write tasks that can run again safely.
 
-### Up to 20% faster queue drain than django-tasks-db
-
-Worker counts match in each row. Rates are tasks per second.
-
-| Queued tasks | Workers per backend | django-ox, tasks/s | django-tasks-db, tasks/s | django-ox faster |
-|---|---:|---:|---:|---:|
-| 2,000 | 1 | 118.5 | 103.9 | **14.0%** |
-| 2,000 | 4 | 426.3 | 387.1 | **10.1%** |
-| 20,000* | 1 | 115.2 | 97.4 | **18.2%** |
-| 20,000* | 4 | 461.8 | 401.6 | **15.0%** |
-
-In each row, every django-ox run outperformed every django-tasks-db run. Results apply to these workloads, not every application.
-
 ### Enqueue 10,000 tasks in 0.71 s
 
-`enqueue_many()` inserted all 10,000 rows in one transaction, including COMMIT. Run times ranged from 0.69 to 0.72 s.
+In django-ox 1.3.0, `enqueue_many()` inserted all 10,000 rows in one transaction, including COMMIT. Run times ranged from 0.69 to 0.72 s.
 
 ### 20 of 20 tasks retried successfully
 
-Each task raised an exception on its first attempt. django-ox retried them automatically, and all succeeded on attempt two, every run. django-tasks-db marked all 20 FAILED after the first exception.
+Each task raised an exception on its first attempt. django-ox 1.3.0 retried them automatically, and all succeeded on attempt two, every run. django-tasks-db marked all 20 FAILED after the first exception.
 
 ### How we measured
 
-Oxpull, 2026-09-19. django-ox 1.3.0 vs django-tasks-db 0.13.0.
+Matched-connection run: Oxpull, 2026-10-14. django-ox 1.9.0 vs django-tasks-db 0.13.0.
 
-PostgreSQL 16 ran locally in Docker on an Apple M1 Max. Task bodies were no-ops. Each cell used five interleaved runs per backend.
+PostgreSQL 16 ran locally in Docker. Django 6.0.8, psycopg 3.3.6. Task bodies were no-ops with a 256-byte payload. Each cell used five interleaved runs per setting and backend, with order balanced across rounds. Both backends got identical Django database options; each package's own defaults applied otherwise.
 
-Package defaults applied except for the kill test, with LOCK_TIMEOUT set to 15 s.
+The test machine had other load (one-minute load average 1.9 to 6.8 before a run), so absolute rates are lower than a quiet machine would give.
 
-<small>*The wallpaper process rendered during kill trials 2 and 3 only; kill counts were unaffected. The four drain cells (2,000 and 20,000 tasks) ran interleaved in one window; the 100,000-task run was one pair, not five.</small>
+At one connection per task, the test machine runs out of ports at about 550 new connections a second, so we show no default-settings throughput above 4 workers.
 
-[**Download both raw JSON files**](https://github.com/oxpull/django-ox/tree/main/benchmarks)
+Kill, enqueue and retry sections: Oxpull, 2026-09-19. django-ox 1.3.0 vs django-tasks-db 0.13.0. PostgreSQL 16 ran locally in Docker. Task bodies were no-ops. Each cell used five interleaved runs per backend. Package defaults applied except for the kill test, with LOCK_TIMEOUT set to 15 s.
+
+[**Download the raw JSON files**](https://github.com/oxpull/django-ox/tree/main/benchmarks)
 
 [**Get started**](background-tasks.md)
 
@@ -8598,7 +8650,7 @@ process that shares a database before anything writes the new status. The
 release notes name the value, say how it reads through `django.tasks`, and
 give the upgrade and rollback steps.
 
-Pin accordingly: `django-ox~=1.9.0` accepts patch releases only;
+Pin accordingly: `django-ox~=1.9.1` accepts patch releases only;
 `django-ox~=1.9` accepts the current major line.
 
 ## Deprecation policy
@@ -8784,8 +8836,8 @@ OK: backlog=0 oldest_age=none last_claim_age=none
 `manage.py check` reports schedule and backend policy errors through `django_ox.E002` to `E005`, `E010` and `E011`, and warnings through `django_ox.W003` and `django_ox.W004`, before deployment. Database acceptance of schedule arguments is determined at dispatch. Alert on `schedule_dispatch_error`, `schedule_dispatch_failed` and `schedule_tick_unreadable`. For stored schedules, also alert on `schedule_row_skipped`, `schedule_source_unavailable` and `schedule_boundary_heal_failed`. Review `django_ox.W003` and `django_ox.W004` warnings too; `W004` asks for a non-bool integer from 1 to 32767 while retaining compatible legacy values.
 
 Invalid per-task fields raise `InvalidTask` (`InvalidTaskError` on the
-backport) when the task is built, normally at import, rather than appearing
-as a system-check message.
+backport) when the task is built, normally at import. They do not appear
+as system-check messages.
 
 Start a worker in its own process, next to the web server, under the same
 supervisor:
@@ -8923,9 +8975,8 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
 
 ## Facts to get right
 
-- `QUEUES` sits beside `OPTIONS`, not inside it. Inside `OPTIONS` it is
-  ignored without warning; the symptom is `InvalidTask: Queue 'X' is not
-  valid for backend.`
+- `QUEUES` sits beside `OPTIONS`. Inside `OPTIONS` it is ignored without
+  warning; the symptom is `InvalidTask: Queue 'X' is not valid for backend.`
 - Tasks use the Tasks-framework API. Import `task` from `django.tasks` on
   Django 6.0+, or `django_tasks` on 5.2 LTS, decorate with `@task`, and call
   `.enqueue(...)`. No django-ox import is needed for declarations.
@@ -8938,8 +8989,8 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   substitution. Keep `OxBackend` and use the public, provisional
   `django_ox.testing.run_tasks()` helper to test queued execution.
 - The worker imports a task by its dotted path, so the module must be
-  importable in the worker process and the worker runs the same code as the
-  producer; nothing is registered and there is no autodiscovery. `async def`
+  importable in the worker process. The worker runs the same code as the
+  producer. Nothing is registered and there is no autodiscovery. `async def`
   tasks run.
 - Priority and deferral are Django API: `task.using(priority=N)` with N from
   -100 to 100, higher first, and `task.using(run_after=...)` with a timedelta
@@ -8950,18 +9001,18 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   A second signal forces exit 130; a process that cannot act on signals
   needs SIGKILL.
 - `enqueue()` is one INSERT on the database the router sends `OxTask` to,
-  `default` unless you wrote a router. Two things make the commit joint: a
-  `transaction.atomic()` opened on that database, because a bare `atomic()`
-  opens on `default`; and the caller's own rows written there too. With both,
-  the task and those rows commit or roll back together, and the task is
-  visible to workers only after commit. Do not add `transaction.on_commit()`
-  around it. Rows written on another connection give two transactions, not
-  one.
+  `default` unless you wrote a router. Two things make the commit joint. The
+  first is a `transaction.atomic()` opened on that database, because a bare
+  `atomic()` opens on `default`. The second is the caller's own rows written
+  there too. With both, the task and those rows commit or roll back together,
+  and the task is visible to workers only after commit. Do not add
+  `transaction.on_commit()` around it. Rows written on another connection
+  give two transactions.
 - Many calls of one task go through `django_ox.bulk.enqueue_many(task,
   [(args, kwargs), ...])`: one INSERT per 1,000 rows, one transaction, results
   in input order. Set queue, priority and `run_after` once with `.using(...)`.
 - Execution is at-least-once. Write tasks to be safe to run twice: guard on
-  state already in the database, not on a flag in memory.
+  state already in the database. Do not guard on a flag in memory.
 - The task function runs outside any transaction. Open
   `transaction.atomic()` inside the task when it needs `select_for_update()`.
 - An attempt is consumed at claim time, so a worker dying mid-run uses one.
@@ -8972,22 +9023,21 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   delays are not capped.
 - The worker schedules lease renewal every `LOCK_TIMEOUT / 3` seconds;
   task length is not bounded by `LOCK_TIMEOUT` while renewals succeed.
-  Renewal needs a database connection: if the worker cannot refresh its
+  Renewal needs a database connection. If the worker cannot refresh its
   lease for `LOCK_TIMEOUT`, the reaper can hand the task to another worker
   even while it is alive.
 - With Django's PostgreSQL pool, provide at least `concurrency + 1` pooled
-  connections per worker process; add a spare pooled connection if fallback
+  connections per worker process. Add a spare pooled connection if fallback
   must work under full load. Budget up to `max_size + 2` server connections
-  per process and database alias in normal operation, including any added spare:
-  one private renewal connection
-  and one possible watchdog connection. A worker whose tasks never use
-  timeouts needs only the first, for `max_size + 1` in normal operation.
-  A worker stopping with recovery pending opens one more private connection
-  for its stop-time recovery look: budget up to `max_size + 3` during that
-  look, or `max_size + 2` if its tasks never use timeouts.
-  An absent timeout in `OPTIONS` does not
-  establish that, because tasks can declare their own. Account for all
-  processes, aliases, other clients and reserved slots.
+  per process and database alias in normal operation, including any added
+  spare. The 2 covers one private renewal connection and one possible
+  watchdog connection. A worker whose tasks never use timeouts needs only
+  the first, for `max_size + 1` in normal operation. A worker stopping with
+  recovery pending opens one more private connection for its stop-time
+  recovery look. Budget up to `max_size + 3` during that look, or
+  `max_size + 2` if its tasks never use timeouts. An absent timeout in
+  `OPTIONS` does not establish that, because tasks can declare their own.
+  Account for all processes, aliases, other clients and reserved slots.
 - The worker polls; `--interval` (default 1.0 s) is the idle sleep, so a task
   starts within one interval of its commit. There is no LISTEN/NOTIFY.
 - Each attempt's timeout comes from the task's `timeout`, then its queue's
@@ -8999,31 +9049,32 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   later is recorded as failed and the worker exits 75 so its supervisor
   restarts it. The stuck-thread path uses the worker's backoff without
   calling user callbacks. `django_ox.remaining()` reads the seconds left
-  from inside a task, including for a task-declared timeout. On a thread
-  a coverage tool or a debugger is watching (a `sys.settrace` hook, or a
-  `sys.monitoring` tool with events enabled) nothing is raised inside a
-  sync task: the worker logs `timeouts_backstop_only`, a task that returns
-  within `TASK_TIMEOUT_GRACE` is recorded as whatever it did, and one still
-  running then is recorded as failed and recycles the worker. An async task
-  is cancelled at the deadline either way.
-- Claiming: one `UPDATE ... SKIP LOCKED ... RETURNING` statement on
-  PostgreSQL; `SELECT ... FOR UPDATE SKIP LOCKED` on MySQL 8+; an atomic
-  compare-and-set UPDATE on SQLite and other databases without `SKIP LOCKED`.
+  from inside a task, including for a task-declared timeout. A coverage
+  tool or a debugger may be watching a thread (a `sys.settrace` hook, or a
+  `sys.monitoring` tool with events enabled). On such a thread nothing is
+  raised inside a sync task. The worker logs `timeouts_backstop_only`. A
+  task that returns within `TASK_TIMEOUT_GRACE` is recorded as whatever it
+  did. One still running then is recorded as failed and recycles the
+  worker. An async task is cancelled at the deadline either way.
+- Claiming is one `UPDATE ... SKIP LOCKED ... RETURNING` statement on
+  PostgreSQL. On MySQL 8+ it is `SELECT ... FOR UPDATE SKIP LOCKED`. On
+  SQLite and other databases without `SKIP LOCKED` it is an atomic
+  compare-and-set UPDATE.
 - `--concurrency N` is a thread pool in one process. `--processes N` runs N
-  such workers under one supervisor; a worker process that dies is restarted
-  after one second, doubling to 30 s, and more than five deaths of one slot
-  in a minute stops the supervisor with exit 1. CPU-bound work wants
+  such workers under one supervisor. A worker process that dies is restarted
+  after one second, doubling to 30 s. More than five deaths of one slot in a
+  minute stops the supervisor with exit 1. CPU-bound work wants
   `--processes N --concurrency 1`.
-- Recurring tasks go in `OPTIONS["SCHEDULES"]`, with either `cron` or `every`,
-  not both. Every worker dispatches them; there is no scheduler process to
-  start. A tick that passes while every worker is down is enqueued once on
-  recovery, and older missed ticks are skipped.
+- Recurring tasks go in `OPTIONS["SCHEDULES"]`, with `cron` or `every`. Each
+  schedule takes exactly one of the two. Every worker dispatches them; there
+  is no scheduler process to start. A tick that passes while every worker is
+  down is enqueued once on recovery, and older missed ticks are skipped.
 - Schedules can live in the database instead, editable in the admin. Set
   `OPTIONS["SCHEDULE_SOURCE"]` to `"django_ox.stored.DatabaseScheduleSource"`.
-  A row names a key registered with `@schedulable`, never an import path, so
-  admin access does not become permission to run arbitrary code. The decorator
-  takes effect only when its module is imported, and django-ox imports each
-  installed app's `tasks` module. Write rows with
+  A row names a key registered with `@schedulable`. Import paths are not
+  accepted, so admin access does not become permission to run arbitrary
+  code. The decorator takes effect only when its module is imported, and
+  django-ox imports each installed app's `tasks` module. Write rows with
   `django_ox.stored.create_schedule`, `create_schedules` or
   `update_schedule`; `objects.create()` skips validation and leaves the
   activation boundary stale. Retiming a stored schedule reschedules it from
@@ -9036,15 +9087,15 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   field and message. A non-mapping row or unsupported key raises
   `TypeError` immediately.
   Permission refusals raise a separate `PermissionDenied`, naming every
-  denied row. A database refusal at the check or write raises for one row;
-  a concurrent name conflict raises `IntegrityError` and rolls back the
+  denied row. A database refusal at the check or write raises for one row.
+  A concurrent name conflict raises `IntegrityError` and rolls back the
   entire call.
   See [Writing schedules from code](stored-schedules.md#writing-schedules-from-code).
 - `ox_import_beat_schedules` reads django-celery-beat's database scheduler
   tables: `PeriodicTask`, `CrontabSchedule` and `IntervalSchedule`.
   It prints code for review and application. First shipped in 1.2.0 and
-  rebuilt in 1.8.0, it now prints one all-or-nothing `create_schedules` call
-  and lists each row it cannot translate with a named reason. It reads
+  rebuilt in 1.8.0, it now prints one all-or-nothing `create_schedules` call.
+  It lists each row it cannot translate with a named reason. It reads
   crontabs with Celery's grammar. Use `--beat-timezone ZONE` to supply
   beat's timezone.
   Its `--database` flag selects the alias holding the django-celery-beat
@@ -9074,7 +9125,7 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
 - Heartbeats are updated at each poll and drain pass head and before every
   claim attempt. A busy pass can make up to `--concurrency` claims, but
   updates occur between claims. Budget for reap and dispatch work plus one
-  claim, the poll interval and scheduling margin, not concurrency
+  claim, the poll interval and scheduling margin. Do not budget concurrency
   multiplied by claim latency. With Django's PostgreSQL connection pool,
   a refused database can hold a pass for the pool's `timeout`, 30 seconds
   by default. Include that wait in the freshness budget.
@@ -9089,11 +9140,12 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   [heartbeat liveness](monitoring.md#freshness-and-database-isolation) for
   freshness sizing and database-stall restart tradeoffs. Docker and Compose
   outside Swarm mark a container unhealthy when its healthcheck fails. Their
-  restart policies act on process exit rather than healthcheck status.
+  restart policies act on process exit. A failed healthcheck does not
+  restart the container.
 - `path("ox/", include("django_ox.urls"))` mounts `GET /ox/metrics`, the
   queue stats as Prometheus gauges. It has no authentication of its own;
   wrap it with `login_required` or restrict it by network.
-- Run `migrate` before rolling workers, not from the worker.
+- Run `migrate` before rolling workers. Do not run it from the worker.
 - `django_ox.actions.retry(result_id)` requeues a FAILED or LOST task for
   one more attempt. `django_ox.actions.discard(result_id)` closes a READY,
   WAITING, FAILED or LOST task without running it. Neither touches a RUNNING task.
@@ -9213,6 +9265,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.9.1] - 2026-10-17
+
+**Upgrading:** No database migration is required.
+
+### Changed
+
+- `worker_connection_hint` is now a WARNING on PostgreSQL. A worker with
+  `CONN_MAX_AGE = 0` and no `OPTIONS["pool"]` opens a new connection for every
+  task, about 5 ms each on a local server, and logs one line at startup saying
+  so. To remove it, set `CONN_MAX_AGE = 600` or configure Django's pool and
+  leave `CONN_MAX_AGE` at 0. MySQL keeps the INFO line, and SQLite logs
+  nothing. "Retaining worker connections" in `docs/production.md`
+  lists both settings and the pool size to use.
+- The benchmarks page now reports django-ox 1.9.0 against django-tasks-db 0.13.0
+  at the same connection settings.
+
+### Fixed
+
+- A worker whose database refuses the connection for an outcome write, as a
+  host out of ephemeral ports does under `CONN_MAX_AGE=0`, now tries the write
+  again after waits of 50 ms doubling to 1.6 s, 3.15 s in all, and the waits
+  total at most a tenth of `LOCK_TIMEOUT`. A worker told to stop ends a wait at
+  once.
 
 ## [1.9.0] - 2026-10-12
 
@@ -11627,6 +11703,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[1.9.1]: https://github.com/oxpull/django-ox/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/oxpull/django-ox/compare/v1.8.0...v1.9.0
 [1.7.0]: https://github.com/oxpull/django-ox/compare/v1.6.0...v1.7.0
 [1.8.0]: https://github.com/oxpull/django-ox/compare/v1.7.0...v1.8.0

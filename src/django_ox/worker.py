@@ -140,6 +140,14 @@ POOL_SHORTEST_WAIT = 0.001
 # from 3.2.
 LIBPQ_MIN_CONNECT_TIMEOUT = 2
 
+# Waits between the tries of an outcome write whose connect was refused, a
+# host out of ephemeral ports or a database at its connection limit. Such a
+# write finds no connection open and none lost, and a refusal like that clears
+# in milliseconds to seconds as other sockets close, so it earns these short,
+# doubling waits. The total is also held to a tenth of the lease, so the lease
+# the write is fenced by is never the thing it waits out.
+OUTCOME_CONNECT_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.6)
+
 # While lease renewal can get no connection at all, it says so at most this
 # often, with the number of renewals missed since it last did.
 MISSED_RENEWAL_REPORT_INTERVAL = 30.0
@@ -1312,6 +1320,31 @@ def _sweep_pool(conn: Any, *, lost: bool = True) -> None:
             pool.check()
         elif lost:
             drain()
+
+
+def _pause(seconds: float, stop: Event) -> None:
+    """
+    The wait between tries of an outcome write. It ends at once when the
+    worker is told to stop, so a shutdown never sits out the schedule. A seam
+    for tests.
+    """
+    stop.wait(seconds)
+
+
+def _outcome_connect_delays(lock_timeout: float) -> list[float]:
+    """
+    OUTCOME_CONNECT_RETRY_DELAYS, cut off where their sum would pass a tenth
+    of the lease.
+    """
+    budget = lock_timeout / 10
+    delays: list[float] = []
+    for delay in OUTCOME_CONNECT_RETRY_DELAYS:
+        delay = min(delay, budget)
+        if delay <= 0:
+            break
+        delays.append(delay)
+        budget -= delay
+    return delays
 
 
 def _close_lost_connection(conn: Any, *, lost: bool | None = None) -> None:
@@ -3571,7 +3604,17 @@ class Worker:
         that still answered among them, and does not promise the second try
         a fresh connection: a replacement may still be connecting, and the
         database may still be down. The second try then fails as the first
-        did. There is no third, and no wait before the second.
+        did. There is no third for a lost connection, and no wait before the
+        second.
+
+        A write whose connect was refused is the exception, and only it: the
+        host is out of ephemeral ports, or the database at its connection
+        limit, and both clear as other sockets close. It finds no connection
+        open and none lost, and it is tried again after the short waits of
+        _outcome_connect_delays, doubling from 50 ms and held to a tenth of
+        the lease in all. The waits are on the outcome write alone, never
+        the task body, and the fence is the same on every try. A refusal
+        that outlasts them ends as a second failure does.
 
         The second try is earned by a connection that is gone, and the
         sweep by one that was lost, which is narrower. A write whose
@@ -3607,9 +3650,9 @@ class Worker:
         fenced this attempt. A row that still awaits recovery is the
         reaper's once its lease expires, as before. The line says as much,
         which "Unhandled error executing task" did not. Nothing waits
-        between the two tries, so an outage of any length that spans both
-        ends here. Whatever the second try raises that is not a database
-        error is raised.
+        between the two tries of a lost connection, so an outage of any
+        length that spans both ends here. Whatever the second try raises that
+        is not a database error is raised.
         """
         seen = _Seen(self._db_alias)
         seen.watch()
@@ -3630,41 +3673,47 @@ class Worker:
         # restart left as dead as this one, so the pool is swept first, when
         # the first try lost a connection and did not merely fail to get
         # one; even so, the next one is not certain to be alive.
-        _close_lost_connection(conn, lost=seen.lost())
-        try:
-            written = self._outcome_already_written(db_task, status, fields)
-            landed = written or self._write_outcome(
-                db_task, status=status, duration_ms=duration_ms, **fields
-            )
-        except Error as exc:
-            with suppress(Error):
-                conn.close()
-            logger.error(
-                "Task id=%s path=%s lost its connection to database %r writing "
-                "the %s outcome of attempt %d/%d (%s), and a new connection "
-                "failed too (%s: %s). The outcome is unconfirmed, not "
-                "necessarily absent: the first write may have landed, or "
-                "another recovery path may already have fenced this attempt. "
-                "If the row still awaits recovery, the reaper handles it once "
-                "its lease expires",
-                db_task.id,
-                db_task.task_path,
-                self._db_alias,
-                status,
-                db_task.attempts,
-                db_task.max_attempts,
-                lost,
-                type(exc).__qualname__,
-                _reason(exc),
-                exc_info=True,
-                extra=self._log_extra(
-                    "task_outcome_unrecorded",
-                    db_task,
-                    duration_ms=duration_ms,
-                    dropped_status=str(status),
-                ),
-            )
-            return False
+        lost_a_connection = seen.lost()
+        # A connect the server refused: the first try held no connection and
+        # opened none, so nothing was open and nothing was lost. Such a refusal
+        # can clear within a moment, so this write waits out a few short
+        # delays, _outcome_connect_delays, before each try. A try that held
+        # or opened a connection, lost or not as the driver tells it, goes at
+        # once, as before.
+        retry_delays = (
+            []
+            if lost_a_connection or seen.raws
+            else _outcome_connect_delays(self.lock_timeout)
+        )
+        if retry_delays and conn.connection is None and not conn.in_atomic_block:
+            _pause(retry_delays.pop(0), self._stop)
+        _close_lost_connection(conn, lost=lost_a_connection)
+        while True:
+            tried = _Seen(self._db_alias)
+            tried.watch()
+            try:
+                written = self._outcome_already_written(db_task, status, fields)
+                landed = written or self._write_outcome(
+                    db_task, status=status, duration_ms=duration_ms, **fields
+                )
+                break
+            except Error as exc:
+                # Refused only if this try held and opened no connection.
+                refused = (
+                    isinstance(exc, InterfaceError | OperationalError)
+                    and not tried.raws
+                    and conn.connection is None
+                    and not conn.in_atomic_block
+                )
+                with suppress(Error):
+                    conn.close()
+                if refused and retry_delays:
+                    _pause(retry_delays.pop(0), self._stop)
+                    continue
+                self._log_outcome_unrecorded(db_task, status, duration_ms, lost, exc)
+                return False
+            finally:
+                tried.unwatch()
         if written:
             db_task.status = status
             for name, value in fields.items():
@@ -3694,6 +3743,41 @@ class Worker:
                 ),
             )
         return landed
+
+    def _log_outcome_unrecorded(
+        self,
+        db_task: OxTask,
+        status: OxTask.Status,
+        duration_ms: int,
+        lost: str,
+        exc: Error,
+    ) -> None:
+        """The one line for an outcome write that failed on its last try."""
+        logger.error(
+            "Task id=%s path=%s lost its connection to database %r writing "
+            "the %s outcome of attempt %d/%d (%s), and a new connection "
+            "failed too (%s: %s). The outcome is unconfirmed, not "
+            "necessarily absent: the first write may have landed, or "
+            "another recovery path may already have fenced this attempt. "
+            "If the row still awaits recovery, the reaper handles it once "
+            "its lease expires",
+            db_task.id,
+            db_task.task_path,
+            self._db_alias,
+            status,
+            db_task.attempts,
+            db_task.max_attempts,
+            lost,
+            type(exc).__qualname__,
+            _reason(exc),
+            exc_info=exc,
+            extra=self._log_extra(
+                "task_outcome_unrecorded",
+                db_task,
+                duration_ms=duration_ms,
+                dropped_status=str(status),
+            ),
+        )
 
     def _outcome_connection_lost(self) -> bool:
         """
@@ -6102,11 +6186,16 @@ class Worker:
 
     def _hint_if_every_task_reconnects(self) -> None:
         """
-        Report per-attempt execution connections at PostgreSQL and MySQL startup.
+        Say so at startup when every task attempt opens a new connection.
 
-        Log worker_connection_hint once at INFO when CONN_MAX_AGE is zero and
-        PostgreSQL pooling is absent. Read settings without opening a connection
-        or preventing worker startup.
+        That is CONN_MAX_AGE of 0 with no Django pool on PostgreSQL or MySQL.
+        PostgreSQL gets a warning: a benchmark on a local server measured
+        about 5 ms per new connection, and enough of them exhaust a host's
+        ephemeral ports. MySQL stays at INFO, because no such cost has been
+        measured there. SQLite opens a file and gets nothing. Both lines
+        are the event worker_connection_hint, once per Worker.run(), so once
+        per worker process, never per task or thread.
+        Settings are read and no connection is opened.
         """
         conn = connections[self._db_alias]
         if conn.vendor not in ("postgresql", "mysql"):
@@ -6114,6 +6203,24 @@ class Worker:
         if conn.settings_dict.get("CONN_MAX_AGE", 0) != 0:
             return
         if conn.vendor == "postgresql" and _pool_options(self._db_alias) is not None:
+            return
+        extra = {
+            "event": "worker_connection_hint",
+            "worker_id": self.worker_id,
+            "database": self._db_alias,
+            "vendor": conn.vendor,
+        }
+        if conn.vendor == "postgresql":
+            logger.warning(
+                "Worker %s: database %r opens a new connection for every task "
+                "because CONN_MAX_AGE is 0 and OPTIONS['pool'] is not set. "
+                "Set CONN_MAX_AGE = 600, or set OPTIONS['pool'] and leave "
+                "CONN_MAX_AGE at 0. See 'Retaining worker connections' in "
+                "the production guide.",
+                self.worker_id,
+                self._db_alias,
+                extra=extra,
+            )
             return
         logger.info(
             "Worker %s: database %r opens a new execution connection per "
@@ -6126,12 +6233,7 @@ class Worker:
             "CONN_MAX_AGE = 0.",
             self.worker_id,
             self._db_alias,
-            extra={
-                "event": "worker_connection_hint",
-                "worker_id": self.worker_id,
-                "database": self._db_alias,
-                "vendor": conn.vendor,
-            },
+            extra=extra,
         )
 
     def _warn_if_the_connection_pool_cannot_drain(self) -> None:

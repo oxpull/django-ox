@@ -143,7 +143,7 @@ def send_welcome_email(user_id):
 
 Nothing here comes from django-ox. `@task` is the Tasks framework, and the
 function is ordinary Django code. Arguments are stored as JSON, so pass the
-user's id rather than the user.
+user's id.
 
 Try it from the shell before wiring up a view:
 
@@ -554,12 +554,11 @@ ERRORS:
 System check identified 1 issue (0 silenced).
 ```
 
-The worker runs the same validation at startup, so these errors stop startup
-rather than skipping dispatch in silence. The checks do not establish database
-acceptance of arguments; schedule-scoped failures at dispatch are logged as
-`schedule_dispatch_error`. Put `* * * * *` back and restart the worker.
-The startup line now says `schedules=1`, and at the next minute boundary
-the schedule fires:
+The worker runs the same validation at startup, so these errors stop it from
+starting. The checks do not establish database acceptance of arguments;
+schedule-scoped failures at dispatch are logged as `schedule_dispatch_error`.
+Put `* * * * *` back and restart the worker. The startup line now says
+`schedules=1`, and at the next minute boundary the schedule fires:
 
 ```
 2026-09-19 07:59:12,044 INFO django_ox Worker myhost-23929-gJ7A6QmA starting: queues=['default'] concurrency=1 poll=1.0s schedules=1
@@ -615,7 +614,7 @@ in the admin without a deploy.
   `ox_health --heartbeat-file PATH`, using the same `--processes N` on both
   commands. Use an existing, writable directory private to the container.
   A passing file probe means the expected controlling loops have advanced
-  recently, not that tasks are progressing.
+  recently. It does not mean that tasks are progressing.
 
     With no flags, `ox_health` checks that the database answers. Keep that
     dependency check separate from liveness restarts. Queue thresholds turn
@@ -657,13 +656,13 @@ in the admin without a deploy.
   8 take a `SKIP LOCKED` claim path built for many workers. See
   [PostgreSQL, MySQL or SQLite](production.md#postgresql-mysql-or-sqlite).
 - **On a read replica**, django-ox reads its own rows on the database it
-  writes them to, so a lagging replica never hides a task from the worker,
+  writes them to. A lagging replica never hides a task from the worker,
   the result API or `ox_health`. The admin reads the primary too.
   `ox_worker`, `ox_prune` and `ox_health` take `--database` to name the
   alias they work on; leave it unset unless you mean it. Details under
   [Read replicas](configuration.md#read-replicas).
 - **Run `migrate` before rolling workers**, as a deploy step or an init
-  container, not from the worker itself.
+  container. Do not run it from the worker itself.
 
 ## Next steps
 

@@ -1210,7 +1210,7 @@ With Django's PostgreSQL pool, check
 </code></pre></div>
 <p><code>enqueue()</code> is one INSERT on the database holding <code>OxTask</code>. Put the task and user row in the same database transaction, and both commit or neither does. Workers see the task only after the commit. No <code>transaction.on_commit()</code> needed.</p>
 <p>That is the advantage over sending to a separate broker: the enqueue can share your database transaction. django-tasks-db shares this property too.</p>
-<p>The transaction covers the database writes, not email delivery. Make the task safe to repeat.</p>
+<p>The transaction covers the database writes. Email delivery sits outside it, so make the task safe to repeat.</p>
 <h2 id="run-recurring-django-tasks-without-a-scheduler-process">Run recurring Django tasks without a scheduler process</h2>
 <p>Run the nightly report and refresh exchange rates every five minutes without deploying a separate dispatcher such as <code>celery beat</code>.</p>
 <div class="highlight"><pre><span></span><code><span class="n">TASKS</span> <span class="o">=</span> <span class="p">{</span>
@@ -1232,7 +1232,7 @@ With Django's PostgreSQL pool, check
 <p>Keep schedules in settings, or let your team pause and edit them as <a href="../stored-schedules/">rows in Django admin</a>. See <a href="../recurring-tasks/">Recurring tasks</a> for the configuration.</p>
 <p>Schedules need at least one running worker and a usable database. A schedule-scoped failure does not stop later entries if rollback succeeds and the same connection remains usable. After an outage, only the most recent missed tick is enqueued.</p>
 <h2 id="deduplicate-a-repeated-webhook">Deduplicate a repeated webhook</h2>
-<p>A payment provider sends the same event twice. Your webhook queues the same invoice sync twice. Stop the duplicate at enqueue rather than making the queue do the same work again.</p>
+<p>A payment provider sends the same event twice. Your webhook queues the same invoice sync twice. Stop the duplicate at enqueue.</p>
 <p>Without a unique-task declaration, these calls create separate tasks:</p>
 <div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>
 
@@ -1249,7 +1249,7 @@ With Django's PostgreSQL pool, check
 <p>Unique tasks are included in django-ox through the optional <code>oxpull</code> app and require Django 6.0+. Follow the <a href="../features/">setup overview</a>, then the <a href="../features/unique-tasks/">unique-task declaration guide</a>.</p>
 <p>The same app provides <a href="../features/batches/">batches</a> to track grouped work, <a href="../features/rate-limiting/">rate limiting</a> to control task starts, and provisional <a href="../features/workflows/">workflows</a> to connect dependent tasks.</p>
 <h2 id="when-to-choose-another-tool">When to choose another tool</h2>
-<p>Choose another backend if you need to revoke a chosen running task, require Celery's chain, group or chord APIs, or exceed the throughput one database can serve. django-ox provides <a href="../features/batches/">batches</a> and provisional <a href="../features/workflows/">dependency workflows</a>, not those Celery APIs.</p>
+<p>Choose another backend if you need to revoke a chosen running task. Choose another if you require Celery's chain, group or chord APIs, or exceed the throughput one database can serve. django-ox provides <a href="../features/batches/">batches</a> and provisional <a href="../features/workflows/">dependency workflows</a>.</p>
 <p>Transactional enqueue requires the task and model rows to share a database. A separate queue database cannot give you that shared commit.</p>
 <p>For CPU-bound work, the thread pool is not enough on its own. Use <code>--processes N</code> and measure your workload.</p>
 <p><a href="../background-tasks/"><strong>Follow the step-by-step guide</strong></a> to install django-ox and run your first tasks.</p>

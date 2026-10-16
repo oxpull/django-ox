@@ -1263,14 +1263,14 @@ and queue selection differ.</p>
 <ul>
 <li>Replace <code>--queue-name</code> with <code>--queues</code>.</li>
 <li><code>--batch</code> maps by name to <code>--batch</code>. In <code>ox_worker</code>, it ends after an
-  error-free empty claim pass with no local tasks in flight; it does not
+  error-free empty claim pass with no local tasks in flight. It does not
   wait for future tasks, retry backoff or deferred releases. <code>db_worker</code>
   exits with a traceback when the database is unreachable or its tables are
   missing. <code>ox_worker</code> keeps retrying. An abandoned dispatch pass prevents
   batch completion until a later dispatch pass completes. A schedule-scoped
   failure is reported as <code>schedule_dispatch_error</code> and does not hold the
-  batch open. Exit 0 means the batch finished, not that every schedule
-  enqueued. Give the job a timeout, as
+  batch open. Exit 0 means the batch finished. It does not mean that every
+  schedule enqueued. Give the job a timeout, as
   <a href="../production/#running-as-a-job">Running as a job</a> explains.</li>
 <li><code>--max-tasks N</code> maps by name to <code>--max-tasks N</code>. In <code>ox_worker</code>, every
   claimed attempt consumes one of N, including failed attempts and repeat
@@ -1286,7 +1286,7 @@ and queue selection differ.</p>
   Use <code>--queues default</code> to preserve the old default.</li>
 </ul>
 <p>Do not use <code>--queues '*'</code> to select all queues. <code>*</code> is treated as a literal
-queue name, not a wildcard. Omit <code>--queues</code> to run every configured queue.</p>
+queue name. Omit <code>--queues</code> to run every configured queue.</p>
 <h2 id="from-celery">From Celery</h2>
 <p>Celery needs a broker and its own workers. django-ox uses the database you
 already have, so there is no broker to run.</p>
@@ -1367,8 +1367,8 @@ django-tasks 0.12+. They are not accepted by Django 6.0's <code>@task</code>
 decorator. See <a href="../configuration/#per-task-policy">Per-task policy</a>.</p>
 <p>In django-ox, <code>max_attempts</code> counts worker claims, including the first.
 A worker that dies after claiming a task consumes an attempt too. Choose
-the budget from that definition rather than copying a retry count from
-another task runner.</p>
+the budget from that definition. Do not copy a retry count from another
+task runner.</p>
 <p>One difference in behaviour to read before you switch. With a broker,
 <code>enqueue</code> leaves your process immediately. If the surrounding transaction then
 rolls back, a worker can pick up an order that no longer exists. The usual fix
@@ -1381,7 +1381,7 @@ implement Celery's chain, group or chord APIs, or routing across multiple
 brokers. <a href="../features/batches/">Batches</a> provide grouped work, and
 provisional <a href="../features/workflows/">workflows</a> provide dependency DAGs.
 Both require Django 6.0+ and the optional <code>oxpull</code> app. Review their
-semantics rather than treating them as drop-in Celery replacements.</p>
+semantics. They are not drop-in Celery replacements.</p>
 <h2 id="from-huey">From huey</h2>
 <p>Closer to django-ox than Celery is, since huey can already store tasks in
 SQLite or Postgres. What changes is the API, and where schedules live.</p>
@@ -1530,7 +1530,7 @@ left to run it.</p>
 <p>No drain window available? Run both. Old workers keep serving the old table
 while new work goes to django-ox. They cannot see each other's rows.</p>
 <p>Both systems run tasks at least once, so your tasks should already be
-idempotent. Confirm it before you start rather than halfway through.</p>
+idempotent. Confirm it before you start.</p>
 <h2 id="migrating-away">Migrating away</h2>
 <p>Tasks without django-ox policy declarations use the standard <code>django.tasks</code>
 API. Moving them to another backend is a settings change and a drain, run
@@ -1542,13 +1542,12 @@ before switching. Same-named fields on another backend are not a
 compatibility guarantee. In the other direction, django-ox reads policy
 only from <code>PolicyTask</code>; other Task classes inherit its backend defaults
 when rebound with <code>.using(backend=...)</code>.</p>
-<p>Transactional enqueue also needs deciding on the way in rather than on
-the way out. Enqueueing inside <code>transaction.atomic()</code> on the database that
-holds <code>OxTask</code> ties the task to that transaction, so it disappears on
-rollback. A broker-based backend cannot do this: the enqueue leaves your
-process the moment you call it. Code that depends on a rollback removing
-a task will behave differently once the queue lives in a broker, and it
-will do so quietly.</p>
+<p>Transactional enqueue also needs deciding on the way in. Enqueueing inside
+<code>transaction.atomic()</code> on the database that holds <code>OxTask</code> ties the task to
+that transaction, so it disappears on rollback. A broker-based backend
+cannot do this: the enqueue leaves your process the moment you call it. Code
+that depends on a rollback removing a task will behave differently once the
+queue lives in a broker. It will do so quietly.</p>
 <p>If you want to keep that option open, wrap enqueues in
 <code>transaction.on_commit()</code>, the way a broker-based backend requires. django-ox
 runs correctly either way, and the task is enqueued after the commit instead of

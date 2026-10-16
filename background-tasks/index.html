@@ -1394,7 +1394,7 @@ django_ox</code> creates django-ox's alone.</p>
 </code></pre></div>
 <p>Nothing here comes from django-ox. <code>@task</code> is the Tasks framework, and the
 function is ordinary Django code. Arguments are stored as JSON, so pass the
-user's id rather than the user.</p>
+user's id.</p>
 <p>Try it from the shell before wiring up a view:</p>
 <div class="highlight"><pre><span></span><code>python manage.py shell
 </code></pre></div>
@@ -1741,12 +1741,11 @@ ERRORS:
 
 System check identified 1 issue (0 silenced).
 </code></pre></div>
-<p>The worker runs the same validation at startup, so these errors stop startup
-rather than skipping dispatch in silence. The checks do not establish database
-acceptance of arguments; schedule-scoped failures at dispatch are logged as
-<code>schedule_dispatch_error</code>. Put <code>* * * * *</code> back and restart the worker.
-The startup line now says <code>schedules=1</code>, and at the next minute boundary
-the schedule fires:</p>
+<p>The worker runs the same validation at startup, so these errors stop it from
+starting. The checks do not establish database acceptance of arguments;
+schedule-scoped failures at dispatch are logged as <code>schedule_dispatch_error</code>.
+Put <code>* * * * *</code> back and restart the worker. The startup line now says
+<code>schedules=1</code>, and at the next minute boundary the schedule fires:</p>
 <div class="highlight"><pre><span></span><code>2026-09-19 07:59:12,044 INFO django_ox Worker myhost-23929-gJ7A6QmA starting: queues=['default'] concurrency=1 poll=1.0s schedules=1
 2026-09-19 08:00:00,399 INFO django_ox Dispatched schedule signup-report tick 2026-09-19T08:00:00+00:00 (task id=fe1388c3-bb4a-4f11-9e21-85449a4d50e0)
 Task id=fe1388c3-bb4a-4f11-9e21-85449a4d50e0 path=accounts.tasks.signup_report state=RUNNING
@@ -1793,7 +1792,7 @@ escalates to SIGKILL.
   <code>ox_health --heartbeat-file PATH</code>, using the same <code>--processes N</code> on both
   commands. Use an existing, writable directory private to the container.
   A passing file probe means the expected controlling loops have advanced
-  recently, not that tasks are progressing.</p>
+  recently. It does not mean that tasks are progressing.</p>
 <p>With no flags, <code>ox_health</code> checks that the database answers. Keep that
 dependency check separate from liveness restarts. Queue thresholds turn
 queue depth and backlog age into an exit code for fleet alerting:</p>
@@ -1824,13 +1823,13 @@ tracebacks survive until someone has read them. The
   8 take a <code>SKIP LOCKED</code> claim path built for many workers. See
   <a href="../production/#postgresql-mysql-or-sqlite">PostgreSQL, MySQL or SQLite</a>.
 - <strong>On a read replica</strong>, django-ox reads its own rows on the database it
-  writes them to, so a lagging replica never hides a task from the worker,
+  writes them to. A lagging replica never hides a task from the worker,
   the result API or <code>ox_health</code>. The admin reads the primary too.
   <code>ox_worker</code>, <code>ox_prune</code> and <code>ox_health</code> take <code>--database</code> to name the
   alias they work on; leave it unset unless you mean it. Details under
   <a href="../configuration/#read-replicas">Read replicas</a>.
 - <strong>Run <code>migrate</code> before rolling workers</strong>, as a deploy step or an init
-  container, not from the worker itself.</p>
+  container. Do not run it from the worker itself.</p>
 </li>
 </ul>
 <h2 id="next-steps">Next steps</h2>

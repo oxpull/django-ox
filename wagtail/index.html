@@ -1288,7 +1288,7 @@
 </ul>
 <p>Wagtail 7.3.x declares Django 6.0 support.</p>
 <p>On Django 6.1, pip permits Wagtail 7.3.x, but Wagtail 7.3.4 fails in Wagtail's own search with <code>OperationalError: unable to use function MATCH</code>, both with and without django-ox.</p>
-<p>Do not use Wagtail 7.3.0 with this setup on Django 5.2 or 6.0. Its dependency constraints resolve <code>django-tasks</code> 0.9.0. On Django 6.0, that version crashes during app loading (<code>django.setup()</code>) once <code>TASKS</code> selects a backend built on core Django's <code>Task</code>. Every <code>manage.py</code> command and the web process fail, not just migrations.</p>
+<p>Do not use Wagtail 7.3.0 with this setup on Django 5.2 or 6.0. Its dependency constraints resolve <code>django-tasks</code> 0.9.0. On Django 6.0, that version crashes during app loading (<code>django.setup()</code>) once <code>TASKS</code> selects a backend built on core Django's <code>Task</code>. Every <code>manage.py</code> command and the web process fail.</p>
 <p>Upgrade Wagtail before installing django-ox into a Wagtail 7.3.0 environment.</p>
 <h2 id="install">Install</h2>
 <p>On Django 5.2 LTS, install the extra for the <code>django-tasks</code> backport:</p>
@@ -1313,7 +1313,7 @@ TASKS = {
     },
 }
 </code></pre></div>
-<p>If <code>TASKS</code> already exists, update its <code>default</code> entry rather than replacing other backends. Wagtail's bare <code>@task()</code> binds to backend alias <code>default</code> and queue <code>default</code>.</p>
+<p>If <code>TASKS</code> already exists, update its <code>default</code> entry. Leave the other backends in place. Wagtail's bare <code>@task()</code> binds to backend alias <code>default</code> and queue <code>default</code>.</p>
 <p>Run migrations:</p>
 <div class="highlight"><pre><span></span><code>python manage.py migrate
 </code></pre></div>
@@ -1347,10 +1347,10 @@ TASKS = {
 <p>If a worker dies, its unfinished tasks return to the queue if they have attempts left. If the expired claim was the last attempt, the task becomes <code>LOST</code> instead.</p>
 <p>Attempts count claims. The default <code>MAX_ATTEMPTS</code> is 3.</p>
 <p>Every running worker runs a reaper every <code>min(30, max(LOCK_TIMEOUT/2, 1))</code> seconds. With the default 300-second lease and 30-second reaper interval, recovery can take about 330 seconds after the last lease renewal. Recovery requires at least one running worker.</p>
-<p><code>LOCK_TIMEOUT</code> and <code>MAX_ATTEMPTS</code> belong inside <code>TASKS["default"]["OPTIONS"]</code>, not at the top level of Django settings. See <a href="../configuration/#options">Backend options</a>.</p>
+<p><code>LOCK_TIMEOUT</code> and <code>MAX_ATTEMPTS</code> belong inside <code>TASKS["default"]["OPTIONS"]</code>. Do not put them at the top level of Django settings. See <a href="../configuration/#options">Backend options</a>.</p>
 <h3 id="timeouts">Timeouts</h3>
 <p>Timeouts are opt-in: <code>TASK_TIMEOUT</code> defaults to <code>None</code>, meaning no backend-wide limit. <code>TASK_TIMEOUTS</code> sets per-queue limits. Both belong in the backend's <a href="../configuration/#options">options</a>. On Django 6.1, or Django 5.2 with django-tasks 0.12+, a task's <code>timeout</code> declaration takes precedence over both; see <a href="../configuration/#per-task-policy">per-task policy</a>.</p>
-<p>Wagtail's frontend-cache purge makes outbound HTTP calls, so consider an appropriate task timeout rather than assuming one is already active.</p>
+<p>Wagtail's frontend-cache purge makes outbound HTTP calls, so consider an appropriate task timeout. Do not assume one is already active.</p>
 <h3 id="objects-deleted-before-their-tasks-run">Objects deleted before their tasks run</h3>
 <p>Wagtail's search-index and reference-index task bodies raise <code>DoesNotExist</code> if the object is deleted before they run. This behavior applies on any task backend.</p>
 <p>With django-ox's default three attempts, those tasks end <code>FAILED</code>. The file-deletion task still runs. Check the traceback and whether the object still exists before investigating a worker outage.</p>

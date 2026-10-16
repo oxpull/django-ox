@@ -1385,7 +1385,7 @@ broker.</p>
 database as the <code>User</code> row, your default one, so the task becomes visible to
 workers only when the transaction commits. If <code>create_user</code> is rolled back
 further up, the email task disappears with it.</p>
-<p>Pass the id, not the object. Arguments are stored as JSON, and a stale copy of a
+<p>Pass the model's id. Arguments are stored as JSON, and a stale copy of a
 model is a bug waiting to happen.</p>
 <h2 id="retry-a-flaky-third-party-call">Retry a flaky third-party call</h2>
 <p>Retries are automatic. Without a task override, raise and the worker
@@ -1482,7 +1482,7 @@ failed to record, or record one that never gets processed.</p>
 <code>is_finished</code> covers the last two. A task whose worker vanished without
 reporting also reads as <code>FAILED</code>; <a href="../production/#the-reaper">the reaper</a>
 explains what that record contains. Return values are stored as JSON, so
-return a URL or an id rather than a file or a model.</p>
+return a URL or an id.</p>
 <h2 id="defer-work-to-a-specific-time">Defer work to a specific time</h2>
 <p>Use <code>.using(run_after=...)</code>. It returns a copy of the task with that setting
 applied.</p>
@@ -1580,10 +1580,10 @@ again.</p>
         <span class="n">order</span><span class="o">.</span><span class="n">charged_at</span> <span class="o">=</span> <span class="n">timezone</span><span class="o">.</span><span class="n">now</span><span class="p">()</span>
         <span class="n">order</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">update_fields</span><span class="o">=</span><span class="p">[</span><span class="s2">"charged_at"</span><span class="p">])</span>
 </code></pre></div>
-<p>Guard on state you have written, not on a flag you set in memory. The row lock
-serialises concurrent attempts, and the idempotency key covers the gap where the
-charge succeeds but the transaction does not commit. Use one whenever the
-external system offers it.</p>
+<p>Guard on state you have written. Do not guard on a flag you set in memory.
+The row lock serialises concurrent attempts, and the idempotency key covers
+the gap where the charge succeeds but the transaction does not commit. Use
+one whenever the external system offers it.</p>
 <p><strong>Your task is not run inside a transaction.</strong> The worker manages its own for
 claiming and bookkeeping, but your function is called outside them, so
 <code>select_for_update()</code> and anything else needing an open transaction must open

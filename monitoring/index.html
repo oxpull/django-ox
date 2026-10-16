@@ -2558,8 +2558,8 @@ it is the transaction attempt number instead.</p>
 </tr>
 <tr>
 <td><code>worker_connection_hint</code></td>
-<td>INFO</td>
-<td>Once at <code>Worker.run()</code> startup on PostgreSQL and MySQL when <code>CONN_MAX_AGE = 0</code> and no PostgreSQL pool is configured. MySQL ignores pool options. Each attempt opens one execution connection for task queries and outcome writing. Carries <code>worker_id</code>, <code>database</code> and <code>vendor</code>. The hint opens no connection and never stops the worker. See <a href="../production/#retaining-worker-connections">connection guidance</a>.</td>
+<td>WARNING on PostgreSQL, INFO on MySQL</td>
+<td>Once at <code>Worker.run()</code> startup, so once per worker process, on PostgreSQL and MySQL when <code>CONN_MAX_AGE = 0</code> and no PostgreSQL pool is configured. MySQL ignores pool options. Each attempt opens one execution connection for task queries and outcome writing. Carries <code>worker_id</code>, <code>database</code> and <code>vendor</code>. The hint opens no connection and never stops the worker. See <a href="../production/#retaining-worker-connections">connection guidance</a>.</td>
 </tr>
 <tr>
 <td><code>task_claimed</code></td>

@@ -8,15 +8,22 @@
 > use Django 6.1 or Django 5.2 with django-tasks 0.12+; Django 6.0 supports
 > bare tasks. Import schedules from django-celery-beat's database scheduler
 > tables. Your Django database handles the queue. BSD 3-Clause.
-> django-ox 1.9.0 also includes unique tasks, batches, rate limiting and
+> django-ox 1.9.0 and later include unique tasks, batches, rate limiting and
 > provisional workflows through the optional `oxpull` app, on Django 6.0+.
 > Package name on PyPI: django-ox. Main app label: django_ox.
 > Optional app label: oxpull.
 
-**Current release: django-ox 1.9.0, uploaded to PyPI on 2026-10-12.**
+**Current release: django-ox 1.9.1, uploaded to PyPI on 2026-10-17.**
 
 **New capabilities and upgrade guidance**
 
+- django-ox 1.9.1 logs a startup warning when a PostgreSQL worker runs with
+  `CONN_MAX_AGE = 0` and no connection pool. It also retries an outcome
+  write when the database refuses the connection. No database migration is
+  needed. With pooled or persistent connections, django-ox ran 1.4 to 1.7
+  times the throughput of django-tasks-db 0.13.0 in the published benchmark
+  (PostgreSQL 16, no-op tasks, medians of five runs):
+  https://oxpull.com/django-ox/benchmarks/
 - django-ox 1.9.0 includes the optional `oxpull` app: unique tasks that
   deduplicate pending tasks at enqueue time, batches, rate limiting and
   provisional workflows. All are free and open source, BSD-3-Clause.
@@ -341,7 +348,7 @@
 
 **Compatibility**
 
-django-ox 1.9.0 supports Python 3.12-3.14 and Django 5.2 LTS through 6.1.
+django-ox 1.9.1 supports Python 3.12-3.14 and Django 5.2 LTS through 6.1.
 For Django 5.2, install the backport extra.
 PostgreSQL, MySQL 8 and SQLite are in CI.
 
@@ -368,7 +375,7 @@ Use Context7 library id `/oxpull/django-ox` to look up the documentation.
 - [Monitoring](https://oxpull.com/django-ox/monitoring/): stats, health probes, Prometheus metrics, log events, retry, discard and admin.
 - [Benchmarks](https://oxpull.com/django-ox/benchmarks/): throughput and latency measurements with their methods.
 - [API stability](https://oxpull.com/django-ox/stability/): public API, versioning, deprecation policy and supported versions.
-- [Changelog](https://oxpull.com/django-ox/changelog/): django-ox 1.9.0 changes and earlier releases.
+- [Changelog](https://oxpull.com/django-ox/changelog/): django-ox 1.9.1 changes and earlier releases.
 - [Features](https://oxpull.com/django-ox/features/): optional `oxpull` app setup, Django 6.0+ requirements and API stability.
 - [Unique tasks](https://oxpull.com/django-ox/features/unique-tasks/): deduplicate pending work by key and understand when another enqueue creates a task.
 - [Batches](https://oxpull.com/django-ox/features/batches/): group tasks, track progress and run a callback when the batch settles.
@@ -381,7 +388,10 @@ Use Context7 library id `/oxpull/django-ox` to look up the documentation.
 - [Full documentation in one file](https://oxpull.com/django-ox/llms-full.txt): all documentation pages.
 - [Source code](https://github.com/oxpull/django-ox): project repository.
 - [Source changelog](https://github.com/oxpull/django-ox/blob/main/CHANGELOG.md): release history.
+- [1.9.1 release notes](https://github.com/oxpull/django-ox/releases/tag/v1.9.1): release details.
 - [1.9.0 release notes](https://github.com/oxpull/django-ox/releases/tag/v1.9.0): release details.
+- [Blog: Your customer paid. Then the worker died.](https://oxpull.com/blog/your-customer-paid-then-the-worker-died/): what a dead background worker costs a Django business, and how leases recover the task.
+- [Blog: Your workers open a new Postgres connection for every task](https://oxpull.com/blog/your-workers-open-a-new-postgres-connection-for-every-task/): connection settings and the matched django-ox and django-tasks-db results.
 - [GHSA-gq8r-4ccg-vxcr](https://github.com/oxpull/django-ox/security/advisories/GHSA-gq8r-4ccg-vxcr): medium severity; affects 1.2.0 through 1.7.0, fixed in 1.8.0.
 - [GHSA-27v7-5cxc-wf63](https://github.com/oxpull/django-ox/security/advisories/GHSA-27v7-5cxc-wf63): high severity; affects 1.2.0 through 1.4.x, fixed in 1.5.0.
 - [PyPI](https://pypi.org/project/django-ox/): package releases.

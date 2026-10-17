@@ -466,7 +466,7 @@ recent `last_claim_age`. Stop the worker with Ctrl-C; it drains and exits 0.
 
 ## Compatibility
 
-django-ox 1.9.0 supports Django 5.2 LTS through the `django-tasks` backport and Django 6.0 / 6.1 through core `django.tasks`. It requires Python 3.12+. CI covers Python 3.12-3.14, with PostgreSQL, MySQL 8 and SQLite.
+django-ox 1.9.1 supports Django 5.2 LTS through the `django-tasks` backport and Django 6.0 / 6.1 through core `django.tasks`. It requires Python 3.12+. CI covers Python 3.12-3.14, with PostgreSQL, MySQL 8 and SQLite.
 
 The optional `oxpull` app is included in the distribution and requires Django 6.0+. Projects that do not enable it can continue using django-ox on Django 5.2.
 
@@ -478,7 +478,8 @@ Use Context7 library id `/oxpull/django-ox` to look up the documentation.
 
 ## Links
 
-- [Changelog](changelog.md): django-ox 1.9.0 and earlier releases.
+- [Changelog](changelog.md): django-ox 1.9.1 and earlier releases.
+- [1.9.1 release notes](https://github.com/oxpull/django-ox/releases/tag/v1.9.1).
 - [1.9.0 release notes](https://github.com/oxpull/django-ox/releases/tag/v1.9.0).
 - [Schedules in the database](stored-schedules.md):
   admin-editable schedules, `create_schedules` and the django-celery-beat

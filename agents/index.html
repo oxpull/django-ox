@@ -1596,7 +1596,7 @@ With <code>DEBUG = True</code>, Django's own <code>Task id=... state=RUNNING</co
 <p><code>python manage.py ox_health --worker-timeout 60</code> now exits 0 and reports a
 recent <code>last_claim_age</code>. Stop the worker with Ctrl-C; it drains and exits 0.</p>
 <h2 id="compatibility">Compatibility</h2>
-<p>django-ox 1.9.0 supports Django 5.2 LTS through the <code>django-tasks</code> backport and Django 6.0 / 6.1 through core <code>django.tasks</code>. It requires Python 3.12+. CI covers Python 3.12-3.14, with PostgreSQL, MySQL 8 and SQLite.</p>
+<p>django-ox 1.9.1 supports Django 5.2 LTS through the <code>django-tasks</code> backport and Django 6.0 / 6.1 through core <code>django.tasks</code>. It requires Python 3.12+. CI covers Python 3.12-3.14, with PostgreSQL, MySQL 8 and SQLite.</p>
 <p>The optional <code>oxpull</code> app is included in the distribution and requires Django 6.0+. Projects that do not enable it can continue using django-ox on Django 5.2.</p>
 <p>For existing <code>oxpull</code> deployments, follow <a href="../migrating/#earlier-oxpull-installs">Earlier <code>oxpull</code> installs</a>.</p>
 <p>Machine-readable copies: <a href="../llms.txt">llms.txt</a> contains facts and links;
@@ -1604,7 +1604,8 @@ recent <code>last_claim_age</code>. Stop the worker with Ctrl-C; it drains and e
 Use Context7 library id <code>/oxpull/django-ox</code> to look up the documentation.</p>
 <h2 id="links">Links</h2>
 <ul>
-<li><a href="../changelog/">Changelog</a>: django-ox 1.9.0 and earlier releases.</li>
+<li><a href="../changelog/">Changelog</a>: django-ox 1.9.1 and earlier releases.</li>
+<li><a href="https://github.com/oxpull/django-ox/releases/tag/v1.9.1">1.9.1 release notes</a>.</li>
 <li><a href="https://github.com/oxpull/django-ox/releases/tag/v1.9.0">1.9.0 release notes</a>.</li>
 <li><a href="../stored-schedules/">Schedules in the database</a>:
   admin-editable schedules, <code>create_schedules</code> and the django-celery-beat

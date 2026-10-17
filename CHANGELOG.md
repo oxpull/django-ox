@@ -3,13 +3,18 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
 ## [Unreleased]
 
 ### Added
 
-- Schedulable `django_ox.maintenance.prune` task wrapping `ox_prune` to allow
-  scheduling task and tick pruning through `OPTIONS["SCHEDULES"]`. Returns
-  deletion counts as the task result.
+- `django_ox.maintenance.prune`, a task that runs `ox_prune --format json`
+  and returns its counts, so retention can be scheduled from
+  `OPTIONS["SCHEDULES"]` instead of an external timer. Its keywords
+  `older_than`, `include_failed`, `queue`, `dry_run` and `batch_size` map
+  to the flags of the same name, with the same defaults. It prunes the
+  alias `OxTask` writes to, as `ox_prune` does without `--database`.
 
 ## [1.9.1] - 2026-10-17
 
@@ -2448,6 +2453,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
+[Unreleased]: https://github.com/oxpull/django-ox/compare/v1.9.1...HEAD
 [1.9.1]: https://github.com/oxpull/django-ox/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/oxpull/django-ox/compare/v1.8.0...v1.9.0
 [1.7.0]: https://github.com/oxpull/django-ox/compare/v1.6.0...v1.7.0

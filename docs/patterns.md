@@ -259,8 +259,9 @@ than across queues. List every queue you use in the backend's `QUEUES`, or set
 Nothing extra to run: the workers you already have dispatch the ticks. Details
 in [Recurring tasks](recurring-tasks.md).
 
-Task rows are not deleted for you. Run `ox_prune` on your own schedule, from
-cron, a systemd timer, or a django-ox schedule using `django_ox.maintenance.prune`:
+Task rows are not deleted for you. Run `ox_prune --older-than 7d` from cron
+or a systemd timer, or schedule the `django_ox.maintenance.prune` task,
+which runs `ox_prune` for you and returns its counts:
 
 ```python
 "OPTIONS": {
@@ -272,12 +273,6 @@ cron, a systemd timer, or a django-ox schedule using `django_ox.maintenance.prun
         },
     },
 }
-```
-
-Or manually:
-
-```
-python manage.py ox_prune --older-than 7d
 ```
 
 ## Make a task safe to run twice

@@ -405,9 +405,10 @@ not get those updates merely by accepting `heartbeat_file`.
 
 Finished task rows stay in the table until pruned; the queue table doubles
 as the result store, and django-ox does not guess at your retention
-needs. Run `ox_prune` on your own schedule (cron, a systemd timer, or scheduled through django-ox via `django_ox.maintenance.prune`;
-there are examples on the [Production](production.md#pruning-on-a-timer)
-page):
+needs. Run `ox_prune` on your own schedule (cron, a systemd timer, or the
+`django_ox.maintenance.prune` task in `SCHEDULES`; the
+[Production](production.md#pruning-on-a-timer) page shows the systemd unit
+and the schedule entry):
 
 ```
 python manage.py ox_prune --older-than 7d

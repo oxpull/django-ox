@@ -260,7 +260,21 @@ Nothing extra to run: the workers you already have dispatch the ticks. Details
 in [Recurring tasks](recurring-tasks.md).
 
 Task rows are not deleted for you. Run `ox_prune` on your own schedule, from
-cron, a systemd timer, or a django-ox schedule:
+cron, a systemd timer, or a django-ox schedule using `django_ox.maintenance.prune`:
+
+```python
+"OPTIONS": {
+    "SCHEDULES": {
+        "ox-prune": {
+            "task": "django_ox.maintenance.prune",
+            "cron": "0 3 * * *",
+            "kwargs": {"older_than": "7d"},
+        },
+    },
+}
+```
+
+Or manually:
 
 ```
 python manage.py ox_prune --older-than 7d

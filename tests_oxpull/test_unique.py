@@ -1978,3 +1978,21 @@ def test_the_lock_wait_message_names_a_snapshot_only_where_the_session_reads_one
     else:
         assert names in inside
         assert "snapshot" in inside
+
+
+def test_oxpull_w001_not_raised_for_schedulable_prune_task():
+    backend = OxpullBackend(
+        "default",
+        {
+            "OPTIONS": {
+                "QUEUES": ["default", "maintenance"],
+                "SCHEDULES": {
+                    "ox-prune": {
+                        "task": "django_ox.maintenance.prune",
+                        "cron": "0 3 * * *",
+                    }
+                },
+            }
+        },
+    )
+    assert "oxpull.W001" not in [message.id for message in backend.check()]

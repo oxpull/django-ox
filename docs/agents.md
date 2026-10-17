@@ -344,8 +344,8 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
 - In 1.8.0, invalid stored schedule rows are skipped and logged so other
   schedules and queued tasks keep running. This fixes
   GHSA-gq8r-4ccg-vxcr, affecting 1.2.0 through 1.7.0.
-- `ox_prune --older-than 7d` deletes finished rows; FAILED rows stay unless
-  `--include-failed`. READY, WAITING and RUNNING rows are never deleted.
+- `ox_prune --older-than 7d` (and `django_ox.maintenance.prune`) deletes finished rows; FAILED rows stay unless
+  `--include-failed` (or `include_failed=True`). READY, WAITING and RUNNING rows are never deleted.
 - For per-container loop-liveness, pair `ox_worker --heartbeat-file PATH`
   with `ox_health --heartbeat-file PATH --processes N`, matching the
   worker's process count. Use an absolute path in an existing, writable

@@ -17,6 +17,7 @@ from .conftest import start_worker_thread
 from .contention import CONTENTION, failing, simulated
 from .test_inline_path import ToAlt
 from .test_prune import make_old_rows, make_task
+from .test_prune_unreadable import insert_tick, only_on
 from .test_schedules import backdate_anchor, frozen_now, tasks_setting  # noqa: F401
 from .test_supervisor import start_worker, stop_worker, wait_for
 
@@ -276,6 +277,20 @@ class TestPruneTaskWiring:
         )
         errors = default_task_backend.check()
         assert [error.id for error in errors] == ["django_ox.E002"]
+
+    def test_the_unreadable_tick_warning_stays_off_worker_stderr(self, capsys):
+        only_on("sqlite")
+        bad = insert_tick("k", "'banana'")
+
+        res_handle = prune.enqueue(older_than="7d")
+        run_tasks()
+        res_handle.refresh()
+
+        err = capsys.readouterr().err
+        assert "Warning: this run encountered" not in err
+        assert "--purge-unreadable-ticks" not in err
+        assert res_handle.return_value["unreadable_tick_rows"] == 1
+        assert OxScheduleTick.objects.filter(pk=bad).exists()
 
     @pytest.mark.django_db(transaction=True, databases=["default", "alt"])
     def test_the_prune_follows_the_router_write_alias(self, settings):

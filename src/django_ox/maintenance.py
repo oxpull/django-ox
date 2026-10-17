@@ -40,5 +40,6 @@ def prune(
     if batch_size is not None:
         args.extend(["--batch-size", str(batch_size)])
 
-    call_command("ox_prune", *args, stdout=out)
+    # The unreadable-tick warning goes to stderr; the result carries its counts.
+    call_command("ox_prune", *args, stdout=out, stderr=io.StringIO())
     return cast(dict[str, Any], json.loads(out.getvalue()))

@@ -1622,11 +1622,21 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-Or from cron, or as a recurring task pointed at a small wrapper task of
-your own. Flag reference on the
-[Configuration](configuration.md#ox_prune) page. FAILED rows are kept by
-default so tracebacks survive until you have looked at them; add
-`--include-failed` once that is not needed.
+Or from cron, or scheduled directly through django-ox using `django_ox.maintenance.prune`:
+
+```python
+"SCHEDULES": {
+    "ox-prune": {
+        "task": "django_ox.maintenance.prune",
+        "cron": "0 3 * * *",
+        "kwargs": {"older_than": "7d"},
+    },
+}
+```
+
+The task accepts `older_than` (default `"7d"`), `include_failed` (default `False`), `queue` (default `None`), and `dry_run` (default `False`), returning the same counts dictionary as `ox_prune --format json`. It prunes the database alias `OxTask` writes to; a worker using `--database other` needs the schedule's `queue_name` or its own database alias handling.
+
+Flag reference on the [Configuration](configuration.md#ox_prune) page. FAILED rows are kept by default so tracebacks survive until you have looked at them; add `include_failed=True` (or `--include-failed`) once that is not needed.
 
 ### oxpull_prune
 

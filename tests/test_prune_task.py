@@ -11,9 +11,13 @@ from django_ox.compat import default_task_backend
 from django_ox.maintenance import prune
 from django_ox.models import OxScheduleTick, OxTask
 from django_ox.testing import run_tasks
+from django_ox.worker import Worker
 
+from .conftest import start_worker_thread
 from .contention import CONTENTION, failing, simulated
+from .test_inline_path import ToAlt
 from .test_prune import make_old_rows, make_task
+from .test_schedules import backdate_anchor, frozen_now, tasks_setting  # noqa: F401
 from .test_supervisor import start_worker, stop_worker, wait_for
 
 
@@ -212,3 +216,79 @@ class TestPruneTask:
 
         assert code == 0
         assert OxTask.objects.get(id=res_handle.id).return_value["task_rows"] == 1
+
+
+PRUNE_SCHEDULE = {
+    "ox-prune": {
+        "task": "django_ox.maintenance.prune",
+        "cron": "* * * * *",
+        "kwargs": {"older_than": "7d"},
+    }
+}
+
+
+@pytest.mark.django_db(transaction=True)
+class TestPruneTaskWiring:
+    def test_queue_limits_the_prune_to_that_queue(self):
+        emails = make_old_rows(2, OxTask.Status.SUCCESSFUL, queue_name="emails")
+        others = make_old_rows(3, OxTask.Status.SUCCESSFUL, queue_name="reports")
+
+        res_handle = prune.enqueue(older_than="7d", queue="emails")
+        run_tasks()
+        res_handle.refresh()
+
+        assert res_handle.return_value["task_rows"] == 2
+        assert not OxTask.objects.filter(pk__in=emails).exists()
+        assert OxTask.objects.filter(pk__in=others).count() == 3
+
+    def test_a_schedule_entry_fires_the_prune_through_a_worker(
+        self,
+        settings,
+        frozen_now,  # noqa: F811
+    ):
+        settings.TASKS = tasks_setting(PRUNE_SCHEDULE)
+        old = make_old_rows(2, OxTask.Status.SUCCESSFUL)
+        worker = Worker(poll_interval=0.05, schedule_interval=0.05, backoff_initial=0)
+        thread = start_worker_thread(worker)
+        try:
+            assert wait_for(
+                lambda: OxScheduleTick.objects.filter(schedule_name="ox-prune").exists()
+            )
+            backdate_anchor("ox-prune", 1)
+            assert wait_for(
+                lambda: OxTask.objects.filter(
+                    task_path="django_ox.maintenance.prune",
+                    status=OxTask.Status.SUCCESSFUL,
+                ).exists()
+            )
+        finally:
+            worker.request_stop()
+            thread.join(timeout=5)
+        assert not thread.is_alive()
+
+        row = OxTask.objects.get(task_path="django_ox.maintenance.prune")
+        assert row.return_value["task_rows"] == 2
+        assert not OxTask.objects.filter(pk__in=old).exists()
+
+    def test_a_bad_cron_entry_is_reported_as_e002(self, settings):
+        settings.TASKS = tasks_setting(
+            {"ox-prune": {**PRUNE_SCHEDULE["ox-prune"], "cron": "banana"}}
+        )
+        errors = default_task_backend.check()
+        assert [error.id for error in errors] == ["django_ox.E002"]
+
+    @pytest.mark.django_db(transaction=True, databases=["default", "alt"])
+    def test_the_prune_follows_the_router_write_alias(self, settings):
+        on_default = make_old_rows(2, OxTask.Status.SUCCESSFUL)
+        settings.DATABASE_ROUTERS = [ToAlt()]
+        assert router.db_for_write(OxTask) == "alt"
+        old = make_old_rows(2, OxTask.Status.SUCCESSFUL)
+        assert OxTask.objects.using("alt").filter(pk__in=old).count() == 2
+
+        res_handle = prune.enqueue(older_than="7d")
+        run_tasks()
+        res_handle.refresh()
+
+        assert res_handle.return_value["task_rows"] == 2
+        assert not OxTask.objects.using("alt").filter(pk__in=old).exists()
+        assert OxTask.objects.using("default").filter(pk__in=on_default).count() == 2

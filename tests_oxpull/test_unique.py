@@ -1980,19 +1980,20 @@ def test_the_lock_wait_message_names_a_snapshot_only_where_the_session_reads_one
         assert "snapshot" in inside
 
 
-def test_oxpull_w001_not_raised_for_schedulable_prune_task():
-    backend = OxpullBackend(
-        "default",
-        {
-            "OPTIONS": {
-                "QUEUES": ["default", "maintenance"],
-                "SCHEDULES": {
-                    "ox-prune": {
-                        "task": "django_ox.maintenance.prune",
-                        "cron": "0 3 * * *",
-                    }
-                },
-            }
-        },
-    )
-    assert "oxpull.W001" not in [message.id for message in backend.check()]
+def test_oxpull_w001_fires_for_a_unique_task_and_not_for_the_prune_task():
+    from django_ox.maintenance import prune  # noqa: F401
+
+    def warnings_for(path):
+        backend = OxpullBackend(
+            "default",
+            {
+                "OPTIONS": {
+                    "QUEUES": ["default", "maintenance"],
+                    "SCHEDULES": {"nightly": {"task": path, "cron": "0 3 * * *"}},
+                }
+            },
+        )
+        return [message.id for message in backend.check()]
+
+    assert "oxpull.W001" in warnings_for("tests_oxpull.tasks.unique_echo")
+    assert "oxpull.W001" not in warnings_for("django_ox.maintenance.prune")

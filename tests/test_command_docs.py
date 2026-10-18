@@ -55,14 +55,24 @@ def documented_flags(command_name: str) -> set[str]:
     return set(FLAG_CELL.findall(match["section"]))
 
 
-@pytest.mark.parametrize("command_name", ["ox_worker", "ox_prune", "ox_health"])
+COMMAND_FLAG_FLOORS = {
+    "ox_worker": 5,
+    "ox_prune": 5,
+    "ox_health": 5,
+    "ox_retry": 3,
+    "ox_discard": 3,
+}
+
+
+@pytest.mark.parametrize("command_name", list(COMMAND_FLAG_FLOORS))
 def test_every_public_command_flag_is_documented(command_name):
+    floor = COMMAND_FLAG_FLOORS[command_name]
     parser_flags = public_flags(command_name)
     table_flags = documented_flags(command_name)
-    assert len(parser_flags) >= 5, (
+    assert len(parser_flags) >= floor, (
         f"{command_name} parser exposed only {len(parser_flags)} public flags"
     )
-    assert len(table_flags) >= 5, (
+    assert len(table_flags) >= floor, (
         f"{command_name} configuration table contained only {len(table_flags)} flags"
     )
     missing = sorted(parser_flags - table_flags)

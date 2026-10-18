@@ -1607,7 +1607,37 @@ Check semantics, probe examples, and guidance on which check fits which
 alert are on the
 [Monitoring](monitoring.md#health-checks-ox_health) page.
 
-## `oxpull` options
+## ox_retry
+
+Retry one or more failed or lost tasks by primary key:
+
+```
+python manage.py ox_retry 550e8400-e29b-41d4-a716-446655440000
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--queue` | all queues | Restrict retry to tasks on this queue. Tasks on other queues are skipped. |
+| `--dry-run` | off | Report how many tasks are eligible without retrying any. |
+| `--format` | `text` | Output format. `json` prints execution counts (`changed`, `skipped`) or preview counts (`eligible`, `skipped`, `dry_run: true`) on stdout. |
+
+Accepts one or more positional task IDs separated by whitespace. Execution delegates directly to `django_ox.actions.retry_many`, preserving attempts, advancing `lease_epoch`, and resetting task state to READY on the database alias `OxTask` writes to.
+
+## ox_discard
+
+Discard one or more tasks without running them:
+
+```
+python manage.py ox_discard 550e8400-e29b-41d4-a716-446655440000
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--queue` | all queues | Restrict discard to tasks on this queue. Tasks on other queues are skipped. |
+| `--dry-run` | off | Report how many tasks are eligible without discarding any. |
+| `--format` | `text` | Output format. `json` prints execution counts (`changed`, `skipped`) or preview counts (`eligible`, `skipped`, `dry_run: true`) on stdout. |
+
+Accepts one or more positional task IDs separated by whitespace. Execution delegates directly to `django_ox.actions.discard_many`, closing READY, WAITING, FAILED, or LOST tasks without sending task signals.
 
 The optional `oxpull` app requires Django 6.0+. Add it to `INSTALLED_APPS`, run migrations, and use `oxpull.backend.OxpullBackend` for each alias that needs its features.
 
@@ -8157,6 +8187,11 @@ thousand rows inside one transaction and return `(changed, skipped)`. The
 admin actions use them, so a select-across of a hundred thousand rows is a
 hundred UPDATEs, and either all of it lands or none does.
 
+The management commands `python manage.py ox_retry TASK_ID...` and
+`python manage.py ox_discard TASK_ID...` expose these actions for terminal
+scripts and operator tooling, with `--dry-run` and `--format json` support.
+Flag reference on the [Configuration](configuration.md#ox_retry) page.
+
 `retry_many()` counts each row at the claim ceiling as skipped; other
 eligible rows still move. The ceiling check is part of the same UPDATE
 that would grant the extra attempt.
@@ -9309,6 +9344,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ox_retry` and `ox_discard` management commands for scriptable recovery
+  of tasks. Both commands take one or more task UUIDs, deduplicate them, and
+  delegate to `django_ox.actions.retry_many` or `discard_many`. Both support
+  `--queue` scoping, `--dry-run` to preview eligible vs. skipped counts
+  without mutating tasks, and `--format json` for machine-readable output.
 - `django_ox.maintenance.prune`, a task that runs `ox_prune --format json`
   and returns its counts, so retention can be scheduled from
   `OPTIONS["SCHEDULES"]` instead of an external timer. Its keywords

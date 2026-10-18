@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ox_retry` and `ox_discard` management commands for scriptable recovery
+  of tasks. Both commands take one or more task UUIDs, deduplicate them, and
+  delegate to `django_ox.actions.retry_many` or `discard_many`. Both support
+  `--queue` scoping, `--dry-run` to preview eligible vs. skipped counts
+  without mutating tasks, and `--format json` for machine-readable output.
 - `django_ox.maintenance.prune`, a task that runs `ox_prune --format json`
   and returns its counts, so retention can be scheduled from
   `OPTIONS["SCHEDULES"]` instead of an external timer. Its keywords

@@ -1079,6 +1079,11 @@ thousand rows inside one transaction and return `(changed, skipped)`. The
 admin actions use them, so a select-across of a hundred thousand rows is a
 hundred UPDATEs, and either all of it lands or none does.
 
+The management commands `python manage.py ox_retry TASK_ID...` and
+`python manage.py ox_discard TASK_ID...` expose these actions for terminal
+scripts and operator tooling, with `--dry-run` and `--format json` support.
+Flag reference on the [Configuration](configuration.md#ox_retry) page.
+
 `retry_many()` counts each row at the claim ceiling as skipped; other
 eligible rows still move. The ceiling check is part of the same UPDATE
 that would grant the extra attempt.

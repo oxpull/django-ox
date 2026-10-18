@@ -540,6 +540,8 @@ python manage.py ox_discard 550e8400-e29b-41d4-a716-446655440000
 
 Accepts one or more positional task IDs separated by whitespace. Execution delegates directly to `django_ox.actions.discard_many`, closing READY, WAITING, FAILED, or LOST tasks without sending task signals.
 
+## `oxpull` options
+
 The optional `oxpull` app requires Django 6.0+. Add it to `INSTALLED_APPS`, run migrations, and use `oxpull.backend.OxpullBackend` for each alias that needs its features.
 
 These settings belong in the alias's `OPTIONS`:

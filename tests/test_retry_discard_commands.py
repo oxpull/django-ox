@@ -3,12 +3,14 @@ import uuid
 from io import StringIO
 
 import pytest
-from django.core.management import call_command
+from django.core.management import ManagementUtility, call_command
 from django.core.management.base import CommandError
+from django.utils import timezone
 
 from django_ox.actions import (
     MAX_ATTEMPTS_LIMIT,
 )
+from django_ox.compat import task_enqueued, task_finished
 from django_ox.models import OxTask
 
 from .test_prune import make_task
@@ -268,3 +270,192 @@ class TestOxDiscardCommand:
         )
         data = json.loads(out.getvalue())
         assert data == {"changed": 1, "skipped": 0}
+
+
+def run_json(command, *args):
+    out = StringIO()
+    call_command(command, *args, "--format", "json", stdout=out)
+    return json.loads(out.getvalue())
+
+
+def snapshot():
+    return {
+        row["pk"]: row
+        for row in OxTask.objects.values(
+            "pk", "status", "attempts", "lease_epoch", "max_attempts"
+        )
+    }
+
+
+def mixed_rows():
+    """One row per status, the two ceiling cases, and a row on another queue."""
+    rows = {
+        "failed": make_task(OxTask.Status.FAILED),
+        "lost": make_task(OxTask.Status.LOST),
+        "ready": make_task(OxTask.Status.READY),
+        "waiting": make_task(OxTask.Status.WAITING),
+        "running": make_task(OxTask.Status.RUNNING),
+        "successful": make_task(OxTask.Status.SUCCESSFUL),
+        "discarded": make_task(OxTask.Status.DISCARDED),
+        "nearly_capped": make_task(OxTask.Status.FAILED),
+        "capped": make_task(OxTask.Status.FAILED),
+        "elsewhere": make_task(OxTask.Status.FAILED, queue_name="emails"),
+    }
+    OxTask.objects.filter(pk=rows["nearly_capped"].pk).update(
+        attempts=MAX_ATTEMPTS_LIMIT - 1
+    )
+    OxTask.objects.filter(pk=rows["capped"].pk).update(attempts=MAX_ATTEMPTS_LIMIT)
+    return rows
+
+
+RETRIES = ["failed", "lost", "nearly_capped"]
+DISCARDS = ["ready", "waiting", "failed", "lost", "nearly_capped", "capped"]
+
+
+@pytest.mark.django_db(transaction=True)
+class TestPreviewMatchesExecution:
+    @pytest.mark.parametrize(
+        "command,moves,moved_to",
+        [
+            ("ox_retry", RETRIES, OxTask.Status.READY),
+            ("ox_discard", DISCARDS, OxTask.Status.DISCARDED),
+        ],
+    )
+    def test_every_status_the_ceiling_and_the_queue_filter(
+        self, command, moves, moved_to
+    ):
+        rows = mixed_rows()
+        # Every row, one of them twice, and an id that is not in the table.
+        ids = [str(row.pk) for row in rows.values()]
+        ids += [str(rows["failed"].pk), str(uuid.uuid4())]
+        distinct = len(rows) + 1
+        before = snapshot()
+
+        preview = run_json(command, *ids, "--queue", "default", "--dry-run")
+
+        assert preview == {
+            "eligible": len(moves),
+            "skipped": distinct - len(moves),
+            "dry_run": True,
+        }
+        assert snapshot() == before
+
+        result = run_json(command, *ids, "--queue", "default")
+
+        assert result == {"changed": preview["eligible"], "skipped": preview["skipped"]}
+        after = snapshot()
+        for name, row in rows.items():
+            expected = moved_to if name in moves else before[row.pk]["status"]
+            assert after[row.pk]["status"] == expected, name
+        assert run_json(command, *ids, "--queue", "default", "--dry-run") == {
+            "eligible": 0,
+            "skipped": distinct,
+            "dry_run": True,
+        }
+
+    def test_retry_keeps_attempts_and_advances_the_lease_epoch(self):
+        failed = make_task(OxTask.Status.FAILED)
+        OxTask.objects.filter(pk=failed.pk).update(
+            attempts=5, lease_epoch=7, run_after=timezone.now()
+        )
+
+        assert run_json("ox_retry", str(failed.pk)) == {"changed": 1, "skipped": 0}
+
+        failed.refresh_from_db()
+        assert failed.status == OxTask.Status.READY
+        assert failed.attempts == 5
+        assert failed.max_attempts == 6
+        assert failed.lease_epoch == 8
+        assert failed.run_after is None
+
+    @pytest.mark.parametrize("command", ["ox_retry", "ox_discard"])
+    def test_sends_no_task_signal(self, command):
+        rows = [make_task(OxTask.Status.FAILED), make_task(OxTask.Status.LOST)]
+        received = []
+
+        def receiver(sender, **kwargs):
+            received.append(kwargs)
+
+        task_enqueued.connect(receiver)
+        task_finished.connect(receiver)
+        try:
+            result = run_json(command, *(str(row.pk) for row in rows))
+        finally:
+            task_enqueued.disconnect(receiver)
+            task_finished.disconnect(receiver)
+
+        assert result == {"changed": 2, "skipped": 0}
+        assert received == []
+
+
+class _WritesToAlt:
+    """
+    Sends django_ox's writes to the alt database and its reads to the default
+    one, where these tests keep no row. A lookup that follows db_for_read, or
+    a hard-coded alias, finds nothing to retry or discard.
+    """
+
+    def db_for_read(self, model, **hints):
+        return "default" if model._meta.app_label == "django_ox" else None
+
+    def db_for_write(self, model, **hints):
+        return "alt" if model._meta.app_label == "django_ox" else None
+
+
+@pytest.mark.django_db(transaction=True, databases=["default", "alt"])
+class TestRoutedWrites:
+    @pytest.mark.parametrize(
+        "command,moved_to",
+        [("ox_retry", OxTask.Status.READY), ("ox_discard", OxTask.Status.DISCARDED)],
+    )
+    def test_selection_preview_and_execution_follow_db_for_write(
+        self, settings, command, moved_to
+    ):
+        row = OxTask.objects.using("alt").create(
+            task_path="tests.tasks.add",
+            backend_name="default",
+            queue_name="default",
+            status=OxTask.Status.FAILED,
+            enqueued_at=timezone.now(),
+        )
+        settings.DATABASE_ROUTERS = [_WritesToAlt()]
+        ids = (str(row.pk), "--queue", "default")
+
+        assert run_json(command, *ids, "--dry-run") == {
+            "eligible": 1,
+            "skipped": 0,
+            "dry_run": True,
+        }
+        assert run_json(command, *ids) == {"changed": 1, "skipped": 0}
+        assert OxTask.objects.using("alt").get(pk=row.pk).status == moved_to
+        assert not OxTask.objects.using("default").exists()
+
+
+@pytest.mark.django_db(transaction=True)
+class TestUsageErrorsFromTheCommandLine:
+    @pytest.mark.parametrize("command", ["ox_retry", "ox_discard"])
+    def test_no_ids_exits_2(self, command, capsys):
+        argv = ["manage.py", command, "--skip-checks"]
+
+        with pytest.raises(SystemExit) as info:
+            ManagementUtility(argv).execute()
+
+        assert info.value.code == 2
+        assert "the following arguments are required: TASK_ID" in (
+            capsys.readouterr().err
+        )
+
+    @pytest.mark.parametrize("command", ["ox_retry", "ox_discard"])
+    def test_a_malformed_id_exits_2_before_any_write(self, command, capsys):
+        failed = make_task(OxTask.Status.FAILED)
+        argv = ["manage.py", command, str(failed.pk), "not-a-uuid", "--skip-checks"]
+
+        with pytest.raises(SystemExit) as info:
+            ManagementUtility(argv).execute()
+
+        assert info.value.code == 2
+        err = capsys.readouterr().err
+        assert "Invalid task ID 'not-a-uuid'; must be a valid UUID." in err
+        assert "Traceback" not in err
+        failed.refresh_from_db()
+        assert failed.status == OxTask.Status.FAILED

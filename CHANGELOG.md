@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `older_than`, `include_failed`, `queue`, `dry_run` and `batch_size` map
   to the flags of the same name, with the same defaults. It prunes the
   alias `OxTask` writes to, as `ox_prune` does without `--database`.
+- `ox_health --task-paths` fails when a READY or WAITING row's `task_path`
+  no longer imports to a `django.tasks` Task, the rule a worker applies
+  before running it. Each failing path is reported with its row count and
+  exception class, in `problems` and in `unknown_task_paths`, a new field
+  of every database-mode `--format json` object, `null` unless
+  `--task-paths` ran. The `OK:` line then ends with `task_paths=N`, the
+  number of distinct paths checked. Run it after `migrate` and before
+  rolling workers; the Production page has the release sequence and a
+  "Renaming a task" section. The flag is refused with `--heartbeat-file`,
+  as the other database options are.
 
 ## [1.9.1] - 2026-10-17
 

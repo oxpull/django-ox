@@ -460,12 +460,13 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--queue` | all queues | Restrict the database checks to one queue. |
-| `--format` | `text` | `json` prints one object on stdout instead of the `OK:` line, on success and failure. In database mode its fields are `ok`, `queue`, `backlog`, `oldest_age_seconds`, `last_claim_age_seconds` and `problems`. `queue` is `null` when no `--queue` is given. The figures are `null` when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. File mode uses the [heartbeat JSON object](monitoring.md#file-mode-json). The exit status is unchanged. |
+| `--format` | `text` | `json` prints one object on stdout instead of the `OK:` line, on success and failure. In database mode its fields are `ok`, `queue`, `backlog`, `oldest_age_seconds`, `last_claim_age_seconds`, `unknown_task_paths` and `problems`. `queue` is `null` when no `--queue` is given. `unknown_task_paths` is `null` unless `--task-paths` ran; then it lists each failing path as `{"task_path": ..., "rows": N, "error": "ModuleNotFoundError"}`. The figures are `null` when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. File mode uses the [heartbeat JSON object](monitoring.md#file-mode-json). The exit status is unchanged. |
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. Tasks deferred to a future `run_after` do not count. |
 | `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. Measures fleet claim activity, not per-worker liveness. |
+| `--task-paths` | off | Fail when a READY or WAITING row's `task_path` no longer imports to a django.tasks Task, the rule a worker applies before running it. Reports each failing path with its row count and exception class, and exits 1. RUNNING and finished rows are not checked. One grouped query, then one import per distinct path; importing runs the task modules' import side effects, as worker startup does. The `OK:` line then ends with `task_paths=N`, the number of distinct paths checked. See [renaming a task](production.md#renaming-a-task). |
 | `--database` | the alias `OxTask` writes to | Database alias to check. The figures come from that alias, so the check reports the queue your workers are running. |
-| `--heartbeat-file PATH` | off | Check the local file set written by `ox_worker --heartbeat-file PATH`, instead of the database. Reads metadata only, runs no system or migration checks, opens no database connection and constructs no task backend. Cannot be combined with `--database`, `--queue`, `--max-backlog`, `--max-age` or `--worker-timeout`. |
+| `--heartbeat-file PATH` | off | Check the local file set written by `ox_worker --heartbeat-file PATH`, instead of the database. Reads metadata only, runs no system or migration checks, opens no database connection and constructs no task backend. Cannot be combined with `--database`, `--queue`, `--max-backlog`, `--max-age`, `--worker-timeout` or `--task-paths`. |
 | `--max-heartbeat-age SECONDS` | `60` | Maximum heartbeat age, inclusive. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds, including fractions. Must be finite and strictly positive. Requires `--heartbeat-file`. |
 | `--processes N` | `1` | Expected worker process count; must match the worker's `--processes`. At 1, check `PATH`. Above 1, require `PATH.supervisor` and every slot file from `PATH.0` through `PATH.(N-1)` to pass. Must be an integer of at least 1. Requires `--heartbeat-file`. |
 
@@ -501,7 +502,7 @@ CommandError: --heartbeat-file checks files, not the database, so it cannot be c
 
 The message lists every conflicting flag given, comma-separated, in this
 order: `--database`, `--queue`, `--max-backlog`, `--max-age`,
-`--worker-timeout`.
+`--worker-timeout`, `--task-paths`.
 
 Check semantics, probe examples, and guidance on which check fits which
 alert are on the

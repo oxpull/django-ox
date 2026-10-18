@@ -1560,12 +1560,13 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--queue` | all queues | Restrict the database checks to one queue. |
-| `--format` | `text` | `json` prints one object on stdout instead of the `OK:` line, on success and failure. In database mode its fields are `ok`, `queue`, `backlog`, `oldest_age_seconds`, `last_claim_age_seconds` and `problems`. `queue` is `null` when no `--queue` is given. The figures are `null` when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. File mode uses the [heartbeat JSON object](monitoring.md#file-mode-json). The exit status is unchanged. |
+| `--format` | `text` | `json` prints one object on stdout instead of the `OK:` line, on success and failure. In database mode its fields are `ok`, `queue`, `backlog`, `oldest_age_seconds`, `last_claim_age_seconds`, `unknown_task_paths` and `problems`. `queue` is `null` when no `--queue` is given. `unknown_task_paths` is `null` unless `--task-paths` ran; then it lists each failing path as `{"task_path": ..., "rows": N, "error": "ModuleNotFoundError"}`. The figures are `null` when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. File mode uses the [heartbeat JSON object](monitoring.md#file-mode-json). The exit status is unchanged. |
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. Tasks deferred to a future `run_after` do not count. |
 | `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. Measures fleet claim activity, not per-worker liveness. |
+| `--task-paths` | off | Fail when a READY or WAITING row's `task_path` no longer imports to a django.tasks Task, the rule a worker applies before running it. Reports each failing path with its row count and exception class, and exits 1. RUNNING and finished rows are not checked. One grouped query, then one import per distinct path; importing runs the task modules' import side effects, as worker startup does. The `OK:` line then ends with `task_paths=N`, the number of distinct paths checked. See [renaming a task](production.md#renaming-a-task). |
 | `--database` | the alias `OxTask` writes to | Database alias to check. The figures come from that alias, so the check reports the queue your workers are running. |
-| `--heartbeat-file PATH` | off | Check the local file set written by `ox_worker --heartbeat-file PATH`, instead of the database. Reads metadata only, runs no system or migration checks, opens no database connection and constructs no task backend. Cannot be combined with `--database`, `--queue`, `--max-backlog`, `--max-age` or `--worker-timeout`. |
+| `--heartbeat-file PATH` | off | Check the local file set written by `ox_worker --heartbeat-file PATH`, instead of the database. Reads metadata only, runs no system or migration checks, opens no database connection and constructs no task backend. Cannot be combined with `--database`, `--queue`, `--max-backlog`, `--max-age`, `--worker-timeout` or `--task-paths`. |
 | `--max-heartbeat-age SECONDS` | `60` | Maximum heartbeat age, inclusive. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds, including fractions. Must be finite and strictly positive. Requires `--heartbeat-file`. |
 | `--processes N` | `1` | Expected worker process count; must match the worker's `--processes`. At 1, check `PATH`. Above 1, require `PATH.supervisor` and every slot file from `PATH.0` through `PATH.(N-1)` to pass. Must be an integer of at least 1. Requires `--heartbeat-file`. |
 
@@ -1601,7 +1602,7 @@ CommandError: --heartbeat-file checks files, not the database, so it cannot be c
 
 The message lists every conflicting flag given, comma-separated, in this
 order: `--database`, `--queue`, `--max-backlog`, `--max-age`,
-`--worker-timeout`.
+`--worker-timeout`, `--task-paths`.
 
 Check semantics, probe examples, and guidance on which check fits which
 alert are on the
@@ -5718,6 +5719,39 @@ processes included: `enqueue()` writes every column the current schema has.
 Run them as an init container or a job, not from the worker itself; several
 workers starting at once would race the same migration.
 
+A release then runs in this order:
+
+1. Install the new code.
+2. Run `migrate`.
+3. Run `python manage.py ox_health --task-paths`.
+4. Roll the workers.
+
+Step 3 exits 1 and names every READY or WAITING task path the new code no
+longer imports, before a worker claims one of those rows and fails it. See
+[Renaming a task](#renaming-a-task).
+
+## Renaming a task
+
+A row stores the dotted path of its task when it is enqueued, and a worker
+imports that path when it claims the row. Renaming a task, or moving it to
+another module, leaves every READY and WAITING row enqueued under the old
+name unable to run: the worker records an ImportError against it.
+
+Keep the old name bound to the new task until those rows have drained, for
+example with `old_name = new_name` left in the old module, and remove it in a
+later release. Rows that are RUNNING already imported their task; finished
+rows are not run again.
+
+`python manage.py ox_health --task-paths` checks this before workers roll. It
+reads each distinct task path among READY and WAITING rows, with its row
+count, in one grouped query, and imports each path under the rule the worker
+applies: the path must resolve to a django.tasks Task. Every path that fails
+is reported with its row count and exception class, and the command exits 1.
+`--queue` and `--database` scope the read as for the other database checks.
+Importing a task module runs the same import side effects as worker startup.
+Keep import-time output out of task modules: anything they print at import
+lands on stdout ahead of the `--format json` object.
+
 ## Running as a job
 
 For cron and job runners, `--batch` stops after an error-free polling pass
@@ -5822,12 +5856,14 @@ a task thread that its timeout could not stop; see
 [Task timeouts](#task-timeouts). A process manager on `Restart=always` or
 `Restart=on-failure` restarts it either way.
 
-This maps directly onto rolling deploys: send SIGTERM, wait, start the new
-version. Set the process manager's kill escalation (`TimeoutStopSec` above)
-relative to your longest task, while allowing for calls that may not return.
-One caveat for the upgrade from 1.1.0, in the changelog under the 1.2.0
-migration note: a settings schedule first seen while both versions are
-running can be anchored twice, and its second tick does not fire.
+This maps directly onto rolling deploys: install the new code, run `migrate`,
+run `ox_health --task-paths`, then roll workers by sending SIGTERM, waiting,
+and starting the new version. Set the process manager's kill escalation
+(`TimeoutStopSec` above) relative to your longest task, while allowing for
+calls that may not return. One caveat for the upgrade from 1.1.0, in the
+changelog under the 1.2.0 migration note: a settings schedule first seen
+while both versions are running can be anchored twice, and its second tick
+does not fire.
 
 With `--processes` above 1, the signal goes to the supervisor, and SIGHUP
 counts as well as SIGTERM and SIGINT. The sequence is:
@@ -7166,18 +7202,19 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--queue` | all queues | Restrict the database checks to one queue. |
-| `--format` | `text` | `json` prints one object on stdout instead of the `OK:` line, on success and failure. In database mode its fields are `ok`, `queue`, `backlog`, `oldest_age_seconds`, `last_claim_age_seconds` and `problems`. `queue` is `null` when no `--queue` is given. The figures are `null` when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. File mode uses the [heartbeat JSON object](#file-mode-json). The exit status is unchanged. |
+| `--format` | `text` | `json` prints one object on stdout instead of the `OK:` line, on success and failure. In database mode its fields are `ok`, `queue`, `backlog`, `oldest_age_seconds`, `last_claim_age_seconds`, `unknown_task_paths` and `problems`. `queue` is `null` when no `--queue` is given. `unknown_task_paths` is `null` unless `--task-paths` ran; then it lists each failing path as `{"task_path": ..., "rows": N, "error": "ModuleNotFoundError"}`. The figures are `null` when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. File mode uses the [heartbeat JSON object](#file-mode-json). The exit status is unchanged. |
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. Deferred tasks do not count. |
 | `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. This measures queue-wide claim activity, not one worker's liveness. |
+| `--task-paths` | off | Fail when a READY or WAITING row's `task_path` no longer imports to a django.tasks Task, the rule a worker applies before running it. Reports each failing path with its row count and exception class, and exits 1. RUNNING and finished rows are not checked. One grouped query, then one import per distinct path; importing runs the task modules' import side effects, as worker startup does. The `OK:` line then ends with `task_paths=N`, the number of distinct paths checked. See [renaming a task](production.md#renaming-a-task). |
 | `--database` | the alias `OxTask` writes to | Database alias to check. The figures come from that alias, so the check reports the queue your workers are running. |
 | `--heartbeat-file PATH` | off | Check the local file set written by `ox_worker --heartbeat-file PATH`, instead of the database. Reads metadata only and runs no system or migration checks. |
 | `--max-heartbeat-age SECONDS` | `60` | Maximum file age, inclusive. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds, including fractions. Must be finite and strictly positive. Requires `--heartbeat-file`. |
 | `--processes N` | `1` | Expected worker process count. Must match the worker's `--processes` and be at least 1. At 1, check `PATH`. Above 1, require `PATH.supervisor` and every slot file from `PATH.0` through `PATH.(N-1)` to pass. Requires `--heartbeat-file`. |
 
 File mode cannot be combined with `--database`, `--queue`, `--max-backlog`,
-`--max-age` or `--worker-timeout`. Run dependency and queue checks as separate
-commands.
+`--max-age`, `--worker-timeout` or `--task-paths`. Run dependency and queue
+checks as separate commands.
 
 On success, database mode prints the measured values, which is useful in
 cron mail:
@@ -9315,6 +9352,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `older_than`, `include_failed`, `queue`, `dry_run` and `batch_size` map
   to the flags of the same name, with the same defaults. It prunes the
   alias `OxTask` writes to, as `ox_prune` does without `--database`.
+- `ox_health --task-paths` fails when a READY or WAITING row's `task_path`
+  no longer imports to a `django.tasks` Task, the rule a worker applies
+  before running it. Each failing path is reported with its row count and
+  exception class, in `problems` and in `unknown_task_paths`, a new field
+  of every database-mode `--format json` object, `null` unless
+  `--task-paths` ran. The `OK:` line then ends with `task_paths=N`, the
+  number of distinct paths checked. Run it after `migrate` and before
+  rolling workers; the Production page has the release sequence and a
+  "Renaming a task" section. The flag is refused with `--heartbeat-file`,
+  as the other database options are.
 
 ## [1.9.1] - 2026-10-17
 

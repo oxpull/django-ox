@@ -88,6 +88,7 @@ class TestHealth:
             "backlog": 0,
             "oldest_age_seconds": None,
             "last_claim_age_seconds": None,
+            "unknown_task_paths": None,
             "problems": [],
         }
 
@@ -128,6 +129,7 @@ class TestHealth:
             "backlog": None,
             "oldest_age_seconds": None,
             "last_claim_age_seconds": None,
+            "unknown_task_paths": None,
             "problems": ["--max-backlog must be zero or a positive integer."],
         }
         assert str(error) == "--max-backlog must be zero or a positive integer."
@@ -329,3 +331,236 @@ class TestParseSeconds:
     def test_rejects_garbage(self, value):
         with pytest.raises(argparse.ArgumentTypeError):
             parse_seconds(value)
+
+
+def make_row(
+    task_path, *, status=OxTask.Status.READY, queue="default", using="default"
+):
+    return OxTask.objects.using(using).create(
+        task_path=task_path,
+        backend_name="default",
+        queue_name=queue,
+        status=status,
+        enqueued_at=timezone.now(),
+    )
+
+
+class _ToAlt:
+    """Sends django_ox's writes to the alt database."""
+
+    def db_for_read(self, model, **hints):
+        return "alt" if model._meta.app_label == "django_ox" else None
+
+    def db_for_write(self, model, **hints):
+        return "alt" if model._meta.app_label == "django_ox" else None
+
+
+@pytest.mark.django_db(databases=["default", "alt"])
+class TestTaskPaths:
+    def test_a_queued_row_that_resolves_to_a_task_passes(self):
+        make_row("tests.tasks.add")
+
+        report, error = health_json("--task-paths")
+
+        assert error is None
+        assert report["ok"] is True
+        assert report["unknown_task_paths"] == []
+        assert health("--task-paths").startswith("OK: ")
+        assert "task_paths=1" in health("--task-paths")
+
+    def test_an_unimportable_path_fails_with_its_row_count(self):
+        make_row("tests.no_such_module.gone")
+        make_row("tests.no_such_module.gone")
+        make_row("tests.tasks.add")
+
+        report, error = health_json("--task-paths")
+
+        assert isinstance(error, CommandError)
+        assert report["ok"] is False
+        assert report["unknown_task_paths"] == [
+            {
+                "task_path": "tests.no_such_module.gone",
+                "rows": 2,
+                "error": "ModuleNotFoundError",
+            }
+        ]
+        assert report["problems"] == [
+            (
+                "task path 'tests.no_such_module.gone' does not resolve to a task "
+                "(2 queued rows, ModuleNotFoundError)"
+            )
+        ]
+        assert str(error) == report["problems"][0]
+
+    def test_a_path_to_a_plain_function_fails_as_the_worker_would(self):
+        make_row("tests.tasks._busy")
+
+        report, error = health_json("--task-paths")
+
+        assert isinstance(error, CommandError)
+        assert report["unknown_task_paths"] == [
+            {"task_path": "tests.tasks._busy", "rows": 1, "error": "ImportError"}
+        ]
+        assert report["problems"] == [
+            (
+                "task path 'tests.tasks._busy' does not resolve to a task "
+                "(1 queued row, ImportError)"
+            )
+        ]
+
+    def test_a_module_that_exits_at_import_is_reported_not_obeyed(self):
+        make_row("tests.exits_on_import.anything")
+
+        report, error = health_json("--task-paths")
+
+        assert isinstance(error, CommandError)
+        assert report["unknown_task_paths"] == [
+            {
+                "task_path": "tests.exits_on_import.anything",
+                "rows": 1,
+                "error": "SystemExit",
+            }
+        ]
+
+    def test_an_interrupt_during_an_import_is_not_swallowed(self):
+        make_row("tests.interrupts_on_import.anything")
+
+        with pytest.raises(KeyboardInterrupt):
+            health_json("--task-paths")
+
+    def test_unknown_paths_are_sorted_and_counted_across_statuses(self):
+        make_row("tests.gone.second")
+        make_row("tests.gone.second", status=OxTask.Status.WAITING)
+        make_row("tests.gone.first")
+
+        report, error = health_json("--task-paths")
+
+        assert isinstance(error, CommandError)
+        assert report["unknown_task_paths"] == [
+            {
+                "task_path": "tests.gone.first",
+                "rows": 1,
+                "error": "ModuleNotFoundError",
+            },
+            {
+                "task_path": "tests.gone.second",
+                "rows": 2,
+                "error": "ModuleNotFoundError",
+            },
+        ]
+        assert report["problems"][0].startswith("task path 'tests.gone.first'")
+        assert report["problems"][1].startswith("task path 'tests.gone.second'")
+
+    def test_database_error_in_the_path_read_is_reported_as_unreachable(
+        self, monkeypatch
+    ):
+        def boom(queue, alias):
+            raise DatabaseError("connection refused")
+
+        monkeypatch.setattr(ox_health, "_pending_task_paths", boom)
+
+        report, error = health_json("--task-paths")
+
+        assert isinstance(error, CommandError)
+        assert report["unknown_task_paths"] is None
+        assert report["problems"] == ["Database unreachable: connection refused"]
+
+    def test_an_error_other_than_import_error_is_reported_by_class(self, capsys):
+        make_row("tests.raises_on_import.anything")
+
+        report, error = health_json("--task-paths")
+
+        assert isinstance(error, CommandError)
+        assert report["unknown_task_paths"] == [
+            {
+                "task_path": "tests.raises_on_import.anything",
+                "rows": 1,
+                "error": "TypeError",
+            }
+        ]
+        out = StringIO()
+        with pytest.raises(CommandError):
+            call_command("ox_health", "--task-paths", stdout=out)
+        assert "Traceback" not in out.getvalue()
+        assert "Traceback" not in capsys.readouterr().out
+
+    def test_only_ready_and_waiting_rows_are_checked(self):
+        make_row("tests.gone.waiting", status=OxTask.Status.WAITING)
+        for status in (
+            OxTask.Status.RUNNING,
+            OxTask.Status.SUCCESSFUL,
+            OxTask.Status.FAILED,
+            OxTask.Status.LOST,
+            OxTask.Status.DISCARDED,
+        ):
+            make_row(f"tests.gone.{status.lower()}", status=status)
+
+        report, _ = health_json("--task-paths")
+
+        assert [u["task_path"] for u in report["unknown_task_paths"]] == [
+            "tests.gone.waiting"
+        ]
+
+    def test_queue_scopes_the_check(self):
+        make_row("tests.gone.emails", queue="emails")
+
+        report, error = health_json("--task-paths", "--queue", "default")
+        assert error is None
+        assert report["unknown_task_paths"] == []
+
+        report, error = health_json("--task-paths", "--queue", "emails")
+        assert isinstance(error, CommandError)
+        assert [u["task_path"] for u in report["unknown_task_paths"]] == [
+            "tests.gone.emails"
+        ]
+
+    def test_database_selects_the_alias_read(self):
+        make_row("tests.gone.on_alt", using="alt")
+
+        report, error = health_json("--task-paths")
+        assert error is None
+        assert report["unknown_task_paths"] == []
+
+        report, error = health_json("--task-paths", "--database", "alt")
+        assert isinstance(error, CommandError)
+        assert [u["task_path"] for u in report["unknown_task_paths"]] == [
+            "tests.gone.on_alt"
+        ]
+
+    def test_the_write_alias_is_the_default(self, settings):
+        make_row("tests.gone.on_alt", using="alt")
+        settings.DATABASE_ROUTERS = [_ToAlt()]
+
+        report, error = health_json("--task-paths")
+
+        assert isinstance(error, CommandError)
+        assert [u["task_path"] for u in report["unknown_task_paths"]] == [
+            "tests.gone.on_alt"
+        ]
+
+    def test_the_read_is_one_query_whatever_the_row_count(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        def task_path_queries(*flags):
+            with CaptureQueriesContext(connection) as ctx:
+                health_json(*flags)
+            return [q["sql"] for q in ctx.captured_queries if "task_path" in q["sql"]]
+
+        make_row("tests.tasks.add")
+        one_row = task_path_queries("--task-paths")
+        for _ in range(20):
+            make_row("tests.tasks.add")
+        many_rows = task_path_queries("--task-paths")
+
+        assert len(one_row) == len(many_rows) == 1
+        assert "GROUP BY" in many_rows[0]
+        assert task_path_queries() == []
+
+    def test_without_the_flag_nothing_is_imported_or_reported(self):
+        make_row("tests.gone.never_checked")
+
+        report, error = health_json()
+
+        assert error is None
+        assert report["unknown_task_paths"] is None

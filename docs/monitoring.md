@@ -1097,6 +1097,12 @@ with no transaction open starts again from its first row. It stops after
 three attempts in all. Called inside a transaction of your own, it doesn't.
 The error reaches you, and your transaction has to start over.
 
+`ox_retry TASK_ID...` and `ox_discard TASK_ID...` run `retry_many()` and
+`discard_many()` from the command line on the ids given. `--queue` skips
+ids on any other queue, `--dry-run` reports what would move and writes
+nothing, and `--format json` prints the counts as one object. The flags
+are on the [Configuration](configuration.md#ox_retry) page.
+
 The actions write the table directly and send no `django.tasks` signal: a
 discard finishes the result without `task_finished`, and a retry requeues
 it without `task_enqueued`.

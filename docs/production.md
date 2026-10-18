@@ -330,6 +330,39 @@ processes included: `enqueue()` writes every column the current schema has.
 Run them as an init container or a job, not from the worker itself; several
 workers starting at once would race the same migration.
 
+A release then runs in this order:
+
+1. Install the new code.
+2. Run `migrate`.
+3. Run `python manage.py ox_health --task-paths`.
+4. Roll the workers.
+
+Step 3 exits 1 and names every READY or WAITING task path the new code no
+longer imports, before a worker claims one of those rows and fails it. See
+[Renaming a task](#renaming-a-task).
+
+## Renaming a task
+
+A row stores the dotted path of its task when it is enqueued, and a worker
+imports that path when it claims the row. Renaming a task, or moving it to
+another module, leaves every READY and WAITING row enqueued under the old
+name unable to run: the worker records an ImportError against it.
+
+Keep the old name bound to the new task until those rows have drained, for
+example with `old_name = new_name` left in the old module, and remove it in a
+later release. Rows that are RUNNING already imported their task; finished
+rows are not run again.
+
+`python manage.py ox_health --task-paths` checks this before workers roll. It
+reads each distinct task path among READY and WAITING rows, with its row
+count, in one grouped query, and imports each path under the rule the worker
+applies: the path must resolve to a django.tasks Task. Every path that fails
+is reported with its row count and exception class, and the command exits 1.
+`--queue` and `--database` scope the read as for the other database checks.
+Importing a task module runs the same import side effects as worker startup.
+Keep import-time output out of task modules: anything they print at import
+lands on stdout ahead of the `--format json` object.
+
 ## Running as a job
 
 For cron and job runners, `--batch` stops after an error-free polling pass
@@ -434,12 +467,14 @@ a task thread that its timeout could not stop; see
 [Task timeouts](#task-timeouts). A process manager on `Restart=always` or
 `Restart=on-failure` restarts it either way.
 
-This maps directly onto rolling deploys: send SIGTERM, wait, start the new
-version. Set the process manager's kill escalation (`TimeoutStopSec` above)
-relative to your longest task, while allowing for calls that may not return.
-One caveat for the upgrade from 1.1.0, in the changelog under the 1.2.0
-migration note: a settings schedule first seen while both versions are
-running can be anchored twice, and its second tick does not fire.
+This maps directly onto rolling deploys: install the new code, run `migrate`,
+run `ox_health --task-paths`, then roll workers by sending SIGTERM, waiting,
+and starting the new version. Set the process manager's kill escalation
+(`TimeoutStopSec` above) relative to your longest task, while allowing for
+calls that may not return. One caveat for the upgrade from 1.1.0, in the
+changelog under the 1.2.0 migration note: a settings schedule first seen
+while both versions are running can be anchored twice, and its second tick
+does not fire.
 
 With `--processes` above 1, the signal goes to the supervisor, and SIGHUP
 counts as well as SIGTERM and SIGINT. The sequence is:

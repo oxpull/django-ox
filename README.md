@@ -54,7 +54,7 @@ Enqueue inside `transaction.atomic()` on the database holding `OxTask`, and the 
 
 Inspect attempts and retry or discard tasks in Django admin. Open **Queue overview** from the task change list to compare queues. Edit recurring schedules in admin or declare them in settings; workers dispatch them without a scheduler process.
 
-For fleet alerting, `ox_health` turns queue thresholds into an exit code. For local loop-liveness probes, pair `ox_worker --heartbeat-file PATH` with `ox_health --heartbeat-file PATH`, using the same process count. Both health modes support `--format json`. Monitor through `django_ox.stats` or `/ox/metrics`, and clear finished rows with `ox_prune`. Use `--database` on `ox_worker`, `ox_prune` and the database mode of `ox_health` to select the database alias.
+For fleet alerting, `ox_health` turns queue thresholds into an exit code. Before a release rolls workers, `ox_health --task-paths` fails if a queued task path no longer imports. For local loop-liveness probes, pair `ox_worker --heartbeat-file PATH` with `ox_health --heartbeat-file PATH`, using the same process count. Both health modes support `--format json`. Monitor through `django_ox.stats` or `/ox/metrics`, and clear finished rows with `ox_prune`. Use `--database` on `ox_worker`, `ox_prune` and the database mode of `ox_health` to select the database alias.
 
 With pooled or persistent connections, django-ox delivered 1.4 to 1.7× django-tasks-db's throughput at matched Django connection settings. See the [published benchmarks](https://oxpull.com/django-ox/benchmarks/).
 
@@ -247,10 +247,11 @@ This mode checks file metadata without querying the database.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--queue` | all queues | Restrict the database checks to one queue. |
-| `--format` | `text` | `json` prints one object on stdout instead of the `OK:` line, on success and failure. Database mode includes `ok`, `queue`, `backlog`, `oldest_age_seconds`, `last_claim_age_seconds` and `problems`. `queue` is `null` when no queue is selected; figures are `null` when there is nothing to measure or the check cannot run. File mode includes `ok`, `heartbeat_file`, `processes`, `max_heartbeat_age_seconds`, `files` and `problems`. See the [JSON reference](https://oxpull.com/django-ox/monitoring/#file-mode-json). |
+| `--format` | `text` | `json` prints one object on stdout instead of the `OK:` line, on success and failure. Database mode includes `ok`, `queue`, `backlog`, `oldest_age_seconds`, `last_claim_age_seconds`, `unknown_task_paths` and `problems`. `queue` is `null` when no queue is selected; `unknown_task_paths` is `null` unless `--task-paths` ran; figures are `null` when there is nothing to measure or the check cannot run. File mode includes `ok`, `heartbeat_file`, `processes`, `max_heartbeat_age_seconds`, `files` and `problems`. See the [JSON reference](https://oxpull.com/django-ox/monitoring/#file-mode-json). |
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. |
 | `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. Measures fleet claim activity, not one worker's liveness. |
+| `--task-paths` | off | Fail when a READY or WAITING row's `task_path` no longer imports to a django.tasks Task, the rule a worker applies before running it. Reports each failing path with its row count and exception class. Run it after `migrate` and before rolling workers. |
 | `--database` | the alias `OxTask` writes to | Database alias to check. The figures come from that alias, so the check reports the queue your workers are running. |
 | `--heartbeat-file PATH` | off | Check the worker's local heartbeat files instead of the database. Cannot be combined with database or queue health options. |
 | `--max-heartbeat-age SECONDS` | `60` | Maximum file age, inclusive. Accepts duration suffixes or seconds, including fractions; must be finite and positive. Requires `--heartbeat-file`. |

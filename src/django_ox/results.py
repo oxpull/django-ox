@@ -31,6 +31,24 @@ if TYPE_CHECKING:
     from .models import OxTask
 
 
+def resolve_task_path(task_path: str) -> Task[..., Any]:
+    """
+    Import a stored task_path and require a django.tasks Task, as the worker
+    does before running a row.
+
+    Raises ImportError if the path no longer resolves, or resolves to a
+    non-Task object. Whatever the imported module raises while it is
+    imported propagates unchanged.
+    """
+    obj = import_string(task_path)
+    if not isinstance(obj, Task):
+        raise ImportError(
+            f"{task_path!r} did not resolve to a django.tasks Task; "
+            "django-ox only runs functions registered with @task."
+        )
+    return obj
+
+
 def task_from_db(db_task: OxTask) -> Task[..., Any]:
     """
     Rebuild the Task for a stored row.
@@ -56,12 +74,7 @@ def task_from_db(db_task: OxTask) -> Task[..., Any]:
     non-Task object; callers decide whether that is a hard error (get_result)
     or a task failure (worker).
     """
-    obj = import_string(db_task.task_path)
-    if not isinstance(obj, Task):
-        raise ImportError(
-            f"{db_task.task_path!r} did not resolve to a django.tasks Task; "
-            "django-ox only runs functions registered with @task."
-        )
+    obj = resolve_task_path(db_task.task_path)
     enqueued_as: dict[str, Any] = {
         "priority": db_task.priority,
         "backend": db_task.backend_name,

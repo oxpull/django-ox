@@ -4,10 +4,13 @@ from typing import Any, NoReturn
 
 from django.core.management.base import CommandError, CommandParser
 from django.db import DatabaseError
+from django.db.models import Count
 
 from django_ox import heartbeat, stats
 from django_ox.durations import parse_seconds
 from django_ox.management._database import DatabaseCommand
+from django_ox.models import OxTask
+from django_ox.results import resolve_task_path
 
 #: What --max-heartbeat-age is when it is not given, in seconds.
 DEFAULT_MAX_HEARTBEAT_AGE = 60.0
@@ -20,7 +23,12 @@ _DATABASE_OPTIONS = (
     ("max_backlog", "--max-backlog"),
     ("max_age", "--max-age"),
     ("worker_timeout", "--worker-timeout"),
+    ("task_paths", "--task-paths"),
 )
+
+# The statuses whose rows a worker has yet to import. A RUNNING row's worker
+# has already imported its task, and a finished row will not be run again.
+_PENDING_STATUSES = (OxTask.Status.READY, OxTask.Status.WAITING)
 
 # The options that only qualify --heartbeat-file. Without it they would be
 # accepted and ignored, and a probe that looks configured would check the
@@ -99,6 +107,21 @@ class Command(DatabaseCommand):
             ),
         )
         parser.add_argument(
+            "--task-paths",
+            action="store_true",
+            # None, not False: _DATABASE_OPTIONS reads `is not None` to tell
+            # a flag that was typed from one that was not.
+            default=None,
+            help=(
+                "Fail when a READY or WAITING task's task_path no longer "
+                "imports to a django.tasks Task, the rule a worker applies "
+                "before running it. Run it after installing new code and "
+                "before rolling workers. Imports the task modules, with the "
+                "same side effects as worker startup (default: no task path "
+                "check)."
+            ),
+        )
+        parser.add_argument(
             "--heartbeat-file",
             default=None,
             metavar="PATH",
@@ -108,8 +131,8 @@ class Command(DatabaseCommand):
                 "updated within --max-heartbeat-age. Reads file metadata "
                 "only, runs no system checks and opens no database "
                 "connection, so it cannot be combined with --database, "
-                "--queue, --max-backlog, --max-age or --worker-timeout "
-                "(default: check the database)."
+                "--queue, --max-backlog, --max-age, --worker-timeout or "
+                "--task-paths (default: check the database)."
             ),
         )
         parser.add_argument(
@@ -231,10 +254,13 @@ class Command(DatabaseCommand):
         if worker_timeout is not None and worker_timeout <= 0:
             _invalid("--worker-timeout must be a positive number of seconds.")
 
+        unknown_task_paths: list[dict[str, Any]] | None = None
         try:
             backlog = stats.ready_count(queue, using=alias)
             oldest = stats.oldest_ready_age(queue, using=alias)
             claim_age = stats.last_claim_age(queue, using=alias)
+            if options["task_paths"]:
+                pending_paths = _pending_task_paths(queue, alias)
         except DatabaseError as exc:
             reason = f"Database unreachable: {exc}"
             if as_json:
@@ -263,18 +289,32 @@ class Command(DatabaseCommand):
                     f"last task claim was {_seconds(claim_age)} ago, "
                     f"over --worker-timeout {worker_timeout:g}s"
                 )
+        if options["task_paths"]:
+            unknown_task_paths = _unknown_task_paths(pending_paths)
+            for unknown in unknown_task_paths:
+                rows = unknown["rows"]
+                problems.append(
+                    f"task path {unknown['task_path']!r} does not resolve to a "
+                    f"task ({rows} queued {'row' if rows == 1 else 'rows'}, "
+                    f"{unknown['error']})"
+                )
         if as_json:
             # A monitoring agent wants the figures most when a check fails, so
             # the object is printed before the non-zero exit, not instead of it.
-            self._write_json(queue, backlog, oldest, claim_age, problems)
+            self._write_json(
+                queue, backlog, oldest, claim_age, problems, unknown_task_paths
+            )
         if problems:
             raise CommandError("; ".join(problems))
         if as_json:
             return
 
+        task_paths = (
+            f" task_paths={len(pending_paths)}" if options["task_paths"] else ""
+        )
         self.stdout.write(
             f"OK: backlog={backlog} oldest_age={_seconds(oldest)} "
-            f"last_claim_age={_seconds(claim_age)}"
+            f"last_claim_age={_seconds(claim_age)}{task_paths}"
         )
 
     def _handle_heartbeat(self, options: dict[str, Any]) -> None:
@@ -336,6 +376,7 @@ class Command(DatabaseCommand):
         oldest: timedelta | None,
         claim_age: timedelta | None,
         problems: list[str],
+        unknown_task_paths: list[dict[str, Any]] | None = None,
     ) -> None:
         self._reported = True
         self.stdout.write(
@@ -346,10 +387,55 @@ class Command(DatabaseCommand):
                     "backlog": backlog,
                     "oldest_age_seconds": _total_seconds(oldest),
                     "last_claim_age_seconds": _total_seconds(claim_age),
+                    # null unless --task-paths ran, as the figures are null
+                    # when the database was never reached.
+                    "unknown_task_paths": unknown_task_paths,
                     "problems": problems,
                 }
             )
         )
+
+
+def _pending_task_paths(queue: str | None, alias: str) -> dict[str, int]:
+    """
+    Each distinct task_path among the READY and WAITING rows, with its row
+    count. One grouped query whatever the backlog; like the other ox_health
+    reads, it visits every matching row, and only the imports that follow
+    scale with the number of distinct paths.
+    """
+    rows = OxTask.objects.using(alias).filter(status__in=_PENDING_STATUSES)
+    if queue is not None:
+        rows = rows.filter(queue_name=queue)
+    return {
+        row["task_path"]: row["rows"]
+        for row in rows.values("task_path")
+        .annotate(rows=Count("pk"))
+        .order_by("task_path")
+    }
+
+
+def _unknown_task_paths(pending_paths: dict[str, int]) -> list[dict[str, Any]]:
+    """
+    The paths a worker would refuse, with the class of what went wrong.
+
+    Anything the import raises counts, not only ImportError: a task module
+    that raises, or calls sys.exit(), while it is imported fails the worker
+    the same way. A SystemExit let through here would end the probe with the
+    module's exit code and no output, and exit 0 reads as healthy. Only
+    KeyboardInterrupt propagates; it is aimed at this process by whoever runs
+    it. Only the class is reported, so no traceback reaches stdout.
+    """
+    unknown: list[dict[str, Any]] = []
+    for task_path, rows in pending_paths.items():
+        try:
+            resolve_task_path(task_path)
+        except KeyboardInterrupt:
+            raise
+        except BaseException as exc:
+            unknown.append(
+                {"task_path": task_path, "rows": rows, "error": type(exc).__name__}
+            )
+    return unknown
 
 
 def _max_heartbeat_age(options: dict[str, Any]) -> float:

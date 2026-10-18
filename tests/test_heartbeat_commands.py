@@ -85,6 +85,7 @@ class TestHealthOptions:
             ["--max-backlog", "5"],
             ["--max-age", "60"],
             ["--worker-timeout", "60"],
+            ["--task-paths"],
         ],
     )
     def test_database_options_are_refused_with_a_file(self, tmp_path, flag, capsys):

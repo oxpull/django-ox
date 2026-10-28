@@ -413,10 +413,22 @@ class TestAPostCommitCallbackThatRaises:
         # the failure is that schedule's, and the pass goes on to the next.
         with_history()
         commit = connection._commit
+        fired = False
 
         def failing_commit():
-            monkeypatch.setattr(connection, "_commit", commit)
-            raise OperationalError("server closed the connection unexpectedly")
+            # Fires once, then calls the real commit directly for every
+            # later call in this test. Re-patching the attribute from here
+            # (rather than calling `commit` straight) left monkeypatch's own
+            # undo stack holding two entries for the same (connection,
+            # "_commit") pair; pytest 9.2's teardown unwinds that as a
+            # delattr on an attribute the second entry had already removed,
+            # raising AttributeError instead of restoring it. Never re-enter
+            # monkeypatch.setattr on the attribute it is already tracking.
+            nonlocal fired
+            if not fired:
+                fired = True
+                raise OperationalError("server closed the connection unexpectedly")
+            return commit()
 
         monkeypatch.setattr(connection, "_commit", failing_commit)
         with caplog.at_level(logging.INFO, logger="django_ox"):
@@ -438,7 +450,9 @@ class TestAPostCommitCallbackThatRaises:
         commit = connection._commit
 
         def commit_on_a_dead_session():
-            monkeypatch.setattr(connection, "_commit", commit)
+            # Calls the real commit directly; see the note in
+            # test_a_commit_that_fails_is_not_a_callback_failure above about
+            # never re-entering monkeypatch.setattr on this same attribute.
             kill(connection)
             return commit()
 

@@ -963,10 +963,18 @@ def test_a_schedule_in_another_timezone_is_not_translated(beat_tables):
     assert "nightly" not in printed_rows(output)
 
 
-def test_an_equivalent_zone_under_another_name_is_still_translated(beat_tables):
-    # US/Eastern and America/New_York are one zone. Comparing the strings
+def test_an_equivalent_zone_under_another_name_is_still_translated(
+    beat_tables, zone_files
+):
+    # US/Eastern and America/New_York are one zone in the tz database: a
+    # link to the same rules under a legacy name. Comparing the strings
     # would divert a correctly-aligned schedule into the untranslated list.
-    # The one test here that leans on the tz database's own links.
+    # Built here under both names, so which releases of the system or
+    # packaged tzdata the link survives in is not this test's business;
+    # see test_two_names_for_the_same_zone_data_are_one_zone for the same
+    # mechanism under names the tz database has no opinion on at all.
+    zone_files("US/Eastern", PLUS_TWO)
+    zone_files("America/New_York", PLUS_TWO)
     set_crontab(1, timezone="US/Eastern")
     with override_settings(TIME_ZONE="America/New_York"):
         output = run()

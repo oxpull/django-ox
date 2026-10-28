@@ -56,7 +56,19 @@ Issues = "https://github.com/oxpull/django-ox/issues"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
+    # Ceiling: 9.2.0 changed monkeypatch.setattr's undo bookkeeping to read
+    # the pre-patch value from the target's own __dict__ (pytest #10644).
+    # Through a Django LazyObject proxy (django.contrib.admin.sites.site is
+    # one; django.db.connection is another), the delegated attribute is
+    # never in that __dict__, so monkeypatch records it as absent and
+    # deletes it from the wrapped object at teardown instead of restoring
+    # it. Harmless where a class method shows through once the instance
+    # shadow is gone (DatabaseWrapper._commit), but an attribute that exists
+    # only on the wrapped instance, such as AdminSite._actions, is then gone
+    # for every later test in the process. Upstream tracks it as
+    # pytest-dev/pytest#15099, open with no fix yet, so the ceiling is the
+    # whole 9.2 line rather than naming just 9.2.0.
+    "pytest>=8.0,<9.2",
     "pytest-django>=4.9",
     "pytest-cov>=6.0",
     "ruff>=0.14",

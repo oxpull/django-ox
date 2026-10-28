@@ -338,7 +338,9 @@ raw data in `soak-results-raw-<date>.json`.
 
 `killbench.py` counts what each backend leaves behind when its worker
 process is killed and restarted. It measures no speed. It reuses `bench.py`
-for the container, the databases, the migrations and the truncate.
+for the databases, the migrations and the truncate, and for the container
+too unless `--external-postgres` says PostgreSQL is already reachable at
+`bench.PG` without one, as a CI service container provides it.
 
 What runs:
 
@@ -424,6 +426,32 @@ Disclosure, all of it:
 - `--smoke` runs N=100, K=2, one trial per arm, and writes
   `results-kill-<date>-SMOKE.json`. Never for published numbers.
 - Same host, container and scope caveats as the sections above.
+- A `.github/workflows/kill-smoke.yml` GitHub Actions job runs `--smoke`
+  against current main on a weekly schedule (and on demand, and on a pull
+  request that touches this harness), against a plain PostgreSQL service
+  container rather than the `ox-bench` one above: pass
+  `--external-postgres` to skip the Docker Desktop calls when PostgreSQL
+  is already reachable at `bench.PG` some other way. A failing scheduled
+  run emails whoever last committed to that workflow file; nothing else
+  watches it.
+
+### Reproduce this yourself
+
+The commands above start `ox-bench` and run `bench.py`'s own matrix.
+`killbench.py` is run the same way, from this directory, with the project
+venv:
+
+```sh
+../../.venv/bin/python killbench.py --smoke          # pipeline check, ~1 minute
+../../.venv/bin/python killbench.py                  # the published figures' shape: N=2000, K=20, five trials
+```
+
+Each run writes `results-kill-<date>.json` (or `-SMOKE.json` for
+`--smoke`) in this directory, and worker stderr tails under `logs/`. To
+submit a run from your own host, attach the JSON file to an issue or a
+pull request on this repository, zipped if the file won't attach
+directly; nothing is promised about what happens to it beyond that
+someone will look.
 
 ## Files
 

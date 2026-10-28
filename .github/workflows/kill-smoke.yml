@@ -1,0 +1,125 @@
+name: Kill-test smoke
+
+# The published killbench.py figures (benchmarks/README.md, "Worker death")
+# come from django-ox 1.3.0. This workflow runs the harness's own smoke mode
+# (N=100, K=2, one trial per arm) against current main, so a regression in
+# the at-least-once guarantee the harness checks surfaces on a schedule
+# instead of waiting for the next person to run killbench.py by hand.
+#
+# It also runs on a pull_request that touches the harness itself or this
+# file, paths-filtered so it never runs on an unrelated PR. That is not
+# what scheduled smoke testing needs; it is what proving this workflow
+# needs. workflow_dispatch only works once a workflow file is on the
+# default branch, so without a pull_request run, the first time this job
+# ever executes on a GitHub runner is an unattended weekly run. The job
+# below must stay free of pull_request-specific context (no
+# github.event.pull_request.*, no PR refs) so a green run here says the
+# same thing a green scheduled run would.
+#
+# This job is not part of ci-ok and must not be added to its required
+# checks: a red run here blocks nothing but itself.
+
+on:
+  schedule:
+    # Wednesday, away from CI's nightly 03:17 and Security's Monday 06:00.
+    - cron: "0 5 * * 3"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/kill-smoke.yml"
+      - "benchmarks/killbench.py"
+      - "benchmarks/bench.py"
+      - "benchmarks/benchsite/**"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    # ~4 min per arm from the harness's own windows (idle 30s + observe 120s
+    # + reclaim bound 23.5s + task work), two arms, plus install: generous
+    # headroom over the ~8-10 min this takes in practice.
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ox
+        ports:
+          # bench.py hard-codes PG["port"] = 54330 (distinct from ci.yml's
+          # 54329, a different job, so they never collide); the service
+          # container publishes the same port so bench.py and the
+          # benchsite settings modules need no change to run here.
+          - 54330:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --group dev -e . "Django~=6.1.0"
+      # Not in any dependency group: killbench.py's tasksdb arm imports it
+      # directly. Pinned to the version the harness was validated against,
+      # so an upstream db_worker flag change cannot redden this job without
+      # a deliberate bump here.
+      - run: python -m pip install "django-tasks-db==0.13.0"
+      - name: Run the smoke harness against the service container
+        working-directory: benchmarks
+        run: python killbench.py --smoke --external-postgres
+      - name: Check the django-ox arm reached a terminal state everywhere
+        working-directory: benchmarks
+        run: |
+          python - <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          matches = sorted(pathlib.Path(".").glob("results-kill-*-SMOKE*.json"))
+          if len(matches) != 1:
+              sys.exit(f"expected exactly one smoke results file, found {matches}")
+          path = matches[0]
+          summary = json.loads(path.read_text())["summary"]
+
+          problems = []
+          # killbench.py's own orchestrate() already sys.exits on a failed
+          # self-check, which is this same condition; checked again here so
+          # the gate still holds if that exit is ever loosened upstream.
+          for arm in ("ox", "tasksdb"):
+              if not summary[arm]["harness_ok_all"]:
+                  problems.append(f"{arm}: harness_ok_all is false")
+
+          # django-ox only: django-tasks-db leaves RUNNING rows behind by
+          # design (see benchmarks/README.md's "Worker death" disclosures),
+          # so these three checks over the tasksdb arm would never pass.
+          ox = summary["ox"]
+          if any(v > 0 for v in ox["never_terminal"]["values"]):
+              problems.append(f"ox: never_terminal {ox['never_terminal']['values']}")
+          if any(v > 0 for v in ox["status_FAILED"]["values"]):
+              problems.append(f"ox: status_FAILED {ox['status_FAILED']['values']}")
+          if any(v > 0 for v in ox["status_LOST"]["values"]):
+              problems.append(f"ox: status_LOST {ox['status_LOST']['values']}")
+
+          if problems:
+              print(f"kill-smoke gate FAILED ({path.name}):")
+              for p in problems:
+                  print(f"  - {p}")
+              sys.exit(1)
+          print(f"kill-smoke gate passed ({path.name})")
+          PY
+      - name: Upload results and worker logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: kill-smoke-${{ github.run_id }}
+          path: |
+            benchmarks/results-kill-*.json
+            benchmarks/logs/
+          if-no-files-found: warn

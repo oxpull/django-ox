@@ -112,11 +112,15 @@ export names this page does not list; those names are not public.
   is always `null`. On `worker_claim_recovery_failed` and
   `worker_claim_recovery_expired`, it is always `"expired"`.
 - **The testing helpers** `django_ox.testing.ImmediateBackend`,
-  `django_ox.testing.DummyBackend` and `django_ox.testing.run_tasks`.
-  The backends accept policy declarations but do not enforce retries,
-  backoff or timeouts. `run_tasks()` drains due queued tasks through the
-  configured worker class, including retries and backoff. It does not
-  enforce timeouts. `run_tasks()` is public and provisional.
+  `django_ox.testing.DummyBackend`, `django_ox.testing.run_tasks` and
+  `django_ox.testing.assert_task_count`. The backends accept policy
+  declarations but do not enforce retries, backoff or timeouts.
+  `run_tasks()` drains due queued tasks through the configured worker
+  class, including retries and backoff. It does not enforce timeouts.
+  `run_tasks()` is public and provisional. `assert_task_count()` is
+  public and stable: its keyword-only signature
+  (`path`, `queue`, `count`, `backend`, `args`, `kwargs`) does not carry
+  `run_tasks()`'s provisional status.
 - **The database schema** of `OxTask` and `OxScheduleTick`, evolved only
   through shipped migrations.
 - **`django_ox.__version__`.**

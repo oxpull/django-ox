@@ -25,11 +25,17 @@ run_tasks() is for test settings that keep OxBackend. It runs what the test
 enqueued the way a worker runs it, on the test's own thread and connection,
 so it works inside a TestCase's transaction; its docstring says what it
 does and does not reproduce.
+
+assert_task_count() is a read-only assertion against the OxTask table
+itself, for either kind of test: whether a task is still queued, or ran and
+left its row behind.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Mapping, Sequence
 from threading import Lock
 from typing import Any
 
@@ -38,7 +44,7 @@ from .compat import DummyBackend as _StockDummyBackend
 from .compat import ImmediateBackend as _StockImmediateBackend
 from .tasks import PolicyTask, task_policy, validate_policy
 
-__all__ = ["DummyBackend", "ImmediateBackend", "run_tasks"]
+__all__ = ["DummyBackend", "ImmediateBackend", "assert_task_count", "run_tasks"]
 
 logger = logging.getLogger("django_ox")
 
@@ -232,3 +238,80 @@ def run_tasks(
         max_tasks=max_tasks,
         raise_failures=raise_failures,
     )
+
+
+def _json_round_trip(label: str, value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value))
+    except TypeError as exc:
+        raise TypeError(
+            f"assert_task_count() {label} must be values a standard JSON round "
+            f"trip preserves ({exc}); supply the task's stored JSON "
+            f"representation instead."
+        ) from exc
+
+
+def assert_task_count(
+    *,
+    path: str,
+    queue: str,
+    count: int,
+    backend: str = DEFAULT_TASK_BACKEND_ALIAS,
+    args: Sequence[Any] = (),
+    kwargs: Mapping[str, Any] | None = None,
+) -> None:
+    """
+    Assert that exactly `count` OxTask rows in `backend`'s `queue` have
+    `path` as their stored task path and match `args` and `kwargs`.
+
+    This reads database rows, not a separate enqueue record: a task whose
+    enqueue was rolled back is not counted, and the count includes a row
+    that has since run, retried or finished, since its path, args and
+    kwargs are unchanged by running. Narrow with `run_tasks(queues=...)` or
+    a status check first if only queued work should count.
+
+    `args` and `kwargs` are compared to the stored values after a JSON
+    round trip, the same lossy conversion `enqueue()` itself applies before
+    storing them: a tuple in `args` matches a stored list, but a type a
+    standard `json.dumps()` call cannot handle, such as a raw `datetime`,
+    `UUID` or `Decimal`, is rejected with `TypeError` rather than silently
+    miscompared. Pass that value's own stored JSON representation (a
+    string, an int or a plain list or dict) instead.
+
+    Raises `AssertionError`, naming `backend`, `queue`, `path`, the
+    normalised `args` and `kwargs`, and the expected and observed counts,
+    when the observed count differs.
+    """
+    if not isinstance(path, str):
+        raise TypeError(f"assert_task_count() path must be a string, got {path!r}.")
+    if not isinstance(queue, str):
+        raise TypeError(f"assert_task_count() queue must be a string, got {queue!r}.")
+    if not isinstance(backend, str):
+        raise TypeError(
+            f"assert_task_count() backend must be a string, got {backend!r}."
+        )
+    if isinstance(count, bool) or not isinstance(count, int):
+        raise TypeError(
+            f"assert_task_count() count must be a whole number, got {count!r}."
+        )
+    if count < 0:
+        raise ValueError(f"assert_task_count() count must be 0 or more, got {count!r}.")
+
+    want_args = _json_round_trip("args", list(args))
+    want_kwargs = _json_round_trip("kwargs", dict(kwargs) if kwargs else {})
+
+    # Imported here, not at the top: this module is named in TASKS settings,
+    # and the worker imports the models.
+    from .models import OxTask
+
+    rows = OxTask.objects.filter(backend_name=backend, queue_name=queue, task_path=path)
+    observed = sum(
+        1 for row in rows if row.args == want_args and row.kwargs == want_kwargs
+    )
+    if observed != count:
+        raise AssertionError(
+            f"expected {count} task(s) matching backend={backend!r} "
+            f"queue={queue!r} path={path!r} args={want_args!r} "
+            f"kwargs={want_kwargs!r}, found {observed} (of {rows.count()} row(s) "
+            f"stored for that path in that backend and queue)"
+        )

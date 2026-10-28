@@ -1181,8 +1181,9 @@ def orchestrate(args: argparse.Namespace) -> None:
     arms = [args.arm] if args.arm else list(ARMS)
     seed = args.seed if args.seed is not None else random.randrange(1_000_000)
 
-    bench.ensure_docker()
-    bench.ensure_container()
+    if not args.external_postgres:
+        bench.ensure_docker()
+        bench.ensure_container()
     bench.ensure_databases()
     LOG_DIR.mkdir(exist_ok=True)
     for arm in arms:
@@ -1297,6 +1298,15 @@ def main() -> None:
         "--smoke",
         action="store_true",
         help="N=100, K=2, one trial per arm; never for published numbers.",
+    )
+    parser.add_argument(
+        "--external-postgres",
+        action="store_true",
+        help=(
+            "Skip bench.py's Docker Desktop container management; use "
+            "whatever PostgreSQL is already reachable at bench.PG, such as "
+            "a CI service container publishing the same host and port."
+        ),
     )
     parser.add_argument(
         "--idle-seconds",

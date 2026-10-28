@@ -4654,6 +4654,86 @@ Use a real worker to test timeout enforcement and worker infrastructure. `run_ta
 
 Timeouts are inert. `deadline()` and `remaining()` return `None`. A configured timeout produces `run_tasks_timeout_inert` once per task path per call. A hanging body or callback hangs the test.
 
+### Assert on the queue directly
+
+`django_ox.testing.assert_task_count()` reads the `OxTask` table itself, so
+it works whether a task is still queued or has already run and left its
+row behind. It matches by backend alias, queue and task path, with `args`
+and `kwargs` compared the same way `enqueue()` stores them:
+
+```python
+from django_ox.testing import assert_task_count
+
+send_welcome_email.enqueue(user.pk)
+assert_task_count(
+    path="myapp.tasks.send_welcome_email", queue="default", args=[user.pk], count=1
+)
+```
+
+A rolled-back enqueue is not counted, since the row behind it never
+existed. `args` and `kwargs` are matched after the same JSON round trip
+`enqueue()` applies before storing them, so a tuple in `args` matches a
+stored list, and a raw `datetime`, `UUID` or `Decimal` is rejected with
+`TypeError`: supply that value's own stored JSON representation instead.
+
+### An isolated queue for one test
+
+`run_tasks()` claims whatever its backend's worker would, which includes
+rows other tests, fixtures or `setUpTestData` left behind on a shared
+queue. To run only a task under test, reserve a queue nothing else writes
+to, and check it is still empty before draining it. This is a documented
+recipe, not a shipped fixture or pytest plugin:
+
+```python
+import pytest
+from django_ox.models import OxTask
+from django_ox.testing import run_tasks
+
+# Must appear in this backend's own QUEUES list (a sibling of OPTIONS,
+# not inside it): TASKS["default"]["QUEUES"].
+ISOLATED_QUEUE = "isolated-recipe"
+
+
+@pytest.fixture
+def isolated_run_tasks():
+    # Checked once, here, before the test body enqueues anything: a row
+    # from setUpTestData or an earlier fixture is caught before it is ever
+    # claimed. The returned `run` does not repeat the check, since by then
+    # the only row it is meant to find is the one the test just enqueued.
+    if OxTask.objects.filter(
+        backend_name="default", queue_name=ISOLATED_QUEUE
+    ).exists():
+        raise ValueError(
+            f"queue {ISOLATED_QUEUE!r} already holds rows; reserve a queue "
+            "no other test or fixture writes to"
+        )
+
+    def run(**kwargs):
+        return run_tasks(queues=[ISOLATED_QUEUE], **kwargs)
+
+    return run
+```
+
+```python
+@task(queue_name=ISOLATED_QUEUE)
+def convert_video(path): ...
+
+
+def test_convert_video(isolated_run_tasks):
+    convert_video.enqueue("clip.mp4")
+    [result] = isolated_run_tasks()
+    assert result.return_value is not None
+```
+
+Fixture setup runs before the test body, so the emptiness check sees only
+what was there beforehand, never the task the test is about to enqueue.
+A queue that already holds work, including a row `setUpTestData` left
+there, fails fast with `ValueError` rather than draining someone else's
+task. Passing `queues=` to the wrapped `run_tasks()` call, not a model
+filter, is what keeps the drain from touching unrelated rows:
+`tests/test_testing_assertions.py` tests this recipe's isolation and
+failure behaviour directly.
+
 ## Optional coordination features
 
 [Unique tasks](features/unique-tasks.md), [batches](features/batches.md),
@@ -8524,11 +8604,15 @@ export names this page does not list; those names are not public.
   is always `null`. On `worker_claim_recovery_failed` and
   `worker_claim_recovery_expired`, it is always `"expired"`.
 - **The testing helpers** `django_ox.testing.ImmediateBackend`,
-  `django_ox.testing.DummyBackend` and `django_ox.testing.run_tasks`.
-  The backends accept policy declarations but do not enforce retries,
-  backoff or timeouts. `run_tasks()` drains due queued tasks through the
-  configured worker class, including retries and backoff. It does not
-  enforce timeouts. `run_tasks()` is public and provisional.
+  `django_ox.testing.DummyBackend`, `django_ox.testing.run_tasks` and
+  `django_ox.testing.assert_task_count`. The backends accept policy
+  declarations but do not enforce retries, backoff or timeouts.
+  `run_tasks()` drains due queued tasks through the configured worker
+  class, including retries and backoff. It does not enforce timeouts.
+  `run_tasks()` is public and provisional. `assert_task_count()` is
+  public and stable: its keyword-only signature
+  (`path`, `queue`, `count`, `backend`, `args`, `kwargs`) does not carry
+  `run_tasks()`'s provisional status.
 - **The database schema** of `OxTask` and `OxScheduleTick`, evolved only
   through shipped migrations.
 - **`django_ox.__version__`.**
@@ -9384,6 +9468,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `django_ox.testing.assert_task_count()`, a read-only assertion that reads
+  the `OxTask` table directly, matching by backend alias, queue, task path,
+  and `args`/`kwargs` compared the same way `enqueue()` stores them. A
+  rolled-back enqueue is not counted. `docs/patterns.md` also documents an
+  isolated-queue `run_tasks()` pytest fixture recipe, with a repository
+  test, not a shipped fixture API.
 - `ox_retry` and `ox_discard` management commands for scriptable recovery
   of tasks. Both commands take one or more task UUIDs, deduplicate them, and
   delegate to `django_ox.actions.retry_many` or `discard_many`. Both support

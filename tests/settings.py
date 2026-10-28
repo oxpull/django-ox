@@ -72,7 +72,9 @@ DATABASES["alt"] = {
 TASKS: dict[str, dict[str, Any]] = {
     "default": {
         "BACKEND": "django_ox.backend.OxBackend",
-        "QUEUES": ["default", "emails"],
+        # "isolated-recipe" is reserved for the docs/patterns.md isolated-queue
+        # fixture recipe and its test; nothing else enqueues onto it.
+        "QUEUES": ["default", "emails", "isolated-recipe"],
         "OPTIONS": {"MAX_ATTEMPTS": 3},
     }
 }

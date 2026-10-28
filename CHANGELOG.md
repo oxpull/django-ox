@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `django_ox.testing.assert_task_count()`, a read-only assertion that reads
+  the `OxTask` table directly, matching by backend alias, queue, task path,
+  and `args`/`kwargs` compared the same way `enqueue()` stores them. A
+  rolled-back enqueue is not counted. `docs/patterns.md` also documents an
+  isolated-queue `run_tasks()` pytest fixture recipe, with a repository
+  test, not a shipped fixture API.
 - `ox_retry` and `ox_discard` management commands for scriptable recovery
   of tasks. Both commands take one or more task UUIDs, deduplicate them, and
   delegate to `django_ox.actions.retry_many` or `discard_many`. Both support

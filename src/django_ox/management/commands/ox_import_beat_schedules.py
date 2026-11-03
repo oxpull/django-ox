@@ -2137,9 +2137,10 @@ def _kombu_json() -> Any:
     environment. _OLD_KOMBU for a kombu from before Celery type markers
     (5.3), None where kombu is not installed.
     """
-    # kombu is beat's dependency, not this package's, and ships no types.
+    # kombu is beat's dependency, not this package's. It ships no types
+    # before 5.7.0; from 5.7.0 it does, and its loads() is untyped.
     try:
-        from kombu.utils import json as kombu_json  # type: ignore[import-untyped]
+        from kombu.utils import json as kombu_json  # type: ignore[import-untyped,unused-ignore]
     except ImportError:
         return None
     if not hasattr(kombu_json, "object_hook"):
@@ -2151,7 +2152,7 @@ def _old_kombu_loads(source: Any) -> Any:
     """loads of a kombu from before type markers, which takes no object_hook."""
     from kombu.utils import json as kombu_json
 
-    return kombu_json.loads(source)
+    return kombu_json.loads(source)  # type: ignore[no-untyped-call,unused-ignore]
 
 
 def _loads_without_kombu(source: Any, object_hook: Any) -> Any:

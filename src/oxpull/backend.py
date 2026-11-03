@@ -1,16 +1,17 @@
 """
-Optional unique tasks, batches, rate limiting and workflows for django-ox.
+Optional unique tasks, batches, rate limiting, concurrency limits and
+workflows for django-ox.
 
 Use OxpullBackend on each task alias that needs these features, in every
-enqueuing and claiming process. Rate limits and workflows also require
-oxpull.worker.OxpullWorker through OPTIONS["WORKER_CLASS"]. Workflows require
-OPTIONS["WORKFLOWS"] = True and a reconciler schedule; batches require their
-reconciler schedule.
+enqueuing and claiming process. Rate limits, concurrency limits and workflows
+also require oxpull.worker.OxpullWorker through OPTIONS["WORKER_CLASS"].
+Workflows require OPTIONS["WORKFLOWS"] = True and a reconciler schedule;
+batches require their reconciler schedule.
 
 Uniqueness deduplicates pending task rows. It does not prevent two executions
 of the same key from overlapping. Tasks sent outside this backend and workers
 that do not apply its admission gate bypass oxpull's unique-task lock rows and
-rate limits, respectively.
+its rate and concurrency limits, respectively.
 
 oxpull creates only its own tables. It does not change any django-ox table,
 column, index, constraint or migration.
@@ -59,6 +60,7 @@ from django.utils.module_loading import import_string
 
 from django_ox.backend import OxBackend
 
+from .concurrency import ConcurrencyLimit, concurrency_limits_from_options
 from .exceptions import UniqueEnqueueRace
 from .rate_limits import (
     RateLimit,
@@ -1166,6 +1168,8 @@ class OxpullBackend(OxBackend):
         errors.extend(self._check_unique_schedules())
         errors.extend(self._check_rate_limits())
         errors.extend(self._check_limit_names_across_backends())
+        errors.extend(self._check_concurrency_limits())
+        errors.extend(self._check_concurrency_overlap_across_backends())
         errors.extend(self._check_reconcile_schedule())
         errors.extend(self._check_workflows())
         return errors
@@ -1517,7 +1521,11 @@ class OxpullBackend(OxBackend):
         return messages
 
     def _check_limited_task_paths(
-        self, limits: dict[str, RateLimit]
+        self,
+        limits: Mapping[str, RateLimit | ConcurrencyLimit],
+        *,
+        option: str = "RATE_LIMITS",
+        check_id: str = "oxpull.E005",
     ) -> list[checks.CheckMessage]:
         """
         Every path under a limit's `tasks` must import to a Task.
@@ -1537,15 +1545,162 @@ class OxpullBackend(OxBackend):
                 if not isinstance(obj, Task):
                     errors.append(
                         checks.Error(
-                            f"RATE_LIMITS[{limit.name!r}]['tasks'] entry "
+                            f"{option}[{limit.name!r}]['tasks'] entry "
                             f"{path!r} is not a django.tasks Task. The limit "
                             "would cover nothing under that name.",
                             hint="Use the dotted path of a @task-decorated "
                             "function, as it is stored on the task row.",
-                            id="oxpull.E005",
+                            id=check_id,
                         )
                     )
         return errors
+
+    def _check_concurrency_limits(self) -> list[checks.CheckMessage]:
+        """
+        Validate CONCURRENCY_LIMITS, then insist on a worker that applies it.
+
+        The same two failures _check_rate_limits catches, under ids of their
+        own: a malformed option or a `tasks` entry that is not a Task is
+        oxpull.E010, and limits under a worker that does not apply them, which
+        starts cleanly and limits nothing, is oxpull.E011.
+        """
+        from django_ox.worker import worker_class
+
+        from .worker import OxpullWorker
+
+        try:
+            limits = concurrency_limits_from_options(
+                self.options, self.alias, self.queues
+            )
+        except ImproperlyConfigured as exc:
+            return [
+                checks.Error(
+                    str(exc),
+                    hint="Fix the CONCURRENCY_LIMITS entry the message names.",
+                    id="oxpull.E010",
+                )
+            ]
+        if not limits:
+            return []
+        errors = self._check_limited_task_paths(
+            limits, option="CONCURRENCY_LIMITS", check_id="oxpull.E010"
+        )
+        if errors:
+            return errors
+        try:
+            runs = worker_class(self.alias)
+        except ImproperlyConfigured as exc:
+            return [checks.Error(str(exc), id="oxpull.E011")]
+        if not issubclass(runs, OxpullWorker):
+            return [
+                checks.Error(
+                    f"Backend {self.alias!r} configures concurrency limit(s) "
+                    f"{sorted(limits)}, but its worker is "
+                    f"{runs.__module__}.{runs.__qualname__}, which does not "
+                    "apply them. Every limit would be ignored, silently.",
+                    hint="Set OPTIONS['WORKER_CLASS'] to 'oxpull.worker.OxpullWorker'.",
+                    id="oxpull.E011",
+                )
+            ]
+        return []
+
+    def _check_concurrency_overlap_across_backends(self) -> list[checks.CheckMessage]:
+        """
+        oxpull.W008: limits on two backends that cover one task or queue and
+        are not declared alike.
+
+        A worker counts the RUNNING rows its own limits cover, on the whole
+        database, and stops at its own max. Two backends whose limits list
+        the same tasks and queues count the same rows: under one max they
+        are one limit, and under two the larger keeps claiming after the
+        smaller has stopped. Two backends whose coverage overlaps but
+        differs do not share a count. A row only one of them covers counts
+        for that one alone, so the rows one limit covers can reach the sum
+        of both ceilings, equal or not. Only the first case is silent. Names
+        play no part. Enforcement never reads them, so one name with
+        disjoint coverage on two backends is two unrelated limits.
+
+        Only literal overlap is compared: a task path in both `tasks`, or a
+        queue in both `queues`. A `tasks` entry on one backend and a `queues`
+        entry on another overlap whenever that task runs on that queue, which
+        settings do not say. Overlapping limits on one backend are nesting,
+        ten on a queue and two on one task in it, and are not reported.
+
+        A Warning for oxpull.W005's reason, and emitted once, from the first
+        OxpullBackend alias in sort order.
+        """
+        from .batches import task_backend_classes
+
+        if self._first_oxpull_alias() != self.alias:
+            return []
+        configured: list[tuple[str, ConcurrencyLimit]] = []
+        for alias, backend_class in sorted(task_backend_classes().items()):
+            if not issubclass(backend_class, OxpullBackend):
+                continue
+            params = settings.TASKS[alias]
+            queues = params.get("QUEUES", [DEFAULT_TASK_QUEUE_NAME])
+            try:
+                limits = concurrency_limits_from_options(
+                    params.get("OPTIONS", {}), alias, queues
+                )
+            except ImproperlyConfigured:
+                continue
+            configured.extend((alias, limit) for limit in limits.values())
+        messages: list[checks.CheckMessage] = []
+        for index, (alias, limit) in enumerate(configured):
+            for other_alias, other in configured[index + 1 :]:
+                if other_alias == alias:
+                    continue
+                same_coverage = (
+                    limit.task_paths == other.task_paths
+                    and limit.queues == other.queues
+                )
+                if same_coverage and other.max == limit.max:
+                    continue
+                shared = [
+                    *(
+                        f"task {path!r}"
+                        for path in sorted(limit.task_paths & other.task_paths)
+                    ),
+                    *(
+                        f"queue {queue!r}"
+                        for queue in sorted(limit.queues & other.queues)
+                    ),
+                ]
+                if not shared:
+                    continue
+                pair = (
+                    f"Concurrency limit {limit.name!r} on backend {alias!r} "
+                    f"(max={limit.max}) and {other.name!r} on backend "
+                    f"{other_alias!r} (max={other.max})"
+                )
+                if same_coverage:
+                    messages.append(
+                        checks.Warning(
+                            f"{pair} cover the same tasks and queues with "
+                            "different ceilings. Both count the same RUNNING "
+                            "rows, and each backend's workers stop at their own "
+                            "max, so together they allow up to the larger one.",
+                            hint="Use one max for this limit on every backend "
+                            "that declares it.",
+                            id="oxpull.W008",
+                        )
+                    )
+                    continue
+                messages.append(
+                    checks.Warning(
+                        f"{pair} both cover {_in_words(shared)} and differ "
+                        "elsewhere. Each backend's workers count only the rows "
+                        "their own limit covers and stop at their own max, so "
+                        "the rows one limit covers can reach the sum of both "
+                        "ceilings, whatever the two values are.",
+                        hint="Declare the limit with the same max, tasks and "
+                        "queues on both backends, or only on the backend whose "
+                        "queues carry these tasks.",
+                        id="oxpull.W008",
+                    )
+                )
+        return messages
 
     def _check_unique_task_paths(self) -> list[checks.CheckMessage]:
         """

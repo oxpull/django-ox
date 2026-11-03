@@ -593,15 +593,16 @@ def drain(
         _draining.reset(draining)
     if max_tasks is None:
         # A conservative look, not a claim: the claim can still refuse a row
-        # this finds, one gated by a workflow or held by a rate limit.
+        # this finds, one gated by a workflow or held by a rate limit or a
+        # concurrency limit.
         candidate = worker._ready_queryset().values_list("task_path", flat=True)
         remaining = candidate.first()
         if remaining is not None:
             raise RuntimeError(
                 f"run_tasks() reached its safety limit of {SAFETY_LIMIT} "
                 f"attempts; due READY work remains (for example: "
-                f"'{remaining}'). Remaining work may be gated or rate-limited. "
-                "Use max_tasks=N for bounded stepping."
+                f"'{remaining}'). Remaining work may be gated, rate-limited "
+                "or concurrency-limited. Use max_tasks=N for bounded stepping."
             )
     return results
 

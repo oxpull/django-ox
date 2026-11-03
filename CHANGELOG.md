@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rolling workers; the Production page has the release sequence and a
   "Renaming a task" section. The flag is refused with `--heartbeat-file`,
   as the other database options are.
+- `OPTIONS["CONCURRENCY_LIMITS"]` on an `oxpull.backend.OxpullBackend` alias:
+  named limits on how many covered tasks are RUNNING at once, by task path
+  or queue, applied by `OxpullWorker` before each claim from a count of
+  RUNNING rows. A blocked task stays READY and spends no attempt. The bound
+  is `max + W - 1` across W claimers and exact with one; `max: 0` pauses the
+  covered tasks. Checks `oxpull.E010`, `oxpull.E011` and `oxpull.W008`, and
+  DEBUG events `concurrency_limit_blocked` and `concurrency_limit_unblocked`.
+  The option, its checks and its events are provisional. The feature page
+  is `docs/features/concurrency-limits.md`.
 
 ## [1.9.1] - 2026-10-17
 

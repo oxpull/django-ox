@@ -209,10 +209,12 @@ def _capacity(name: str, limit: object, per: object) -> tuple[int, int]:
     return limit, seconds
 
 
-def _string_list(name: str, config: dict[str, Any], key: str) -> list[str]:
+def _string_list(
+    name: str, config: dict[str, Any], key: str, option: str = "RATE_LIMITS"
+) -> list[str]:
     raw = config.get(key, [])
     if not (isinstance(raw, list | tuple) and all(isinstance(v, str) for v in raw)):
         raise ImproperlyConfigured(
-            f"RATE_LIMITS[{name!r}][{key!r}] must be a list of strings."
+            f"{option}[{name!r}][{key!r}] must be a list of strings."
         )
     return list(raw)

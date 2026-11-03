@@ -682,7 +682,7 @@ For task lifecycle events, `attempt` is the task's attempt count. For
 `workflow_seal_serialization_retry` and `workflow_reconcile_conflict_retry`,
 it is the transaction attempt number instead.
 
-The optional app emits 31 distinct log events. Non-workflow events are stable; every `workflow_*` event is provisional.
+The optional app emits 33 distinct log events. Every `workflow_*` and `concurrency_limit_*` event is provisional; the other events are stable.
 
 An `attempt` value on `batch_add_deadlock_retry`, `batch_add_serialization_retry`, `workflow_add_deadlock_retry` or `workflow_add_serialization_retry` is a transaction attempt number, not a task execution attempt.
 
@@ -696,6 +696,8 @@ A stopped reconciler sweep is not a completed sweep. Check `visited_count`, `unv
 | `batch_completed` | INFO | A batch completed, with failed and unattributed member counts. |
 | `batch_reconcile_failed` | ERROR | A batch could not be reconciled. Includes a traceback. |
 | `batch_reconcile_stopped` | WARNING | A reconciler tick under a task timeout stopped before visiting every sealed batch. A later tick visits the rest. If every tick stops, give the reconciler's queue a longer `TASK_TIMEOUTS` entry. Keys: `visited_count`, `unvisited_count`, `remaining_seconds` |
+| `concurrency_limit_blocked` | DEBUG | A concurrency limit's count reached its `max` on this worker's refresh, so the tasks and queues it covers are left out of this worker's claims. Logged on the transition only, and on a worker's first count for every limit already at its `max`. Keys: `limit`, `running`, `max`, `worker_id` |
+| `concurrency_limit_unblocked` | DEBUG | A blocked concurrency limit's count fell below its `max` on this worker's refresh, so the tasks and queues it covers are claimable again. Logged on the transition only. Keys: `limit`, `running`, `max`, `worker_id` |
 | `rate_limit_closed` | WARNING | Consecutive failures to count against a rate limit have closed admission under that limit until its counter accepts a write again. |
 | `rate_limit_reopened` | WARNING | A rate-limit counter accepts writes again, so admission under that limit has resumed. |
 | `rate_limit_row_adopted` | INFO | The database collation treats a configured limit name and a stored window-row name as equal, so the limit uses that row. |
@@ -822,9 +824,11 @@ A failed connect while recording a stuck attempt logs
 | `batch_id` | `batch_complete_serialization_retry`, `batch_completed`, `batch_reconcile_failed` | The batch identifier. |
 | `failed_count` | `batch_completed`, `workflow_completed` | The number of failed batch members or workflow nodes. |
 | `unattributed_count` | `batch_completed`, `workflow_completed` | The number of batch members or workflow nodes reported as unattributed. |
-| `limit` | `rate_limit_closed`, `rate_limit_reopened`, `rate_limit_row_adopted`, `rate_limit_uncounted` | The configured rate-limit name. |
+| `limit` | `rate_limit_closed`, `rate_limit_reopened`, `rate_limit_row_adopted`, `rate_limit_uncounted`, `concurrency_limit_blocked`, `concurrency_limit_unblocked` | The configured limit name: a rate limit on the `rate_limit_*` events, a concurrency limit on the `concurrency_limit_*` events. |
 | `failures` | `rate_limit_closed` | The number of consecutive counting failures that caused admission under the limit to close. |
 | `stored_as` | `rate_limit_row_adopted` | The name stored on the window row that the database collation treats as equal to the configured limit name. |
+| `running` | `concurrency_limit_blocked`, `concurrency_limit_unblocked` | The number of covered RUNNING task rows the refresh counted. |
+| `max` | `concurrency_limit_blocked`, `concurrency_limit_unblocked` | The limit's configured `max`. |
 | `row_count` | `workflow_backstop_skipped` | The number of rows the workflow backstop could not lock. |
 | `table` | `workflow_backstop_skipped` | The table containing the rows the workflow backstop could not lock. |
 | `workflow_id` | `workflow_complete_serialization_retry`, `workflow_completed`, `workflow_nodes_cancelled`, `workflow_reconcile_failed`, `workflow_records_repaired`, `workflow_release_skip_overflow`, `workflow_seal_serialization_retry`; conditionally on `workflow_reconcile_conflict_retry` and `workflow_release_skip_unqueued` | The affected workflow. On `workflow_reconcile_conflict_retry`, it is absent only for `oxpull_prune`'s scan-row cleanup. |

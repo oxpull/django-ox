@@ -56,6 +56,9 @@
       "tests_oxpull/test_workflows_reconciler.py"
     ],
     "shard5": [
+      "tests_oxpull/test_concurrency_cost.py",
+      "tests_oxpull/test_concurrency_hazard_mysql_repeatable_read_inside_a_caller_s_transaction.py",
+      "tests_oxpull/test_concurrency_limits.py",
       "tests_oxpull/test_rate_limit_names.py",
       "tests_oxpull/test_rate_limits.py",
       "tests_oxpull/test_workflows_hazard_prune_ungates.py",

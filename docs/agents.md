@@ -420,11 +420,11 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   Test timeout enforcement and worker infrastructure against a real
   worker. See [Run queued tasks in tests](patterns.md#run-queued-tasks-in-tests)
   for transaction and callback differences.
-- [Unique tasks, batches, rate limiting and workflows](features/index.md)
+- [Unique tasks, batches, rate limiting, concurrency limits and workflows](features/index.md)
   are included in django-ox through the optional `oxpull` app and require
   Django 6.0+. `OxpullBackend`, `OxpullWorker` and the documented
   unique-task, batch and rate-limit entry points are stable.
-  Workflows are provisional.
+  Workflows and concurrency limits are provisional.
 - `create_schedules` creates stored schedules. It, `django_ox.stats` and
   `ox_health` do not require the optional app.
 

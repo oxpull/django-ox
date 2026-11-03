@@ -137,7 +137,8 @@ Semantics, all deliberate:
 - **It limits attempt starts, not completions and not concurrency.** Ten
   per minute on a task that runs for ten minutes will have a hundred
   attempts running at once. "At most K running" is a concurrency limit,
-  which is a different mechanism.
+  which is a different mechanism. See
+  [Concurrency limits](concurrency-limits.md).
 - **Retries count.** A reaped or failed attempt that goes back to READY
   consumes another admission when it is claimed again. That is correct
   for what limits usually protect: a retry is another call to the third

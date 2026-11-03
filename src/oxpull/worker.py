@@ -1,5 +1,5 @@
 """
-The worker that applies rate limits.
+The worker that applies rate limits and concurrency limits.
 
     TASKS = {
         "default": {
@@ -22,6 +22,14 @@ behind --processes N starts each child through ox_worker, so select the
 worker in settings rather than only in the parent process. Otherwise,
 children can use the base django_ox.worker.Worker and bypass rate-limit
 admission.
+
+Concurrency limits (CONCURRENCY_LIMITS, concurrency.py) use the same
+pre-claim exclusion, for the same reason, with a count of covered RUNNING
+rows in place of a window. Nothing runs after the claim, and the bound is
+max + W - 1 by the argument below: each claimer's view includes its own
+admissions before its next covered claim, and W claimers can each read
+max - 1 at once. Its state is kept apart from the rate view's, see
+_read_running.
 
 The budget is consulted before the claim, never after it. django-ox folds
 `attempts = attempts + 1` and `lease_epoch = lease_epoch + 1` into the
@@ -84,13 +92,14 @@ from django.db import (
     connections,
     transaction,
 )
-from django.db.models import F, Q, QuerySet
+from django.db.models import Count, F, Q, QuerySet
 from django.db.models.functions import Now
 
 from django_ox.models import OxTask
 from django_ox.worker import POSTGRES_CLAIM_SQL, Worker, _lease_now
 
 from .batches import ADD_RETRY_JITTER
+from .concurrency import concurrency_limits_from_options
 from .models import OxpullRateWindow, OxpullWorkflowNode
 from .rate_limits import rate_limits_from_options, refresh_interval_from_options
 from .routing import oxpull_db_alias
@@ -113,6 +122,7 @@ from .workflows import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from .concurrency import ConcurrencyLimit
     from .rate_limits import RateLimit
 
 logger = logging.getLogger("oxpull")
@@ -176,7 +186,7 @@ def _class_hook(worker: Worker, name: str) -> Any:
 
 class OxpullWorker(Worker):
     """
-    django-ox's Worker, plus rate limits.
+    django-ox's Worker, plus rate limits and concurrency limits.
 
     An install with no limits configured pays nothing: the claim filter
     adds nothing to what the class's hooks return, so the emitted SQL is
@@ -185,9 +195,9 @@ class OxpullWorker(Worker):
 
     A subclass narrows what it claims through django-ox's claim filter
     hooks, claim_filter_q() and claim_filter_sql(). Those hooks carry only
-    the subclass's own condition. The worker adds its rate limits to
-    whatever they return, so a subclass that never calls super() still
-    claims inside every limit.
+    the subclass's own condition. The worker adds its rate and concurrency
+    limits to whatever they return, so a subclass that never calls super()
+    still claims inside every limit.
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -210,6 +220,25 @@ class OxpullWorker(Worker):
         self._seen: dict[str, _Seen] = {}
         self._blocked_paths: frozenset[str] = frozenset()
         self._blocked_queues: frozenset[str] = frozenset()
+        self._concurrency: dict[str, ConcurrencyLimit] = (
+            concurrency_limits_from_options(
+                self.backend.options, self.backend.alias, self.backend.queues
+            )
+        )
+        # The concurrency view keeps its own state beside the rate view's.
+        # _read_windows replaces the rate sets whole and can put its next
+        # read off until a window ends, which can be an hour away, while a
+        # concurrency block can lift whenever a covered task finishes.
+        self._concurrency_blocked: frozenset[str] = frozenset()
+        self._concurrency_blocked_paths: frozenset[str] = frozenset()
+        self._concurrency_blocked_queues: frozenset[str] = frozenset()
+        # Stale at start, after every covered claim, and after every covered
+        # outcome this worker writes. The outcome is written on a pool
+        # thread, and run() wakes on that task's future to claim again, so
+        # the next pass sees the freed slot rather than waiting out the
+        # interval and then a poll_interval with nothing in flight.
+        self._concurrency_stale = True
+        self._concurrency_refresh_after = 0.0
         # Limits whose counter could not be written MAX_COUNT_FAILURES
         # times running, and the run length that got them there.
         self._closed: set[str] = set()
@@ -302,7 +331,7 @@ class OxpullWorker(Worker):
         # Decided before the claim, which on the SKIP LOCKED path opens a
         # transaction that should not carry a look at the schema.
         self._recording()
-        if not self._limits:
+        if not (self._limits or self._concurrency):
             return super().claim_one()
         self._refresh_view()
         db_task = super().claim_one()
@@ -344,13 +373,14 @@ class OxpullWorker(Worker):
 
     def _oxpull_condition_q(self) -> Q | None:
         """
-        Rate limits and workflow dependencies, conjoined, or None when
-        neither applies.
+        Rate and concurrency limits and workflow dependencies, conjoined, or
+        None when none applies.
 
-        Two independent reasons a READY row may not be claimed, and both
+        Independent reasons a READY row may not be claimed, and all of them
         have to hold at once: a throttled task is not claimable however
-        satisfied its dependencies are, and a workflow node whose parents
-        have not succeeded is not claimable however much budget is left.
+        satisfied its dependencies are, a task at its concurrency ceiling is
+        not claimable however much rate budget is left, and a workflow node
+        whose parents have not succeeded is not claimable at all.
 
         Each term is present only where its feature is configured, so a
         backend with neither returns None and the emitted SQL is what
@@ -364,18 +394,26 @@ class OxpullWorker(Worker):
         (downstream_task_id, satisfied), per candidate row, which finds
         nothing for a task that is not in a workflow.
         """
-        if not (self._workflows or self._blocked_paths or self._blocked_queues):
+        paths, queues = self._excluded()
+        if not (self._workflows or paths or queues):
             return None
         condition = runnable_filter_q() if self._workflows else Q()
-        if self._blocked_paths:
-            condition &= ~Q(task_path__in=sorted(self._blocked_paths))
-        if self._blocked_queues:
-            condition &= ~Q(queue_name__in=sorted(self._blocked_queues))
+        if paths:
+            condition &= ~Q(task_path__in=sorted(paths))
+        if queues:
+            condition &= ~Q(queue_name__in=sorted(queues))
         return condition
+
+    def _excluded(self) -> tuple[frozenset[str], frozenset[str]]:
+        """The task paths and queues a rate or concurrency limit blocks now."""
+        return (
+            self._blocked_paths | self._concurrency_blocked_paths,
+            self._blocked_queues | self._concurrency_blocked_queues,
+        )
 
     def _oxpull_condition_sql(self) -> tuple[str, dict[str, Any]]:
         """
-        The same two conditions for the PostgreSQL claim, which builds
+        The same conditions for the PostgreSQL claim, which builds
         its own SQL.
 
         This and claim_filter_q must stay equivalent: PostgreSQL is the
@@ -396,14 +434,15 @@ class OxpullWorker(Worker):
             workflow_clause, workflow_params = runnable_filter_sql()
             conjuncts.append(workflow_clause)
             params.update(workflow_params)
-        if self._blocked_paths:
+        paths, queues = self._excluded()
+        if paths:
             conjuncts.append(f' AND "{self._path_column}" <> ALL(%(ox_blocked_paths)s)')
-            params["ox_blocked_paths"] = sorted(self._blocked_paths)
-        if self._blocked_queues:
+            params["ox_blocked_paths"] = sorted(paths)
+        if queues:
             conjuncts.append(
                 f' AND "{self._queue_column}" <> ALL(%(ox_blocked_queues)s)'
             )
-            params["ox_blocked_queues"] = sorted(self._blocked_queues)
+            params["ox_blocked_queues"] = sorted(queues)
         return "".join(conjuncts), params
 
     # -- the node flag the claim carries ----------------------------------
@@ -482,6 +521,33 @@ class OxpullWorker(Worker):
     # -- recording a node's outcome ----------------------------------------
 
     def _write_outcome(
+        self,
+        db_task: OxTask,
+        *,
+        status: OxTask.Status,
+        duration_ms: int,
+        **fields: Any,
+    ) -> bool:
+        """
+        The outcome write, then a mark that the concurrency view is stale when
+        a concurrency limit covers the task.
+
+        Every outcome reaches this hook: a success, a failure, a retry put
+        back to READY, and the stuck-thread handover. Each one moves the row
+        out of RUNNING. The mark is a flag store and nothing else, so an
+        install without concurrency limits runs the statements it always ran.
+        It is set however the write ended, because a mark that turns out
+        early costs one count and a missing one costs a poll_interval.
+        """
+        try:
+            return self._write_node_outcome(
+                db_task, status=status, duration_ms=duration_ms, **fields
+            )
+        finally:
+            if self._concurrency_covers(db_task):
+                self._concurrency_stale = True
+
+    def _write_node_outcome(
         self,
         db_task: OxTask,
         *,
@@ -764,9 +830,20 @@ class OxpullWorker(Worker):
     # -- the budget --------------------------------------------------------
 
     def _refresh_view(self) -> None:
-        if not self._view_stale and time.monotonic() < self._refresh_after:
-            return
-        self._read_windows()
+        """
+        Read whichever view is due, each on its own staleness and its own timer.
+
+        A covered completion does not cost a window read, and a rate window
+        that puts its next read off until it ends does not hold back a
+        concurrency slot that freed up meanwhile.
+        """
+        now = time.monotonic()
+        if self._limits and (self._view_stale or now >= self._refresh_after):
+            self._read_windows()
+        if self._concurrency and (
+            self._concurrency_stale or now >= self._concurrency_refresh_after
+        ):
+            self._read_running()
 
     def _read_windows(self) -> None:
         """
@@ -967,6 +1044,12 @@ class OxpullWorker(Worker):
             )
 
     def _record(self, db_task: OxTask) -> None:
+        if self._concurrency_covers(db_task):
+            # The claim committed a covered RUNNING row, so the next covered
+            # claim has to count it. The same rule as the rate view's below,
+            # and what holds the ceiling at max + W - 1 rather than at
+            # max x W.
+            self._concurrency_stale = True
         counted = False
         for name, config in self._limits.items():
             if config.covers(db_task.task_path, db_task.queue_name):
@@ -1096,6 +1179,118 @@ class OxpullWorker(Worker):
                 "event": "rate_limit_closed",
                 "limit": name,
                 "failures": failures,
+                "worker_id": self.worker_id,
+            },
+        )
+
+    # -- the concurrency view ---------------------------------------------
+
+    def _concurrency_covers(self, db_task: OxTask) -> bool:
+        return any(
+            limit.covers(db_task.task_path, db_task.queue_name)
+            for limit in self._concurrency.values()
+        )
+
+    def reap(self) -> int:
+        """
+        django-ox's reaper pass, then a mark that the concurrency view is stale
+        when it took rows back, because a requeued row has left RUNNING and
+        this worker can use the slot on its next pass.
+        """
+        reaped = super().reap()
+        if reaped and self._concurrency:
+            self._concurrency_stale = True
+        return reaped
+
+    def _read_running(self) -> None:
+        """
+        One SELECT counting the RUNNING rows each concurrency limit covers, on
+        the database the claim writes to, then the blocked sets from it.
+
+        Called from claim_one() before the claim, never from a claim-filter
+        hook. The hooks run inside the SKIP LOCKED transaction and the
+        PostgreSQL statement build, and on MySQL a count inside that
+        transaction would read its snapshot. Pinned to _db_alias rather than
+        routed for reads: a replica that lags would answer that there is room.
+
+        The count is not scoped to this backend or to this worker's queues. A
+        claim selects by queue and never by backend, and the resource a limit
+        protects does not know which queue a task came from, so every covered
+        RUNNING row on the database counts, whoever enqueued or claimed it.
+
+        The stale flag is cleared before the count, not after. An outcome
+        written on a pool thread while the count runs sets it again, and that
+        mark has to survive into the next pass. A count that raises leaves the
+        view stale and propagates: nothing has been claimed, and the next pass
+        reads again rather than claiming against a view that may lack this
+        worker's last admission.
+
+        A limit at max 0 blocks without a count, so a configuration whose
+        limits are all 0 runs no statement here at all.
+        """
+        started = time.monotonic()
+        self._concurrency_stale = False
+        counted = [limit for limit in self._concurrency.values() if limit.max > 0]
+        running: dict[str, int] = {}
+        if counted:
+            try:
+                row = (
+                    OxTask.objects.using(self._db_alias)
+                    .filter(status=OxTask.Status.RUNNING)
+                    .aggregate(
+                        **{
+                            f"running_{index}": Count("pk", filter=limit.covered_q())
+                            for index, limit in enumerate(counted)
+                        }
+                    )
+                )
+            except BaseException:
+                self._concurrency_stale = True
+                raise
+            running = {
+                limit.name: row[f"running_{index}"]
+                for index, limit in enumerate(counted)
+            }
+        blocked = frozenset(
+            name
+            for name, limit in self._concurrency.items()
+            if running.get(name, 0) >= limit.max
+        )
+        for name in sorted(blocked ^ self._concurrency_blocked):
+            self._log_concurrency_transition(
+                name, running.get(name, 0), blocked=name in blocked
+            )
+        self._concurrency_blocked = blocked
+        self._concurrency_blocked_paths = frozenset(
+            path for name in blocked for path in self._concurrency[name].task_paths
+        )
+        self._concurrency_blocked_queues = frozenset(
+            queue for name in blocked for queue in self._concurrency[name].queues
+        )
+        self._concurrency_refresh_after = started + self._refresh_interval
+
+    def _log_concurrency_transition(
+        self, name: str, running: int, *, blocked: bool
+    ) -> None:
+        limit = self._concurrency[name]
+        if blocked:
+            message = "Concurrency limit %r: %d of %d running; claiming none it covers"
+        else:
+            message = "Concurrency limit %r: %d of %d running; claiming again"
+        logger.debug(
+            message,
+            name,
+            running,
+            limit.max,
+            extra={
+                "event": (
+                    "concurrency_limit_blocked"
+                    if blocked
+                    else "concurrency_limit_unblocked"
+                ),
+                "limit": name,
+                "running": running,
+                "max": limit.max,
                 "worker_id": self.worker_id,
             },
         )

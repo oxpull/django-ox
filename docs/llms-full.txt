@@ -223,9 +223,9 @@ before you commit:
   processes under one supervisor. See
   [Production](production.md#threads-and-processes).
 
-[Unique tasks, batches, rate limiting and workflows](features/index.md)
+[Unique tasks, batches, rate limiting, concurrency limits and workflows](features/index.md)
 are included in django-ox through the optional `oxpull` app and require
-Django 6.0+. Workflows are provisional.
+Django 6.0+. Workflows and concurrency limits are provisional.
 
 Metrics and health checks are included: `django_ox.stats` and `ox_health`
 do not require the optional app.
@@ -1650,7 +1650,8 @@ These settings belong in the alias's `OPTIONS`:
 | --- | --- | --- |
 | `UNIQUE_TASKS` | `[]` | A list or tuple of dotted task-path strings. Each entry has the same effect as decorating that task with `@unique`. Uniqueness is scoped to the backend alias. |
 | `RATE_LIMITS` | `{}` | A dictionary of named admission limits. Each name identifies a shared window across every backend that configures it. See the validation rules below. |
-| `RATE_REFRESH_INTERVAL` | `0.25` | Seconds between a worker's refresh reads of the rate-limit window rows. Accepts a finite, non-negative `int` or `float`, but not a boolean. |
+| `RATE_REFRESH_INTERVAL` | `0.25` | Seconds between a worker's refresh reads of the rate-limit window rows and its concurrency-limit counts. Accepts a finite, non-negative `int` or `float`, but not a boolean. |
+| `CONCURRENCY_LIMITS` | `{}` | A dictionary of named concurrency limits. Each caps how many covered tasks are RUNNING at once. The name is a settings key and is never stored. See the validation rules below. This option is provisional. |
 | `WORKFLOWS` | `False` | Enables workflows. Accepts only `True` or `False`. This option is provisional. |
 
 A `RATE_LIMITS` name must be non-empty and at most 128 characters. Two names that differ only by case are refused.
@@ -1663,7 +1664,18 @@ Each limit's value is a dictionary containing only `limit`, `per`, `tasks` and `
 - `queues` is a list of queue names accepted by the backend.
 - At least one of `tasks` and `queues` is required.
 
-Rate limits and workflows require `OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"`. Rate limits also require `RATE_LIMITS`; workflows also require `WORKFLOWS = True`.
+A `CONCURRENCY_LIMITS` name must be non-empty. It is a settings key and is never stored, so two names that differ only by case are two limits, and there is no length cap.
+
+Each limit's value is a dictionary containing only `max`, `tasks` and `queues`:
+
+- `max` is a whole number of RUNNING tasks, at least 0. A boolean or a float is not accepted.
+- `tasks` is a list of dotted task-path strings.
+- `queues` is a list of queue names accepted by the backend.
+- At least one of `tasks` and `queues` is required.
+
+`OxpullWorker` refuses a malformed `CONCURRENCY_LIMITS` when it is constructed, so one stops `ox_worker --skip-checks` as well. A `tasks` entry that is not a task (`oxpull.E010`) and limits on an alias whose worker is not `OxpullWorker` (`oxpull.E011`) are caught only by the system checks: under `--skip-checks` the first starts a worker whose limit covers nothing under that path, and the second starts a worker that applies no limit.
+
+Rate limits, concurrency limits and workflows require `OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"`. Rate limits also require `RATE_LIMITS`; concurrency limits also require `CONCURRENCY_LIMITS`; workflows also require `WORKFLOWS = True`.
 
 Batches and workflows need their respective reconciler schedules. Each reconciler must have a working scheduling path and an accepted queue. Creating a batch without its reconciler schedule is refused; creating or sealing a workflow without its reconciler schedule is also refused.
 
@@ -1677,7 +1689,7 @@ See [Optional features](features/index.md) for feature-specific setup.
 
 ### `oxpull` checks
 
-The optional app provides these 16 checks:
+The optional app provides these 19 checks:
 
 - **`oxpull.E001`**: `oxpull` is not in `INSTALLED_APPS`. Add the app and run migrations.
 - **`oxpull.E002`**: A configured unique-task entry cannot be imported or is not a `Task`. Correct the dotted task path.
@@ -1688,6 +1700,8 @@ The optional app provides these 16 checks:
 - **`oxpull.E007`**: `WORKFLOWS` is not a boolean, or workflows are enabled without a resolving worker class that applies the workflow gate. Use `True` or `False` and configure `oxpull.worker.OxpullWorker` when enabling workflows.
 - **`oxpull.E008`**: A reconciler is exposed through `SCHEDULABLE_TASKS`, but no backend reading schedule rows accepts its queue and no `SCHEDULES` entry names it. Add a `SCHEDULES` entry for the reconciler, or read schedule rows on a django-ox backend whose `QUEUES` include its queue.
 - **`oxpull.E009`**: On MySQL, the relevant table collations do not match. Correct the collation mismatch reported by the database check.
+- **`oxpull.E010`**: `CONCURRENCY_LIMITS` is malformed, or a configured concurrency-limit task entry is not a `Task`. Correct the option or task path.
+- **`oxpull.E011`**: Concurrency limits are configured, but the alias's worker is not `oxpull.worker.OxpullWorker` or a subclass, or `WORKER_CLASS` is not a worker. Without that worker every limit would be ignored silently. Configure `oxpull.worker.OxpullWorker`.
 - **`oxpull.W001`**: A scheduled task is also unique. It can coalesce with a pending manual enqueue, and the tick may record against that task. Remove `@unique` or the `UNIQUE_TASKS` entry from the scheduled task if that behavior is not intended. Schedules already deduplicate once per tick.
 - **`oxpull.W002`**: The batch reconciler has no configured schedule. Configure its schedule before creating batches.
 - **`oxpull.W003`**: Workflows are enabled without a workflow reconciler schedule. Configure the schedule; `workflows.create()` and `Workflow.seal()` refuse until one exists.
@@ -1695,6 +1709,7 @@ The optional app provides these 16 checks:
 - **`oxpull.W005`**: Backends configure different periods under the same limit name. Align their definitions.
 - **`oxpull.W006`**: Rate-limit names differ only by case or accents. Use names that remain distinct under the database's comparison rules.
 - **`oxpull.W007`**: WAITING workflow nodes exist, but no backend in `TASKS` declares `OPTIONS["WORKFLOWS"]`. Restore the workflow configuration or follow the documented shutdown procedure.
+- **`oxpull.W008`**: Concurrency limits on two backends cover the same task path or the same queue and are not declared alike: the `max` differs, or the `tasks` or `queues` do. Reported once for the installation. Each backend's workers count the rows their own limit covers and stop at their own `max`. With the same coverage they allow up to the larger `max`; with coverage that differs, the rows one limit covers can reach the sum of both. Declare the limit with the same `max`, `tasks` and `queues` on both backends, or only on the backend whose queues carry those tasks.
 
 ### django_ox checks
 
@@ -2994,7 +3009,7 @@ dispatch leaves no tick row.
 
 # Optional features
 
-django-ox 1.9.0 includes the optional `oxpull` app. It adds unique tasks, batches, rate limiting and workflows without a separate package installation.
+django-ox includes the optional `oxpull` app, part of the package since 1.9.0. It adds unique tasks, batches, rate limiting, concurrency limits and workflows without a separate package installation.
 
 The app requires Django 6.0+. django-ox itself continues to support Django 5.2 through the `django-tasks` backport.
 
@@ -3007,6 +3022,7 @@ The app requires Django 6.0+. django-ox itself continues to support Django 5.2 t
     - Unique tasks use `@unique` or `OPTIONS["UNIQUE_TASKS"]`.
     - Batches need a reconciler schedule.
     - Rate limits need `OPTIONS["RATE_LIMITS"]` and `OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"`.
+    - Concurrency limits need `OPTIONS["CONCURRENCY_LIMITS"]` and `OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"`.
     - Workflows need `OPTIONS["WORKFLOWS"] = True`, `OxpullWorker` and a reconciler schedule.
 
 Apply the relevant backend and worker settings in every process that enqueues or claims those tasks. Follow the feature page for the complete configuration, including the reconciler's queue and schedule.
@@ -3031,6 +3047,14 @@ This is not a guarantee that two executions of the same key cannot overlap. A LO
 
 A limit name identifies one shared window across the backends that configure it. A backend setting alone does not make a plain django-ox worker enforce that limit.
 
+## Concurrency limits
+
+[Concurrency limits](concurrency-limits.md) cap how many covered tasks are RUNNING at once, through `OxpullWorker`. Configure limits on task paths, queues or both.
+
+The worker counts RUNNING task rows before each claim. A blocked task stays READY and spends no attempt. With one claimer the limit is exact; with W claimers the bound is `max + W - 1`.
+
+Concurrency limits are provisional: the `CONCURRENCY_LIMITS` option, `oxpull.E010`, `oxpull.E011`, `oxpull.W008` and the `concurrency_limit_*` log events.
+
 ## Workflows
 
 [Workflows](workflows.md) coordinate tasks with dependencies. A workflow is created at runtime. Enable `OPTIONS["WORKFLOWS"]`, use `OxpullWorker`, and configure the reconciler schedule before creating or sealing workflows.
@@ -3051,9 +3075,9 @@ Tasks enqueued through `OxpullBackend` use that backend as the signal sender. Re
 
 ## Stability
 
-The backend, its unique-task and rate-limit options, the worker, the unique-task decorator and the documented batches API are stable. The `oxpull_*` schema, check ids, `oxpull_prune` and non-workflow log events are also stable.
+The backend, its unique-task and rate-limit options, the worker, the unique-task decorator and the documented batches API are stable. The `oxpull_*` schema and `oxpull_prune` are also stable, as are the check ids and log events outside the two provisional surfaces below.
 
-Everything in the documented workflow surface is provisional, including the `WORKFLOWS` option and every `workflow_*` event. Workflow internals are not public.
+Everything in the documented workflow surface is provisional, including the `WORKFLOWS` option and every `workflow_*` event. Workflow internals are not public. Concurrency limits are provisional too: the `CONCURRENCY_LIMITS` option, `oxpull.E010`, `oxpull.E011`, `oxpull.W008` and every `concurrency_limit_*` event.
 
 See the [stability policy](../stability.md) for the complete lists and versioning rules.
 
@@ -3709,7 +3733,8 @@ Semantics, all deliberate:
 - **It limits attempt starts, not completions and not concurrency.** Ten
   per minute on a task that runs for ten minutes will have a hundred
   attempts running at once. "At most K running" is a concurrency limit,
-  which is a different mechanism.
+  which is a different mechanism. See
+  [Concurrency limits](concurrency-limits.md).
 - **Retries count.** A reaped or failed attempt that goes back to READY
   consumes another admission when it is claimed again. That is correct
   for what limits usually protect: a retry is another call to the third
@@ -3827,6 +3852,232 @@ Size batches against limits.
 Rate-limit window reads and writes use the alias returned by `oxpull_db_alias()`. See [worker database aliases and pools](workflows.md#worker-database-aliases-and-pools) for the recording alias's pool requirements and the limits of the worker's startup warning.
 
 Use the same database alias for task rows and rate-limit windows: `OxpullWorker` reads the window on that alias. See the [database-routing constraints](unique-tasks.md#database-routing-constraints).
+
+---
+
+# Source: https://oxpull.com/django-ox/features/concurrency-limits/
+
+# Concurrency limits
+
+A concurrency limit caps how many covered tasks are RUNNING at once. `OxpullWorker` applies it before each claim, from a count of RUNNING task rows. Its guarantee depends on the workers applying the limit; the bound and its assumptions are described below. Concurrency limits are provisional, as [API stability](../stability.md#provisional-concurrency-limits) lists.
+
+See the [feature overview](index.md) for setup, requirements, and compatibility.
+
+[Rate limiting](rate-limiting.md) caps how often a task starts. A concurrency
+limit caps how many run at once. The two combine: a task blocked by either is
+not claimed, and a workflow node must still pass the workflow gate.
+
+## Behaviour
+
+Give a limit a name, a `max`, and the tasks or queues it covers:
+
+```python
+TASKS = {
+    "default": {
+        "BACKEND": "oxpull.backend.OxpullBackend",
+        "QUEUES": ["default", "exports", "video"],
+        "OPTIONS": {
+            "WORKER_CLASS": "oxpull.worker.OxpullWorker",
+            "CONCURRENCY_LIMITS": {
+                # Both tasks count against one ceiling of two.
+                "warehouse": {
+                    "max": 2,
+                    "tasks": [
+                        "myapp.exports.build_csv",
+                        "myapp.exports.build_pdf",
+                    ],
+                },
+                # A whole queue, whatever runs on it.
+                "video": {"max": 4, "queues": ["video"]},
+                # Paused: nothing it covers is claimed while max is 0.
+                "backfill": {"max": 0, "tasks": ["myapp.backfill.rebuild"]},
+            },
+        },
+    }
+}
+```
+
+A limit covers a task when the task's path is in `tasks` or its queue is in
+`queues`. At least one of the two is required. A queue limit counts every
+task running on that queue. A task-path limit counts that task on any queue.
+
+Before a claim, the worker counts the RUNNING task rows each limit covers. A
+limit whose count is at or over its `max` has no room. Its tasks and queues
+are left out of that claim's candidate select, on all three claim paths.
+Uncovered tasks are still claimed in the same pass. The limit adds nothing
+after the claim.
+
+A limit is declared in settings. A worker imports no task modules, so a
+limit written next to its task would be enforced only when something else
+happened to import that module first. Declared here, it is visible to
+every worker and to `manage.py check`.
+
+`CONCURRENCY_LIMITS` takes effect only with `oxpull.backend.OxpullBackend`
+and `OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"`. Limits on an
+alias whose worker is not `OxpullWorker` or a subclass, or whose
+`WORKER_CLASS` is not a worker, are `oxpull.E011`, a hard system check
+error. Every limit would be ignored silently. `max` is a whole number, zero
+or more; `tasks` and `queues` are lists of strings; every queue must be one
+the backend accepts. Anything else is `oxpull.E010`, and so is a `tasks`
+entry that is not a task. The full rules are under
+[`oxpull` options](../configuration.md#oxpull-options). `OxpullWorker`
+refuses a malformed option when it is constructed, so one stops
+`ox_worker --skip-checks` as well. Two faults only the system checks
+catch: a `tasks` entry that is not a task (`oxpull.E010`), and limits on
+an alias whose worker is not `OxpullWorker` (`oxpull.E011`). Under
+`--skip-checks` the first starts a worker whose limit covers nothing
+under that path, and the second starts a worker that applies no limit.
+
+## Deployment guarantees
+
+Concurrency limits are applied in `OxpullWorker` before the claim, from a count of RUNNING rows, and are not enforced by a database constraint. The base `Worker` claims covered tasks without applying the limit. So does an `OxpullWorker` from django-ox 1.9.x: it ignores `CONCURRENCY_LIMITS` and starts normally. A worker on a backend without the option is the same. The rows those workers claim add to the count, and no limit bounds them.
+
+The settings can therefore deploy before the code. The bound holds once every claimer on the queues that carry covered tasks runs a version that applies it. `manage.py check` reads only its own process's settings and cannot verify which worker other processes run.
+
+## The guarantee
+
+> For a limit with ceiling `max`, with W claimers running `OxpullWorker`
+> with the limit on the queues that carry covered tasks, the number of
+> covered RUNNING rows is at most `max + W - 1`. One `ox_worker` process
+> is one claimer; under `--processes N` each child is one. `--concurrency`
+> adds no claimer: one thread claims per process. Each thread calling
+> `run_once()` concurrently is one more. With a single claimer the limit
+> is exact: at most `max`.
+
+The W - 1 is structural. The count is read before the claim, because the
+claim spends an attempt and a lease epoch and neither can be given back.
+Two workers can each read `max - 1` at once, and each then claims.
+
+W is a deployment fact. Size against the bound: for a ceiling of T,
+configure **`max = T - (W - 1)`**. Adding claimers raises the bound of a
+limit that is left alone. Under load the count goes over `max` routinely,
+up to the bound; it is not a rare race.
+
+That rule needs T to be at least W. With T = 1 and W = 2 it gives `max`
+0, which is a pause. When T is smaller than W, or the ceiling must be
+exact, put the covered tasks on a queue of their own and serve that queue
+from one `ox_worker` process that no other worker claims from, as under
+[routing a queue to its own worker](../configuration.md#routing-a-queue-to-its-own-worker).
+The limit then has one claimer, so it is exact at `max`, whatever that
+process's `--concurrency`.
+
+The count is of RUNNING rows. A row and the body it stands for can part
+ways:
+
+- A dead worker's rows keep counting until the reaper takes them back:
+  their lease expires (`LOCK_TIMEOUT`) and a reaper pass runs, up to one
+  reap interval later. Until then those rows hold room under the limit.
+- When the stuck-thread watchdog hands a row over, or the reaper requeues a
+  row whose worker was only slow, the row leaves RUNNING while the old body
+  may still be running. That body runs outside the cap until it ends.
+
+Semantics, all deliberate:
+
+- **A blocked task stays READY.** It is not claimed, spends no attempt and
+  no lease epoch, and is indistinguishable from other queued work.
+- **A blocked task does not hold up anything else.** The exclusion is
+  applied inside the claim's candidate select, on all three claim paths. A
+  worker with a full limit still claims uncovered tasks on the same pass.
+- **A task may belong to several limits.** It is claimable only when every
+  one of them has room.
+- **Every RUNNING row counts.** The count covers every RUNNING row on the
+  database the claim writes to, whichever backend enqueued it and whichever
+  worker claimed it, on any queue. A worker that does not apply the limit
+  adds to the count, and no limit bounds it.
+- **`max: 0` pauses the covered tasks.** As with rate limiting's
+  `limit: 0`, paused tasks hold unique keys open, hold batches open, and
+  push up the ready-age metric for as long as it is set. A limit at 0
+  needs no count.
+- **A limit's name is a settings key.** It is never stored. Spelling is
+  the identity on every database: two names that differ only by case are
+  two limits, and there is no length cap. A rate-limit name is the primary
+  key of its window row, which is why the rules there differ.
+- **Two backends share a limit only when both declare it alike.** Each
+  backend's workers count the RUNNING rows their own limits cover and stop
+  at their own `max`. Two backends whose limits list the same `tasks` and
+  `queues` under one `max` share one count and one ceiling. With the same
+  coverage and different `max` values they allow up to the larger one.
+  With coverage that overlaps but differs, a row only one limit covers
+  counts for that one alone, so the rows one limit covers can reach the
+  sum of both ceilings, equal or not. Both of those pairs are warning
+  `oxpull.W008`, reported once for the installation, when both list a path
+  under `tasks` or both list a queue under `queues`. Names play no part.
+  Settings cannot see a `tasks` entry on one backend overlapping a
+  `queues` entry on another, so that pair is not reported. Overlapping
+  limits on one backend nest, for example 10 on a queue and 2 on one task
+  in it, and are not reported.
+- **Rate limits and concurrency limits combine.** A task blocked by either
+  is not claimed. A workflow node must still pass the workflow gate.
+- **Inside a caller's transaction the bound is not promised.** With
+  `run_once()` inside `transaction.atomic`, `run_tasks()` under a
+  `TestCase`, or `AUTOCOMMIT: False`, the count reads that transaction's
+  view. On MySQL's default REPEATABLE READ that is a snapshot, which hides
+  other processes' claims and completions since it was taken. The caller's
+  own uncommitted claims are visible to its own count, and invisible to
+  every other process until it commits.
+- **A count that fails claims nothing in that pass.** `run()` logs
+  `worker_poll_failed` and tries again on the next pass; `run_once()`
+  raises.
+- **Only blocked work left ends a batch run.** An `ox_worker --batch`
+  worker stops when only blocked work is left, and `run_tasks()` returns,
+  as with a rate-limited queue.
+
+## When the count refreshes
+
+The count runs before a claim and never on its own. Before a claim the
+worker re-counts when its view is stale, or when `RATE_REFRESH_INTERVAL`
+(0.25 s by default, the option rate limiting already uses) has passed
+since its last count. The view goes stale on three things. This worker
+claimed a covered task. It wrote the outcome of a covered task: success,
+failure, a retry put back to READY, or the stuck-thread handover. Or its
+reaper pass took rows back. So a slot this worker frees is reused on the
+pass that the completion wakes.
+
+A slot another worker frees is seen on this worker's next claim once a
+refresh interval has passed since its last count. While this worker has
+free slots and keeps finding work it claims again at once, so that is
+within one refresh interval. Otherwise it claims again when one of its own
+tasks settles, or after the poll interval (`ox_worker --interval`, 1.0 s
+by default), so a worker with nothing to claim sees the slot within a poll
+interval, or a refresh interval if that is longer. The refresh interval
+bounds how stale a count can be when a claim runs. It does not start one.
+
+A count that moves a limit across its `max` logs one DEBUG event on the
+`oxpull` logger. `concurrency_limit_blocked` says the count reached `max`;
+`concurrency_limit_unblocked` says it fell below. Both carry `limit`,
+`running`, `max` and `worker_id`, and both are logged on the transition
+only. A worker starts with nothing blocked, so its first count logs
+`concurrency_limit_blocked` for every limit already at its `max`, `max: 0`
+limits included. See [log events](../monitoring.md#log-events).
+
+## Claim cost
+
+Nothing when it is unused. With no `CONCURRENCY_LIMITS` configured, the
+claim SQL is exactly what it was. With limits, the cost is one COUNT per
+refresh: one SELECT counts every limit. A limit with `max: 0` needs no
+count, and a configuration whose limits are all 0 runs no count.
+
+Nothing is stored for a limit. The name is a settings key, and the count
+reads task rows.
+
+## Blocked work reads as backlog, because it is
+
+A blocked task is READY, so `django_ox.stats.oldest_ready_age` and the
+Prometheus ready-age gauge climb for as long as it waits. A queue-age alert
+tuned before the limit existed will fire under a cap that stays full. Alert
+on the age of queues that carry no covered tasks, or set the threshold with
+the cap in mind.
+
+The same holds for a blocked `@unique` task's key and for a batch with a
+blocked member: both wait for the slot. Size batches against limits.
+
+## Database aliases
+
+The count runs on the database the claim writes to, never a read replica.
+`ox_worker --database` moves the count with the claims, so the rows a
+worker counts are the rows it claims against. See
+[read replicas](../configuration.md#read-replicas) for what that flag does
+and does not check.
 
 ---
 
@@ -4561,7 +4812,7 @@ Each attempt uses the configured worker's claim and execution methods on the cal
 
 The return value is a list of framework `TaskResult` objects in attempt order. Each object captures that attempt's recorded state. Retries produce separate results. Failures are recorded without raising by default. With `raise_failures=True`, the same exception is raised after recording and attempt callbacks, including for retryable failures. Later tasks are left unclaimed. A retried attempt's result is `READY` (a retry is pending), and reading its `return_value` raises, following the framework's rule for unfinished results.
 
-By default, it claims until no task is claimable. `max_tasks=N` limits attempts, including retries, and returns quietly when the limit is reached. Zero makes no claim. Use a nonnegative integer, excluding booleans. It runs at most 1,000 attempts without an explicit limit. It raises `RuntimeError` if due `READY` work remains then, even if that work is gated or rate-limited. Attempt limits do not bound elapsed time.
+By default, it claims until no task is claimable. `max_tasks=N` limits attempts, including retries, and returns quietly when the limit is reached. Zero makes no claim. Use a nonnegative integer, excluding booleans. It runs at most 1,000 attempts without an explicit limit. It raises `RuntimeError` if due `READY` work remains then, even if that work is gated, rate-limited or concurrency-limited. Attempt limits do not bound elapsed time.
 
 Call it from synchronous test code. Django's own async `TestCase` methods can use `sync_to_async`. Outside an atomic block on the worker's database, `run_tasks()` raises `RuntimeError` before claiming anything if another thread's connection holds a `TestCase` transaction on the same database alias. This guards against draining with tasks hidden in another thread's test transaction or committed outside it, where they can outlive the test. For event loops not wrapped by `async_to_sync`, including pytest-asyncio and anyio, use `TransactionTestCase` or `django_db(transaction=True)` instead of a `TestCase` transaction. Transactions on other database aliases do not trigger this check. Do not call it from tasks, their callbacks or signal receivers. Nested drains are refused. Broken caller transactions are refused before any claim.
 
@@ -5351,7 +5602,7 @@ not the right fit.
 | Recurring schedules | Cron or a fixed interval in settings, or rows created and edited in the Django admin, limited to the tasks the code exposes; every worker dispatches, no scheduler process. See [Schedules in the database](stored-schedules.md) | None. Issue #259 open since 2026-08-10 [^tasks-259] | `periodic_task(crontab(...))` [^huey-guide] | `celery beat`, a separate process; "ensure only a single scheduler is running" [^celery-beat]. With `django-celery-beat` the schedules are rows that "can be managed from the Django Admin interface", and the field naming the task has no list to choose from [^beat-admin] | `Schedule` model, editable in admin; cron via croniter [^q2-schedules] | None built in; APScheduler recommended [^dq-cookbook] | `@app.periodic` [^proc-index] |
 | Unique tasks / deduplicated enqueue | `@unique` or `UNIQUE_TASKS` returns the existing `TaskResult` while a match is READY or RUNNING; not an execution-exclusivity guarantee. All four features below require the optional `oxpull` app and `OxpullBackend` on Django 6.0+ | Issue #164 closed as a duplicate of discussion #143; maintainer: "handled by your business logic" [^tdb-164] | huey's own `lock_task()` prevents concurrent runs, not duplicate enqueues [^huey-stable] | No general built-in enqueue deduplication. The cookbook uses a custom execution lock; `worker_deduplicate_successful_tasks` handles successful redeliveries, and SQS FIFO has a broker-specific deduplication mechanism [^celery-cookbook] [^celery-dedup-d3] [^celery-sqs-d3] | Not documented [^q2-tasks-d3] | Not documented [^dq-ref] | `queueing_lock` permits one job in `todo` per chosen lock string, but multiple jobs in `doing`; a duplicate defer raises `AlreadyEnqueued` [^proc-qlock] |
 | Batch completion callback | `on_complete` is enqueued once every member's row is settled or gone, whatever the outcome; `on_success` requires all to succeed. Callbacks run at least once. Requires a once-a-minute reconciler schedule | "Task Groups" discussion #58, open since 2024-06-20, with 0 comments [^tasks-58] | huey's own `chord()` runs after members finish or fail permanently, passing failures as `huey.Error`; a member lost to abrupt consumer shutdown prevents the callback [^huey-stable] | `chord` runs its callback only if every member succeeds; a failed member produces `ChordError`, and an errback attached to the callback runs instead. Requires a result backend other than RPC and member results must not be ignored [^celery-canvas] | No group completion hook documented; groups label results for polling, while `hook` is per task [^q2-group] [^q2-tasks-d3] | `group.add_completion_callback()` requires optional `GroupCallbacks` middleware; the completion barrier is signalled only on success, so the callback requires every member to succeed [^dq-ref] | A contributor: "there is nothing out of the box"; issue #1219 closed in favour of #1198 [^proc-1219] |
-| Rate limits shared across workers | Fixed start windows coordinated through one database row per limit name; requires `OxpullWorker`. Bounded overshoot is possible. Throttled tasks stay READY without spending an attempt; this is not a concurrency cap | Not documented in the README, worker flags or Django Tasks API [^tdb-readme-d3] [^tdb-worker-d3] [^dj-ref-tasks] | huey's own `rate_limit()` uses a fixed-window storage counter keyed by huey name and limit name; workers using the same shared storage use that counter. Checked inside the running task, with throttled calls rescheduled [^huey-stable] [^huey-ratelimit-src] | `Task.rate_limit` is per worker instance, not global; the docs advise restricting to a given queue for global limiting [^celery-ratelimit] | Not documented; pull request #350 proposes a per-cluster throttle and remains open [^q2-configure-d3] [^q2-350] | `WindowRateLimiter` and `BucketRateLimiter` use Redis or Memcached for shared limits, called from actor code [^dq-ref] [^dq-cookbook-d3] | Not documented; issue #1289 open since 2025-01-14 [^proc-1289] |
+| Rate limits shared across workers | Fixed start windows coordinated through one database row per limit name; requires `OxpullWorker`. Bounded overshoot is possible. Throttled tasks stay READY without spending an attempt; this is not a concurrency cap. For a cap on tasks running at once, see [Concurrency limits](features/concurrency-limits.md) | Not documented in the README, worker flags or Django Tasks API [^tdb-readme-d3] [^tdb-worker-d3] [^dj-ref-tasks] | huey's own `rate_limit()` uses a fixed-window storage counter keyed by huey name and limit name; workers using the same shared storage use that counter. Checked inside the running task, with throttled calls rescheduled [^huey-stable] [^huey-ratelimit-src] | `Task.rate_limit` is per worker instance, not global; the docs advise restricting to a given queue for global limiting [^celery-ratelimit] | Not documented; pull request #350 proposes a per-cluster throttle and remains open [^q2-configure-d3] [^q2-350] | `WindowRateLimiter` and `BucketRateLimiter` use Redis or Memcached for shared limits, called from actor code [^dq-ref] [^dq-cookbook-d3] | Not documented; issue #1289 open since 2025-01-14 [^proc-1289] |
 | Dependency workflows | Provisional. `depends_on` forms a DAG; a node runs only after every upstream succeeds. Requires `WORKFLOWS: True`, `OxpullWorker` and a reconciler schedule | Not documented in the Tasks API; discussion #58 proposes task groups and follow-up work [^dj-ref-tasks] [^tasks-58] | huey's own pipelines with `.then()` run tasks sequentially; a failure skips the remaining success pipeline [^huey-stable] | `chain` / `link` call the next task after success; `chord` provides fan-in [^celery-canvas] | Chains are not success-gated: later tasks are also enqueued after a failure. `save_task()` has no success check before enqueueing the next chain link. Issue #327, open since 2026-05-05 [^q2-327-d3] [^q2-monitor-d3] | `pipeline` passes results to the next actor; the next step is enqueued only after success [^dq-ref] | No built-in workflows; issue #1198 open since 2024-09-18. Execution locks order jobs whether the preceding job succeeds or not [^proc-1198] [^proc-locks-d3] |
 | Priorities | -100 to 100 | Yes [^tdb-backend] | Yes; on Redis needs 5.0+ and `PriorityRedisHuey` [^huey-guide] | 0 to 255 on RabbitMQ and Redis [^celery-calling] | Not documented [^q2-configure] | Per actor; lower number runs first [^dq-guide] | Yes [^proc-index] |
 | Time limit on a running task | Configured through backend `TASK_TIMEOUT`, per-queue `TASK_TIMEOUTS`, or a task's declared `timeout` on Django 6.1 or Django 5.2 with django-tasks 0.12+. `TaskTimeout` is raised inside the task at the deadline, followed by a worker recycle if the thread does not stop. The recycle is the whole enforcement on an interpreter with no facility for raising an exception in another thread, and for a thread a coverage tool or debugger is watching. See [Production](production.md#task-timeouts) | Not documented in the README or the worker flags [^tdb-readme] [^tdb-worker] | `timeout` per task or per call; "a `TaskTimeout` is raised and returned to the caller via the result handle" [^huey-guide] | `soft_time_limit` raises `SoftTimeLimitExceeded` inside the task; `time_limit` terminates the process running it, which is replaced. "Time limits don't currently work on platforms that don't support the `SIGUSR1` signal" [^celery-workers] | `timeout`, default `None`: "the number of seconds a worker is allowed to spend on a task before it's terminated" [^q2-configure] | `time_limit` per actor, default 10 minutes, raises `TimeLimitExceeded`. "Time limits are best-effort. They cannot cancel system calls or any function that doesn't currently hold the GIL under CPython" [^dq-guide] | Not documented on the page checked [^proc-index] |
@@ -5381,12 +5632,12 @@ says "not stated" when those pages do not say.
 | Transactional enqueue | Yes. Enqueue is one INSERT on your default database; a task written inside `atomic()` commits or rolls back with the rows beside it | The README says a shared database gives transactional integrity and recommends against relying on it: a separate database for the queue, and `transaction.on_commit` for tasks that depend on data [^sq-readme] | "`enqueue()` writes immediately and returns a real persisted task result ID"; for a task that depends on rows in the current transaction the README provides `enqueue_on_commit()` or `transaction.on_commit()` [^djq-readme] | Not stated as a feature. The PostgreSQL broker section says `pg_notify()` runs inside the same transaction as the INSERT and is delivered on commit [^ddt-readme] |
 | Retries and backoff | Exponential backoff by default; per-task `max_attempts` and `backoff` on Django 6.1 or Django 5.2 with django-tasks 0.12+. Backend defaults: `MAX_ATTEMPTS`, `BACKOFF_INITIAL`, `BACKOFF_MAX`. Every attempt's traceback kept. See [Per-task policy](configuration.md#per-task-policy) | Not stated in the README or the configuration page; failed tasks are retried from the Django admin [^sq-readme] [^sq-config] | None built in: "`dj_queue` does not add an automatic retry policy or backoff engine". Failed jobs are retried from the admin or with `retry_failed_job()` [^djq-readme] | No automatic retry stated. A FAILED task is re-run from the admin action "Retry failed tasks" or with `run_task_by_id(..., allow_retry=True)` [^ddt-readme] |
 | Recurring schedules | Cron or a fixed interval in settings, or rows edited in the Django admin; every worker dispatches, no scheduler process | Cron-style, with the `@recurring` decorator in code; a scheduler process under the supervisor [^sq-readme] | Static recurring tasks in `OPTIONS["recurring"]` and dynamic recurring tasks managed at runtime; a scheduler under the supervisor [^djq-readme] | None built in. The worker is run from cron, a systemd timer, JP1, Hinemos or Cloud Scheduler [^ddt-readme] |
-| Unique tasks / deduplicated enqueue | `@unique` or `UNIQUE_TASKS` returns the existing `TaskResult` while a match is READY or RUNNING; not an execution-exclusivity guarantee. All four features below require the optional `oxpull` app and `OxpullBackend` on Django 6.0+ | Issue #24, open since 2026-02-10; owner: "For now ... I don't think this will get added to the package", but is "open to creating a `contrib` subpackage that could include this" [^sq-24] | `@concurrency(..., on_conflict="discard")` provides singleton-style work through a concurrency semaphore with a TTL; the discarded enqueue's return value is not stated [^djq-readme-d3] | Not stated; `SELECT FOR UPDATE SKIP LOCKED` prevents duplicate claims, not duplicate enqueues [^ddt-readme-d3] |
+| Unique tasks / deduplicated enqueue | `@unique` or `UNIQUE_TASKS` returns the existing `TaskResult` while a match is READY or RUNNING; not an execution-exclusivity guarantee. Unique tasks, batches, rate limits, workflows and concurrency limits require the optional `oxpull` app and `OxpullBackend` on Django 6.0+ | Issue #24, open since 2026-02-10; owner: "For now ... I don't think this will get added to the package", but is "open to creating a `contrib` subpackage that could include this" [^sq-24] | `@concurrency(..., on_conflict="discard")` provides singleton-style work through a concurrency semaphore with a TTL; the discarded enqueue's return value is not stated [^djq-readme-d3] | Not stated; `SELECT FOR UPDATE SKIP LOCKED` prevents duplicate claims, not duplicate enqueues [^ddt-readme-d3] |
 | Batch completion callback | `on_complete` is enqueued once every member's row is settled or gone, whatever the outcome; `on_success` requires all to succeed. Callbacks run at least once. Requires a once-a-minute reconciler schedule | Not stated [^sq-readme-d3] | Not stated [^djq-readme-d3] | Not stated [^ddt-readme-d3] |
-| Rate limits shared across workers | Fixed start windows coordinated through one database row per limit name; requires `OxpullWorker`. Bounded overshoot is possible. Throttled tasks stay READY without spending an attempt; this is not a concurrency cap | Not stated; the README's concurrency controls limit simultaneous execution, not start rate [^sq-readme-d3] | Not stated; shared semaphores provide concurrency limits, not rate limits [^djq-readme-d3] | Not provided by the package; the README points to Google Cloud Tasks per-queue rate settings for `CloudTasksDatabaseBackend` [^ddt-readme-d3] |
+| Rate limits shared across workers | Fixed start windows coordinated through one database row per limit name; requires `OxpullWorker`. Bounded overshoot is possible. Throttled tasks stay READY without spending an attempt; this is not a concurrency cap. For a cap on tasks running at once, see [Concurrency limits](features/concurrency-limits.md) | Not stated; the README's concurrency controls limit simultaneous execution, not start rate [^sq-readme-d3] | Not stated; shared semaphores provide concurrency limits, not rate limits [^djq-readme-d3] | Not provided by the package; the README points to Google Cloud Tasks per-queue rate settings for `CloudTasksDatabaseBackend` [^ddt-readme-d3] |
 | Dependency workflows | Provisional. `depends_on` forms a DAG; a node runs only after every upstream succeeds. Requires `WORKFLOWS: True`, `OxpullWorker` and a reconciler schedule | Not stated [^sq-readme-d3] | Not stated [^djq-readme-d3] | Not stated [^ddt-readme-d3] |
 | Priorities | -100 to 100 | -100 to 100 [^sq-readme] | `priority` on the task call; higher claimed first within a queue [^djq-readme] | -100 to 100 [^ddt-readme] |
-| Concurrency controls | No per-task concurrency limit. [Rate limiting](features/rate-limiting.md) caps how often a task starts, not how many run at once | "Limit how many instances of a specific task can run simultaneously" [^sq-readme] | `@concurrency` decorator with database-backed limits; semaphores shown in the admin dashboard [^djq-readme] | Not stated [^ddt-readme] |
+| Concurrency controls | `CONCURRENCY_LIMITS` caps how many covered tasks are RUNNING at once, by task path or queue; requires `OxpullWorker`. Exact with one claimer; at most `max + W - 1` across W claimers. Blocked tasks stay READY without spending an attempt. See [Concurrency limits](features/concurrency-limits.md) | "Limit how many instances of a specific task can run simultaneously" [^sq-readme] | `@concurrency` decorator with database-backed limits; semaphores shown in the admin dashboard [^djq-readme] | Not stated [^ddt-readme] |
 | Worker dies mid-task | Lease renewed every `LOCK_TIMEOUT / 3`; a task whose lease goes stale for `LOCK_TIMEOUT` is put back to READY, or marked LOST when attempts are spent | Marked failed with `ProcessPrunedError` (heartbeat expired) or `ProcessExitError` (killed), to be inspected [^sq-readme] | Kept "as failed work that operators can inspect and retry": `ProcessExitError`, `ProcessPrunedError`, `ProcessMissingError` [^djq-readme] | Requeued by `requeue_stale_database_tasks --older-than`, a separate command run from cron or a systemd timer; `--max-attempts` (default 3) marks the task FAILED instead [^ddt-readme] |
 | Health and metrics | `ox_health` command, `django_ox.stats`, a Prometheus endpoint (`/ox/metrics`), structured log events, admin retry and discard | Django admin: pause and resume queues, inspect tasks, retry or discard failed ones; operational signals from `steady_queue.signals` [^sq-readme] | Admin dashboard at `/admin/dj_queue/dashboard/`; `dj_queue_health` command; `/dj_queue/metrics` in Prometheus text format with the `prometheus` extra [^djq-readme] | Django admin; structured log fields; opt-in worker exit codes for job schedulers [^ddt-readme] |
 | Async tasks and results | `async def` tasks run; `get_result()` supported | "Async task enqueueing is not supported"; "Result fetching is not supported" [^sq-readme] | `get_result()` documented; async task functions not stated [^djq-readme] | "Supports async task functions"; `get_result()` documented [^ddt-readme] |
@@ -7908,7 +8159,7 @@ For task lifecycle events, `attempt` is the task's attempt count. For
 `workflow_seal_serialization_retry` and `workflow_reconcile_conflict_retry`,
 it is the transaction attempt number instead.
 
-The optional app emits 31 distinct log events. Non-workflow events are stable; every `workflow_*` event is provisional.
+The optional app emits 33 distinct log events. Every `workflow_*` and `concurrency_limit_*` event is provisional; the other events are stable.
 
 An `attempt` value on `batch_add_deadlock_retry`, `batch_add_serialization_retry`, `workflow_add_deadlock_retry` or `workflow_add_serialization_retry` is a transaction attempt number, not a task execution attempt.
 
@@ -7922,6 +8173,8 @@ A stopped reconciler sweep is not a completed sweep. Check `visited_count`, `unv
 | `batch_completed` | INFO | A batch completed, with failed and unattributed member counts. |
 | `batch_reconcile_failed` | ERROR | A batch could not be reconciled. Includes a traceback. |
 | `batch_reconcile_stopped` | WARNING | A reconciler tick under a task timeout stopped before visiting every sealed batch. A later tick visits the rest. If every tick stops, give the reconciler's queue a longer `TASK_TIMEOUTS` entry. Keys: `visited_count`, `unvisited_count`, `remaining_seconds` |
+| `concurrency_limit_blocked` | DEBUG | A concurrency limit's count reached its `max` on this worker's refresh, so the tasks and queues it covers are left out of this worker's claims. Logged on the transition only, and on a worker's first count for every limit already at its `max`. Keys: `limit`, `running`, `max`, `worker_id` |
+| `concurrency_limit_unblocked` | DEBUG | A blocked concurrency limit's count fell below its `max` on this worker's refresh, so the tasks and queues it covers are claimable again. Logged on the transition only. Keys: `limit`, `running`, `max`, `worker_id` |
 | `rate_limit_closed` | WARNING | Consecutive failures to count against a rate limit have closed admission under that limit until its counter accepts a write again. |
 | `rate_limit_reopened` | WARNING | A rate-limit counter accepts writes again, so admission under that limit has resumed. |
 | `rate_limit_row_adopted` | INFO | The database collation treats a configured limit name and a stored window-row name as equal, so the limit uses that row. |
@@ -8048,9 +8301,11 @@ A failed connect while recording a stuck attempt logs
 | `batch_id` | `batch_complete_serialization_retry`, `batch_completed`, `batch_reconcile_failed` | The batch identifier. |
 | `failed_count` | `batch_completed`, `workflow_completed` | The number of failed batch members or workflow nodes. |
 | `unattributed_count` | `batch_completed`, `workflow_completed` | The number of batch members or workflow nodes reported as unattributed. |
-| `limit` | `rate_limit_closed`, `rate_limit_reopened`, `rate_limit_row_adopted`, `rate_limit_uncounted` | The configured rate-limit name. |
+| `limit` | `rate_limit_closed`, `rate_limit_reopened`, `rate_limit_row_adopted`, `rate_limit_uncounted`, `concurrency_limit_blocked`, `concurrency_limit_unblocked` | The configured limit name: a rate limit on the `rate_limit_*` events, a concurrency limit on the `concurrency_limit_*` events. |
 | `failures` | `rate_limit_closed` | The number of consecutive counting failures that caused admission under the limit to close. |
 | `stored_as` | `rate_limit_row_adopted` | The name stored on the window row that the database collation treats as equal to the configured limit name. |
+| `running` | `concurrency_limit_blocked`, `concurrency_limit_unblocked` | The number of covered RUNNING task rows the refresh counted. |
+| `max` | `concurrency_limit_blocked`, `concurrency_limit_unblocked` | The limit's configured `max`. |
 | `row_count` | `workflow_backstop_skipped` | The number of rows the workflow backstop could not lock. |
 | `table` | `workflow_backstop_skipped` | The table containing the rows the workflow backstop could not lock. |
 | `workflow_id` | `workflow_complete_serialization_retry`, `workflow_completed`, `workflow_nodes_cancelled`, `workflow_reconcile_failed`, `workflow_records_repaired`, `workflow_release_skip_overflow`, `workflow_seal_serialization_retry`; conditionally on `workflow_reconcile_conflict_retry` and `workflow_release_skip_unqueued` | The affected workflow. On `workflow_reconcile_conflict_retry`, it is absent only for `oxpull_prune`'s scan-row cleanup. |
@@ -8654,11 +8909,21 @@ The stable public surface is:
 - `oxpull.exceptions.BatchSealed`.
 - `oxpull.exceptions.BatchMemberExists`.
 - The `oxpull_prune` management command.
-- All 16 `oxpull` check ids: `oxpull.E001` through `oxpull.E009`, and `oxpull.W001` through `oxpull.W007`.
+- 16 of the 19 `oxpull` check ids: `oxpull.E001` through `oxpull.E009`, and `oxpull.W001` through `oxpull.W007`. The other three are provisional, under concurrency limits below.
 - The `oxpull_*` schema.
-- The non-workflow `oxpull` log events documented under [Log events](monitoring.md#log-events).
+- The `oxpull` log events documented under [Log events](monitoring.md#log-events), except the `workflow_*` and `concurrency_limit_*` events.
 
 `BatchProgress.pruned` is a deprecated alias of `unattributed`. Use `unattributed`; the alias emits `DeprecationWarning` and is marked for removal in 2.0.
+
+### Provisional: concurrency limits
+
+The documented concurrency-limit surface is provisional:
+
+- The `CONCURRENCY_LIMITS` option.
+- `oxpull.E010`, `oxpull.E011` and `oxpull.W008`.
+- The `concurrency_limit_blocked` and `concurrency_limit_unblocked` log events.
+
+The provisional tier also covers the documented bound, `max + W - 1`, and what the count reads. `RATE_REFRESH_INTERVAL` stays stable.
 
 ### Provisional: workflows
 
@@ -9374,11 +9639,11 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   Test timeout enforcement and worker infrastructure against a real
   worker. See [Run queued tasks in tests](patterns.md#run-queued-tasks-in-tests)
   for transaction and callback differences.
-- [Unique tasks, batches, rate limiting and workflows](features/index.md)
+- [Unique tasks, batches, rate limiting, concurrency limits and workflows](features/index.md)
   are included in django-ox through the optional `oxpull` app and require
   Django 6.0+. `OxpullBackend`, `OxpullWorker` and the documented
   unique-task, batch and rate-limit entry points are stable.
-  Workflows are provisional.
+  Workflows and concurrency limits are provisional.
 - `create_schedules` creates stored schedules. It, `django_ox.stats` and
   `ox_health` do not require the optional app.
 
@@ -9495,6 +9760,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rolling workers; the Production page has the release sequence and a
   "Renaming a task" section. The flag is refused with `--heartbeat-file`,
   as the other database options are.
+- `OPTIONS["CONCURRENCY_LIMITS"]` on an `oxpull.backend.OxpullBackend` alias:
+  named limits on how many covered tasks are RUNNING at once, by task path
+  or queue, applied by `OxpullWorker` before each claim from a count of
+  RUNNING rows. A blocked task stays READY and spends no attempt. The bound
+  is `max + W - 1` across W claimers and exact with one; `max: 0` pauses the
+  covered tasks. Checks `oxpull.E010`, `oxpull.E011` and `oxpull.W008`, and
+  DEBUG events `concurrency_limit_blocked` and `concurrency_limit_unblocked`.
+  The option, its checks and its events are provisional. The feature page
+  is `docs/features/concurrency-limits.md`.
 
 ## [1.9.1] - 2026-10-17
 

@@ -1,6 +1,6 @@
 # Optional features
 
-django-ox 1.9.0 includes the optional `oxpull` app. It adds unique tasks, batches, rate limiting and workflows without a separate package installation.
+django-ox includes the optional `oxpull` app, part of the package since 1.9.0. It adds unique tasks, batches, rate limiting, concurrency limits and workflows without a separate package installation.
 
 The app requires Django 6.0+. django-ox itself continues to support Django 5.2 through the `django-tasks` backport.
 
@@ -13,6 +13,7 @@ The app requires Django 6.0+. django-ox itself continues to support Django 5.2 t
     - Unique tasks use `@unique` or `OPTIONS["UNIQUE_TASKS"]`.
     - Batches need a reconciler schedule.
     - Rate limits need `OPTIONS["RATE_LIMITS"]` and `OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"`.
+    - Concurrency limits need `OPTIONS["CONCURRENCY_LIMITS"]` and `OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"`.
     - Workflows need `OPTIONS["WORKFLOWS"] = True`, `OxpullWorker` and a reconciler schedule.
 
 Apply the relevant backend and worker settings in every process that enqueues or claims those tasks. Follow the feature page for the complete configuration, including the reconciler's queue and schedule.
@@ -37,6 +38,14 @@ This is not a guarantee that two executions of the same key cannot overlap. A LO
 
 A limit name identifies one shared window across the backends that configure it. A backend setting alone does not make a plain django-ox worker enforce that limit.
 
+## Concurrency limits
+
+[Concurrency limits](concurrency-limits.md) cap how many covered tasks are RUNNING at once, through `OxpullWorker`. Configure limits on task paths, queues or both.
+
+The worker counts RUNNING task rows before each claim. A blocked task stays READY and spends no attempt. With one claimer the limit is exact; with W claimers the bound is `max + W - 1`.
+
+Concurrency limits are provisional: the `CONCURRENCY_LIMITS` option, `oxpull.E010`, `oxpull.E011`, `oxpull.W008` and the `concurrency_limit_*` log events.
+
 ## Workflows
 
 [Workflows](workflows.md) coordinate tasks with dependencies. A workflow is created at runtime. Enable `OPTIONS["WORKFLOWS"]`, use `OxpullWorker`, and configure the reconciler schedule before creating or sealing workflows.
@@ -57,8 +66,8 @@ Tasks enqueued through `OxpullBackend` use that backend as the signal sender. Re
 
 ## Stability
 
-The backend, its unique-task and rate-limit options, the worker, the unique-task decorator and the documented batches API are stable. The `oxpull_*` schema, check ids, `oxpull_prune` and non-workflow log events are also stable.
+The backend, its unique-task and rate-limit options, the worker, the unique-task decorator and the documented batches API are stable. The `oxpull_*` schema and `oxpull_prune` are also stable, as are the check ids and log events outside the two provisional surfaces below.
 
-Everything in the documented workflow surface is provisional, including the `WORKFLOWS` option and every `workflow_*` event. Workflow internals are not public.
+Everything in the documented workflow surface is provisional, including the `WORKFLOWS` option and every `workflow_*` event. Workflow internals are not public. Concurrency limits are provisional too: the `CONCURRENCY_LIMITS` option, `oxpull.E010`, `oxpull.E011`, `oxpull.W008` and every `concurrency_limit_*` event.
 
 See the [stability policy](../stability.md) for the complete lists and versioning rules.

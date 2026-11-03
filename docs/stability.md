@@ -162,11 +162,21 @@ The stable public surface is:
 - `oxpull.exceptions.BatchSealed`.
 - `oxpull.exceptions.BatchMemberExists`.
 - The `oxpull_prune` management command.
-- All 16 `oxpull` check ids: `oxpull.E001` through `oxpull.E009`, and `oxpull.W001` through `oxpull.W007`.
+- 16 of the 19 `oxpull` check ids: `oxpull.E001` through `oxpull.E009`, and `oxpull.W001` through `oxpull.W007`. The other three are provisional, under concurrency limits below.
 - The `oxpull_*` schema.
-- The non-workflow `oxpull` log events documented under [Log events](monitoring.md#log-events).
+- The `oxpull` log events documented under [Log events](monitoring.md#log-events), except the `workflow_*` and `concurrency_limit_*` events.
 
 `BatchProgress.pruned` is a deprecated alias of `unattributed`. Use `unattributed`; the alias emits `DeprecationWarning` and is marked for removal in 2.0.
+
+### Provisional: concurrency limits
+
+The documented concurrency-limit surface is provisional:
+
+- The `CONCURRENCY_LIMITS` option.
+- `oxpull.E010`, `oxpull.E011` and `oxpull.W008`.
+- The `concurrency_limit_blocked` and `concurrency_limit_unblocked` log events.
+
+The provisional tier also covers the documented bound, `max + W - 1`, and what the count reads. `RATE_REFRESH_INTERVAL` stays stable.
 
 ### Provisional: workflows
 

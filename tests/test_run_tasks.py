@@ -273,7 +273,8 @@ class TestRecursionAndBounds:
         assert str(raised.value) == (
             "run_tasks() reached its safety limit of 1000 attempts; due READY "
             f"work remains (for example: '{HERE}.loop_forever'). Remaining work "
-            "may be gated or rate-limited. Use max_tasks=N for bounded stepping."
+            "may be gated, rate-limited or concurrency-limited. Use max_tasks=N "
+            "for bounded stepping."
         )
         # The limit's own claims, and not one more to look at what is left.
         assert STATE["claims"] == 1000

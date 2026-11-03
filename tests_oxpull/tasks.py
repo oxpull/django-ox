@@ -1,5 +1,6 @@
 """Module-level task functions; django.tasks requires module-level definitions."""
 
+import threading
 import time
 
 from django.tasks import task
@@ -170,3 +171,46 @@ def deferred_step(label):
 def failing_deferred_step(label):
     _record(label)
     raise ValueError(f"{label} boom")
+
+
+# How many gauged bodies are inside their sleep at once, in this process, and
+# the most there ever were. A body runs only while its row is RUNNING, so the
+# peak is a floor on the most covered RUNNING rows the concurrency tests saw.
+GAUGE_LOCK = threading.Lock()
+GAUGE = {"now": 0, "peak": 0}
+
+
+def reset_gauge():
+    with GAUGE_LOCK:
+        GAUGE.update(now=0, peak=0)
+
+
+@task
+def gauged(seconds):
+    with GAUGE_LOCK:
+        GAUGE["now"] += 1
+        GAUGE["peak"] = max(GAUGE["peak"], GAUGE["now"])
+    try:
+        time.sleep(seconds)
+    finally:
+        with GAUGE_LOCK:
+            GAUGE["now"] -= 1
+    return seconds
+
+
+@task
+def ungauged(seconds):
+    time.sleep(seconds)
+    return seconds
+
+
+@task
+def held_until_released():
+    """
+    Waits for STATE["release"] inside a lock acquire, a call that does not
+    return to Python, so a TaskTimeout raised at the deadline cannot land
+    and the watchdog hands the attempt over while this body runs on.
+    """
+    if not STATE["release"].wait(60):
+        raise TimeoutError("the test never released this task")
+    return "released"

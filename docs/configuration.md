@@ -550,7 +550,8 @@ These settings belong in the alias's `OPTIONS`:
 | --- | --- | --- |
 | `UNIQUE_TASKS` | `[]` | A list or tuple of dotted task-path strings. Each entry has the same effect as decorating that task with `@unique`. Uniqueness is scoped to the backend alias. |
 | `RATE_LIMITS` | `{}` | A dictionary of named admission limits. Each name identifies a shared window across every backend that configures it. See the validation rules below. |
-| `RATE_REFRESH_INTERVAL` | `0.25` | Seconds between a worker's refresh reads of the rate-limit window rows. Accepts a finite, non-negative `int` or `float`, but not a boolean. |
+| `RATE_REFRESH_INTERVAL` | `0.25` | Seconds between a worker's refresh reads of the rate-limit window rows and its concurrency-limit counts. Accepts a finite, non-negative `int` or `float`, but not a boolean. |
+| `CONCURRENCY_LIMITS` | `{}` | A dictionary of named concurrency limits. Each caps how many covered tasks are RUNNING at once. The name is a settings key and is never stored. See the validation rules below. This option is provisional. |
 | `WORKFLOWS` | `False` | Enables workflows. Accepts only `True` or `False`. This option is provisional. |
 
 A `RATE_LIMITS` name must be non-empty and at most 128 characters. Two names that differ only by case are refused.
@@ -563,7 +564,18 @@ Each limit's value is a dictionary containing only `limit`, `per`, `tasks` and `
 - `queues` is a list of queue names accepted by the backend.
 - At least one of `tasks` and `queues` is required.
 
-Rate limits and workflows require `OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"`. Rate limits also require `RATE_LIMITS`; workflows also require `WORKFLOWS = True`.
+A `CONCURRENCY_LIMITS` name must be non-empty. It is a settings key and is never stored, so two names that differ only by case are two limits, and there is no length cap.
+
+Each limit's value is a dictionary containing only `max`, `tasks` and `queues`:
+
+- `max` is a whole number of RUNNING tasks, at least 0. A boolean or a float is not accepted.
+- `tasks` is a list of dotted task-path strings.
+- `queues` is a list of queue names accepted by the backend.
+- At least one of `tasks` and `queues` is required.
+
+`OxpullWorker` refuses a malformed `CONCURRENCY_LIMITS` when it is constructed, so one stops `ox_worker --skip-checks` as well. A `tasks` entry that is not a task (`oxpull.E010`) and limits on an alias whose worker is not `OxpullWorker` (`oxpull.E011`) are caught only by the system checks: under `--skip-checks` the first starts a worker whose limit covers nothing under that path, and the second starts a worker that applies no limit.
+
+Rate limits, concurrency limits and workflows require `OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"`. Rate limits also require `RATE_LIMITS`; concurrency limits also require `CONCURRENCY_LIMITS`; workflows also require `WORKFLOWS = True`.
 
 Batches and workflows need their respective reconciler schedules. Each reconciler must have a working scheduling path and an accepted queue. Creating a batch without its reconciler schedule is refused; creating or sealing a workflow without its reconciler schedule is also refused.
 
@@ -577,7 +589,7 @@ See [Optional features](features/index.md) for feature-specific setup.
 
 ### `oxpull` checks
 
-The optional app provides these 16 checks:
+The optional app provides these 19 checks:
 
 - **`oxpull.E001`**: `oxpull` is not in `INSTALLED_APPS`. Add the app and run migrations.
 - **`oxpull.E002`**: A configured unique-task entry cannot be imported or is not a `Task`. Correct the dotted task path.
@@ -588,6 +600,8 @@ The optional app provides these 16 checks:
 - **`oxpull.E007`**: `WORKFLOWS` is not a boolean, or workflows are enabled without a resolving worker class that applies the workflow gate. Use `True` or `False` and configure `oxpull.worker.OxpullWorker` when enabling workflows.
 - **`oxpull.E008`**: A reconciler is exposed through `SCHEDULABLE_TASKS`, but no backend reading schedule rows accepts its queue and no `SCHEDULES` entry names it. Add a `SCHEDULES` entry for the reconciler, or read schedule rows on a django-ox backend whose `QUEUES` include its queue.
 - **`oxpull.E009`**: On MySQL, the relevant table collations do not match. Correct the collation mismatch reported by the database check.
+- **`oxpull.E010`**: `CONCURRENCY_LIMITS` is malformed, or a configured concurrency-limit task entry is not a `Task`. Correct the option or task path.
+- **`oxpull.E011`**: Concurrency limits are configured, but the alias's worker is not `oxpull.worker.OxpullWorker` or a subclass, or `WORKER_CLASS` is not a worker. Without that worker every limit would be ignored silently. Configure `oxpull.worker.OxpullWorker`.
 - **`oxpull.W001`**: A scheduled task is also unique. It can coalesce with a pending manual enqueue, and the tick may record against that task. Remove `@unique` or the `UNIQUE_TASKS` entry from the scheduled task if that behavior is not intended. Schedules already deduplicate once per tick.
 - **`oxpull.W002`**: The batch reconciler has no configured schedule. Configure its schedule before creating batches.
 - **`oxpull.W003`**: Workflows are enabled without a workflow reconciler schedule. Configure the schedule; `workflows.create()` and `Workflow.seal()` refuse until one exists.
@@ -595,6 +609,7 @@ The optional app provides these 16 checks:
 - **`oxpull.W005`**: Backends configure different periods under the same limit name. Align their definitions.
 - **`oxpull.W006`**: Rate-limit names differ only by case or accents. Use names that remain distinct under the database's comparison rules.
 - **`oxpull.W007`**: WAITING workflow nodes exist, but no backend in `TASKS` declares `OPTIONS["WORKFLOWS"]`. Restore the workflow configuration or follow the documented shutdown procedure.
+- **`oxpull.W008`**: Concurrency limits on two backends cover the same task path or the same queue and are not declared alike: the `max` differs, or the `tasks` or `queues` do. Reported once for the installation. Each backend's workers count the rows their own limit covers and stop at their own `max`. With the same coverage they allow up to the larger `max`; with coverage that differs, the rows one limit covers can reach the sum of both. Declare the limit with the same `max`, `tasks` and `queues` on both backends, or only on the backend whose queues carry those tasks.
 
 ### django_ox checks
 

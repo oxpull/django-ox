@@ -67,6 +67,7 @@ nav:
       - Unique tasks: features/unique-tasks.md
       - Batches: features/batches.md
       - Rate limiting: features/rate-limiting.md
+      - Concurrency limits: features/concurrency-limits.md
       - Workflows: features/workflows.md
   - Common patterns: patterns.md
   - Migrating: migrating.md

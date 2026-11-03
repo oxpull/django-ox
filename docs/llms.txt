@@ -338,10 +338,11 @@
   between calls for delayed retries. No timeouts, lease renewal, schedules
   or reconcilers run automatically. Use `TransactionTestCase` to test
   worker autocommit behaviour and a real worker for infrastructure.
-- Unique tasks, batches, rate limiting and workflows are included in
-  django-ox through the optional `oxpull` app and require Django 6.0+.
-  `OxpullBackend`, `OxpullWorker` and the documented unique-task, batch
-  and rate-limit entry points are stable. Workflows are provisional.
+- Unique tasks, batches, rate limiting, concurrency limits and workflows
+  are included in django-ox through the optional `oxpull` app and require
+  Django 6.0+. `OxpullBackend`, `OxpullWorker` and the documented
+  unique-task, batch and rate-limit entry points are stable. Workflows
+  and concurrency limits are provisional.
   Setup: https://oxpull.com/django-ox/features/
   `create_schedules` creates stored schedules. It, `django_ox.stats` and
   `ox_health` do not require the optional app.
@@ -380,6 +381,7 @@ Use Context7 library id `/oxpull/django-ox` to look up the documentation.
 - [Unique tasks](https://oxpull.com/django-ox/features/unique-tasks/): deduplicate pending work by key and understand when another enqueue creates a task.
 - [Batches](https://oxpull.com/django-ox/features/batches/): group tasks, track progress and run a callback when the batch settles.
 - [Rate limiting](https://oxpull.com/django-ox/features/rate-limiting/): shared limits on task starts, worker configuration and the distinction from concurrency limits.
+- [Concurrency limits](https://oxpull.com/django-ox/features/concurrency-limits/): provisional caps on how many covered tasks are RUNNING at once, the bound across claimers, worker configuration and the distinction from rate limits.
 - [Workflows](https://oxpull.com/django-ox/features/workflows/): provisional dependency DAGs, worker configuration and workflow execution.
 - [For AI assistants](https://oxpull.com/django-ox/agents/): exact setup and verification steps, upgrade guidance and operational facts.
 

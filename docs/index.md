@@ -216,9 +216,9 @@ before you commit:
   processes under one supervisor. See
   [Production](production.md#threads-and-processes).
 
-[Unique tasks, batches, rate limiting and workflows](features/index.md)
+[Unique tasks, batches, rate limiting, concurrency limits and workflows](features/index.md)
 are included in django-ox through the optional `oxpull` app and require
-Django 6.0+. Workflows are provisional.
+Django 6.0+. Workflows and concurrency limits are provisional.
 
 Metrics and health checks are included: `django_ox.stats` and `ox_health`
 do not require the optional app.

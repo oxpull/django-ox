@@ -17,6 +17,7 @@ import random
 import re
 import zoneinfo
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from celery import Celery
@@ -297,7 +298,16 @@ STEPPED_CRONTABS = {
 
 
 def celery_crontab(texts):
-    """The crontab Celery builds from five stored strings, or None if refused."""
+    """
+    The crontab Celery builds from five stored strings, or None if Celery
+    refuses one of its fields.
+
+    From 5.7.0 Celery also refuses a whole crontab whose day of the month
+    comes in none of its months (the 31st of February), which earlier
+    releases built and never ran. A beat table can hold such a row from
+    any release, so it stands here as the field sets earlier releases
+    built from it.
+    """
     minute, hour, day_of_month, month_of_year, day_of_week = texts
     try:
         return crontab(
@@ -308,7 +318,11 @@ def celery_crontab(texts):
             month_of_year=month_of_year,
         )
     except Exception:
-        return None
+        sets = {
+            field.column: celery_reads(text, field)
+            for text, field in zip(texts, FIELDS, strict=True)
+        }
+        return None if None in sets.values() else SimpleNamespace(**sets)
 
 
 def celery_fires_on(schedule, day):

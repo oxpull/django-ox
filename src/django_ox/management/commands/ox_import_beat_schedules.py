@@ -1833,12 +1833,15 @@ class _Destination:
             elif isinstance(item, int):
                 if self.vendor == "mysql" and not low <= item <= high:
                     return WHY_BIG_INTEGER.format(number=_excerpt(item))
-            elif isinstance(item, float):
-                # json.dumps writes a float from 1e16 up with an exponent,
-                # and PostgreSQL's jsonb keeps the number and writes it
-                # back in full, which JSON then reads as an integer.
-                if self.vendor == "postgresql" and "e+" in repr(item):
-                    return WHY_EXPONENT.format(number=repr(item))
+            # json.dumps writes a float from 1e16 up with an exponent,
+            # and PostgreSQL's jsonb keeps the number and writes it
+            # back in full, which JSON then reads as an integer.
+            elif (
+                isinstance(item, float)
+                and self.vendor == "postgresql"
+                and "e+" in repr(item)
+            ):
+                return WHY_EXPONENT.format(number=repr(item))
         return None
 
     def clashes(self, names: list[Any]) -> dict[int, str]:

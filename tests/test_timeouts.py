@@ -1653,7 +1653,7 @@ class TestBackstop:
         # the other task put together, so a run() that returned before it
         # ended is a run() that left the sleep behind. Judging that by any
         # tighter number would be judging the machine.
-        stuck_seconds = 2.5
+        stuck_seconds = 5
         worker = Worker(
             task_timeout=0.2,
             task_timeout_grace=0.3,

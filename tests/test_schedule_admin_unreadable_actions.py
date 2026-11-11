@@ -666,7 +666,11 @@ class TestDeleteSelectedIsStillDjangos:
         self, client, admin_user, monkeypatch
     ):
         row = a_schedule("kept")
-        monkeypatch.setattr(site, "_actions", {})
+        # site is a lazy proxy, and _actions lives only on the AdminSite
+        # behind it. pytest 9.2.0 restores an attribute patched through
+        # such a proxy by deleting it (pytest-dev/pytest#15099), so the
+        # patch goes on the AdminSite itself.
+        monkeypatch.setattr(site._wrapped, "_actions", {})
         client.force_login(admin_user)
         listed = client.get(reverse(CHANGELIST))
         assert 'value="delete_selected"' not in body(listed)

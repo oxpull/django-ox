@@ -1,0 +1,63 @@
+# Serves GET /ox/metrics. Prometheus scrapes it through the Service; the
+# gauges are read from the database, so any one pod answers for the queue.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ox-web
+  namespace: ox-keda
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ox-web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ox-web
+        ox-keda/db-client: "true"
+    spec:
+      containers:
+        - name: web
+          image: ox-keda-app:dev
+          command:
+            - gunicorn
+            - demo.wsgi
+            - --bind=0.0.0.0:8000
+            - --workers=2
+          envFrom:
+            - configMapRef:
+                name: ox-app
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ox-keda
+                  key: db-password
+            - name: DJANGO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ox-keda
+                  key: django-secret-key
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ox-web
+  namespace: ox-keda
+spec:
+  selector:
+    app.kubernetes.io/name: ox-web
+  ports:
+    - port: 8000

@@ -529,6 +529,10 @@ Workers can also be split by queue: run
 `ox_worker --queues emails --concurrency 8` next to
 `ox_worker --queues default` to isolate slow or bursty workloads.
 
+To drive the replica count from queue depth on Kubernetes, see
+[Autoscaling workers with KEDA](keda.md). It is a runnable example that scales workers from zero on
+`django_ox_ready_tasks`.
+
 ### Threads and processes
 
 `--concurrency N` is a thread pool inside one process. That fits the

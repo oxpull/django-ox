@@ -46,6 +46,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The option, its checks and its events are provisional. The feature page
   is `docs/features/concurrency-limits.md`.
 
+- `examples/keda/` is a runnable example that scales `ox_worker` pods from
+  zero on `django_ox_ready_tasks` with KEDA. `python examples/keda/check.py`
+  builds a throwaway kind cluster and proves it end to end. Workers scale
+  up, drain on SIGTERM so every task succeeds on its first attempt, and
+  scale down after `ox_prune` empties the queue. A second trigger keeps one
+  replica while any task is RUNNING, so a reaper is there to take back a
+  killed worker's task. When the scrape or Prometheus fails, KEDA holds
+  fallback replicas. The ScaledObject sets `ignoreNullValues: "false"`, so a
+  monitoring outage counts as a scaler failure where KEDA's default reads it
+  as 0. The example is not in the wheel or the sdist. The new KEDA
+  autoscaling page covers the queries, the worker settings and the recorded
+  run.
+
 ## [1.9.1] - 2026-10-17
 
 **Upgrading:** No database migration is required.

@@ -1,0 +1,61 @@
+# The metrics endpoint has no authentication of its own, so the network
+# decides who reaches it. Only Prometheus pods reach the web pods, only the
+# KEDA operator reaches Prometheus, and only pods labelled
+# ox-keda/db-client reach the database. check.py runs an unlabelled pod
+# against each and expects a timeout.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ox-web-from-prometheus
+  namespace: ox-keda
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ox-web
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus-from-keda
+  namespace: ox-keda
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: keda
+          podSelector:
+            matchLabels:
+              app: keda-operator
+      ports:
+        - port: 9090
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ox-db-from-app
+  namespace: ox-keda
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ox-db
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              ox-keda/db-client: "true"
+      ports:
+        - port: 5432

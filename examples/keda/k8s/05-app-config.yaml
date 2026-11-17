@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ox-app
+  namespace: ox-keda
+data:
+  DB_HOST: ox-db
+  DB_NAME: ox
+  DB_USER: ox
+  ALLOWED_HOSTS: ox-web,localhost

@@ -1,0 +1,35 @@
+# Migrations run once, from a Job, never from a worker. check.py waits for
+# the Job before it applies the ScaledObject, so no worker starts first.
+# backoffLimit covers the time the database takes to accept connections.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ox-migrate
+  namespace: ox-keda
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ox-migrate
+        ox-keda/db-client: "true"
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: ox-keda-app:dev
+          command: ["python", "manage.py", "migrate", "--noinput"]
+          envFrom:
+            - configMapRef:
+                name: ox-app
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ox-keda
+                  key: db-password
+            - name: DJANGO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ox-keda
+                  key: django-secret-key

@@ -177,6 +177,8 @@ ignore = [
 "tests_wheel/**" = ["S101", "S603", "S607", "S608"]
 # Benchmark and maintenance scripts are operator tools, not shipped code.
 "tools/**" = ["T20"]
+# The KEDA example's check drives docker, kind and kubectl and reports as it goes.
+"examples/**" = ["T20", "S603", "S607"]
 
 [tool.mypy]
 files = ["src"]

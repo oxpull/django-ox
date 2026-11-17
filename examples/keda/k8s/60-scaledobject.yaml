@@ -1,0 +1,70 @@
+# Scales ox-worker for the reports queue, on two triggers. The HPA takes
+# the larger replica count, and either trigger starts workers from 0.
+#
+# The first trigger is the backlog. django_ox_ready_tasks counts READY rows
+# that are due now. It is a gauge: no rate(). Three readings have to stay
+# apart:
+#   - a sample: the backlog, including 0 when the queue has rows but no
+#     eligible work;
+#   - no sample while the scrape succeeds (up == 1): the queue has no
+#     rows, for instance after ox_prune removed the last one. The second
+#     half of the query turns this into 0;
+#   - no sample because the scrape failed, or no answer from Prometheus:
+#     the query returns nothing or errors. ignoreNullValues "false" makes
+#     KEDA count that as a scaler failure. Once failures pass
+#     failureThreshold, KEDA holds the fallback replica count instead of
+#     scaling to 0.
+#
+# max() rather than sum(): every web pod reports the same database-wide
+# number.
+#
+# The second trigger holds one replica while any task is RUNNING. Its
+# comment below gives the reason.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: ox-worker
+  namespace: ox-keda
+spec:
+  scaleTargetRef:
+    name: ox-worker
+  minReplicaCount: 0
+  maxReplicaCount: 4
+  pollingInterval: 5
+  # Short so the check finishes in minutes. In production, start from KEDA's
+  # default of 300 seconds and the HPA's default scale-down window.
+  cooldownPeriod: 30
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 10
+  fallback:
+    failureThreshold: 3
+    replicas: 2
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.ox-keda.svc.cluster.local:9090
+        query: >-
+          max(django_ox_ready_tasks{job="django-ox",queue="reports"})
+          or (max(up{job="django-ox"}) == 1) * 0
+        # Eligible tasks per replica, equal to the worker's --concurrency=2.
+        # The gauge leaves out RUNNING tasks, so a higher value would scale
+        # workers down while READY work they could take is still waiting.
+        threshold: "2"
+        activationThreshold: "0"
+        ignoreNullValues: "false"
+    # One replica while any task is RUNNING. The reaper runs inside workers,
+    # so at 0 replicas nothing would reclaim a task whose worker was killed.
+    # "> bool 0" turns the RUNNING count into 1 or 0, and threshold "1"
+    # makes that one replica, however many tasks are RUNNING.
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.ox-keda.svc.cluster.local:9090
+        query: >-
+          (max(django_ox_tasks{job="django-ox",queue="reports",status="running"}) > bool 0)
+          or (max(up{job="django-ox"}) == 1) * 0
+        threshold: "1"
+        activationThreshold: "0"
+        ignoreNullValues: "false"

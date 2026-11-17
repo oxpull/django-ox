@@ -374,6 +374,7 @@ Use Context7 library id `/oxpull/django-ox` to look up the documentation.
 - [Choosing a backend](https://oxpull.com/django-ox/choosing/): sourced backend comparisons and when not to use django-ox.
 - [Production](https://oxpull.com/django-ox/production/): supervision, containers, shutdown, scaling, leases, databases and pruning.
 - [Monitoring](https://oxpull.com/django-ox/monitoring/): stats, health probes, Prometheus metrics, log events, retry, discard and admin.
+- [KEDA autoscaling](https://oxpull.com/django-ox/keda/): runnable example that scales workers from zero on django_ox_ready_tasks: trigger queries, fallback on monitoring failure, graceful scale-down, killed-worker recovery and network policies.
 - [Benchmarks](https://oxpull.com/django-ox/benchmarks/): throughput and latency measurements with their methods.
 - [API stability](https://oxpull.com/django-ox/stability/): public API, versioning, deprecation policy and supported versions.
 - [Changelog](https://oxpull.com/django-ox/changelog/): django-ox 1.9.1 changes and earlier releases.

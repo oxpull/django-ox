@@ -1,0 +1,95 @@
+# One ox_worker process per container. KEDA owns the replica count, from 0
+# to maxReplicaCount in k8s/60-scaledobject.yaml; the 0 here is the start.
+#
+# Database budget, per worker: concurrency task connections, one poll-loop
+# connection and one private lease-renewal connection, so concurrency + 2 = 4.
+# At maxReplicaCount 4 that is 16, under the database's max_connections of 40
+# with room for the web pods, the migrate Job and an operator's psql.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ox-worker
+  namespace: ox-keda
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ox-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ox-worker
+        ox-keda/db-client: "true"
+    spec:
+      # SIGTERM starts the drain. The grace period must outlast the longest
+      # task, or Kubernetes sends SIGKILL mid-task and leaves it to the reaper.
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: worker
+          image: ox-keda-app:dev
+          command:
+            - python
+            - manage.py
+            - ox_worker
+            - --queues=reports
+            - --concurrency=2
+            - --heartbeat-file=/run/ox/heartbeat
+            # Short so step 7 of the check finishes in minutes. The default
+            # is 300 seconds: a killed worker's task stays RUNNING that long
+            # before a reaper takes it back.
+            - --lock-timeout=60
+          envFrom:
+            - configMapRef:
+                name: ox-app
+          env:
+            - name: CONN_MAX_AGE
+              value: "600"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ox-keda
+                  key: db-password
+            - name: DJANGO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ox-keda
+                  key: django-secret-key
+          startupProbe:
+            exec:
+              command:
+                - python
+                - manage.py
+                - ox_health
+                - --heartbeat-file=/run/ox/heartbeat
+                - --max-heartbeat-age=60
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 24
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - manage.py
+                - ox_health
+                - --heartbeat-file=/run/ox/heartbeat
+                - --max-heartbeat-age=60
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: heartbeat
+              mountPath: /run/ox
+      volumes:
+        # Private to this pod: replicas must not share a heartbeat directory.
+        - name: heartbeat
+          emptyDir:
+            medium: Memory

@@ -76,6 +76,7 @@ nav:
   - Choosing a backend: choosing.md
   - Production: production.md
   - Monitoring: monitoring.md
+  - KEDA autoscaling: keda.md
   - Benchmarks: benchmarks.md
   - API stability: stability.md
   - For AI assistants: agents.md

@@ -275,6 +275,12 @@ which runs `ox_prune` for you and returns its counts:
 }
 ```
 
+The task runs on the `default` queue when `TASKS["default"]` accepts that
+name, and otherwise on the first queue in its `QUEUES`. Add `"queue_name"`
+to the entry to put it on a queue your workers' `--queues` serve. Its
+`include_failed` and `dry_run` keywords must be `True` or `False`. See
+[Pruning on a timer](production.md#pruning-on-a-timer).
+
 ## Make a task safe to run twice
 
 The one habit to build. Execution is at-least-once, so a task retries both
@@ -449,10 +455,11 @@ Timeouts are inert. `deadline()` and `remaining()` return `None`. A configured t
 
 ### Assert on the queue directly
 
-`django_ox.testing.assert_task_count()` reads the `OxTask` table itself, so
-it works whether a task is still queued or has already run and left its
-row behind. It matches by backend alias, queue and task path, with `args`
-and `kwargs` compared the same way `enqueue()` stores them:
+`django_ox.testing.assert_task_count()` is public and provisional. It
+reads the `OxTask` table itself, so it works whether a task is still
+queued or has already run and left its row behind. It matches by backend
+alias, queue and task path, and compares `args` and `kwargs` with the
+stored JSON values:
 
 ```python
 from django_ox.testing import assert_task_count
@@ -464,10 +471,15 @@ assert_task_count(
 ```
 
 A rolled-back enqueue is not counted, since the row behind it never
-existed. `args` and `kwargs` are matched after the same JSON round trip
-`enqueue()` applies before storing them, so a tuple in `args` matches a
-stored list, and a raw `datetime`, `UUID` or `Decimal` is rejected with
-`TypeError`: supply that value's own stored JSON representation instead.
+existed. `args` and `kwargs` are compared with the JSON values stored on
+the row, using Python equality. Leaving out `args` means no positional
+arguments, not any arguments, and `kwargs` works the same way. A tuple
+in `args` matches a stored list, and `True` equals `1`, so `args=[True]`
+matches a stored `[1]`. A value JSON does not represent directly is
+rejected with `TypeError`: a raw `datetime`, `UUID` or `Decimal`, and
+also `bytes` or a `range`, which `enqueue()` accepts and stores as a
+string and a list. Supply that value's own stored JSON representation
+instead.
 
 ### An isolated queue for one test
 
@@ -479,6 +491,7 @@ recipe, not a shipped fixture or pytest plugin:
 
 ```python
 import pytest
+from django.db import router
 from django_ox.models import OxTask
 from django_ox.testing import run_tasks
 
@@ -493,9 +506,9 @@ def isolated_run_tasks():
     # from setUpTestData or an earlier fixture is caught before it is ever
     # claimed. The returned `run` does not repeat the check, since by then
     # the only row it is meant to find is the one the test just enqueued.
-    if OxTask.objects.filter(
-        backend_name="default", queue_name=ISOLATED_QUEUE
-    ).exists():
+    # Read where enqueue() writes, which a replica router's reads are not.
+    rows = OxTask.objects.using(router.db_for_write(OxTask))
+    if rows.filter(backend_name="default", queue_name=ISOLATED_QUEUE).exists():
         raise ValueError(
             f"queue {ISOLATED_QUEUE!r} already holds rows; reserve a queue "
             "no other test or fixture writes to"
@@ -508,14 +521,19 @@ def isolated_run_tasks():
 ```
 
 ```python
+from django.tasks import task  # On Django 5.2: from django_tasks import task
+
+
 @task(queue_name=ISOLATED_QUEUE)
-def convert_video(path): ...
+def convert_video(path):
+    return f"converted {path}"
 
 
+@pytest.mark.django_db
 def test_convert_video(isolated_run_tasks):
     convert_video.enqueue("clip.mp4")
     [result] = isolated_run_tasks()
-    assert result.return_value is not None
+    assert result.return_value == "converted clip.mp4"
 ```
 
 Fixture setup runs before the test body, so the emptiness check sees only
@@ -530,11 +548,13 @@ failure behaviour directly.
 ## Optional coordination features
 
 [Unique tasks](features/unique-tasks.md), [batches](features/batches.md),
-[rate limiting](features/rate-limiting.md) and
+[rate limiting](features/rate-limiting.md),
+[concurrency limits](features/concurrency-limits.md) and
 [workflows](features/workflows.md) are included in django-ox through the
 optional `oxpull` app. They require Django 6.0+.
 `OxpullBackend`, `OxpullWorker` and the documented unique-task, batch and
-rate-limit entry points are stable. Workflows are provisional.
+rate-limit entry points are stable. Workflows and concurrency limits are
+provisional.
 See the [feature overview](features/index.md) for setup.
 
 `django_ox.stats` and `manage.py ox_health` do not require the optional app.

@@ -20,7 +20,9 @@ before it does any work, whatever ``--database`` said.
 
 That second part holds for the commands that probe and report. It must
 not hold for ``ox_worker``, which is a daemon: see
-``checks_the_database`` below.
+``checks_the_database`` below. ``ox_retry`` and ``ox_discard`` take no
+flag and work on the alias the router sends OxTask writes to; their checks
+are scoped to that alias for the same reason (``WriteAliasCommand``).
 """
 
 from __future__ import annotations
@@ -103,4 +105,22 @@ class DatabaseCommand(BaseCommand):
         return {
             **super().get_check_kwargs(options),
             "databases": [self.database(options)],
+        }
+
+
+class WriteAliasCommand(BaseCommand):
+    """
+    A command that works on the alias OxTask writes to and takes no
+    --database flag.
+
+    Its system checks are scoped to that alias, as DatabaseCommand scopes a
+    probe's. Left to Django 6.1's default they would open a connection to
+    every SQLite and MySQL alias in DATABASES, and an unrelated alias that
+    is unreachable would end the command before it did any work.
+    """
+
+    def get_check_kwargs(self, options: Any) -> dict[str | None, Any]:
+        return {
+            **super().get_check_kwargs(options),
+            "databases": [router.db_for_write(OxTask)],
         }

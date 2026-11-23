@@ -479,6 +479,41 @@ class TestTheChecksAreScopedToOneAlias:
         kwargs = command.get_check_kwargs({"database": None})
         assert kwargs["databases"] == [PRIMARY]
 
+    @pytest.mark.parametrize("name", ["ox_retry", "ox_discard"])
+    def test_commands_without_the_flag_check_the_write_alias(self, name, settings):
+        from django.core.management import load_command_class
+
+        settings.DATABASE_ROUTERS = [_ReplicaReadRouter()]
+        command = load_command_class("django_ox", name)
+        assert command.get_check_kwargs({})["databases"] == [PRIMARY]
+
+    @pytest.mark.parametrize("name", ["ox_retry", "ox_discard"])
+    def test_an_unreachable_other_alias_does_not_end_them(
+        self, name, settings, monkeypatch
+    ):
+        """
+        The effect rather than the argument: the checks these commands run
+        open no connection to an alias they do not work on.
+        """
+        from django.core import checks
+        from django.core.management import load_command_class
+
+        settings.DATABASE_ROUTERS = [_ReplicaReadRouter()]
+        connection = connections[REPLICA]
+        # The support check asks once per process and remembers; a suite
+        # that has already run has the answer cached.
+        monkeypatch.delitem(
+            connection.features.__dict__, "supports_json_field", raising=False
+        )
+
+        def unreachable():
+            raise OperationalError("could not connect to server")
+
+        monkeypatch.setattr(connection, "ensure_connection", unreachable)
+        command = load_command_class("django_ox", name)
+        # No raise: nothing the checks run opens the other alias.
+        checks.run_checks(**command.get_check_kwargs({}))
+
 
 @pytest.mark.django_db(databases=[REPLICA, PRIMARY])
 class TestTheWorkerStartsWithoutItsDatabase:

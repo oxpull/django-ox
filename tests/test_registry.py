@@ -137,6 +137,10 @@ class TestSettingsChannel:
         [
             ({"k": {}}, "missing 'task'"),
             ({"k": {"task": "tests.tasks.nope"}}, "cannot import task"),
+            (
+                {"k": {"task": "tests.refused_queue_on_import.refused"}},
+                "cannot import task .* is not valid for backend",
+            ),
             ({"k": {"task": "tests.tasks.add", "banana": 1}}, "unknown key"),
             (
                 {"k": {"task": "tests.tasks.add", "form": "tests.tasks.nope"}},

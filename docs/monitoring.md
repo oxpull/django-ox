@@ -92,7 +92,7 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. Deferred tasks do not count. |
 | `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. This measures queue-wide claim activity, not one worker's liveness. |
-| `--task-paths` | off | Fail when a READY or WAITING row's `task_path` no longer imports to a django.tasks Task, the rule a worker applies before running it. Reports each failing path with its row count and exception class, and exits 1. RUNNING and finished rows are not checked. One grouped query, then one import per distinct path; importing runs the task modules' import side effects, as worker startup does. The `OK:` line then ends with `task_paths=N`, the number of distinct paths checked. See [renaming a task](production.md#renaming-a-task). |
+| `--task-paths` | off | Fail when a READY or WAITING row's `task_path` no longer imports to a django.tasks Task, the rule a worker applies before running it. Reports each failing path with its row count and exception class, and exits 1. RUNNING and finished rows are not checked. One grouped query, then one import per distinct path; importing runs the task modules' import side effects, as worker startup does. Under MySQL's case-insensitive collations, paths that differ only in letter case are grouped as one and checked under one spelling, so after a rename that changes only letter case, rows left under the old spelling can go unreported while rows under the new one are queued. The `OK:` line then ends with `task_paths=N`, the number of distinct paths checked. See [renaming a task](production.md#renaming-a-task). |
 | `--database` | the alias `OxTask` writes to | Database alias to check. The figures come from that alias, so the check reports the queue your workers are running. |
 | `--heartbeat-file PATH` | off | Check the local file set written by `ox_worker --heartbeat-file PATH`, instead of the database. Reads metadata only and runs no system or migration checks. |
 | `--max-heartbeat-age SECONDS` | `60` | Maximum file age, inclusive. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds, including fractions. Must be finite and strictly positive. Requires `--heartbeat-file`. |
@@ -827,7 +827,7 @@ A failed connect while recording a stuck attempt logs
 | `limit` | `rate_limit_closed`, `rate_limit_reopened`, `rate_limit_row_adopted`, `rate_limit_uncounted`, `concurrency_limit_blocked`, `concurrency_limit_unblocked` | The configured limit name: a rate limit on the `rate_limit_*` events, a concurrency limit on the `concurrency_limit_*` events. |
 | `failures` | `rate_limit_closed` | The number of consecutive counting failures that caused admission under the limit to close. |
 | `stored_as` | `rate_limit_row_adopted` | The name stored on the window row that the database collation treats as equal to the configured limit name. |
-| `running` | `concurrency_limit_blocked`, `concurrency_limit_unblocked` | The number of covered RUNNING task rows the refresh counted. |
+| `running` | `concurrency_limit_blocked`, `concurrency_limit_unblocked` | The number of covered RUNNING task rows the refresh counted. A `max: 0` limit is never counted, so its `concurrency_limit_blocked` event reports 0, whatever is RUNNING. |
 | `max` | `concurrency_limit_blocked`, `concurrency_limit_unblocked` | The limit's configured `max`. |
 | `row_count` | `workflow_backstop_skipped` | The number of rows the workflow backstop could not lock. |
 | `table` | `workflow_backstop_skipped` | The table containing the rows the workflow backstop could not lock. |
@@ -1104,8 +1104,10 @@ The error reaches you, and your transaction has to start over.
 `ox_retry TASK_ID...` and `ox_discard TASK_ID...` run `retry_many()` and
 `discard_many()` from the command line on the ids given. `--queue` skips
 ids on any other queue, `--dry-run` reports what would move and writes
-nothing, and `--format json` prints the counts as one object. The flags
-are on the [Configuration](configuration.md#ox_retry) page.
+nothing, and `--format json` prints the counts as one object. Both
+commands are provisional, as [API stability](stability.md#public-api)
+lists. The flags are on the [Configuration](configuration.md#ox_retry)
+page.
 
 The actions write the table directly and send no `django.tasks` signal: a
 discard finishes the result without `task_finished`, and a retry requeues

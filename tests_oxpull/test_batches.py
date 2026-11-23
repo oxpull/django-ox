@@ -2351,3 +2351,24 @@ def test_a_reissued_add_sends_task_enqueued_for_each_attempt(monkeypatch):
     assert len(fired) == 2 and len(set(fired)) == 2
     assert committed == [result.id]
     assert OxTask.objects.count() == 1
+
+
+@pytest.mark.parametrize(
+    ("queues", "expected"),
+    [
+        (["default", "emails"], "default"),
+        (["zeta", "alpha"], "zeta"),
+        (("zeta", "alpha"), "zeta"),
+        # No declared order: the first name in sorted order, the same in every
+        # process whatever its hash seed.
+        ({"zeta", "alpha"}, "alpha"),
+        (frozenset({"zeta", "alpha"}), "alpha"),
+    ],
+)
+def test_the_reconciler_queue_follows_the_declared_queues(queues, expected):
+    from types import SimpleNamespace
+
+    from oxpull.batches import queue_accepted_by
+
+    backend = SimpleNamespace(queues=set(queues))
+    assert queue_accepted_by(backend, {"QUEUES": queues}) == expected

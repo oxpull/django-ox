@@ -2,15 +2,16 @@ import json
 import uuid
 from typing import Any
 
-from django.core.management.base import BaseCommand, CommandError, CommandParser
+from django.core.management.base import CommandError, CommandParser
 from django.db import router
 
 from django_ox import actions
+from django_ox.management._database import WriteAliasCommand
 from django_ox.models import OxTask
 from django_ox.tasks import MAX_ATTEMPTS_LIMIT
 
 
-class Command(BaseCommand):
+class Command(WriteAliasCommand):
     help = "Retry one or more failed or lost tasks."
 
     def add_arguments(self, parser: CommandParser) -> None:

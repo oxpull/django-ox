@@ -237,6 +237,19 @@ def test_stale_docs_pin_fails(tmp_path):
     )
 
 
+def test_a_stale_current_release_line_in_llms_txt_fails(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "docs" / "llms.txt").write_text(
+        "**Current release: django-ox 0.1.2, uploaded to PyPI on 2026-08-20.**\n",
+        "utf-8",
+    )
+    problems, _ = check_source(repo)
+    assert (
+        "llms.txt names django-ox 0.1.2 as the current release but this release "
+        "is 0.2.0"
+    ) in _messages(problems)
+
+
 def test_this_repository_is_consistent():
     """The gate applied to the tree it ships with, so a bump cannot skip it.
 
@@ -374,3 +387,15 @@ def test_the_migration_set_is_read_from_the_tree():
     shipped = read_migrations(REPO)
     assert shipped, "no migrations found in the source tree"
     assert all(re.match(r"^[0-9]{4}_", name) for name in shipped)
+
+
+def test_a_tag_cannot_carry_the_release_date_placeholder(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "docs" / "llms.txt").write_text(
+        "Current release: django-ox 0.2.0, uploaded to PyPI on RELEASE_DATE.\n",
+        "utf-8",
+    )
+    untagged, _ = check_source(repo)
+    assert "RELEASE_DATE" not in _messages(untagged)
+    tagged, _ = check_source(repo, tag="v0.2.0")
+    assert "llms.txt still says RELEASE_DATE; write the date" in _messages(tagged)

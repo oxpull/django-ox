@@ -1,13 +1,18 @@
+import importlib
 import json
+import sys
 from datetime import timedelta
 from io import StringIO
 
 import pytest
+from django.core import checks
 from django.core.management import call_command
 from django.db import router
 from django.utils import timezone
+from django.utils.module_loading import import_string
 
-from django_ox.compat import default_task_backend
+import django_ox
+from django_ox.compat import Task, default_task_backend
 from django_ox.maintenance import prune
 from django_ox.models import OxScheduleTick, OxTask
 from django_ox.testing import run_tasks
@@ -20,6 +25,8 @@ from .test_prune import make_old_rows, make_task
 from .test_prune_unreadable import insert_tick, only_on
 from .test_schedules import backdate_anchor, frozen_now, tasks_setting  # noqa: F401
 from .test_supervisor import start_worker, stop_worker, wait_for
+
+PRUNE_PATH = "django_ox.maintenance.prune"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -127,6 +134,24 @@ class TestPruneTask:
         assert result["task_rows"] == 1
         assert OxTask.objects.filter(pk__in=pks).exists()
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"include_failed": "false"},
+            {"include_failed": 1},
+            {"dry_run": "false"},
+            {"dry_run": None},
+        ],
+    )
+    def test_a_flag_that_is_not_a_bool_is_refused_before_any_delete(self, kwargs):
+        old_failed = make_old_rows(1, OxTask.Status.FAILED)
+        old_success = make_old_rows(1, OxTask.Status.SUCCESSFUL)
+
+        with pytest.raises(TypeError, match="must be True or False"):
+            prune.call(older_than="7d", **kwargs)
+
+        assert OxTask.objects.filter(pk__in=old_failed + old_success).count() == 2
+
     def test_invalid_older_than_fails_attempt_with_duration_message(self):
         res_handle = prune.enqueue(older_than="invalid_duration")
         run_tasks()
@@ -200,7 +225,7 @@ class TestPruneTask:
         assert "task_rows" not in captured.out
         assert "Deleted" not in captured.out
 
-    def test_worker_scheduled_execution(self, tmp_path):
+    def test_an_enqueued_prune_runs_in_an_ox_worker_process(self, tmp_path):
         make_old_rows(1, OxTask.Status.SUCCESSFUL)
         res_handle = prune.enqueue(older_than="7d")
         proc = start_worker(tmp_path, "--processes", "1", "--interval", "0.05")
@@ -307,3 +332,72 @@ class TestPruneTaskWiring:
         assert res_handle.return_value["task_rows"] == 2
         assert not OxTask.objects.using("alt").filter(pk__in=old).exists()
         assert OxTask.objects.using("default").filter(pk__in=on_default).count() == 2
+
+
+class TestThePruneTaskIsBuiltOnAccess:
+    """
+    `django_ox.maintenance` builds `prune` when it is looked up, on a queue
+    the default backend accepts, so importing the module validates nothing
+    against a backend and a QUEUES without "default" can still schedule it.
+    """
+
+    def test_the_stored_task_path_is_the_public_one(self):
+        assert prune.module_path == PRUNE_PATH
+        assert import_string(PRUNE_PATH).module_path == PRUNE_PATH
+
+    def test_each_lookup_is_a_new_task_equal_to_the_last(self):
+        first = import_string(PRUNE_PATH)
+        second = import_string(PRUNE_PATH)
+        assert isinstance(first, Task)
+        assert first == second
+        assert first is not second
+
+    @pytest.mark.parametrize(
+        ("queues", "expected"),
+        [
+            (["default", "emails"], "default"),
+            ([], "default"),
+            (["emails", "reports"], "emails"),
+            (["zeta", "alpha"], "zeta"),
+            (("zeta", "alpha"), "zeta"),
+            # No declared order: the first name in sorted order, the same in
+            # every process whatever its hash seed.
+            ({"zeta", "alpha"}, "alpha"),
+            (frozenset({"zeta", "alpha"}), "alpha"),
+        ],
+    )
+    def test_the_queue_is_one_the_default_backend_accepts(
+        self, settings, queues, expected
+    ):
+        settings.TASKS = {
+            "default": {"BACKEND": "django_ox.backend.OxBackend", "QUEUES": queues}
+        }
+        assert import_string(PRUNE_PATH).queue_name == expected
+
+    def test_dir_and_star_import_name_the_task_without_binding_it(self):
+        import django_ox.maintenance as module
+
+        assert "prune" in dir(module)
+        # `from django_ox.maintenance import *` binds each name in __all__
+        # through getattr, which is what this does.
+        assert module.__all__ == ["prune"]
+        star = {name: getattr(module, name) for name in module.__all__}
+        assert star["prune"] == import_string(PRUNE_PATH)
+        assert "prune" not in vars(module)
+
+    def test_queues_without_default_import_and_schedule_it(self, settings, monkeypatch):
+        settings.TASKS = {
+            "default": {
+                "BACKEND": "django_ox.backend.OxBackend",
+                "QUEUES": ["emails"],
+                "OPTIONS": {"SCHEDULES": PRUNE_SCHEDULE},
+            }
+        }
+        # Imported afresh, the way a process that has not imported it yet
+        # meets it: the module must import with this QUEUES, not only resolve.
+        monkeypatch.delitem(sys.modules, "django_ox.maintenance")
+        monkeypatch.delattr(django_ox, "maintenance", raising=False)
+        module = importlib.import_module("django_ox.maintenance")
+        assert module.prune.queue_name == "emails"
+        errors = default_task_backend.check()
+        assert [error.id for error in errors if error.level >= checks.ERROR] == []

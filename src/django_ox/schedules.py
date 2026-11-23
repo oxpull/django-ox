@@ -409,9 +409,13 @@ def schedules_from_options(
         if "phase" in config and "every" not in config:
             raise ImproperlyConfigured(f"{prefix}: 'phase' only applies to 'every'.")
 
+        # InvalidTask as well as ImportError: a task module whose `@task`
+        # declaration its backend refuses, a queue_name outside QUEUES say,
+        # raises it while it is imported, and left to escape it is a
+        # traceback out of the check that exists to report the entry.
         try:
             obj = import_string(config["task"])
-        except ImportError as exc:
+        except (ImportError, InvalidTask) as exc:
             raise ImproperlyConfigured(
                 f"{prefix}: cannot import task {config['task']!r} ({exc})."
             ) from exc

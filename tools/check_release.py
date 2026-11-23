@@ -178,6 +178,21 @@ def check_readme(version: str, repo: Path = REPO) -> list[str]:
                         f"release is {version}"
                     )
                 )
+    # docs/llms.txt is what AI assistants read first, and it names the current
+    # release in words rather than as a pin, so the pin pattern above misses it.
+    llms = repo / "docs" / "llms.txt"
+    if llms.exists():
+        text = llms.read_text(encoding="utf-8")
+        for match in re.finditer(
+            r"Current release: django-ox ([0-9]+\.[0-9]+\.[0-9]+)", text
+        ):
+            if match.group(1) != version:
+                problems.append(
+                    fail(
+                        f"llms.txt names django-ox {match.group(1)} as the current "
+                        f"release but this release is {version}"
+                    )
+                )
     return problems
 
 
@@ -255,6 +270,18 @@ def check_source(
             )
         else:
             notes.append(f"tag {tag} matches the declared version")
+        # The release date is written in as RELEASE_DATE while the release is
+        # prepared and replaced with the upload date before the tag.
+        for page in [
+            repo / "CHANGELOG.md",
+            repo / "README.md",
+            *sorted((repo / "docs").glob("*.md")),
+            repo / "docs" / "llms.txt",
+        ]:
+            if page.exists() and "RELEASE_DATE" in page.read_text("utf-8"):
+                problems.append(
+                    fail(f"{page.name} still says RELEASE_DATE; write the date")
+                )
 
     return problems, notes
 

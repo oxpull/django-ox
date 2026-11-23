@@ -358,6 +358,10 @@ reads each distinct task path among READY and WAITING rows, with its row
 count, in one grouped query, and imports each path under the rule the worker
 applies: the path must resolve to a django.tasks Task. Every path that fails
 is reported with its row count and exception class, and the command exits 1.
+Under MySQL's case-insensitive collations the check can miss a rename that
+changes only letter case: rows left under the old spelling are grouped with
+rows under the new one and checked under one spelling. Keeping the old name
+bound, as above, covers that case.
 `--queue` and `--database` scope the read as for the other database checks.
 Importing a task module runs the same import side effects as worker startup.
 Keep import-time output out of task modules: anything they print at import
@@ -1677,12 +1681,26 @@ Or from cron, or as a django-ox schedule pointed at
 The task takes `older_than`, `include_failed`, `queue`, `dry_run` and
 `batch_size`, the keyword forms of the `ox_prune` flags of the same name,
 with the command's defaults: seven days, FAILED and LOST rows kept, every
-queue, a real run, 1000 rows per DELETE. It returns the object
-`ox_prune --format json` prints, so each run's counts are kept on its
-task row. It prunes the alias `OxTask` writes to, as `ox_prune` does
-without `--database`; a worker started with `--database` for another
-alias doesn't change that. To prune another alias, run
-`ox_prune --database ALIAS` from cron or a timer.
+queue, a real run, 1000 rows per DELETE. `include_failed` and `dry_run`
+must be `True` or `False`. Anything else, the string `"false"` included,
+raises `TypeError` before any row is deleted. The other keywords keep
+the flags' meaning. The task returns the object `ox_prune --format json`
+prints, so each run's counts are kept on its task row.
+
+The task runs on the `default` queue when `TASKS["default"]` accepts
+that name. Otherwise it runs on the first queue of a `QUEUES` list or
+tuple, and on the first name in sorted order for any other `QUEUES`
+value, such as a set. A `queue_name` on the schedule entry overrides
+that. Set it when no worker's `--queues` includes the task's queue: a
+queue no worker serves keeps the task READY, and nothing is pruned. A
+queue the schedule's backend does not accept is `django_ox.E002`.
+
+The task prunes the alias `OxTask` writes to, as `ox_prune` does without
+`--database`. To prune another alias, run `ox_prune --database ALIAS`
+from cron or a timer. Keep this schedule, and every other, away from a
+worker started with `--database` for a different database: that worker
+enqueues every due settings schedule again on each dispatch pass. See
+[read replicas](configuration.md#read-replicas).
 
 Flag reference on the [Configuration](configuration.md#ox_prune) page.
 FAILED rows are kept by default so tracebacks survive until you have

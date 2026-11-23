@@ -414,6 +414,15 @@ and the schedule entry):
 python manage.py ox_prune --older-than 7d
 ```
 
+The `django_ox.maintenance.prune` task takes `older_than`,
+`include_failed`, `queue`, `dry_run` and `batch_size`, the keyword forms
+of the flags of the same name. `include_failed` and `dry_run` must be
+`True` or `False`; anything else raises `TypeError` before any row is
+deleted. The task runs on the `default` queue when `TASKS["default"]`
+accepts that name, and otherwise on the first queue in its `QUEUES`. A
+`queue_name` on the schedule entry overrides that, and a queue the
+schedule's backend does not accept is `django_ox.E002`.
+
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--queue` | all queues | Delete only this queue's task rows, so queues with different retention needs can be pruned separately. Same name and meaning as `ox_health --queue`. Old schedule ticks are still pruned for every schedule. |
@@ -464,7 +473,7 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. Tasks deferred to a future `run_after` do not count. |
 | `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. Measures fleet claim activity, not per-worker liveness. |
-| `--task-paths` | off | Fail when a READY or WAITING row's `task_path` no longer imports to a django.tasks Task, the rule a worker applies before running it. Reports each failing path with its row count and exception class, and exits 1. RUNNING and finished rows are not checked. One grouped query, then one import per distinct path; importing runs the task modules' import side effects, as worker startup does. The `OK:` line then ends with `task_paths=N`, the number of distinct paths checked. See [renaming a task](production.md#renaming-a-task). |
+| `--task-paths` | off | Fail when a READY or WAITING row's `task_path` no longer imports to a django.tasks Task, the rule a worker applies before running it. Reports each failing path with its row count and exception class, and exits 1. RUNNING and finished rows are not checked. One grouped query, then one import per distinct path; importing runs the task modules' import side effects, as worker startup does. Under MySQL's case-insensitive collations, paths that differ only in letter case are grouped as one and checked under one spelling, so after a rename that changes only letter case, rows left under the old spelling can go unreported while rows under the new one are queued. The `OK:` line then ends with `task_paths=N`, the number of distinct paths checked. See [renaming a task](production.md#renaming-a-task). |
 | `--database` | the alias `OxTask` writes to | Database alias to check. The figures come from that alias, so the check reports the queue your workers are running. |
 | `--heartbeat-file PATH` | off | Check the local file set written by `ox_worker --heartbeat-file PATH`, instead of the database. Reads metadata only, runs no system or migration checks, opens no database connection and constructs no task backend. Cannot be combined with `--database`, `--queue`, `--max-backlog`, `--max-age`, `--worker-timeout` or `--task-paths`. |
 | `--max-heartbeat-age SECONDS` | `60` | Maximum heartbeat age, inclusive. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds, including fractions. Must be finite and strictly positive. Requires `--heartbeat-file`. |
@@ -510,7 +519,8 @@ alert are on the
 
 ## ox_retry
 
-Retry one or more failed or lost tasks by primary key:
+`ox_retry` is provisional, as [API stability](stability.md#public-api)
+lists. It retries one or more failed or lost tasks by primary key:
 
 ```
 python manage.py ox_retry 550e8400-e29b-41d4-a716-446655440000
@@ -524,9 +534,12 @@ python manage.py ox_retry 550e8400-e29b-41d4-a716-446655440000
 
 Accepts one or more positional task IDs separated by whitespace. Execution delegates directly to `django_ox.actions.retry_many`, preserving attempts, advancing `lease_epoch`, and resetting task state to READY on the database alias `OxTask` writes to.
 
+A LOST task's last worker can still be alive somewhere. The higher lease number stops that worker writing anything over the retry. It does not stop the body that worker is running, so retrying such a task can run its body a second time. Make the body idempotent, as for any at-least-once task. See [Retrying and discarding](monitoring.md#retrying-and-discarding).
+
 ## ox_discard
 
-Discard one or more tasks without running them:
+`ox_discard` is provisional, as [API stability](stability.md#public-api)
+lists. It discards one or more tasks without running them:
 
 ```
 python manage.py ox_discard 550e8400-e29b-41d4-a716-446655440000
@@ -745,7 +758,20 @@ answer the write alias for django-ox's models. django-ox reads its own
 rows there anyway, so nothing else moves.
 
 **`ox_worker --database`.** The flag is not checked against the router. A
-worker pointed at another alias works on that one alone, while the admin,
-`stats` and `ox_health` without the flag read the router's alias.
-`django_ox.E008` constrains routers, not this flag. Leave it unset unless
-you mean it.
+worker pointed at another alias takes its tasks from that alias, while
+the admin, `stats` and `ox_health` without the flag read the router's
+alias. Schedule dispatch uses two aliases. The worker records each tick
+on its own alias, and the task is enqueued on the alias the router sends
+django-ox's writes to. When the two are one alias, tick and task commit
+in one transaction. When the worker's alias is a different database, the
+task commits and its tick does not. The worker then enqueues every due
+settings schedule again on each dispatch pass, about once a second at
+the default polling interval, and the task body runs each time. Run such
+a worker under settings that give its backend no `SCHEDULES`, and keep
+stored schedules off its database, or have the router, in that worker's
+process, send django-ox's writes to the worker's alias. On PostgreSQL
+and MySQL, a worker on a second alias for the router's own database
+fires settings schedules once per tick, with the task and its tick
+committed separately. Stored schedules fail to dispatch there.
+`django_ox.E008` constrains routers, not this flag. Leave it unset
+unless you mean it.

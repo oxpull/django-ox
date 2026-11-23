@@ -1,29 +1,45 @@
 """
 django_ox.testing.assert_task_count(): reading OxTask rows directly, with
 JSON-normalised matching on args and kwargs.
+
+The isolated-queue recipe in docs/patterns.md is reproduced below exactly as
+the page prints it, apart from its import lines, and
+test_the_recipe_here_is_the_one_on_the_page keeps the two the same.
 """
 
+import re
+from pathlib import Path
+
 import pytest
-from django.db import transaction
+from django.db import router, transaction
 from django.test import TestCase, TransactionTestCase
 
+from django_ox.compat import task
 from django_ox.models import OxTask
 from django_ox.testing import assert_task_count, run_tasks
 
 from . import testing_assertions_tasks as t
+from .test_replica_reads import PRIMARY, REPLICA, _ReplicaReadRouter, no_statement_on
 
 pytestmark = pytest.mark.django_db
 
 PATH = "tests.testing_assertions_tasks.note"
+PATTERNS = Path(__file__).resolve().parent.parent / "docs" / "patterns.md"
+
+# Must appear in this backend's own QUEUES list (a sibling of OPTIONS,
+# not inside it): TASKS["default"]["QUEUES"].
 ISOLATED_QUEUE = "isolated-recipe"
 
 
 @pytest.fixture
 def isolated_run_tasks():
-    """docs/patterns.md's isolated-queue recipe, reproduced to test it."""
-    if OxTask.objects.filter(
-        backend_name="default", queue_name=ISOLATED_QUEUE
-    ).exists():
+    # Checked once, here, before the test body enqueues anything: a row
+    # from setUpTestData or an earlier fixture is caught before it is ever
+    # claimed. The returned `run` does not repeat the check, since by then
+    # the only row it is meant to find is the one the test just enqueued.
+    # Read where enqueue() writes, which a replica router's reads are not.
+    rows = OxTask.objects.using(router.db_for_write(OxTask))
+    if rows.filter(backend_name="default", queue_name=ISOLATED_QUEUE).exists():
         raise ValueError(
             f"queue {ISOLATED_QUEUE!r} already holds rows; reserve a queue "
             "no other test or fixture writes to"
@@ -33,6 +49,42 @@ def isolated_run_tasks():
         return run_tasks(queues=[ISOLATED_QUEUE], **kwargs)
 
     return run
+
+
+@task(queue_name=ISOLATED_QUEUE)
+def convert_video(path):
+    return f"converted {path}"
+
+
+@pytest.mark.django_db
+def test_convert_video(isolated_run_tasks):
+    convert_video.enqueue("clip.mp4")
+    [result] = isolated_run_tasks()
+    assert result.return_value == "converted clip.mp4"
+
+
+def _recipe_blocks():
+    """The page's two code blocks for the recipe, without their import lines."""
+    text = PATTERNS.read_text()
+    section = text[text.index("### An isolated queue for one test") :]
+    section = section[: section.index("\n## ")]
+    blocks = re.findall(r"```python\n(.*?)```", section, re.DOTALL)
+    return [
+        "\n".join(
+            line
+            for line in block.splitlines()
+            if not line.startswith(("import ", "from "))
+        ).strip()
+        for block in blocks
+    ]
+
+
+def test_the_recipe_here_is_the_one_on_the_page():
+    blocks = _recipe_blocks()
+    assert len(blocks) == 2
+    source = Path(__file__).read_text()
+    for block in blocks:
+        assert block in source
 
 
 class TestAssertTaskCount(TestCase):
@@ -113,6 +165,21 @@ class TestAssertTaskCountUnderATransactionTestCase(TransactionTestCase):
             t.note.enqueue("hello")
             raise ValueError("roll back")
         assert_task_count(path=PATH, queue="default", args=["hello"], count=0)
+
+
+@pytest.mark.django_db(databases=[REPLICA, PRIMARY])
+class TestAssertTaskCountReadsTheWriteAlias:
+    """
+    Under a router that sends reads to a replica, the count comes from the
+    alias enqueue() wrote to, and the replica is never asked.
+    """
+
+    def test_a_read_replica_router_does_not_hide_the_row(self, settings):
+        settings.DATABASE_ROUTERS = [_ReplicaReadRouter()]
+        t.note.enqueue("hello")
+        assert OxTask.objects.using(PRIMARY).filter(task_path=PATH).count() == 1
+        with no_statement_on(REPLICA):
+            assert_task_count(path=PATH, queue="default", args=["hello"], count=1)
 
 
 class TestAssertTaskCountArguments:

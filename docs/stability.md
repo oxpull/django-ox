@@ -18,9 +18,10 @@ export names this page does not list; those names are not public.
   `TASK_TIMEOUT_GRACE`, `SCHEDULES` (with its documented per-schedule
   keys), and `WORKER_CLASS`, the dotted path of the `Worker` subclass
   `ox_worker` runs.
-- **The management commands** and their flags: `ox_worker`, `ox_prune`,
-  `ox_health`. `ox_worker`'s exit codes: 0 after a drain, 130 on a forced
-  exit, 75 when the worker recycles itself after a stuck task thread.
+- **The management commands** and their flags: `ox_worker`, `ox_prune`
+  and `ox_health`. `ox_retry` and `ox_discard` are public and provisional.
+  `ox_worker`'s exit codes: 0 after a drain, 130 on a forced exit, 75 when
+  the worker recycles itself after a stuck task thread.
   A worker that finishes under `--batch` or `--max-tasks` drains and exits
   0, even when task attempts or individual schedule dispatches failed.
   Task outcomes stay on their task rows; schedule-scoped failures are
@@ -33,6 +34,11 @@ export names this page does not list; those names are not public.
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   `128 + the signal number`, following the shell convention.
+- **The prune task** `django_ox.maintenance.prune` is stable: its dotted
+  path, as written in a schedule's `task`, the keyword names `older_than`,
+  `include_failed`, `queue`, `dry_run` and `batch_size` with their
+  defaults, and its return value, the object `ox_prune --format json`
+  prints.
 - **The stored-schedule write functions** `django_ox.stored.create_schedule`,
   `django_ox.stored.create_schedules`, `django_ox.stored.update_schedule` and
   `django_ox.stored.delete_schedule`.
@@ -118,9 +124,9 @@ export names this page does not list; those names are not public.
   `run_tasks()` drains due queued tasks through the configured worker
   class, including retries and backoff. It does not enforce timeouts.
   `run_tasks()` is public and provisional. `assert_task_count()` is
-  public and stable: its keyword-only signature
-  (`path`, `queue`, `count`, `backend`, `args`, `kwargs`) does not carry
-  `run_tasks()`'s provisional status.
+  public and provisional too. That covers its keyword-only signature
+  (`path`, `queue`, `count`, `backend`, `args`, `kwargs`) and how it
+  compares `args` and `kwargs` with the stored values.
 - **The database schema** of `OxTask` and `OxScheduleTick`, evolved only
   through shipped migrations.
 - **`django_ox.__version__`.**
@@ -220,11 +226,11 @@ model's non-schema helper methods are not part of the contract.
 In `django_ox.tasks`, only `PolicyTask` and `BackoffCallback` are public,
 with the provisional status above. `MAX_ATTEMPTS_LIMIT` and
 `validate_policy` are implementation details. In `django_ox.testing`, only
-`ImmediateBackend`, `DummyBackend` and `run_tasks` are public.
-`run_tasks` is provisional. `django_ox._run_tasks` and `Worker._task_body`
-are private implementation details. Timeout implementation classes and
-methods, including `TaskTimeouts.enabled` and `TaskTimeouts.for_attempt()`,
-are not public.
+`ImmediateBackend`, `DummyBackend`, `run_tasks` and `assert_task_count`
+are public. `run_tasks` and `assert_task_count` are provisional.
+`django_ox._run_tasks` and `Worker._task_body` are private implementation
+details. Timeout implementation classes and methods, including
+`TaskTimeouts.enabled` and `TaskTimeouts.for_attempt()`, are not public.
 
 ### Worker implementation details
 
@@ -359,8 +365,8 @@ process that shares a database before anything writes the new status. The
 release notes name the value, say how it reads through `django.tasks`, and
 give the upgrade and rollback steps.
 
-Pin accordingly: `django-ox~=1.9.1` accepts patch releases only;
-`django-ox~=1.9` accepts the current major line.
+Pin accordingly: `django-ox~=1.10.0` accepts patch releases only;
+`django-ox~=1.10` accepts 1.10 and every later release on the 1.x line.
 
 ## Deprecation policy
 
@@ -423,8 +429,9 @@ in `DATABASES`. Checking a SQLite or MySQL alias opens a connection and runs
 one query. The cost grows with the number of aliases, and every such command
 pays it. An alias that cannot be reached ends the command.
 
-`ox_prune`, `ox_health` in database mode, and `ox_import_beat_schedules`
-name the alias they work on and pass it to the checks. `ox_worker` passes
+`ox_prune`, `ox_retry`, `ox_discard`, `ox_health` in database mode, and
+`ox_import_beat_schedules` name the alias they work on and pass it to the
+checks. `ox_worker` passes
 an empty list, so no alias is checked. Its poll loop can keep retrying a
 database that refuses connections. Startup work before the loop, such as
 loading database-backed schedules, can still access the database.

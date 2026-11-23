@@ -346,12 +346,21 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   GHSA-gq8r-4ccg-vxcr, affecting 1.2.0 through 1.7.0.
 - `ox_prune --older-than 7d` deletes finished rows; FAILED rows stay unless
   `--include-failed`. READY, WAITING and RUNNING rows are never deleted.
-- `django_ox.maintenance.prune` is a task that runs `ox_prune` with
+- `django_ox.maintenance.prune` is a stable task that runs `ox_prune` with
   `--format json` and returns its counts. Its keywords `older_than`,
   `include_failed`, `queue`, `dry_run` and `batch_size` map to the flags of
-  the same name. Schedule it in `OPTIONS["SCHEDULES"]`. It prunes the alias
-  `OxTask` writes to, whatever `--database` the worker running it was
-  started with; prune another alias with `ox_prune --database` from cron.
+  the same name. `include_failed` and `dry_run` must be `True` or `False`;
+  anything else raises `TypeError` before any row is deleted. Schedule it
+  in `OPTIONS["SCHEDULES"]`. It runs on the `default` queue when
+  `TASKS["default"]` accepts that name. Otherwise it runs on the first
+  queue of a `QUEUES` list or tuple, and on the first name in sorted order
+  for any other `QUEUES` value, such as a set. Set `queue_name` on the
+  schedule entry to put it on a queue the workers' `--queues` serve; a
+  queue the schedule's backend does not accept is `django_ox.E002`. It
+  prunes the alias `OxTask` writes to; prune any other alias with
+  `ox_prune --database` from cron. Give no schedules to a worker started
+  with `--database` for a different database: it enqueues every due
+  settings schedule again on each dispatch pass.
 - For per-container loop-liveness, pair `ox_worker --heartbeat-file PATH`
   with `ox_health --heartbeat-file PATH --processes N`, matching the
   worker's process count. Use an absolute path in an existing, writable
@@ -389,11 +398,15 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   queue stats as Prometheus gauges. It has no authentication of its own;
   wrap it with `login_required` or restrict it by network.
 - Run `migrate` before rolling workers. Do not run it from the worker.
+  Then run `ox_health --task-paths` before the workers roll. It fails when
+  a READY or WAITING row's task path no longer imports to a Task.
 - `django_ox.actions.retry(result_id)` requeues a FAILED or LOST task for
   one more attempt. `django_ox.actions.discard(result_id)` closes a READY,
   WAITING, FAILED or LOST task without running it. Neither touches a RUNNING task.
   With `django.contrib.admin` installed, the task table appears in the admin
-  with the same two actions.
+  with the same two actions. The provisional commands `ox_retry TASK_ID...`
+  and `ox_discard TASK_ID...` do the same from the command line, with
+  `--queue`, `--dry-run` and `--format json`.
 - `OxTask.Status.WAITING` is used by workflows in the optional `oxpull`
   app. Workers never claim a waiting task, `ox_prune` never deletes it,
   and `retry` skips it. It reads as READY through `django.tasks`.
@@ -420,6 +433,10 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   Test timeout enforcement and worker infrastructure against a real
   worker. See [Run queued tasks in tests](patterns.md#run-queued-tasks-in-tests)
   for transaction and callback differences.
+  `django_ox.testing.assert_task_count()`, also public and provisional,
+  asserts how many `OxTask` rows match a backend alias, queue and task
+  path, and compares `args` and `kwargs` with the stored JSON values. See
+  [Assert on the queue directly](patterns.md#assert-on-the-queue-directly).
 - [Unique tasks, batches, rate limiting, concurrency limits and workflows](features/index.md)
   are included in django-ox through the optional `oxpull` app and require
   Django 6.0+. `OxpullBackend`, `OxpullWorker` and the documented
@@ -472,7 +489,7 @@ recent `last_claim_age`. Stop the worker with Ctrl-C; it drains and exits 0.
 
 ## Compatibility
 
-django-ox 1.9.1 supports Django 5.2 LTS through the `django-tasks` backport and Django 6.0 / 6.1 through core `django.tasks`. It requires Python 3.12+. CI covers Python 3.12-3.14, with PostgreSQL, MySQL 8 and SQLite.
+django-ox 1.10.0 supports Django 5.2 LTS through the `django-tasks` backport and Django 6.0 / 6.1 through core `django.tasks`. It requires Python 3.12+. CI covers Python 3.12-3.14, with PostgreSQL, MySQL 8 and SQLite.
 
 The optional `oxpull` app is included in the distribution and requires Django 6.0+. Projects that do not enable it can continue using django-ox on Django 5.2.
 
@@ -484,7 +501,8 @@ Use Context7 library id `/oxpull/django-ox` to look up the documentation.
 
 ## Links
 
-- [Changelog](changelog.md): django-ox 1.9.1 and earlier releases.
+- [Changelog](changelog.md): django-ox 1.10.0 and earlier releases.
+- [1.10.0 release notes](https://github.com/oxpull/django-ox/releases/tag/v1.10.0).
 - [1.9.1 release notes](https://github.com/oxpull/django-ox/releases/tag/v1.9.1).
 - [1.9.0 release notes](https://github.com/oxpull/django-ox/releases/tag/v1.9.0).
 - [Schedules in the database](stored-schedules.md):

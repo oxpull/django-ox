@@ -5,27 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.10.0] - 2026-11-24
+
+**Upgrading:** No database migration is required.
 
 ### Added
 
 - `django_ox.testing.assert_task_count()`, a read-only assertion that reads
-  the `OxTask` table directly, matching by backend alias, queue, task path,
-  and `args`/`kwargs` compared the same way `enqueue()` stores them. A
-  rolled-back enqueue is not counted. `docs/patterns.md` also documents an
-  isolated-queue `run_tasks()` pytest fixture recipe, with a repository
-  test, not a shipped fixture API.
+  the `OxTask` table directly, on the alias `OxTask` writes to. It matches
+  by backend alias, queue and task path, and compares `args` and `kwargs`
+  with the stored JSON values by Python equality, so `True` equals `1`. A
+  value `enqueue()` accepts but JSON does not represent directly, such as
+  `bytes` or a `range`, is refused with `TypeError`. A rolled-back enqueue
+  is not counted. The helper is public and provisional. `docs/patterns.md`
+  also documents an isolated-queue `run_tasks()` pytest fixture recipe,
+  with a repository test, not a shipped fixture API. The recipe checks
+  that its queue is empty on the alias `OxTask` writes to.
 - `ox_retry` and `ox_discard` management commands for scriptable recovery
   of tasks. Both commands take one or more task UUIDs, deduplicate them, and
   delegate to `django_ox.actions.retry_many` or `discard_many`. Both support
   `--queue` scoping, `--dry-run` to preview eligible vs. skipped counts
   without mutating tasks, and `--format json` for machine-readable output.
+  Both write to the alias `OxTask` writes to and run their system checks
+  against that alias only, as `ox_prune` and `ox_health` do, so an
+  unreachable unrelated alias does not end them. Both commands are
+  provisional.
 - `django_ox.maintenance.prune`, a task that runs `ox_prune --format json`
   and returns its counts, so retention can be scheduled from
   `OPTIONS["SCHEDULES"]` instead of an external timer. Its keywords
   `older_than`, `include_failed`, `queue`, `dry_run` and `batch_size` map
-  to the flags of the same name, with the same defaults. It prunes the
-  alias `OxTask` writes to, as `ox_prune` does without `--database`.
+  to the flags of the same name, with the same defaults. `include_failed`
+  and `dry_run` must be `True` or `False`; anything else raises `TypeError`
+  before any row is deleted. The task runs on the `default` queue when
+  `TASKS["default"]` accepts that name. Otherwise it runs on the first
+  queue of a `QUEUES` list or tuple, and on the first name in sorted order
+  for any other `QUEUES` value, such as a set. A `queue_name` on the
+  schedule entry overrides that, and a queue the schedule's backend does
+  not accept is `django_ox.E002`. It prunes the alias `OxTask` writes to,
+  as `ox_prune` does without `--database`. The task path, its keyword
+  names and defaults, and its return value are stable.
 - `ox_health --task-paths` fails when a READY or WAITING row's `task_path`
   no longer imports to a `django.tasks` Task, the rule a worker applies
   before running it. Each failing path is reported with its row count and
@@ -58,6 +76,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as 0. The example is not in the wheel or the sdist. The new KEDA
   autoscaling page covers the queries, the worker settings and the recorded
   run.
+
+### Fixed
+
+- A settings schedule entry whose task module raises `InvalidTask` on
+  import is now reported as `django_ox.E002`, as an `ImportError` is, and
+  a `SCHEDULABLE_TASKS` entry in the same state as `django_ox.E007`. In
+  1.9.1 the exception escaped as a traceback in both cases.
+- A reconciler task of the optional `oxpull` app now builds when `QUEUES`
+  is a set that omits `default`, on the first queue name in sorted order.
+  In 1.9.1 the lookup raised `TypeError`.
+
+### Known issues
+
+- When `ox_worker --database` names an alias for a database the router
+  does not send django-ox's writes to, the worker enqueues every due
+  settings schedule again on each dispatch pass. A pass runs about once a
+  second by default, so the scheduled task body runs repeatedly. That is
+  unchanged from 1.9.1. Run such a worker under settings that give its
+  backend no `SCHEDULES`, and keep stored schedules off its database. Or
+  have the router, in that worker's process, send django-ox's writes to
+  the worker's alias. "Read replicas" in `docs/configuration.md` now
+  describes the behaviour and the remedy.
 
 ## [1.9.1] - 2026-10-17
 
@@ -2496,7 +2536,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
-[Unreleased]: https://github.com/oxpull/django-ox/compare/v1.9.1...HEAD
+[1.10.0]: https://github.com/oxpull/django-ox/compare/v1.9.1...v1.10.0
 [1.9.1]: https://github.com/oxpull/django-ox/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/oxpull/django-ox/compare/v1.8.0...v1.9.0
 [1.7.0]: https://github.com/oxpull/django-ox/compare/v1.6.0...v1.7.0

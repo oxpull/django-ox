@@ -427,7 +427,15 @@ def queue_accepted_by(backend: Any, params: Any) -> str:
     # The declared order is the operator's own; sorted() is only a
     # fallback for a backend built outside settings.TASKS.
     configured = params.get("QUEUES") if isinstance(params, dict) else None
-    return str((configured or sorted(queues))[0])
+    # Only a list or tuple has a declared order. Any other iterable, a set
+    # say, takes the first name in sorted order, so every process picks the
+    # same queue whatever its hash seed.
+    ordered = (
+        configured
+        if isinstance(configured, (list, tuple)) and configured
+        else sorted(queues)
+    )
+    return str(ordered[0])
 
 
 def schedule_entry_hint(

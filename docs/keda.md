@@ -293,8 +293,10 @@ The recorded run peaked at 4 connections per worker and 16 in all, the whole bud
 worker exceeds `concurrency + 2` or the total reaches 40.
 
 Before you raise `maxReplicaCount`, multiply it by `concurrency + 2` and compare the result with your
-database's limit. Leave room for web pods, the migrate Job and an operator's `psql`. The workers set
-`CONN_MAX_AGE=600` so each one keeps its connections between tasks. The Production page's
+database's limit. If any task has a timeout, multiply by `concurrency + 3` instead: the timeout watchdog
+can open one more connection per worker, and the example sets no timeouts. Leave room for web pods, the
+migrate Job and an operator's `psql`. The workers set `CONN_MAX_AGE=600` so each one keeps its connections
+between tasks. The Production page's
 [Budget server capacity](production.md#budget-server-capacity) section has the numbers for Django's
 PostgreSQL pool.
 
@@ -346,7 +348,7 @@ What each step observed:
 | Scale up | 16 tasks of 40 s each brought 4 replicas within 7 s of enqueue. |
 | Scale down | READY reached 0 at 52 s. The HPA went to 1 replica at 55 s, and 3 pods got SIGTERM mid-task. |
 | Drain | Each of the 3 pods logged `draining 2 in-flight task(s)`, finished both tasks and stopped. The fourth pod stayed until every task was done. All 16 rows were SUCCESSFUL at about 88 s, each on its first attempt. KEDA scaled to 0 at 118 s and counted 0 scaler failures. |
-| Prune | After 4 tasks of 2 s, `ox_prune --queue=reports --older-than=0` deleted 20 rows. The sample was gone at the next reading and `up` stayed 1. KEDA read 0 with 0 failures. Replicas went from 1 to 0 about 26 s after the prune. |
+| Prune | After 4 tasks of 2 s, `ox_prune --queue=reports --older-than=0` deleted 20 rows. The sample was gone at the next reading and `up` stayed 1. KEDA read 0 with 0 failures. Replicas read 2, then 1, then 0 after the prune, reaching 0 about 26 s after it. |
 | Failed scrape | Scaling the web Deployment to 0 made `up` 0, and both triggers failed. KEDA counted 4 failures on each, went into fallback and ran 2 replicas. After web came back, the workers went back to 0. |
 | Prometheus down | Scaling Prometheus to 0 failed both triggers too. KEDA counted 5 failures on one and 4 on the other, went into fallback and ran 2 replicas. After recovery the workers went back to 0. |
 | Control | With `ignoreNullValues: "true"` and the web Deployment at 0, after 35 s: `up` 0, KEDA value 0, 0 failures, no fallback, 0 replicas. |

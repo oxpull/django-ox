@@ -128,6 +128,10 @@ class TestSchedulesFromOptions:
             ({"task": "tests.tasks.add", "cron": "0 0 30 2 *"}, "never match"),
             ({"task": "tests.tasks.missing", "cron": "* * * * *"}, "cannot import"),
             (
+                {"task": "tests.refused_queue_on_import.refused", "cron": "* * * * *"},
+                "cannot import task .* is not valid for backend",
+            ),
+            (
                 {"task": "tests.tasks.STATE", "cron": "* * * * *"},
                 "not a django.tasks Task",
             ),

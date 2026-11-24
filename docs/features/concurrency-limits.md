@@ -53,21 +53,28 @@ limit written next to its task would be enforced only when something else
 happened to import that module first. Declared here, it is visible to
 every worker and to `manage.py check`.
 
-`CONCURRENCY_LIMITS` takes effect only with `oxpull.backend.OxpullBackend`
-and `OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"`. Limits on an
-alias whose worker is not `OxpullWorker` or a subclass, or whose
-`WORKER_CLASS` is not a worker, are `oxpull.E011`, a hard system check
-error. Every limit would be ignored silently. `max` is a whole number, zero
-or more; `tasks` and `queues` are lists of strings; every queue must be one
-the backend accepts. Anything else is `oxpull.E010`, and so is a `tasks`
-entry that is not a task. The full rules are under
-[`oxpull` options](../configuration.md#oxpull-options). `OxpullWorker`
-refuses a malformed option when it is constructed, so one stops
-`ox_worker --skip-checks` as well. Two faults only the system checks
-catch: a `tasks` entry that is not a task (`oxpull.E010`), and limits on
-an alias whose worker is not `OxpullWorker` (`oxpull.E011`). Under
-`--skip-checks` the first starts a worker whose limit covers nothing
-under that path, and the second starts a worker that applies no limit.
+`CONCURRENCY_LIMITS` is checked only on an alias whose `BACKEND` is
+`oxpull.backend.OxpullBackend`, and applied only by a worker that is
+`oxpull.worker.OxpullWorker` or a subclass. Set both. On an alias using
+`django_ox.backend.OxBackend`, no system check reads the option. With
+`OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"` on that alias,
+the limits apply and `manage.py check` reports nothing about them.
+Without that worker, the limits are ignored and no check reports it.
+
+On an `OxpullBackend` alias, limits whose worker is not `OxpullWorker` or
+a subclass, or whose `WORKER_CLASS` is not a worker, are `oxpull.E011`, a
+hard system check error. Every limit would be ignored silently. `max` is
+a whole number, zero or more; `tasks` and `queues` are lists of strings;
+every queue must be one the backend accepts. Anything else is
+`oxpull.E010`, and so is a `tasks` entry that is not a task. The full
+rules are under [`oxpull` options](../configuration.md#oxpull-options).
+`OxpullWorker` refuses a malformed option when it is constructed, so one
+stops `ox_worker --skip-checks` as well. Two faults only the system
+checks catch: a `tasks` entry that is not a task (`oxpull.E010`), and
+limits on an alias whose worker is not `OxpullWorker` (`oxpull.E011`).
+Under `--skip-checks` the first starts a worker whose limit covers
+nothing under that path, and the second starts a worker that applies no
+limit.
 
 ## Deployment guarantees
 
@@ -116,9 +123,12 @@ Semantics, all deliberate:
 
 - **A blocked task stays READY.** It is not claimed, spends no attempt and
   no lease epoch, and is indistinguishable from other queued work.
-- **A blocked task does not hold up anything else.** The exclusion is
+- **Other work is still claimed past blocked tasks.** The exclusion is
   applied inside the claim's candidate select, on all three claim paths. A
   worker with a full limit still claims uncovered tasks on the same pass.
+  Every claim, including one that finds nothing, reads past the blocked
+  rows ahead of it in claim order, so claim time grows with the blocked
+  backlog. [Claim cost](#claim-cost) gives the size and the remedy.
 - **A task may belong to several limits.** It is claimable only when every
   one of them has room.
 - **Every RUNNING row counts.** The count covers every RUNNING row on the
@@ -189,14 +199,33 @@ A count that moves a limit across its `max` logs one DEBUG event on the
 `running`, `max` and `worker_id`, and both are logged on the transition
 only. A worker starts with nothing blocked, so its first count logs
 `concurrency_limit_blocked` for every limit already at its `max`, `max: 0`
-limits included. See [log events](../monitoring.md#log-events).
+limits included. A `max: 0` limit is never counted, so its event reports
+`running` as 0, whatever is RUNNING. See
+[log events](../monitoring.md#log-events).
 
 ## Claim cost
 
 Nothing when it is unused. With no `CONCURRENCY_LIMITS` configured, the
 claim SQL is exactly what it was. With limits, the cost is one COUNT per
-refresh: one SELECT counts every limit. A limit with `max: 0` needs no
-count, and a configuration whose limits are all 0 runs no count.
+refresh: one SELECT counts every limit. Claiming a covered task and
+writing its outcome each mark the worker's view stale, so the next claim
+counts again. That is about one extra SELECT per covered task. A limit
+with `max: 0` needs no count, and a configuration whose limits are all 0
+runs no count.
+
+Blocked rows add a second cost, which grows with the backlog. A blocked
+task stays READY, and every claim, including one that finds nothing,
+reads past the blocked rows ahead of it in claim order. Measured with
+200,000 blocked rows ahead of other work, a claim took tens of
+milliseconds on PostgreSQL and SQLite and hundreds of milliseconds on
+MySQL, against a few milliseconds or less without them.
+
+To keep other work clear of that cost, put the covered tasks on a queue
+of their own and run other work on workers whose `--queues` leave that
+queue out, as under
+[routing a queue to its own worker](../configuration.md#routing-a-queue-to-its-own-worker).
+Measured on MySQL, such a worker's claim stayed at a few milliseconds. A
+separate queue alone does not help a worker that serves every queue.
 
 Nothing is stored for a limit. The name is a settings key, and the count
 reads task rows.

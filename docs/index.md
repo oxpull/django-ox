@@ -100,10 +100,12 @@ coming back. The mechanics, and the one case to know about, are in
   for fleet alerting and optional local heartbeat probes, a Prometheus
   endpoint, structured log events, and an admin page with retry and discard.
 - [Unique tasks](features/unique-tasks.md), [batches](features/batches.md),
-  [rate limiting](features/rate-limiting.md) and
+  [rate limiting](features/rate-limiting.md),
+  [concurrency limits](features/concurrency-limits.md) and
   [workflows](features/workflows.md), through the optional `oxpull` app
   included in django-ox. These features require Django 6.0+.
-  Workflows are provisional. See [setup and API status](features/index.md).
+  Workflows and concurrency limits are provisional. See
+  [setup and API status](features/index.md).
 
 ## Install
 

@@ -107,10 +107,12 @@ coming back. The mechanics, and the one case to know about, are in
   for fleet alerting and optional local heartbeat probes, a Prometheus
   endpoint, structured log events, and an admin page with retry and discard.
 - [Unique tasks](features/unique-tasks.md), [batches](features/batches.md),
-  [rate limiting](features/rate-limiting.md) and
+  [rate limiting](features/rate-limiting.md),
+  [concurrency limits](features/concurrency-limits.md) and
   [workflows](features/workflows.md), through the optional `oxpull` app
   included in django-ox. These features require Django 6.0+.
-  Workflows are provisional. See [setup and API status](features/index.md).
+  Workflows and concurrency limits are provisional. See
+  [setup and API status](features/index.md).
 
 ## Install
 
@@ -244,7 +246,7 @@ Send a welcome email without running Redis or RabbitMQ. This guide uses django-o
 
 You will save a user and enqueue their welcome email inside the same `transaction.atomic()` block. Both rows commit, or neither does. No task is left behind for a signup that rolled back.
 
-Every command and output block below was run as written on Django 6.0 with SQLite. The guide calls out the changes for Django 5.2 LTS. django-ox also supports Django 6.1 and requires Python 3.12+.
+Every command and output block below was run as written on Django 6.0 with SQLite. The guide calls out what changes on Django 5.2 LTS and on Django 6.1. django-ox requires Python 3.12+.
 
 ## What you will build
 
@@ -275,8 +277,9 @@ On Django 5.2 LTS:
 from django_tasks import task
 ```
 
-django-ox itself handles both, and everything else on this page is the same
-on both versions.
+django-ox itself handles both. Step 1 adds a mail setting on Django 6.0
+and 5.2 LTS that a new Django 6.1 project leaves out. Everything else on
+this page is the same on every version.
 
 ## Step 1: Install django-ox and point the Tasks framework at it
 
@@ -299,7 +302,7 @@ On Django 5.2 LTS, install the backport with it:
 pip install "django-ox[backport]"
 ```
 
-Add the app, name the backend, and route email to the terminal for now:
+Add the app and name the backend:
 
 ```python
 # myproject/settings.py
@@ -314,15 +317,26 @@ TASKS = {
         "BACKEND": "django_ox.backend.OxBackend",
     }
 }
+```
 
+`TASKS` is Django's own setting. `django_ox` provides the backend, the
+worker command and the table the queue lives in.
+
+For this walk-through only, email is printed, not sent: the welcome
+email will appear in the worker's terminal instead of going anywhere. A
+project created by Django 6.1's `startproject` does that already,
+because its settings define `MAILERS` with the console backend. Leave
+those settings as they are. On Django 6.0 and 5.2 LTS, add this setting:
+
+```python
+# myproject/settings.py, on Django 6.0 and 5.2 LTS only
 # Print emails to the terminal instead of sending them.
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 ```
 
-`TASKS` is Django's own setting. `django_ox` provides the backend, the
-worker command and the table the queue lives in. The email backend is for
-this walk-through only: the welcome email will appear in the worker's
-terminal instead of going anywhere.
+Do not add it where `MAILERS` is defined. Django 6.1 refuses
+`EMAIL_BACKEND` beside `MAILERS`, and every `manage.py` command then
+fails with `ImproperlyConfigured`.
 
 Create the tables:
 
@@ -667,8 +681,9 @@ def sync_to_crm(context, user_id):
 `takes_context=True` asks the Tasks framework to pass a `TaskContext` as
 the first argument. Its `attempt` is the number of the attempt now running.
 
-Restart the worker in the second terminal, then enqueue the task from the
-shell and read it a couple of seconds later:
+Restart the worker in the second terminal. The shell does not reload code
+either, so close it with `exit()` and run `python manage.py shell` again.
+Then enqueue the task and read it a couple of seconds later:
 
 ```pycon
 >>> from accounts.tasks import sync_to_crm
@@ -1514,6 +1529,15 @@ and the schedule entry):
 python manage.py ox_prune --older-than 7d
 ```
 
+The `django_ox.maintenance.prune` task takes `older_than`,
+`include_failed`, `queue`, `dry_run` and `batch_size`, the keyword forms
+of the flags of the same name. `include_failed` and `dry_run` must be
+`True` or `False`; anything else raises `TypeError` before any row is
+deleted. The task runs on the `default` queue when `TASKS["default"]`
+accepts that name, and otherwise on the first queue in its `QUEUES`. A
+`queue_name` on the schedule entry overrides that, and a queue the
+schedule's backend does not accept is `django_ox.E002`.
+
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--queue` | all queues | Delete only this queue's task rows, so queues with different retention needs can be pruned separately. Same name and meaning as `ox_health --queue`. Old schedule ticks are still pruned for every schedule. |
@@ -1564,7 +1588,7 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. Tasks deferred to a future `run_after` do not count. |
 | `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. Measures fleet claim activity, not per-worker liveness. |
-| `--task-paths` | off | Fail when a READY or WAITING row's `task_path` no longer imports to a django.tasks Task, the rule a worker applies before running it. Reports each failing path with its row count and exception class, and exits 1. RUNNING and finished rows are not checked. One grouped query, then one import per distinct path; importing runs the task modules' import side effects, as worker startup does. The `OK:` line then ends with `task_paths=N`, the number of distinct paths checked. See [renaming a task](production.md#renaming-a-task). |
+| `--task-paths` | off | Fail when a READY or WAITING row's `task_path` no longer imports to a django.tasks Task, the rule a worker applies before running it. Reports each failing path with its row count and exception class, and exits 1. RUNNING and finished rows are not checked. One grouped query, then one import per distinct path; importing runs the task modules' import side effects, as worker startup does. Under MySQL's case-insensitive collations, paths that differ only in letter case are grouped as one and checked under one spelling, so after a rename that changes only letter case, rows left under the old spelling can go unreported while rows under the new one are queued. The `OK:` line then ends with `task_paths=N`, the number of distinct paths checked. See [renaming a task](production.md#renaming-a-task). |
 | `--database` | the alias `OxTask` writes to | Database alias to check. The figures come from that alias, so the check reports the queue your workers are running. |
 | `--heartbeat-file PATH` | off | Check the local file set written by `ox_worker --heartbeat-file PATH`, instead of the database. Reads metadata only, runs no system or migration checks, opens no database connection and constructs no task backend. Cannot be combined with `--database`, `--queue`, `--max-backlog`, `--max-age`, `--worker-timeout` or `--task-paths`. |
 | `--max-heartbeat-age SECONDS` | `60` | Maximum heartbeat age, inclusive. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds, including fractions. Must be finite and strictly positive. Requires `--heartbeat-file`. |
@@ -1610,7 +1634,8 @@ alert are on the
 
 ## ox_retry
 
-Retry one or more failed or lost tasks by primary key:
+`ox_retry` is provisional, as [API stability](stability.md#public-api)
+lists. It retries one or more failed or lost tasks by primary key:
 
 ```
 python manage.py ox_retry 550e8400-e29b-41d4-a716-446655440000
@@ -1624,9 +1649,12 @@ python manage.py ox_retry 550e8400-e29b-41d4-a716-446655440000
 
 Accepts one or more positional task IDs separated by whitespace. Execution delegates directly to `django_ox.actions.retry_many`, preserving attempts, advancing `lease_epoch`, and resetting task state to READY on the database alias `OxTask` writes to.
 
+A LOST task's last worker can still be alive somewhere. The higher lease number stops that worker writing anything over the retry. It does not stop the body that worker is running, so retrying such a task can run its body a second time. Make the body idempotent, as for any at-least-once task. See [Retrying and discarding](monitoring.md#retrying-and-discarding).
+
 ## ox_discard
 
-Discard one or more tasks without running them:
+`ox_discard` is provisional, as [API stability](stability.md#public-api)
+lists. It discards one or more tasks without running them:
 
 ```
 python manage.py ox_discard 550e8400-e29b-41d4-a716-446655440000
@@ -1845,10 +1873,23 @@ answer the write alias for django-ox's models. django-ox reads its own
 rows there anyway, so nothing else moves.
 
 **`ox_worker --database`.** The flag is not checked against the router. A
-worker pointed at another alias works on that one alone, while the admin,
-`stats` and `ox_health` without the flag read the router's alias.
-`django_ox.E008` constrains routers, not this flag. Leave it unset unless
-you mean it.
+worker pointed at another alias takes its tasks from that alias, while
+the admin, `stats` and `ox_health` without the flag read the router's
+alias. Schedule dispatch uses two aliases. The worker records each tick
+on its own alias, and the task is enqueued on the alias the router sends
+django-ox's writes to. When the two are one alias, tick and task commit
+in one transaction. When the worker's alias is a different database, the
+task commits and its tick does not. The worker then enqueues every due
+settings schedule again on each dispatch pass, about once a second at
+the default polling interval, and the task body runs each time. Run such
+a worker under settings that give its backend no `SCHEDULES`, and keep
+stored schedules off its database, or have the router, in that worker's
+process, send django-ox's writes to the worker's alias. On PostgreSQL
+and MySQL, a worker on a second alias for the router's own database
+fires settings schedules once per tick, with the task and its tick
+committed separately. Stored schedules fail to dispatch there.
+`django_ox.E008` constrains routers, not this flag. Leave it unset
+unless you mean it.
 
 ---
 
@@ -3662,10 +3703,18 @@ limit written next to its task would be enforced only when something else
 happened to import that module first. Declared here, it is visible to
 every worker and to `manage.py check`.
 
-`RATE_LIMITS`, `UNIQUE_TASKS` and `@unique` take effect only with
+`UNIQUE_TASKS` and `@unique` take effect only with
 `oxpull.backend.OxpullBackend`. On an alias still using
-`django_ox.backend.OxBackend`, nothing reads these settings:
-`manage.py check` is clean, and nothing is throttled or deduplicated.
+`django_ox.backend.OxBackend`, nothing reads them: `manage.py check` is
+clean, and nothing is deduplicated.
+
+`RATE_LIMITS` is checked only on an alias whose `BACKEND` is
+`oxpull.backend.OxpullBackend`, and applied by `OxpullWorker`. Set both.
+On an alias using `django_ox.backend.OxBackend`, no system check reads
+the option. With `WORKER_CLASS` set to `oxpull.worker.OxpullWorker` on
+that alias, the limits apply and `manage.py check` reports nothing about
+them. Without that worker, the limits are ignored and no check reports
+it.
 
 For aliases using `OxpullBackend`, `WORKER_CLASS` is required: it makes
 `ox_worker` run the worker that applies the limits. Configuring limits
@@ -3743,10 +3792,13 @@ Semantics, all deliberate:
   spends no attempt and no lease epoch. It is indistinguishable from any
   other queued task, and nothing in the reaper, the lease or the timeouts
   interacts with it.
-- **A throttled task does not hold up anything else.** The exclusion is
+- **Other work is still claimed past throttled tasks.** The exclusion is
   applied inside the claim's candidate select on all three claim paths,
   ahead of its ordering and its limit, so a worker whose limit is
   exhausted still claims other tasks and other queues on the same pass.
+  Every claim, including one that finds nothing, reads past the throttled
+  rows ahead of it in claim order, so claim time grows with the throttled
+  backlog. [Claim cost](#claim-cost) gives the size and the remedy.
 - **Windows are fixed and anchored at first use**, so a P-length interval
   straddling a boundary can carry twice the capacity. If what you are
   protecting counts per fixed minute, size N at half your true ceiling or
@@ -3825,6 +3877,19 @@ increment. A window roll costs a third. One roll lands per window per
 limit across the whole fleet; a worker that reads the expired window
 before the winner's write commits spends one more UPDATE, which matches
 no row.
+
+Throttled rows add a second cost, which grows with the backlog. A
+throttled task stays READY, and every claim, including one that finds
+nothing, reads past the throttled rows ahead of it in claim order.
+Measured with 200,000 throttled rows ahead of other work, a claim took
+tens of milliseconds on PostgreSQL and SQLite and hundreds of
+milliseconds on MySQL, against a few milliseconds or less without them.
+
+To keep other work clear of that cost, put the limited tasks on a queue
+of their own and run other work on workers whose `--queues` leave that
+queue out, as under
+[routing a queue to its own worker](../configuration.md#routing-a-queue-to-its-own-worker).
+A separate queue alone does not help a worker that serves every queue.
 
 The state is one row per limit name in `oxpull_oxpullratewindow`,
 forever. The table does not grow with traffic and needs no pruning.
@@ -3912,21 +3977,28 @@ limit written next to its task would be enforced only when something else
 happened to import that module first. Declared here, it is visible to
 every worker and to `manage.py check`.
 
-`CONCURRENCY_LIMITS` takes effect only with `oxpull.backend.OxpullBackend`
-and `OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"`. Limits on an
-alias whose worker is not `OxpullWorker` or a subclass, or whose
-`WORKER_CLASS` is not a worker, are `oxpull.E011`, a hard system check
-error. Every limit would be ignored silently. `max` is a whole number, zero
-or more; `tasks` and `queues` are lists of strings; every queue must be one
-the backend accepts. Anything else is `oxpull.E010`, and so is a `tasks`
-entry that is not a task. The full rules are under
-[`oxpull` options](../configuration.md#oxpull-options). `OxpullWorker`
-refuses a malformed option when it is constructed, so one stops
-`ox_worker --skip-checks` as well. Two faults only the system checks
-catch: a `tasks` entry that is not a task (`oxpull.E010`), and limits on
-an alias whose worker is not `OxpullWorker` (`oxpull.E011`). Under
-`--skip-checks` the first starts a worker whose limit covers nothing
-under that path, and the second starts a worker that applies no limit.
+`CONCURRENCY_LIMITS` is checked only on an alias whose `BACKEND` is
+`oxpull.backend.OxpullBackend`, and applied only by a worker that is
+`oxpull.worker.OxpullWorker` or a subclass. Set both. On an alias using
+`django_ox.backend.OxBackend`, no system check reads the option. With
+`OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"` on that alias,
+the limits apply and `manage.py check` reports nothing about them.
+Without that worker, the limits are ignored and no check reports it.
+
+On an `OxpullBackend` alias, limits whose worker is not `OxpullWorker` or
+a subclass, or whose `WORKER_CLASS` is not a worker, are `oxpull.E011`, a
+hard system check error. Every limit would be ignored silently. `max` is
+a whole number, zero or more; `tasks` and `queues` are lists of strings;
+every queue must be one the backend accepts. Anything else is
+`oxpull.E010`, and so is a `tasks` entry that is not a task. The full
+rules are under [`oxpull` options](../configuration.md#oxpull-options).
+`OxpullWorker` refuses a malformed option when it is constructed, so one
+stops `ox_worker --skip-checks` as well. Two faults only the system
+checks catch: a `tasks` entry that is not a task (`oxpull.E010`), and
+limits on an alias whose worker is not `OxpullWorker` (`oxpull.E011`).
+Under `--skip-checks` the first starts a worker whose limit covers
+nothing under that path, and the second starts a worker that applies no
+limit.
 
 ## Deployment guarantees
 
@@ -3975,9 +4047,12 @@ Semantics, all deliberate:
 
 - **A blocked task stays READY.** It is not claimed, spends no attempt and
   no lease epoch, and is indistinguishable from other queued work.
-- **A blocked task does not hold up anything else.** The exclusion is
+- **Other work is still claimed past blocked tasks.** The exclusion is
   applied inside the claim's candidate select, on all three claim paths. A
   worker with a full limit still claims uncovered tasks on the same pass.
+  Every claim, including one that finds nothing, reads past the blocked
+  rows ahead of it in claim order, so claim time grows with the blocked
+  backlog. [Claim cost](#claim-cost) gives the size and the remedy.
 - **A task may belong to several limits.** It is claimable only when every
   one of them has room.
 - **Every RUNNING row counts.** The count covers every RUNNING row on the
@@ -4048,14 +4123,33 @@ A count that moves a limit across its `max` logs one DEBUG event on the
 `running`, `max` and `worker_id`, and both are logged on the transition
 only. A worker starts with nothing blocked, so its first count logs
 `concurrency_limit_blocked` for every limit already at its `max`, `max: 0`
-limits included. See [log events](../monitoring.md#log-events).
+limits included. A `max: 0` limit is never counted, so its event reports
+`running` as 0, whatever is RUNNING. See
+[log events](../monitoring.md#log-events).
 
 ## Claim cost
 
 Nothing when it is unused. With no `CONCURRENCY_LIMITS` configured, the
 claim SQL is exactly what it was. With limits, the cost is one COUNT per
-refresh: one SELECT counts every limit. A limit with `max: 0` needs no
-count, and a configuration whose limits are all 0 runs no count.
+refresh: one SELECT counts every limit. Claiming a covered task and
+writing its outcome each mark the worker's view stale, so the next claim
+counts again. That is about one extra SELECT per covered task. A limit
+with `max: 0` needs no count, and a configuration whose limits are all 0
+runs no count.
+
+Blocked rows add a second cost, which grows with the backlog. A blocked
+task stays READY, and every claim, including one that finds nothing,
+reads past the blocked rows ahead of it in claim order. Measured with
+200,000 blocked rows ahead of other work, a claim took tens of
+milliseconds on PostgreSQL and SQLite and hundreds of milliseconds on
+MySQL, against a few milliseconds or less without them.
+
+To keep other work clear of that cost, put the covered tasks on a queue
+of their own and run other work on workers whose `--queues` leave that
+queue out, as under
+[routing a queue to its own worker](../configuration.md#routing-a-queue-to-its-own-worker).
+Measured on MySQL, such a worker's claim stayed at a few milliseconds. A
+separate queue alone does not help a worker that serves every queue.
 
 Nothing is stored for a limit. The name is a settings key, and the count
 reads task rows.
@@ -4733,6 +4827,12 @@ which runs `ox_prune` for you and returns its counts:
 }
 ```
 
+The task runs on the `default` queue when `TASKS["default"]` accepts that
+name, and otherwise on the first queue in its `QUEUES`. Add `"queue_name"`
+to the entry to put it on a queue your workers' `--queues` serve. Its
+`include_failed` and `dry_run` keywords must be `True` or `False`. See
+[Pruning on a timer](production.md#pruning-on-a-timer).
+
 ## Make a task safe to run twice
 
 The one habit to build. Execution is at-least-once, so a task retries both
@@ -4907,10 +5007,11 @@ Timeouts are inert. `deadline()` and `remaining()` return `None`. A configured t
 
 ### Assert on the queue directly
 
-`django_ox.testing.assert_task_count()` reads the `OxTask` table itself, so
-it works whether a task is still queued or has already run and left its
-row behind. It matches by backend alias, queue and task path, with `args`
-and `kwargs` compared the same way `enqueue()` stores them:
+`django_ox.testing.assert_task_count()` is public and provisional. It
+reads the `OxTask` table itself, so it works whether a task is still
+queued or has already run and left its row behind. It matches by backend
+alias, queue and task path, and compares `args` and `kwargs` with the
+stored JSON values:
 
 ```python
 from django_ox.testing import assert_task_count
@@ -4922,10 +5023,15 @@ assert_task_count(
 ```
 
 A rolled-back enqueue is not counted, since the row behind it never
-existed. `args` and `kwargs` are matched after the same JSON round trip
-`enqueue()` applies before storing them, so a tuple in `args` matches a
-stored list, and a raw `datetime`, `UUID` or `Decimal` is rejected with
-`TypeError`: supply that value's own stored JSON representation instead.
+existed. `args` and `kwargs` are compared with the JSON values stored on
+the row, using Python equality. Leaving out `args` means no positional
+arguments, not any arguments, and `kwargs` works the same way. A tuple
+in `args` matches a stored list, and `True` equals `1`, so `args=[True]`
+matches a stored `[1]`. A value JSON does not represent directly is
+rejected with `TypeError`: a raw `datetime`, `UUID` or `Decimal`, and
+also `bytes` or a `range`, which `enqueue()` accepts and stores as a
+string and a list. Supply that value's own stored JSON representation
+instead.
 
 ### An isolated queue for one test
 
@@ -4937,6 +5043,7 @@ recipe, not a shipped fixture or pytest plugin:
 
 ```python
 import pytest
+from django.db import router
 from django_ox.models import OxTask
 from django_ox.testing import run_tasks
 
@@ -4951,9 +5058,9 @@ def isolated_run_tasks():
     # from setUpTestData or an earlier fixture is caught before it is ever
     # claimed. The returned `run` does not repeat the check, since by then
     # the only row it is meant to find is the one the test just enqueued.
-    if OxTask.objects.filter(
-        backend_name="default", queue_name=ISOLATED_QUEUE
-    ).exists():
+    # Read where enqueue() writes, which a replica router's reads are not.
+    rows = OxTask.objects.using(router.db_for_write(OxTask))
+    if rows.filter(backend_name="default", queue_name=ISOLATED_QUEUE).exists():
         raise ValueError(
             f"queue {ISOLATED_QUEUE!r} already holds rows; reserve a queue "
             "no other test or fixture writes to"
@@ -4966,14 +5073,19 @@ def isolated_run_tasks():
 ```
 
 ```python
+from django.tasks import task  # On Django 5.2: from django_tasks import task
+
+
 @task(queue_name=ISOLATED_QUEUE)
-def convert_video(path): ...
+def convert_video(path):
+    return f"converted {path}"
 
 
+@pytest.mark.django_db
 def test_convert_video(isolated_run_tasks):
     convert_video.enqueue("clip.mp4")
     [result] = isolated_run_tasks()
-    assert result.return_value is not None
+    assert result.return_value == "converted clip.mp4"
 ```
 
 Fixture setup runs before the test body, so the emptiness check sees only
@@ -4988,11 +5100,13 @@ failure behaviour directly.
 ## Optional coordination features
 
 [Unique tasks](features/unique-tasks.md), [batches](features/batches.md),
-[rate limiting](features/rate-limiting.md) and
+[rate limiting](features/rate-limiting.md),
+[concurrency limits](features/concurrency-limits.md) and
 [workflows](features/workflows.md) are included in django-ox through the
 optional `oxpull` app. They require Django 6.0+.
 `OxpullBackend`, `OxpullWorker` and the documented unique-task, batch and
-rate-limit entry points are stable. Workflows are provisional.
+rate-limit entry points are stable. Workflows and concurrency limits are
+provisional.
 See the [feature overview](features/index.md) for setup.
 
 `django_ox.stats` and `manage.py ox_health` do not require the optional app.
@@ -6110,6 +6224,10 @@ reads each distinct task path among READY and WAITING rows, with its row
 count, in one grouped query, and imports each path under the rule the worker
 applies: the path must resolve to a django.tasks Task. Every path that fails
 is reported with its row count and exception class, and the command exits 1.
+Under MySQL's case-insensitive collations the check can miss a rename that
+changes only letter case: rows left under the old spelling are grouped with
+rows under the new one and checked under one spelling. Keeping the old name
+bound, as above, covers that case.
 `--queue` and `--database` scope the read as for the other database checks.
 Importing a task module runs the same import side effects as worker startup.
 Keep import-time output out of task modules: anything they print at import
@@ -7429,12 +7547,26 @@ Or from cron, or as a django-ox schedule pointed at
 The task takes `older_than`, `include_failed`, `queue`, `dry_run` and
 `batch_size`, the keyword forms of the `ox_prune` flags of the same name,
 with the command's defaults: seven days, FAILED and LOST rows kept, every
-queue, a real run, 1000 rows per DELETE. It returns the object
-`ox_prune --format json` prints, so each run's counts are kept on its
-task row. It prunes the alias `OxTask` writes to, as `ox_prune` does
-without `--database`; a worker started with `--database` for another
-alias doesn't change that. To prune another alias, run
-`ox_prune --database ALIAS` from cron or a timer.
+queue, a real run, 1000 rows per DELETE. `include_failed` and `dry_run`
+must be `True` or `False`. Anything else, the string `"false"` included,
+raises `TypeError` before any row is deleted. The other keywords keep
+the flags' meaning. The task returns the object `ox_prune --format json`
+prints, so each run's counts are kept on its task row.
+
+The task runs on the `default` queue when `TASKS["default"]` accepts
+that name. Otherwise it runs on the first queue of a `QUEUES` list or
+tuple, and on the first name in sorted order for any other `QUEUES`
+value, such as a set. A `queue_name` on the schedule entry overrides
+that. Set it when no worker's `--queues` includes the task's queue: a
+queue no worker serves keeps the task READY, and nothing is pruned. A
+queue the schedule's backend does not accept is `django_ox.E002`.
+
+The task prunes the alias `OxTask` writes to, as `ox_prune` does without
+`--database`. To prune another alias, run `ox_prune --database ALIAS`
+from cron or a timer. Keep this schedule, and every other, away from a
+worker started with `--database` for a different database: that worker
+enqueues every due settings schedule again on each dispatch pass. See
+[read replicas](configuration.md#read-replicas).
 
 Flag reference on the [Configuration](configuration.md#ox_prune) page.
 FAILED rows are kept by default so tracebacks survive until you have
@@ -7573,7 +7705,7 @@ python manage.py ox_health --max-backlog 1000 --max-age 600
 | `--max-backlog` | off | Fail when more than this many READY tasks are eligible to run. Deferred tasks do not count. |
 | `--max-age` | off | Fail when a READY task has been eligible to run for longer than this. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. |
 | `--worker-timeout` | off | Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds. This measures queue-wide claim activity, not one worker's liveness. |
-| `--task-paths` | off | Fail when a READY or WAITING row's `task_path` no longer imports to a django.tasks Task, the rule a worker applies before running it. Reports each failing path with its row count and exception class, and exits 1. RUNNING and finished rows are not checked. One grouped query, then one import per distinct path; importing runs the task modules' import side effects, as worker startup does. The `OK:` line then ends with `task_paths=N`, the number of distinct paths checked. See [renaming a task](production.md#renaming-a-task). |
+| `--task-paths` | off | Fail when a READY or WAITING row's `task_path` no longer imports to a django.tasks Task, the rule a worker applies before running it. Reports each failing path with its row count and exception class, and exits 1. RUNNING and finished rows are not checked. One grouped query, then one import per distinct path; importing runs the task modules' import side effects, as worker startup does. Under MySQL's case-insensitive collations, paths that differ only in letter case are grouped as one and checked under one spelling, so after a rename that changes only letter case, rows left under the old spelling can go unreported while rows under the new one are queued. The `OK:` line then ends with `task_paths=N`, the number of distinct paths checked. See [renaming a task](production.md#renaming-a-task). |
 | `--database` | the alias `OxTask` writes to | Database alias to check. The figures come from that alias, so the check reports the queue your workers are running. |
 | `--heartbeat-file PATH` | off | Check the local file set written by `ox_worker --heartbeat-file PATH`, instead of the database. Reads metadata only and runs no system or migration checks. |
 | `--max-heartbeat-age SECONDS` | `60` | Maximum file age, inclusive. Accepts `7d`, `24h`, `90m`, `45s`, or a plain number of seconds, including fractions. Must be finite and strictly positive. Requires `--heartbeat-file`. |
@@ -8308,7 +8440,7 @@ A failed connect while recording a stuck attempt logs
 | `limit` | `rate_limit_closed`, `rate_limit_reopened`, `rate_limit_row_adopted`, `rate_limit_uncounted`, `concurrency_limit_blocked`, `concurrency_limit_unblocked` | The configured limit name: a rate limit on the `rate_limit_*` events, a concurrency limit on the `concurrency_limit_*` events. |
 | `failures` | `rate_limit_closed` | The number of consecutive counting failures that caused admission under the limit to close. |
 | `stored_as` | `rate_limit_row_adopted` | The name stored on the window row that the database collation treats as equal to the configured limit name. |
-| `running` | `concurrency_limit_blocked`, `concurrency_limit_unblocked` | The number of covered RUNNING task rows the refresh counted. |
+| `running` | `concurrency_limit_blocked`, `concurrency_limit_unblocked` | The number of covered RUNNING task rows the refresh counted. A `max: 0` limit is never counted, so its `concurrency_limit_blocked` event reports 0, whatever is RUNNING. |
 | `max` | `concurrency_limit_blocked`, `concurrency_limit_unblocked` | The limit's configured `max`. |
 | `row_count` | `workflow_backstop_skipped` | The number of rows the workflow backstop could not lock. |
 | `table` | `workflow_backstop_skipped` | The table containing the rows the workflow backstop could not lock. |
@@ -8585,8 +8717,10 @@ The error reaches you, and your transaction has to start over.
 `ox_retry TASK_ID...` and `ox_discard TASK_ID...` run `retry_many()` and
 `discard_many()` from the command line on the ids given. `--queue` skips
 ids on any other queue, `--dry-run` reports what would move and writes
-nothing, and `--format json` prints the counts as one object. The flags
-are on the [Configuration](configuration.md#ox_retry) page.
+nothing, and `--format json` prints the counts as one object. Both
+commands are provisional, as [API stability](stability.md#public-api)
+lists. The flags are on the [Configuration](configuration.md#ox_retry)
+page.
 
 The actions write the table directly and send no `django.tasks` signal: a
 discard finishes the result without `task_finished`, and a retry requeues
@@ -8951,8 +9085,10 @@ The recorded run peaked at 4 connections per worker and 16 in all, the whole bud
 worker exceeds `concurrency + 2` or the total reaches 40.
 
 Before you raise `maxReplicaCount`, multiply it by `concurrency + 2` and compare the result with your
-database's limit. Leave room for web pods, the migrate Job and an operator's `psql`. The workers set
-`CONN_MAX_AGE=600` so each one keeps its connections between tasks. The Production page's
+database's limit. If any task has a timeout, multiply by `concurrency + 3` instead: the timeout watchdog
+can open one more connection per worker, and the example sets no timeouts. Leave room for web pods, the
+migrate Job and an operator's `psql`. The workers set `CONN_MAX_AGE=600` so each one keeps its connections
+between tasks. The Production page's
 [Budget server capacity](production.md#budget-server-capacity) section has the numbers for Django's
 PostgreSQL pool.
 
@@ -9004,7 +9140,7 @@ What each step observed:
 | Scale up | 16 tasks of 40 s each brought 4 replicas within 7 s of enqueue. |
 | Scale down | READY reached 0 at 52 s. The HPA went to 1 replica at 55 s, and 3 pods got SIGTERM mid-task. |
 | Drain | Each of the 3 pods logged `draining 2 in-flight task(s)`, finished both tasks and stopped. The fourth pod stayed until every task was done. All 16 rows were SUCCESSFUL at about 88 s, each on its first attempt. KEDA scaled to 0 at 118 s and counted 0 scaler failures. |
-| Prune | After 4 tasks of 2 s, `ox_prune --queue=reports --older-than=0` deleted 20 rows. The sample was gone at the next reading and `up` stayed 1. KEDA read 0 with 0 failures. Replicas went from 1 to 0 about 26 s after the prune. |
+| Prune | After 4 tasks of 2 s, `ox_prune --queue=reports --older-than=0` deleted 20 rows. The sample was gone at the next reading and `up` stayed 1. KEDA read 0 with 0 failures. Replicas read 2, then 1, then 0 after the prune, reaching 0 about 26 s after it. |
 | Failed scrape | Scaling the web Deployment to 0 made `up` 0, and both triggers failed. KEDA counted 4 failures on each, went into fallback and ran 2 replicas. After web came back, the workers went back to 0. |
 | Prometheus down | Scaling Prometheus to 0 failed both triggers too. KEDA counted 5 failures on one and 4 on the other, went into fallback and ran 2 replicas. After recovery the workers went back to 0. |
 | Control | With `ignoreNullValues: "true"` and the web Deployment at 0, after 35 s: `up` 0, KEDA value 0, 0 failures, no fallback, 0 replicas. |
@@ -9149,9 +9285,10 @@ export names this page does not list; those names are not public.
   `TASK_TIMEOUT_GRACE`, `SCHEDULES` (with its documented per-schedule
   keys), and `WORKER_CLASS`, the dotted path of the `Worker` subclass
   `ox_worker` runs.
-- **The management commands** and their flags: `ox_worker`, `ox_prune`,
-  `ox_health`. `ox_worker`'s exit codes: 0 after a drain, 130 on a forced
-  exit, 75 when the worker recycles itself after a stuck task thread.
+- **The management commands** and their flags: `ox_worker`, `ox_prune`
+  and `ox_health`. `ox_retry` and `ox_discard` are public and provisional.
+  `ox_worker`'s exit codes: 0 after a drain, 130 on a forced exit, 75 when
+  the worker recycles itself after a stuck task thread.
   A worker that finishes under `--batch` or `--max-tasks` drains and exits
   0, even when task attempts or individual schedule dispatches failed.
   Task outcomes stay on their task rows; schedule-scoped failures are
@@ -9164,6 +9301,11 @@ export names this page does not list; those names are not public.
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   `128 + the signal number`, following the shell convention.
+- **The prune task** `django_ox.maintenance.prune` is stable: its dotted
+  path, as written in a schedule's `task`, the keyword names `older_than`,
+  `include_failed`, `queue`, `dry_run` and `batch_size` with their
+  defaults, and its return value, the object `ox_prune --format json`
+  prints.
 - **The stored-schedule write functions** `django_ox.stored.create_schedule`,
   `django_ox.stored.create_schedules`, `django_ox.stored.update_schedule` and
   `django_ox.stored.delete_schedule`.
@@ -9249,9 +9391,9 @@ export names this page does not list; those names are not public.
   `run_tasks()` drains due queued tasks through the configured worker
   class, including retries and backoff. It does not enforce timeouts.
   `run_tasks()` is public and provisional. `assert_task_count()` is
-  public and stable: its keyword-only signature
-  (`path`, `queue`, `count`, `backend`, `args`, `kwargs`) does not carry
-  `run_tasks()`'s provisional status.
+  public and provisional too. That covers its keyword-only signature
+  (`path`, `queue`, `count`, `backend`, `args`, `kwargs`) and how it
+  compares `args` and `kwargs` with the stored values.
 - **The database schema** of `OxTask` and `OxScheduleTick`, evolved only
   through shipped migrations.
 - **`django_ox.__version__`.**
@@ -9351,11 +9493,11 @@ model's non-schema helper methods are not part of the contract.
 In `django_ox.tasks`, only `PolicyTask` and `BackoffCallback` are public,
 with the provisional status above. `MAX_ATTEMPTS_LIMIT` and
 `validate_policy` are implementation details. In `django_ox.testing`, only
-`ImmediateBackend`, `DummyBackend` and `run_tasks` are public.
-`run_tasks` is provisional. `django_ox._run_tasks` and `Worker._task_body`
-are private implementation details. Timeout implementation classes and
-methods, including `TaskTimeouts.enabled` and `TaskTimeouts.for_attempt()`,
-are not public.
+`ImmediateBackend`, `DummyBackend`, `run_tasks` and `assert_task_count`
+are public. `run_tasks` and `assert_task_count` are provisional.
+`django_ox._run_tasks` and `Worker._task_body` are private implementation
+details. Timeout implementation classes and methods, including
+`TaskTimeouts.enabled` and `TaskTimeouts.for_attempt()`, are not public.
 
 ### Worker implementation details
 
@@ -9490,8 +9632,8 @@ process that shares a database before anything writes the new status. The
 release notes name the value, say how it reads through `django.tasks`, and
 give the upgrade and rollback steps.
 
-Pin accordingly: `django-ox~=1.9.1` accepts patch releases only;
-`django-ox~=1.9` accepts the current major line.
+Pin accordingly: `django-ox~=1.10.0` accepts patch releases only;
+`django-ox~=1.10` accepts 1.10 and every later release on the 1.x line.
 
 ## Deprecation policy
 
@@ -9554,8 +9696,9 @@ in `DATABASES`. Checking a SQLite or MySQL alias opens a connection and runs
 one query. The cost grows with the number of aliases, and every such command
 pays it. An alias that cannot be reached ends the command.
 
-`ox_prune`, `ox_health` in database mode, and `ox_import_beat_schedules`
-name the alias they work on and pass it to the checks. `ox_worker` passes
+`ox_prune`, `ox_retry`, `ox_discard`, `ox_health` in database mode, and
+`ox_import_beat_schedules` name the alias they work on and pass it to the
+checks. `ox_worker` passes
 an empty list, so no alias is checked. Its poll loop can keep retrying a
 database that refuses connections. Startup work before the loop, such as
 loading database-backed schedules, can still access the database.
@@ -9949,12 +10092,21 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   GHSA-gq8r-4ccg-vxcr, affecting 1.2.0 through 1.7.0.
 - `ox_prune --older-than 7d` deletes finished rows; FAILED rows stay unless
   `--include-failed`. READY, WAITING and RUNNING rows are never deleted.
-- `django_ox.maintenance.prune` is a task that runs `ox_prune` with
+- `django_ox.maintenance.prune` is a stable task that runs `ox_prune` with
   `--format json` and returns its counts. Its keywords `older_than`,
   `include_failed`, `queue`, `dry_run` and `batch_size` map to the flags of
-  the same name. Schedule it in `OPTIONS["SCHEDULES"]`. It prunes the alias
-  `OxTask` writes to, whatever `--database` the worker running it was
-  started with; prune another alias with `ox_prune --database` from cron.
+  the same name. `include_failed` and `dry_run` must be `True` or `False`;
+  anything else raises `TypeError` before any row is deleted. Schedule it
+  in `OPTIONS["SCHEDULES"]`. It runs on the `default` queue when
+  `TASKS["default"]` accepts that name. Otherwise it runs on the first
+  queue of a `QUEUES` list or tuple, and on the first name in sorted order
+  for any other `QUEUES` value, such as a set. Set `queue_name` on the
+  schedule entry to put it on a queue the workers' `--queues` serve; a
+  queue the schedule's backend does not accept is `django_ox.E002`. It
+  prunes the alias `OxTask` writes to; prune any other alias with
+  `ox_prune --database` from cron. Give no schedules to a worker started
+  with `--database` for a different database: it enqueues every due
+  settings schedule again on each dispatch pass.
 - For per-container loop-liveness, pair `ox_worker --heartbeat-file PATH`
   with `ox_health --heartbeat-file PATH --processes N`, matching the
   worker's process count. Use an absolute path in an existing, writable
@@ -9992,11 +10144,15 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   queue stats as Prometheus gauges. It has no authentication of its own;
   wrap it with `login_required` or restrict it by network.
 - Run `migrate` before rolling workers. Do not run it from the worker.
+  Then run `ox_health --task-paths` before the workers roll. It fails when
+  a READY or WAITING row's task path no longer imports to a Task.
 - `django_ox.actions.retry(result_id)` requeues a FAILED or LOST task for
   one more attempt. `django_ox.actions.discard(result_id)` closes a READY,
   WAITING, FAILED or LOST task without running it. Neither touches a RUNNING task.
   With `django.contrib.admin` installed, the task table appears in the admin
-  with the same two actions.
+  with the same two actions. The provisional commands `ox_retry TASK_ID...`
+  and `ox_discard TASK_ID...` do the same from the command line, with
+  `--queue`, `--dry-run` and `--format json`.
 - `OxTask.Status.WAITING` is used by workflows in the optional `oxpull`
   app. Workers never claim a waiting task, `ox_prune` never deletes it,
   and `retry` skips it. It reads as READY through `django.tasks`.
@@ -10023,6 +10179,10 @@ and [earlier security advisory](https://github.com/oxpull/django-ox/security/adv
   Test timeout enforcement and worker infrastructure against a real
   worker. See [Run queued tasks in tests](patterns.md#run-queued-tasks-in-tests)
   for transaction and callback differences.
+  `django_ox.testing.assert_task_count()`, also public and provisional,
+  asserts how many `OxTask` rows match a backend alias, queue and task
+  path, and compares `args` and `kwargs` with the stored JSON values. See
+  [Assert on the queue directly](patterns.md#assert-on-the-queue-directly).
 - [Unique tasks, batches, rate limiting, concurrency limits and workflows](features/index.md)
   are included in django-ox through the optional `oxpull` app and require
   Django 6.0+. `OxpullBackend`, `OxpullWorker` and the documented
@@ -10075,7 +10235,7 @@ recent `last_claim_age`. Stop the worker with Ctrl-C; it drains and exits 0.
 
 ## Compatibility
 
-django-ox 1.9.1 supports Django 5.2 LTS through the `django-tasks` backport and Django 6.0 / 6.1 through core `django.tasks`. It requires Python 3.12+. CI covers Python 3.12-3.14, with PostgreSQL, MySQL 8 and SQLite.
+django-ox 1.10.0 supports Django 5.2 LTS through the `django-tasks` backport and Django 6.0 / 6.1 through core `django.tasks`. It requires Python 3.12+. CI covers Python 3.12-3.14, with PostgreSQL, MySQL 8 and SQLite.
 
 The optional `oxpull` app is included in the distribution and requires Django 6.0+. Projects that do not enable it can continue using django-ox on Django 5.2.
 
@@ -10087,7 +10247,8 @@ Use Context7 library id `/oxpull/django-ox` to look up the documentation.
 
 ## Links
 
-- [Changelog](changelog.md): django-ox 1.9.1 and earlier releases.
+- [Changelog](changelog.md): django-ox 1.10.0 and earlier releases.
+- [1.10.0 release notes](https://github.com/oxpull/django-ox/releases/tag/v1.10.0).
 - [1.9.1 release notes](https://github.com/oxpull/django-ox/releases/tag/v1.9.1).
 - [1.9.0 release notes](https://github.com/oxpull/django-ox/releases/tag/v1.9.0).
 - [Schedules in the database](stored-schedules.md):
@@ -10113,27 +10274,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.10.0] - 2026-11-24
+
+**Upgrading:** No database migration is required.
 
 ### Added
 
 - `django_ox.testing.assert_task_count()`, a read-only assertion that reads
-  the `OxTask` table directly, matching by backend alias, queue, task path,
-  and `args`/`kwargs` compared the same way `enqueue()` stores them. A
-  rolled-back enqueue is not counted. `docs/patterns.md` also documents an
-  isolated-queue `run_tasks()` pytest fixture recipe, with a repository
-  test, not a shipped fixture API.
+  the `OxTask` table directly, on the alias `OxTask` writes to. It matches
+  by backend alias, queue and task path, and compares `args` and `kwargs`
+  with the stored JSON values by Python equality, so `True` equals `1`. A
+  value `enqueue()` accepts but JSON does not represent directly, such as
+  `bytes` or a `range`, is refused with `TypeError`. A rolled-back enqueue
+  is not counted. The helper is public and provisional. `docs/patterns.md`
+  also documents an isolated-queue `run_tasks()` pytest fixture recipe,
+  with a repository test, not a shipped fixture API. The recipe checks
+  that its queue is empty on the alias `OxTask` writes to.
 - `ox_retry` and `ox_discard` management commands for scriptable recovery
   of tasks. Both commands take one or more task UUIDs, deduplicate them, and
   delegate to `django_ox.actions.retry_many` or `discard_many`. Both support
   `--queue` scoping, `--dry-run` to preview eligible vs. skipped counts
   without mutating tasks, and `--format json` for machine-readable output.
+  Both write to the alias `OxTask` writes to and run their system checks
+  against that alias only, as `ox_prune` and `ox_health` do, so an
+  unreachable unrelated alias does not end them. Both commands are
+  provisional.
 - `django_ox.maintenance.prune`, a task that runs `ox_prune --format json`
   and returns its counts, so retention can be scheduled from
   `OPTIONS["SCHEDULES"]` instead of an external timer. Its keywords
   `older_than`, `include_failed`, `queue`, `dry_run` and `batch_size` map
-  to the flags of the same name, with the same defaults. It prunes the
-  alias `OxTask` writes to, as `ox_prune` does without `--database`.
+  to the flags of the same name, with the same defaults. `include_failed`
+  and `dry_run` must be `True` or `False`; anything else raises `TypeError`
+  before any row is deleted. The task runs on the `default` queue when
+  `TASKS["default"]` accepts that name. Otherwise it runs on the first
+  queue of a `QUEUES` list or tuple, and on the first name in sorted order
+  for any other `QUEUES` value, such as a set. A `queue_name` on the
+  schedule entry overrides that, and a queue the schedule's backend does
+  not accept is `django_ox.E002`. It prunes the alias `OxTask` writes to,
+  as `ox_prune` does without `--database`. The task path, its keyword
+  names and defaults, and its return value are stable.
 - `ox_health --task-paths` fails when a READY or WAITING row's `task_path`
   no longer imports to a `django.tasks` Task, the rule a worker applies
   before running it. Each failing path is reported with its row count and
@@ -10166,6 +10345,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as 0. The example is not in the wheel or the sdist. The new KEDA
   autoscaling page covers the queries, the worker settings and the recorded
   run.
+
+### Fixed
+
+- A settings schedule entry whose task module raises `InvalidTask` on
+  import is now reported as `django_ox.E002`, as an `ImportError` is, and
+  a `SCHEDULABLE_TASKS` entry in the same state as `django_ox.E007`. In
+  1.9.1 the exception escaped as a traceback in both cases.
+- A reconciler task of the optional `oxpull` app now builds when `QUEUES`
+  is a set that omits `default`, on the first queue name in sorted order.
+  In 1.9.1 the lookup raised `TypeError`.
+
+### Known issues
+
+- When `ox_worker --database` names an alias for a database the router
+  does not send django-ox's writes to, the worker enqueues every due
+  settings schedule again on each dispatch pass. A pass runs about once a
+  second by default, so the scheduled task body runs repeatedly. That is
+  unchanged from 1.9.1. Run such a worker under settings that give its
+  backend no `SCHEDULES`, and keep stored schedules off its database. Or
+  have the router, in that worker's process, send django-ox's writes to
+  the worker's alias. "Read replicas" in `docs/configuration.md` now
+  describes the behaviour and the remedy.
 
 ## [1.9.1] - 2026-10-17
 
@@ -12604,7 +12805,7 @@ Initial release.
   the public API surface, the pre-1.0 SemVer rule, the deprecation
   window, and the supported Python and Django matrix.
 
-[Unreleased]: https://github.com/oxpull/django-ox/compare/v1.9.1...HEAD
+[1.10.0]: https://github.com/oxpull/django-ox/compare/v1.9.1...v1.10.0
 [1.9.1]: https://github.com/oxpull/django-ox/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/oxpull/django-ox/compare/v1.8.0...v1.9.0
 [1.7.0]: https://github.com/oxpull/django-ox/compare/v1.6.0...v1.7.0

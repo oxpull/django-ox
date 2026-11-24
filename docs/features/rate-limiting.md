@@ -66,10 +66,18 @@ limit written next to its task would be enforced only when something else
 happened to import that module first. Declared here, it is visible to
 every worker and to `manage.py check`.
 
-`RATE_LIMITS`, `UNIQUE_TASKS` and `@unique` take effect only with
+`UNIQUE_TASKS` and `@unique` take effect only with
 `oxpull.backend.OxpullBackend`. On an alias still using
-`django_ox.backend.OxBackend`, nothing reads these settings:
-`manage.py check` is clean, and nothing is throttled or deduplicated.
+`django_ox.backend.OxBackend`, nothing reads them: `manage.py check` is
+clean, and nothing is deduplicated.
+
+`RATE_LIMITS` is checked only on an alias whose `BACKEND` is
+`oxpull.backend.OxpullBackend`, and applied by `OxpullWorker`. Set both.
+On an alias using `django_ox.backend.OxBackend`, no system check reads
+the option. With `WORKER_CLASS` set to `oxpull.worker.OxpullWorker` on
+that alias, the limits apply and `manage.py check` reports nothing about
+them. Without that worker, the limits are ignored and no check reports
+it.
 
 For aliases using `OxpullBackend`, `WORKER_CLASS` is required: it makes
 `ox_worker` run the worker that applies the limits. Configuring limits
@@ -147,10 +155,13 @@ Semantics, all deliberate:
   spends no attempt and no lease epoch. It is indistinguishable from any
   other queued task, and nothing in the reaper, the lease or the timeouts
   interacts with it.
-- **A throttled task does not hold up anything else.** The exclusion is
+- **Other work is still claimed past throttled tasks.** The exclusion is
   applied inside the claim's candidate select on all three claim paths,
   ahead of its ordering and its limit, so a worker whose limit is
   exhausted still claims other tasks and other queues on the same pass.
+  Every claim, including one that finds nothing, reads past the throttled
+  rows ahead of it in claim order, so claim time grows with the throttled
+  backlog. [Claim cost](#claim-cost) gives the size and the remedy.
 - **Windows are fixed and anchored at first use**, so a P-length interval
   straddling a boundary can carry twice the capacity. If what you are
   protecting counts per fixed minute, size N at half your true ceiling or
@@ -229,6 +240,19 @@ increment. A window roll costs a third. One roll lands per window per
 limit across the whole fleet; a worker that reads the expired window
 before the winner's write commits spends one more UPDATE, which matches
 no row.
+
+Throttled rows add a second cost, which grows with the backlog. A
+throttled task stays READY, and every claim, including one that finds
+nothing, reads past the throttled rows ahead of it in claim order.
+Measured with 200,000 throttled rows ahead of other work, a claim took
+tens of milliseconds on PostgreSQL and SQLite and hundreds of
+milliseconds on MySQL, against a few milliseconds or less without them.
+
+To keep other work clear of that cost, put the limited tasks on a queue
+of their own and run other work on workers whose `--queues` leave that
+queue out, as under
+[routing a queue to its own worker](../configuration.md#routing-a-queue-to-its-own-worker).
+A separate queue alone does not help a worker that serves every queue.
 
 The state is one row per limit name in `oxpull_oxpullratewindow`,
 forever. The table does not grow with traffic and needs no pruning.

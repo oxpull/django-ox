@@ -264,19 +264,21 @@ def assert_task_count(
     Assert that exactly `count` OxTask rows in `backend`'s `queue` have
     `path` as their stored task path and match `args` and `kwargs`.
 
-    This reads database rows, not a separate enqueue record: a task whose
-    enqueue was rolled back is not counted, and the count includes a row
-    that has since run, retried or finished, since its path, args and
-    kwargs are unchanged by running. Narrow with `run_tasks(queues=...)` or
-    a status check first if only queued work should count.
+    This reads database rows on the alias OxTask writes to, not a separate
+    enqueue record: a task whose enqueue was rolled back is not counted,
+    and the count includes a row that has since run, retried or finished,
+    since its path, args and kwargs are unchanged by running. Narrow with
+    `run_tasks(queues=...)` or a status check first if only queued work
+    should count.
 
-    `args` and `kwargs` are compared to the stored values after a JSON
-    round trip, the same lossy conversion `enqueue()` itself applies before
-    storing them: a tuple in `args` matches a stored list, but a type a
-    standard `json.dumps()` call cannot handle, such as a raw `datetime`,
-    `UUID` or `Decimal`, is rejected with `TypeError` rather than silently
-    miscompared. Pass that value's own stored JSON representation (a
-    string, an int or a plain list or dict) instead.
+    `args` and `kwargs` are compared with the JSON values stored on the
+    row, using Python equality: a tuple in `args` matches a stored list,
+    and `True` equals `1`. A value JSON does not represent directly is
+    rejected with `TypeError` rather than silently miscompared: a raw
+    `datetime`, `UUID` or `Decimal`, and also `bytes` or a `range`, which
+    `enqueue()` accepts and stores as a string and a list. Pass that
+    value's stored JSON representation (a string, an int or a plain list
+    or dict) instead.
 
     Raises `AssertionError`, naming `backend`, `queue`, `path`, the
     normalised `args` and `kwargs`, and the expected and observed counts,
@@ -302,9 +304,17 @@ def assert_task_count(
 
     # Imported here, not at the top: this module is named in TASKS settings,
     # and the worker imports the models.
+    from django.db import router
+
     from .models import OxTask
 
-    rows = OxTask.objects.filter(backend_name=backend, queue_name=queue, task_path=path)
+    # Read where enqueue() writes, as every other django-ox read is. Under a
+    # router that sends reads to a replica, or to a test mirror of one, the
+    # read alias does not see a row a test has just enqueued in its own
+    # transaction.
+    rows = OxTask.objects.using(router.db_for_write(OxTask)).filter(
+        backend_name=backend, queue_name=queue, task_path=path
+    )
     observed = sum(
         1 for row in rows if row.args == want_args and row.kwargs == want_kwargs
     )

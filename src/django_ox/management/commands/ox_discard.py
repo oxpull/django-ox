@@ -2,14 +2,15 @@ import json
 import uuid
 from typing import Any
 
-from django.core.management.base import BaseCommand, CommandError, CommandParser
+from django.core.management.base import CommandError, CommandParser
 from django.db import router
 
 from django_ox import actions
+from django_ox.management._database import WriteAliasCommand
 from django_ox.models import OxTask
 
 
-class Command(BaseCommand):
+class Command(WriteAliasCommand):
     help = "Discard one or more tasks without running them."
 
     def add_arguments(self, parser: CommandParser) -> None:

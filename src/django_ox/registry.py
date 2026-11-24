@@ -39,7 +39,7 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.utils.module_loading import autodiscover_modules, import_string
 
-from .compat import Task
+from .compat import InvalidTask, Task
 
 KEY_MAX_LENGTH = 128
 
@@ -259,9 +259,12 @@ def kinds_from_options(options: dict[str, Any], backend_alias: str) -> None:
             )
         if "task" not in config:
             raise ImproperlyConfigured(f"{prefix} is missing 'task'.")
+        # InvalidTask as well as ImportError, as the settings schedule loader
+        # does: a task module whose `@task` declaration its backend refuses
+        # raises it while it is imported.
         try:
             task_obj = import_string(config["task"])
-        except ImportError as exc:
+        except (ImportError, InvalidTask) as exc:
             raise ImproperlyConfigured(
                 f"{prefix}: cannot import task {config['task']!r} ({exc})."
             ) from exc

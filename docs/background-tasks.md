@@ -4,7 +4,7 @@ Send a welcome email without running Redis or RabbitMQ. This guide uses django-o
 
 You will save a user and enqueue their welcome email inside the same `transaction.atomic()` block. Both rows commit, or neither does. No task is left behind for a signup that rolled back.
 
-Every command and output block below was run as written on Django 6.0 with SQLite. The guide calls out the changes for Django 5.2 LTS. django-ox also supports Django 6.1 and requires Python 3.12+.
+Every command and output block below was run as written on Django 6.0 with SQLite. The guide calls out what changes on Django 5.2 LTS and on Django 6.1. django-ox requires Python 3.12+.
 
 ## What you will build
 
@@ -35,8 +35,9 @@ On Django 5.2 LTS:
 from django_tasks import task
 ```
 
-django-ox itself handles both, and everything else on this page is the same
-on both versions.
+django-ox itself handles both. Step 1 adds a mail setting on Django 6.0
+and 5.2 LTS that a new Django 6.1 project leaves out. Everything else on
+this page is the same on every version.
 
 ## Step 1: Install django-ox and point the Tasks framework at it
 
@@ -59,7 +60,7 @@ On Django 5.2 LTS, install the backport with it:
 pip install "django-ox[backport]"
 ```
 
-Add the app, name the backend, and route email to the terminal for now:
+Add the app and name the backend:
 
 ```python
 # myproject/settings.py
@@ -74,15 +75,26 @@ TASKS = {
         "BACKEND": "django_ox.backend.OxBackend",
     }
 }
+```
 
+`TASKS` is Django's own setting. `django_ox` provides the backend, the
+worker command and the table the queue lives in.
+
+For this walk-through only, email is printed, not sent: the welcome
+email will appear in the worker's terminal instead of going anywhere. A
+project created by Django 6.1's `startproject` does that already,
+because its settings define `MAILERS` with the console backend. Leave
+those settings as they are. On Django 6.0 and 5.2 LTS, add this setting:
+
+```python
+# myproject/settings.py, on Django 6.0 and 5.2 LTS only
 # Print emails to the terminal instead of sending them.
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 ```
 
-`TASKS` is Django's own setting. `django_ox` provides the backend, the
-worker command and the table the queue lives in. The email backend is for
-this walk-through only: the welcome email will appear in the worker's
-terminal instead of going anywhere.
+Do not add it where `MAILERS` is defined. Django 6.1 refuses
+`EMAIL_BACKEND` beside `MAILERS`, and every `manage.py` command then
+fails with `ImproperlyConfigured`.
 
 Create the tables:
 
@@ -427,8 +439,9 @@ def sync_to_crm(context, user_id):
 `takes_context=True` asks the Tasks framework to pass a `TaskContext` as
 the first argument. Its `attempt` is the number of the attempt now running.
 
-Restart the worker in the second terminal, then enqueue the task from the
-shell and read it a couple of seconds later:
+Restart the worker in the second terminal. The shell does not reload code
+either, so close it with `exit()` and run `python manage.py shell` again.
+Then enqueue the task and read it a couple of seconds later:
 
 ```pycon
 >>> from accounts.tasks import sync_to_crm

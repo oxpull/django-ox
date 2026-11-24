@@ -62,7 +62,7 @@ With pooled or persistent connections, django-ox delivered 1.4 to 1.7× django-t
 
 CI covers Python 3.12 to 3.14, Django 5.2 to 6.1, PostgreSQL, MySQL and SQLite. Open source under the BSD 3-Clause licence.
 
-django-ox includes the optional `oxpull` app for [unique tasks, batches, rate limiting, concurrency limits and workflows](https://oxpull.com/django-ox/features/). The app, part of django-ox since 1.9.0, requires Django 6.0+. Projects that do not enable it can continue using django-ox on Django 5.2.
+django-ox includes the optional `oxpull` app for [unique tasks, batches, rate limiting, concurrency limits and workflows](https://oxpull.com/django-ox/features/). Workflows and concurrency limits are provisional. The app, part of django-ox since 1.9.0, requires Django 6.0+. Projects that do not enable it can continue using django-ox on Django 5.2.
 
 Documentation: <https://oxpull.com/django-ox/>
 
@@ -72,7 +72,7 @@ Documentation: <https://oxpull.com/django-ox/>
 
 Add `"oxpull"` to `INSTALLED_APPS`, run migrations, and use `"oxpull.backend.OxpullBackend"` for the task aliases that need its features. No separate package installation is needed.
 
-Unique tasks deduplicate pending tasks at enqueue time. Batches also need a reconciler schedule. Rate limits need `OPTIONS["RATE_LIMITS"]` and `"oxpull.worker.OxpullWorker"` as the alias's `OPTIONS["WORKER_CLASS"]`. Workflows need `OPTIONS["WORKFLOWS"] = True`, `OxpullWorker` and a reconciler schedule. Workflows are created at runtime.
+Unique tasks deduplicate pending tasks at enqueue time. Batches also need a reconciler schedule. Rate limits need `OPTIONS["RATE_LIMITS"]` and `"oxpull.worker.OxpullWorker"` as the alias's `OPTIONS["WORKER_CLASS"]`. Concurrency limits need `OPTIONS["CONCURRENCY_LIMITS"]` and the same `WORKER_CLASS`, and are provisional. Workflows need `OPTIONS["WORKFLOWS"] = True`, `OxpullWorker` and a reconciler schedule. Workflows are created at runtime.
 
 See the [feature setup](https://oxpull.com/django-ox/features/) and, for an existing installation, [Earlier `oxpull` installs](https://oxpull.com/django-ox/migrating/#earlier-oxpull-installs).
 
@@ -134,7 +134,7 @@ issue tracker, each carrying a link and the date it was read on the
 | Recurring schedules | **Cron or a fixed interval, and no scheduler process.** Editable in the Django admin, limited to the tasks your code exposes | **None** | `celery beat`, a separate process you must run exactly one of | Yes |
 | Unique tasks / deduplicated enqueue | **Yes.** `@unique` returns the existing result while a match is READY or RUNNING. All four features below require the optional `oxpull` app and `OxpullBackend` on Django 6.0+ | **Business logic.** Issue #164 closed as a duplicate; maintainer: "handled by your business logic" | **No general built-in.** The cookbook's custom lock prevents concurrent runs, not duplicate enqueues | **Not enqueue dedup.** huey's own `lock_task()` prevents concurrent runs |
 | Batch completion callback | **Yes.** `on_complete` is enqueued once all member rows are settled or gone, whatever the outcome; `on_success` requires all to succeed. Callback execution is at least once | **None.** "Task Groups" discussion #58 open since 2024-06-20, with 0 comments | **Success callback; failure errback.** `chord` needs a supported result backend; a failed member produces `ChordError`, and an errback attached to the callback runs instead | **Includes failures.** huey's own `chord()` includes permanent failures; a member lost to abrupt shutdown prevents the callback |
-| Rate limits shared across workers | **Yes.** Database-backed start windows shared by `OxpullWorker` instances, with bounded overshoot; concurrency limits are a separate option | Not claimed | **Per-worker only.** `Task.rate_limit` is not a shared budget | **Yes.** huey's own `rate_limit()` uses a counter in shared storage, checked when the task runs |
+| Rate limits shared across workers | **Yes.** Database-backed start windows shared by `OxpullWorker` instances, with bounded overshoot; concurrency limits are a separate, provisional option | Not claimed | **Per-worker only.** `Task.rate_limit` is not a shared budget | **Yes.** huey's own `rate_limit()` uses a counter in shared storage, checked when the task runs |
 | Dependency workflows | **Yes, provisional.** `depends_on` lets a node run only after every upstream succeeds | Not claimed | **Yes.** `chain` / `link` run the next task after success | **Yes.** huey's own pipelines with `.then()` skip the remaining success pipeline after a failure |
 
 The full version has six more backends, a footnote and a date on every cell,
@@ -206,7 +206,8 @@ and restarts a worker that dies.
 ## Pruning
 
 Finished task rows stay in the table until pruned. Run `ox_prune` on your
-own schedule (cron, systemd timer):
+own schedule (cron, a systemd timer, or the stable
+`django_ox.maintenance.prune` task in `OPTIONS["SCHEDULES"]`):
 
 ```
 python manage.py ox_prune --older-than 7d
@@ -400,8 +401,9 @@ the primary, and no setting changes it. `ox_worker`, `ox_prune` and the
 database mode of `ox_health` take `--database` to name the alias django-ox
 works on. It defaults to the alias `OxTask` writes to, `default` unless you
 wrote a router. The flag is not checked against the router: a worker pointed
-at another alias works there and nothing warns, so leave it unset unless you
-mean it. See
+at another alias works there, and on an alias for a different database it
+enqueues every due settings schedule again on each dispatch pass. Leave
+the flag unset unless you mean it. See
 [Read replicas](https://oxpull.com/django-ox/configuration/#read-replicas).
 
 The optional `oxpull` app creates its own tables. It does not change any django-ox table, column, index, constraint or migration.
@@ -412,7 +414,15 @@ Workflows do write task rows. They insert blocked nodes as WAITING tasks. Cancel
 
 ## Stability
 
-`OxpullBackend`, its unique-task and rate-limit options, `OxpullWorker`, the unique-task decorator and the documented batches API are stable. Workflow APIs, the `WORKFLOWS` option and `workflow_*` log events are provisional. The [stability policy](https://oxpull.com/django-ox/stability/) lists the public surfaces in each tier.
+`OxpullBackend`, its unique-task and rate-limit options, `OxpullWorker`, the unique-task decorator and the documented batches API are stable. These surfaces are provisional:
+
+- Per-task policy: `PolicyTask`, `BackoffCallback`, and the `max_attempts`, `backoff` and `timeout` fields accepted through `@task`.
+- The testing helpers `django_ox.testing.run_tasks()` and `django_ox.testing.assert_task_count()`.
+- The `ox_retry` and `ox_discard` management commands.
+- Concurrency limits: the `CONCURRENCY_LIMITS` option, the checks `oxpull.E010`, `oxpull.E011` and `oxpull.W008`, the `concurrency_limit_*` log events and the documented bound.
+- Workflows: the workflow APIs, the `WORKFLOWS` option and the `workflow_*` log events.
+
+The [stability policy](https://oxpull.com/django-ox/stability/) lists the public surfaces in each tier.
 
 What counts as public API, the versioning and deprecation policy, and the guarantees attached to each tier are covered by [the stability policy](https://oxpull.com/django-ox/stability/).
 

@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../assets/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -593,6 +593,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#concurrency-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Concurrency limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#workflows" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -716,6 +727,34 @@
     
   
     Rate limiting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="concurrency-limits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrency limits
   
 
     
@@ -960,6 +999,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../keda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KEDA autoscaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../benchmarks/" class="md-nav__link">
         
   
@@ -1132,6 +1198,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#concurrency-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Concurrency limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#workflows" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1196,7 +1273,7 @@
 
 
 <h1 id="optional-features">Optional features</h1>
-<p>django-ox 1.9.0 includes the optional <code>oxpull</code> app. It adds unique tasks, batches, rate limiting and workflows without a separate package installation.</p>
+<p>django-ox includes the optional <code>oxpull</code> app, part of the package since 1.9.0. It adds unique tasks, batches, rate limiting, concurrency limits and workflows without a separate package installation.</p>
 <p>The app requires Django 6.0+. django-ox itself continues to support Django 5.2 through the <code>django-tasks</code> backport.</p>
 <h2 id="setup">Setup</h2>
 <ol>
@@ -1207,6 +1284,7 @@
 <li>Unique tasks use <code>@unique</code> or <code>OPTIONS["UNIQUE_TASKS"]</code>.</li>
 <li>Batches need a reconciler schedule.</li>
 <li>Rate limits need <code>OPTIONS["RATE_LIMITS"]</code> and <code>OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"</code>.</li>
+<li>Concurrency limits need <code>OPTIONS["CONCURRENCY_LIMITS"]</code> and <code>OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"</code>.</li>
 <li>Workflows need <code>OPTIONS["WORKFLOWS"] = True</code>, <code>OxpullWorker</code> and a reconciler schedule.</li>
 </ul>
 </li>
@@ -1222,6 +1300,10 @@
 <h2 id="rate-limiting">Rate limiting</h2>
 <p><a href="rate-limiting/">Rate limiting</a> controls admissions through <code>OxpullWorker</code>. Configure limits on task paths, queues or both.</p>
 <p>A limit name identifies one shared window across the backends that configure it. A backend setting alone does not make a plain django-ox worker enforce that limit.</p>
+<h2 id="concurrency-limits">Concurrency limits</h2>
+<p><a href="concurrency-limits/">Concurrency limits</a> cap how many covered tasks are RUNNING at once, through <code>OxpullWorker</code>. Configure limits on task paths, queues or both.</p>
+<p>The worker counts RUNNING task rows before each claim. A blocked task stays READY and spends no attempt. With one claimer the limit is exact; with W claimers the bound is <code>max + W - 1</code>.</p>
+<p>Concurrency limits are provisional: the <code>CONCURRENCY_LIMITS</code> option, <code>oxpull.E010</code>, <code>oxpull.E011</code>, <code>oxpull.W008</code> and the <code>concurrency_limit_*</code> log events.</p>
 <h2 id="workflows">Workflows</h2>
 <p><a href="workflows/">Workflows</a> coordinate tasks with dependencies. A workflow is created at runtime. Enable <code>OPTIONS["WORKFLOWS"]</code>, use <code>OxpullWorker</code>, and configure the reconciler schedule before creating or sealing workflows.</p>
 <p>Workflow APIs, settings and log events are provisional.</p>
@@ -1232,8 +1314,8 @@
 <h2 id="signals">Signals</h2>
 <p>Tasks enqueued through <code>OxpullBackend</code> use that backend as the signal sender. Receivers restricted to the base backend's sender must account for this when an alias changes backend. This applies to every task sent through <code>OxpullBackend</code>, not only unique tasks.</p>
 <h2 id="stability">Stability</h2>
-<p>The backend, its unique-task and rate-limit options, the worker, the unique-task decorator and the documented batches API are stable. The <code>oxpull_*</code> schema, check ids, <code>oxpull_prune</code> and non-workflow log events are also stable.</p>
-<p>Everything in the documented workflow surface is provisional, including the <code>WORKFLOWS</code> option and every <code>workflow_*</code> event. Workflow internals are not public.</p>
+<p>The backend, its unique-task and rate-limit options, the worker, the unique-task decorator and the documented batches API are stable. The <code>oxpull_*</code> schema and <code>oxpull_prune</code> are also stable, as are the check ids and log events outside the two provisional surfaces below.</p>
+<p>Everything in the documented workflow surface is provisional, including the <code>WORKFLOWS</code> option and every <code>workflow_*</code> event. Workflow internals are not public. Concurrency limits are provisional too: the <code>CONCURRENCY_LIMITS</code> option, <code>oxpull.E010</code>, <code>oxpull.E011</code>, <code>oxpull.W008</code> and every <code>concurrency_limit_*</code> event.</p>
 <p>See the <a href="../stability/">stability policy</a> for the complete lists and versioning rules.</p>
 
 
@@ -1324,10 +1406,10 @@
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

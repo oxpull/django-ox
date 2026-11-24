@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../assets/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -599,6 +599,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../features/concurrency-limits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrency limits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../features/workflows/" class="md-nav__link">
         
   
@@ -844,6 +872,17 @@
     <span class="md-ellipsis">
       
         Running in containers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#renaming-a-task" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Renaming a task
       
     </span>
   </a>
@@ -1269,6 +1308,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../keda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KEDA autoscaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../benchmarks/" class="md-nav__link">
         
   
@@ -1412,6 +1478,17 @@
     <span class="md-ellipsis">
       
         Running in containers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#renaming-a-task" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Renaming a task
       
     </span>
   </a>
@@ -2101,6 +2178,38 @@ complete semantics and Kubernetes example.</p>
 processes included: <code>enqueue()</code> writes every column the current schema has.
 Run them as an init container or a job, not from the worker itself; several
 workers starting at once would race the same migration.</p>
+<p>A release then runs in this order:</p>
+<ol>
+<li>Install the new code.</li>
+<li>Run <code>migrate</code>.</li>
+<li>Run <code>python manage.py ox_health --task-paths</code>.</li>
+<li>Roll the workers.</li>
+</ol>
+<p>Step 3 exits 1 and names every READY or WAITING task path the new code no
+longer imports, before a worker claims one of those rows and fails it. See
+<a href="#renaming-a-task">Renaming a task</a>.</p>
+<h2 id="renaming-a-task">Renaming a task</h2>
+<p>A row stores the dotted path of its task when it is enqueued, and a worker
+imports that path when it claims the row. Renaming a task, or moving it to
+another module, leaves every READY and WAITING row enqueued under the old
+name unable to run: the worker records an ImportError against it.</p>
+<p>Keep the old name bound to the new task until those rows have drained, for
+example with <code>old_name = new_name</code> left in the old module, and remove it in a
+later release. Rows that are RUNNING already imported their task; finished
+rows are not run again.</p>
+<p><code>python manage.py ox_health --task-paths</code> checks this before workers roll. It
+reads each distinct task path among READY and WAITING rows, with its row
+count, in one grouped query, and imports each path under the rule the worker
+applies: the path must resolve to a django.tasks Task. Every path that fails
+is reported with its row count and exception class, and the command exits 1.
+Under MySQL's case-insensitive collations the check can miss a rename that
+changes only letter case: rows left under the old spelling are grouped with
+rows under the new one and checked under one spelling. Keeping the old name
+bound, as above, covers that case.
+<code>--queue</code> and <code>--database</code> scope the read as for the other database checks.
+Importing a task module runs the same import side effects as worker startup.
+Keep import-time output out of task modules: anything they print at import
+lands on stdout ahead of the <code>--format json</code> object.</p>
 <h2 id="running-as-a-job">Running as a job</h2>
 <p>For cron and job runners, <code>--batch</code> stops after an error-free polling pass
 observes no claimable task, claims nothing, and began claiming with no local
@@ -2186,12 +2295,14 @@ later, and it counts as a failed attempt.</p>
 a task thread that its timeout could not stop; see
 <a href="#task-timeouts">Task timeouts</a>. A process manager on <code>Restart=always</code> or
 <code>Restart=on-failure</code> restarts it either way.</p>
-<p>This maps directly onto rolling deploys: send SIGTERM, wait, start the new
-version. Set the process manager's kill escalation (<code>TimeoutStopSec</code> above)
-relative to your longest task, while allowing for calls that may not return.
-One caveat for the upgrade from 1.1.0, in the changelog under the 1.2.0
-migration note: a settings schedule first seen while both versions are
-running can be anchored twice, and its second tick does not fire.</p>
+<p>This maps directly onto rolling deploys: install the new code, run <code>migrate</code>,
+run <code>ox_health --task-paths</code>, then roll workers by sending SIGTERM, waiting,
+and starting the new version. Set the process manager's kill escalation
+(<code>TimeoutStopSec</code> above) relative to your longest task, while allowing for
+calls that may not return. One caveat for the upgrade from 1.1.0, in the
+changelog under the 1.2.0 migration note: a settings schedule first seen
+while both versions are running can be anchored twice, and its second tick
+does not fire.</p>
 <p>With <code>--processes</code> above 1, the signal goes to the supervisor, and SIGHUP
 counts as well as SIGTERM and SIGINT. The sequence is:</p>
 <ol>
@@ -2241,6 +2352,9 @@ concurrent workers safe:</p>
 <p>Workers can also be split by queue: run
 <code>ox_worker --queues emails --concurrency 8</code> next to
 <code>ox_worker --queues default</code> to isolate slow or bursty workloads.</p>
+<p>To drive the replica count from queue depth on Kubernetes, see
+<a href="../keda/">Autoscaling workers with KEDA</a>. It is a runnable example that scales workers from zero on
+<code>django_ox_ready_tasks</code>.</p>
 <h3 id="threads-and-processes">Threads and processes</h3>
 <p><code>--concurrency N</code> is a thread pool inside one process. That fits the
 common Django task profile: email, HTTP calls to third parties, ORM work.</p>
@@ -3209,11 +3323,41 @@ need results and tracebacks to stay queryable. With systemd:</p>
 <span class="k">[Install]</span>
 <span class="na">WantedBy</span><span class="o">=</span><span class="s">timers.target</span>
 </code></pre></div>
-<p>Or from cron, or as a recurring task pointed at a small wrapper task of
-your own. Flag reference on the
-<a href="../configuration/#ox_prune">Configuration</a> page. FAILED rows are kept by
-default so tracebacks survive until you have looked at them; add
-<code>--include-failed</code> once that is not needed.</p>
+<p>Or from cron, or as a django-ox schedule pointed at
+<code>django_ox.maintenance.prune</code>, which runs <code>ox_prune</code> for you:</p>
+<div class="highlight"><pre><span></span><code><span class="s2">"SCHEDULES"</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">"ox-prune"</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">"task"</span><span class="p">:</span> <span class="s2">"django_ox.maintenance.prune"</span><span class="p">,</span>
+        <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"0 3 * * *"</span><span class="p">,</span>
+        <span class="s2">"kwargs"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"older_than"</span><span class="p">:</span> <span class="s2">"7d"</span><span class="p">},</span>
+    <span class="p">},</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The task takes <code>older_than</code>, <code>include_failed</code>, <code>queue</code>, <code>dry_run</code> and
+<code>batch_size</code>, the keyword forms of the <code>ox_prune</code> flags of the same name,
+with the command's defaults: seven days, FAILED and LOST rows kept, every
+queue, a real run, 1000 rows per DELETE. <code>include_failed</code> and <code>dry_run</code>
+must be <code>True</code> or <code>False</code>. Anything else, the string <code>"false"</code> included,
+raises <code>TypeError</code> before any row is deleted. The other keywords keep
+the flags' meaning. The task returns the object <code>ox_prune --format json</code>
+prints, so each run's counts are kept on its task row.</p>
+<p>The task runs on the <code>default</code> queue when <code>TASKS["default"]</code> accepts
+that name. Otherwise it runs on the first queue of a <code>QUEUES</code> list or
+tuple, and on the first name in sorted order for any other <code>QUEUES</code>
+value, such as a set. A <code>queue_name</code> on the schedule entry overrides
+that. Set it when no worker's <code>--queues</code> includes the task's queue: a
+queue no worker serves keeps the task READY, and nothing is pruned. A
+queue the schedule's backend does not accept is <code>django_ox.E002</code>.</p>
+<p>The task prunes the alias <code>OxTask</code> writes to, as <code>ox_prune</code> does without
+<code>--database</code>. To prune another alias, run <code>ox_prune --database ALIAS</code>
+from cron or a timer. Keep this schedule, and every other, away from a
+worker started with <code>--database</code> for a different database: that worker
+enqueues every due settings schedule again on each dispatch pass. See
+<a href="../configuration/#read-replicas">read replicas</a>.</p>
+<p>Flag reference on the <a href="../configuration/#ox_prune">Configuration</a> page.
+FAILED rows are kept by default so tracebacks survive until you have
+looked at them; add <code>include_failed=True</code>, or <code>--include-failed</code> on the
+command line, once that is not needed.</p>
 <h3 id="oxpull_prune">oxpull_prune</h3>
 <p>Run <code>oxpull_prune</code> to clean up records owned by the optional app:</p>
 <div class="highlight"><pre><span></span><code><span class="go">python manage.py oxpull_prune</span>
@@ -3346,10 +3490,10 @@ default so tracebacks survive until you have looked at them; add
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

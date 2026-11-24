@@ -16,14 +16,14 @@
         <link rel="prev" href="../batches/">
       
       
-        <link rel="next" href="../workflows/">
+        <link rel="next" href="../concurrency-limits/">
       
       
         
       
       
       <link rel="icon" href="../../assets/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -714,6 +714,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../concurrency-limits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrency limits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../workflows/" class="md-nav__link">
         
   
@@ -919,6 +947,33 @@
     
   
     Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../keda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KEDA autoscaling
   
 
     
@@ -1209,10 +1264,17 @@ and the tasks or queues it covers:</p>
 limit written next to its task would be enforced only when something else
 happened to import that module first. Declared here, it is visible to
 every worker and to <code>manage.py check</code>.</p>
-<p><code>RATE_LIMITS</code>, <code>UNIQUE_TASKS</code> and <code>@unique</code> take effect only with
+<p><code>UNIQUE_TASKS</code> and <code>@unique</code> take effect only with
 <code>oxpull.backend.OxpullBackend</code>. On an alias still using
-<code>django_ox.backend.OxBackend</code>, nothing reads these settings:
-<code>manage.py check</code> is clean, and nothing is throttled or deduplicated.</p>
+<code>django_ox.backend.OxBackend</code>, nothing reads them: <code>manage.py check</code> is
+clean, and nothing is deduplicated.</p>
+<p><code>RATE_LIMITS</code> is checked only on an alias whose <code>BACKEND</code> is
+<code>oxpull.backend.OxpullBackend</code>, and applied by <code>OxpullWorker</code>. Set both.
+On an alias using <code>django_ox.backend.OxBackend</code>, no system check reads
+the option. With <code>WORKER_CLASS</code> set to <code>oxpull.worker.OxpullWorker</code> on
+that alias, the limits apply and <code>manage.py check</code> reports nothing about
+them. Without that worker, the limits are ignored and no check reports
+it.</p>
 <p>For aliases using <code>OxpullBackend</code>, <code>WORKER_CLASS</code> is required: it makes
 <code>ox_worker</code> run the worker that applies the limits. Configuring limits
 without it is a hard system check error (<code>oxpull.E006</code>). <code>per</code> is whole
@@ -1271,7 +1333,8 @@ that dies mid-claim costs one more admission.</p>
 <li><strong>It limits attempt starts, not completions and not concurrency.</strong> Ten
   per minute on a task that runs for ten minutes will have a hundred
   attempts running at once. "At most K running" is a concurrency limit,
-  which is a different mechanism.</li>
+  which is a different mechanism. See
+  <a href="../concurrency-limits/">Concurrency limits</a>.</li>
 <li><strong>Retries count.</strong> A reaped or failed attempt that goes back to READY
   consumes another admission when it is claimed again. That is correct
   for what limits usually protect: a retry is another call to the third
@@ -1280,10 +1343,13 @@ that dies mid-claim costs one more admission.</p>
   spends no attempt and no lease epoch. It is indistinguishable from any
   other queued task, and nothing in the reaper, the lease or the timeouts
   interacts with it.</li>
-<li><strong>A throttled task does not hold up anything else.</strong> The exclusion is
+<li><strong>Other work is still claimed past throttled tasks.</strong> The exclusion is
   applied inside the claim's candidate select on all three claim paths,
   ahead of its ordering and its limit, so a worker whose limit is
-  exhausted still claims other tasks and other queues on the same pass.</li>
+  exhausted still claims other tasks and other queues on the same pass.
+  Every claim, including one that finds nothing, reads past the throttled
+  rows ahead of it in claim order, so claim time grows with the throttled
+  backlog. <a href="#claim-cost">Claim cost</a> gives the size and the remedy.</li>
 <li><strong>Windows are fixed and anchored at first use</strong>, so a P-length interval
   straddling a boundary can carry twice the capacity. If what you are
   protecting counts per fixed minute, size N at half your true ceiling or
@@ -1361,6 +1427,17 @@ increment. A window roll costs a third. One roll lands per window per
 limit across the whole fleet; a worker that reads the expired window
 before the winner's write commits spends one more UPDATE, which matches
 no row.</p>
+<p>Throttled rows add a second cost, which grows with the backlog. A
+throttled task stays READY, and every claim, including one that finds
+nothing, reads past the throttled rows ahead of it in claim order.
+Measured with 200,000 throttled rows ahead of other work, a claim took
+tens of milliseconds on PostgreSQL and SQLite and hundreds of
+milliseconds on MySQL, against a few milliseconds or less without them.</p>
+<p>To keep other work clear of that cost, put the limited tasks on a queue
+of their own and run other work on workers whose <code>--queues</code> leave that
+queue out, as under
+<a href="../../configuration/#routing-a-queue-to-its-own-worker">routing a queue to its own worker</a>.
+A separate queue alone does not help a worker that serves every queue.</p>
 <p>The state is one row per limit name in <code>oxpull_oxpullratewindow</code>,
 forever. The table does not grow with traffic and needs no pruning.</p>
 <h2 id="throttled-work-reads-as-backlog-because-it-is">Throttled work reads as backlog, because it is</h2>
@@ -1427,13 +1504,13 @@ Size batches against limits.</p>
         
         
           
-          <a href="../workflows/" class="md-footer__link md-footer__link--next" aria-label="Next: Workflows">
+          <a href="../concurrency-limits/" class="md-footer__link md-footer__link--next" aria-label="Next: Concurrency limits">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Workflows
+                Concurrency limits
               </div>
             </div>
             <div class="md-footer__button md-icon">
@@ -1470,10 +1547,10 @@ Size batches against limits.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.footer"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.footer"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

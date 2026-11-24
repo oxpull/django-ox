@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../assets/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -784,6 +784,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../features/concurrency-limits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrency limits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../features/workflows/" class="md-nav__link">
         
   
@@ -989,6 +1017,33 @@
     
   
     Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../keda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KEDA autoscaling
   
 
     
@@ -1296,7 +1351,7 @@
 <h1 id="django-background-tasks-step-by-step">Django background tasks, step by step</h1>
 <p>Send a welcome email without running Redis or RabbitMQ. This guide uses django-ox to queue Django tasks in your existing database and run them with a worker. If a worker dies, its unfinished tasks return to the queue.</p>
 <p>You will save a user and enqueue their welcome email inside the same <code>transaction.atomic()</code> block. Both rows commit, or neither does. No task is left behind for a signup that rolled back.</p>
-<p>Every command and output block below was run as written on Django 6.0 with SQLite. The guide calls out the changes for Django 5.2 LTS. django-ox also supports Django 6.1 and requires Python 3.12+.</p>
+<p>Every command and output block below was run as written on Django 6.0 with SQLite. The guide calls out what changes on Django 5.2 LTS and on Django 6.1. django-ox requires Python 3.12+.</p>
 <h2 id="what-you-will-build">What you will build</h2>
 <p>A project called <code>myproject</code> with an <code>accounts</code> app. Its <code>register</code> view creates a user and queues their welcome email in one database transaction. A background worker sends the email, printed to its terminal for this walk-through.</p>
 <p>Then you will watch a failed task succeed on retry, schedule a task to run every minute as a stand-in for a nightly report, and inspect the tasks, attempts and tracebacks in Django admin.</p>
@@ -1317,8 +1372,9 @@
 <p>On Django 5.2 LTS:</p>
 <div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django_tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>
 </code></pre></div>
-<p>django-ox itself handles both, and everything else on this page is the same
-on both versions.</p>
+<p>django-ox itself handles both. Step 1 adds a mail setting on Django 6.0
+and 5.2 LTS that a new Django 6.1 project leaves out. Everything else on
+this page is the same on every version.</p>
 <h2 id="step-1-install-django-ox-and-point-the-tasks-framework-at-it">Step 1: Install django-ox and point the Tasks framework at it</h2>
 <p>Create a project and an app, or use ones you already have:</p>
 <div class="highlight"><pre><span></span><code>django-admin startproject myproject .
@@ -1330,7 +1386,7 @@ python manage.py startapp accounts
 <p>On Django 5.2 LTS, install the backport with it:</p>
 <div class="highlight"><pre><span></span><code>pip install "django-ox[backport]"
 </code></pre></div>
-<p>Add the app, name the backend, and route email to the terminal for now:</p>
+<p>Add the app and name the backend:</p>
 <div class="highlight"><pre><span></span><code><span class="c1"># myproject/settings.py</span>
 <span class="n">INSTALLED_APPS</span> <span class="o">=</span> <span class="p">[</span>
     <span class="c1"># ...</span>
@@ -1343,14 +1399,21 @@ python manage.py startapp accounts
         <span class="s2">"BACKEND"</span><span class="p">:</span> <span class="s2">"django_ox.backend.OxBackend"</span><span class="p">,</span>
     <span class="p">}</span>
 <span class="p">}</span>
-
+</code></pre></div>
+<p><code>TASKS</code> is Django's own setting. <code>django_ox</code> provides the backend, the
+worker command and the table the queue lives in.</p>
+<p>For this walk-through only, email is printed, not sent: the welcome
+email will appear in the worker's terminal instead of going anywhere. A
+project created by Django 6.1's <code>startproject</code> does that already,
+because its settings define <code>MAILERS</code> with the console backend. Leave
+those settings as they are. On Django 6.0 and 5.2 LTS, add this setting:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># myproject/settings.py, on Django 6.0 and 5.2 LTS only</span>
 <span class="c1"># Print emails to the terminal instead of sending them.</span>
 <span class="n">EMAIL_BACKEND</span> <span class="o">=</span> <span class="s2">"django.core.mail.backends.console.EmailBackend"</span>
 </code></pre></div>
-<p><code>TASKS</code> is Django's own setting. <code>django_ox</code> provides the backend, the
-worker command and the table the queue lives in. The email backend is for
-this walk-through only: the welcome email will appear in the worker's
-terminal instead of going anywhere.</p>
+<p>Do not add it where <code>MAILERS</code> is defined. Django 6.1 refuses
+<code>EMAIL_BACKEND</code> beside <code>MAILERS</code>, and every <code>manage.py</code> command then
+fails with <code>ImproperlyConfigured</code>.</p>
 <p>Create the tables:</p>
 <div class="highlight"><pre><span></span><code>python manage.py migrate
 </code></pre></div>
@@ -1644,8 +1707,9 @@ next, standing in for a remote system that was down for a moment:</p>
 </code></pre></div>
 <p><code>takes_context=True</code> asks the Tasks framework to pass a <code>TaskContext</code> as
 the first argument. Its <code>attempt</code> is the number of the attempt now running.</p>
-<p>Restart the worker in the second terminal, then enqueue the task from the
-shell and read it a couple of seconds later:</p>
+<p>Restart the worker in the second terminal. The shell does not reload code
+either, so close it with <code>exit()</code> and run <code>python manage.py shell</code> again.
+Then enqueue the task and read it a couple of seconds later:</p>
 <div class="highlight"><pre><span></span><code><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">accounts.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">sync_to_crm</span>
 <span class="gp">&gt;&gt;&gt; </span><span class="n">result</span> <span class="o">=</span> <span class="n">sync_to_crm</span><span class="o">.</span><span class="n">enqueue</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
 <span class="gp">&gt;&gt;&gt; </span><span class="n">result</span><span class="o">.</span><span class="n">id</span>
@@ -1941,10 +2005,10 @@ tracebacks survive until someone has read them. The
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../assets/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -599,6 +599,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../features/concurrency-limits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrency limits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../features/workflows/" class="md-nav__link">
         
   
@@ -914,6 +942,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../keda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KEDA autoscaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../benchmarks/" class="md-nav__link">
         
   
@@ -1205,7 +1260,7 @@ not the right fit.</p>
 </tr>
 <tr>
 <td>Rate limits shared across workers</td>
-<td>Fixed start windows coordinated through one database row per limit name; requires <code>OxpullWorker</code>. Bounded overshoot is possible. Throttled tasks stay READY without spending an attempt; this is not a concurrency cap</td>
+<td>Fixed start windows coordinated through one database row per limit name; requires <code>OxpullWorker</code>. Bounded overshoot is possible. Throttled tasks stay READY without spending an attempt; this is not a concurrency cap. For a cap on tasks running at once, see <a href="../features/concurrency-limits/">Concurrency limits</a></td>
 <td>Not documented in the README, worker flags or Django Tasks API <sup id="fnref:tdb-readme-d3"><a class="footnote-ref" href="#fn:tdb-readme-d3">10</a></sup> <sup id="fnref:tdb-worker-d3"><a class="footnote-ref" href="#fn:tdb-worker-d3">11</a></sup> <sup id="fnref:dj-ref-tasks"><a class="footnote-ref" href="#fn:dj-ref-tasks">34</a></sup></td>
 <td>huey's own <code>rate_limit()</code> uses a fixed-window storage counter keyed by huey name and limit name; workers using the same shared storage use that counter. Checked inside the running task, with throttled calls rescheduled <sup id="fnref3:huey-stable"><a class="footnote-ref" href="#fn:huey-stable">15</a></sup> <sup id="fnref:huey-ratelimit-src"><a class="footnote-ref" href="#fn:huey-ratelimit-src">16</a></sup></td>
 <td><code>Task.rate_limit</code> is per worker instance, not global; the docs advise restricting to a given queue for global limiting <sup id="fnref:celery-ratelimit"><a class="footnote-ref" href="#fn:celery-ratelimit">31</a></sup></td>
@@ -1356,7 +1411,7 @@ says "not stated" when those pages do not say.</p>
 </tr>
 <tr>
 <td>Unique tasks / deduplicated enqueue</td>
-<td><code>@unique</code> or <code>UNIQUE_TASKS</code> returns the existing <code>TaskResult</code> while a match is READY or RUNNING; not an execution-exclusivity guarantee. All four features below require the optional <code>oxpull</code> app and <code>OxpullBackend</code> on Django 6.0+</td>
+<td><code>@unique</code> or <code>UNIQUE_TASKS</code> returns the existing <code>TaskResult</code> while a match is READY or RUNNING; not an execution-exclusivity guarantee. Unique tasks, batches, rate limits, workflows and concurrency limits require the optional <code>oxpull</code> app and <code>OxpullBackend</code> on Django 6.0+</td>
 <td>Issue #24, open since 2026-02-10; owner: "For now ... I don't think this will get added to the package", but is "open to creating a <code>contrib</code> subpackage that could include this" <sup id="fnref:sq-24"><a class="footnote-ref" href="#fn:sq-24">66</a></sup></td>
 <td><code>@concurrency(..., on_conflict="discard")</code> provides singleton-style work through a concurrency semaphore with a TTL; the discarded enqueue's return value is not stated <sup id="fnref:djq-readme-d3"><a class="footnote-ref" href="#fn:djq-readme-d3">70</a></sup></td>
 <td>Not stated; <code>SELECT FOR UPDATE SKIP LOCKED</code> prevents duplicate claims, not duplicate enqueues <sup id="fnref:ddt-readme-d3"><a class="footnote-ref" href="#fn:ddt-readme-d3">73</a></sup></td>
@@ -1370,7 +1425,7 @@ says "not stated" when those pages do not say.</p>
 </tr>
 <tr>
 <td>Rate limits shared across workers</td>
-<td>Fixed start windows coordinated through one database row per limit name; requires <code>OxpullWorker</code>. Bounded overshoot is possible. Throttled tasks stay READY without spending an attempt; this is not a concurrency cap</td>
+<td>Fixed start windows coordinated through one database row per limit name; requires <code>OxpullWorker</code>. Bounded overshoot is possible. Throttled tasks stay READY without spending an attempt; this is not a concurrency cap. For a cap on tasks running at once, see <a href="../features/concurrency-limits/">Concurrency limits</a></td>
 <td>Not stated; the README's concurrency controls limit simultaneous execution, not start rate <sup id="fnref2:sq-readme-d3"><a class="footnote-ref" href="#fn:sq-readme-d3">67</a></sup></td>
 <td>Not stated; shared semaphores provide concurrency limits, not rate limits <sup id="fnref3:djq-readme-d3"><a class="footnote-ref" href="#fn:djq-readme-d3">70</a></sup></td>
 <td>Not provided by the package; the README points to Google Cloud Tasks per-queue rate settings for <code>CloudTasksDatabaseBackend</code> <sup id="fnref3:ddt-readme-d3"><a class="footnote-ref" href="#fn:ddt-readme-d3">73</a></sup></td>
@@ -1391,7 +1446,7 @@ says "not stated" when those pages do not say.</p>
 </tr>
 <tr>
 <td>Concurrency controls</td>
-<td>No per-task concurrency limit. <a href="../features/rate-limiting/">Rate limiting</a> caps how often a task starts, not how many run at once</td>
+<td><code>CONCURRENCY_LIMITS</code> caps how many covered tasks are RUNNING at once, by task path or queue; requires <code>OxpullWorker</code>. Exact with one claimer; at most <code>max + W - 1</code> across W claimers. Blocked tasks stay READY without spending an attempt. See <a href="../features/concurrency-limits/">Concurrency limits</a></td>
 <td>"Limit how many instances of a specific task can run simultaneously" <sup id="fnref7:sq-readme"><a class="footnote-ref" href="#fn:sq-readme">63</a></sup></td>
 <td><code>@concurrency</code> decorator with database-backed limits; semaphores shown in the admin dashboard <sup id="fnref7:djq-readme"><a class="footnote-ref" href="#fn:djq-readme">68</a></sup></td>
 <td>Not stated <sup id="fnref7:ddt-readme"><a class="footnote-ref" href="#fn:ddt-readme">71</a></sup></td>
@@ -1766,10 +1821,10 @@ of date, open an issue with the link that shows it.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

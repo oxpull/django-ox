@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../assets/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -599,6 +599,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../features/concurrency-limits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrency limits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../features/workflows/" class="md-nav__link">
         
   
@@ -804,6 +832,33 @@
     
   
     Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../keda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KEDA autoscaling
   
 
     
@@ -1090,9 +1145,10 @@ export names this page does not list; those names are not public.</p>
   <code>TASK_TIMEOUT_GRACE</code>, <code>SCHEDULES</code> (with its documented per-schedule
   keys), and <code>WORKER_CLASS</code>, the dotted path of the <code>Worker</code> subclass
   <code>ox_worker</code> runs.</li>
-<li><strong>The management commands</strong> and their flags: <code>ox_worker</code>, <code>ox_prune</code>,
-  <code>ox_health</code>. <code>ox_worker</code>'s exit codes: 0 after a drain, 130 on a forced
-  exit, 75 when the worker recycles itself after a stuck task thread.
+<li><strong>The management commands</strong> and their flags: <code>ox_worker</code>, <code>ox_prune</code>
+  and <code>ox_health</code>. <code>ox_retry</code> and <code>ox_discard</code> are public and provisional.
+  <code>ox_worker</code>'s exit codes: 0 after a drain, 130 on a forced exit, 75 when
+  the worker recycles itself after a stuck task thread.
   A worker that finishes under <code>--batch</code> or <code>--max-tasks</code> drains and exits
   0, even when task attempts or individual schedule dispatches failed.
   Task outcomes stay on their task rows; schedule-scoped failures are
@@ -1105,6 +1161,11 @@ export names this page does not list; those names are not public.</p>
   or recycled, 1 when a slot hit the restart cap, and otherwise with the
   first other non-zero worker code. A worker killed by a signal reports
   <code>128 + the signal number</code>, following the shell convention.</li>
+<li><strong>The prune task</strong> <code>django_ox.maintenance.prune</code> is stable: its dotted
+  path, as written in a schedule's <code>task</code>, the keyword names <code>older_than</code>,
+  <code>include_failed</code>, <code>queue</code>, <code>dry_run</code> and <code>batch_size</code> with their
+  defaults, and its return value, the object <code>ox_prune --format json</code>
+  prints.</li>
 <li><strong>The stored-schedule write functions</strong> <code>django_ox.stored.create_schedule</code>,
   <code>django_ox.stored.create_schedules</code>, <code>django_ox.stored.update_schedule</code> and
   <code>django_ox.stored.delete_schedule</code>.</li>
@@ -1186,11 +1247,15 @@ export names this page does not list; those names are not public.</p>
   <code>worker_claim_recovery_expired</code>, it is always <code>"expired"</code>.</p>
 </li>
 <li><strong>The testing helpers</strong> <code>django_ox.testing.ImmediateBackend</code>,
-  <code>django_ox.testing.DummyBackend</code> and <code>django_ox.testing.run_tasks</code>.
-  The backends accept policy declarations but do not enforce retries,
-  backoff or timeouts. <code>run_tasks()</code> drains due queued tasks through the
-  configured worker class, including retries and backoff. It does not
-  enforce timeouts. <code>run_tasks()</code> is public and provisional.</li>
+  <code>django_ox.testing.DummyBackend</code>, <code>django_ox.testing.run_tasks</code> and
+  <code>django_ox.testing.assert_task_count</code>. The backends accept policy
+  declarations but do not enforce retries, backoff or timeouts.
+  <code>run_tasks()</code> drains due queued tasks through the configured worker
+  class, including retries and backoff. It does not enforce timeouts.
+  <code>run_tasks()</code> is public and provisional. <code>assert_task_count()</code> is
+  public and provisional too. That covers its keyword-only signature
+  (<code>path</code>, <code>queue</code>, <code>count</code>, <code>backend</code>, <code>args</code>, <code>kwargs</code>) and how it
+  compares <code>args</code> and <code>kwargs</code> with the stored values.</li>
 <li><strong>The database schema</strong> of <code>OxTask</code> and <code>OxScheduleTick</code>, evolved only
   through shipped migrations.</li>
 <li><strong><code>django_ox.__version__</code>.</strong></li>
@@ -1226,11 +1291,19 @@ framework support and precedence.</p>
 <li><code>oxpull.exceptions.BatchSealed</code>.</li>
 <li><code>oxpull.exceptions.BatchMemberExists</code>.</li>
 <li>The <code>oxpull_prune</code> management command.</li>
-<li>All 16 <code>oxpull</code> check ids: <code>oxpull.E001</code> through <code>oxpull.E009</code>, and <code>oxpull.W001</code> through <code>oxpull.W007</code>.</li>
+<li>16 of the 19 <code>oxpull</code> check ids: <code>oxpull.E001</code> through <code>oxpull.E009</code>, and <code>oxpull.W001</code> through <code>oxpull.W007</code>. The other three are provisional, under concurrency limits below.</li>
 <li>The <code>oxpull_*</code> schema.</li>
-<li>The non-workflow <code>oxpull</code> log events documented under <a href="../monitoring/#log-events">Log events</a>.</li>
+<li>The <code>oxpull</code> log events documented under <a href="../monitoring/#log-events">Log events</a>, except the <code>workflow_*</code> and <code>concurrency_limit_*</code> events.</li>
 </ul>
 <p><code>BatchProgress.pruned</code> is a deprecated alias of <code>unattributed</code>. Use <code>unattributed</code>; the alias emits <code>DeprecationWarning</code> and is marked for removal in 2.0.</p>
+<h3 id="provisional-concurrency-limits">Provisional: concurrency limits</h3>
+<p>The documented concurrency-limit surface is provisional:</p>
+<ul>
+<li>The <code>CONCURRENCY_LIMITS</code> option.</li>
+<li><code>oxpull.E010</code>, <code>oxpull.E011</code> and <code>oxpull.W008</code>.</li>
+<li>The <code>concurrency_limit_blocked</code> and <code>concurrency_limit_unblocked</code> log events.</li>
+</ul>
+<p>The provisional tier also covers the documented bound, <code>max + W - 1</code>, and what the count reads. <code>RATE_REFRESH_INTERVAL</code> stays stable.</p>
 <h3 id="provisional-workflows">Provisional: workflows</h3>
 <p>The documented workflow surface is provisional:</p>
 <ul>
@@ -1265,11 +1338,11 @@ model's non-schema helper methods are not part of the contract.</p>
 <p>In <code>django_ox.tasks</code>, only <code>PolicyTask</code> and <code>BackoffCallback</code> are public,
 with the provisional status above. <code>MAX_ATTEMPTS_LIMIT</code> and
 <code>validate_policy</code> are implementation details. In <code>django_ox.testing</code>, only
-<code>ImmediateBackend</code>, <code>DummyBackend</code> and <code>run_tasks</code> are public.
-<code>run_tasks</code> is provisional. <code>django_ox._run_tasks</code> and <code>Worker._task_body</code>
-are private implementation details. Timeout implementation classes and
-methods, including <code>TaskTimeouts.enabled</code> and <code>TaskTimeouts.for_attempt()</code>,
-are not public.</p>
+<code>ImmediateBackend</code>, <code>DummyBackend</code>, <code>run_tasks</code> and <code>assert_task_count</code>
+are public. <code>run_tasks</code> and <code>assert_task_count</code> are provisional.
+<code>django_ox._run_tasks</code> and <code>Worker._task_body</code> are private implementation
+details. Timeout implementation classes and methods, including
+<code>TaskTimeouts.enabled</code> and <code>TaskTimeouts.for_attempt()</code>, are not public.</p>
 <h3 id="worker-implementation-details">Worker implementation details</h3>
 <p><code>Worker</code> internals remain <strong>Not public</strong>. This includes <code>_handed_off</code>,
 <code>_unsettled</code>, <code>_fence</code>, <code>_claims_in_flight</code>, <code>_claim_generation</code>,
@@ -1386,8 +1459,8 @@ has no filter for it. Bulk discards skip it, and <code>queue_stats()</code>, the
 process that shares a database before anything writes the new status. The
 release notes name the value, say how it reads through <code>django.tasks</code>, and
 give the upgrade and rollback steps.</p>
-<p>Pin accordingly: <code>django-ox~=1.9.1</code> accepts patch releases only;
-<code>django-ox~=1.9</code> accepts the current major line.</p>
+<p>Pin accordingly: <code>django-ox~=1.10.0</code> accepts patch releases only;
+<code>django-ox~=1.10</code> accepts 1.10 and every later release on the 1.x line.</p>
 <h2 id="deprecation-policy">Deprecation policy</h2>
 <p>When a public surface is going to be removed or changed incompatibly, and
 a compatible path exists, it is deprecated before removal rather than
@@ -1481,8 +1554,9 @@ that runs the full checks and does not name a database now checks every alias
 in <code>DATABASES</code>. Checking a SQLite or MySQL alias opens a connection and runs
 one query. The cost grows with the number of aliases, and every such command
 pays it. An alias that cannot be reached ends the command.</p>
-<p><code>ox_prune</code>, <code>ox_health</code> in database mode, and <code>ox_import_beat_schedules</code>
-name the alias they work on and pass it to the checks. <code>ox_worker</code> passes
+<p><code>ox_prune</code>, <code>ox_retry</code>, <code>ox_discard</code>, <code>ox_health</code> in database mode, and
+<code>ox_import_beat_schedules</code> name the alias they work on and pass it to the
+checks. <code>ox_worker</code> passes
 an empty list, so no alias is checked. Its poll loop can keep retrying a
 database that refuses connections. Startup work before the loop, such as
 loading database-backed schedules, can still access the database.</p>
@@ -1607,10 +1681,10 @@ part of the tested matrix.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

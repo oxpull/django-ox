@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="assets/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -29,10 +29,10 @@
       
     
     
-      <link rel="stylesheet" href="assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -741,6 +741,34 @@
   
   
     <li class="md-nav__item">
+      <a href="features/concurrency-limits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrency limits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="features/workflows/" class="md-nav__link">
         
   
@@ -946,6 +974,33 @@
     
   
     Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="keda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KEDA autoscaling
   
 
     
@@ -1297,10 +1352,12 @@ coming back. The mechanics, and the one case to know about, are in
   for fleet alerting and optional local heartbeat probes, a Prometheus
   endpoint, structured log events, and an admin page with retry and discard.</li>
 <li><a href="features/unique-tasks/">Unique tasks</a>, <a href="features/batches/">batches</a>,
-  <a href="features/rate-limiting/">rate limiting</a> and
+  <a href="features/rate-limiting/">rate limiting</a>,
+  <a href="features/concurrency-limits/">concurrency limits</a> and
   <a href="features/workflows/">workflows</a>, through the optional <code>oxpull</code> app
   included in django-ox. These features require Django 6.0+.
-  Workflows are provisional. See <a href="features/">setup and API status</a>.</li>
+  Workflows and concurrency limits are provisional. See
+  <a href="features/">setup and API status</a>.</li>
 </ul>
 <h2 id="install">Install</h2>
 <p>Requires Python 3.12+ and Django 5.2+. The optional <code>oxpull</code> app requires Django 6.0+. Django 6.0 and later ship the Tasks
@@ -1389,9 +1446,9 @@ before you commit:</p>
   processes under one supervisor. See
   <a href="production/#threads-and-processes">Production</a>.</li>
 </ul>
-<p><a href="features/">Unique tasks, batches, rate limiting and workflows</a>
+<p><a href="features/">Unique tasks, batches, rate limiting, concurrency limits and workflows</a>
 are included in django-ox through the optional <code>oxpull</code> app and require
-Django 6.0+. Workflows are provisional.</p>
+Django 6.0+. Workflows and concurrency limits are provisional.</p>
 <p>Metrics and health checks are included: <code>django_ox.stats</code> and <code>ox_health</code>
 do not require the optional app.</p>
 <h2 id="license">License</h2>
@@ -1469,10 +1526,10 @@ do not require the optional app.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": ".", "features": ["content.code.copy", "navigation.footer"], "search": "assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": ".", "features": ["content.code.copy", "navigation.footer"], "search": "assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../assets/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -599,6 +599,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../features/concurrency-limits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrency limits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../features/workflows/" class="md-nav__link">
         
   
@@ -848,6 +876,28 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#assert-on-the-queue-directly" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Assert on the queue directly
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#an-isolated-queue-for-one-test" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        An isolated queue for one test
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1022,6 +1072,33 @@
     
   
     Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../keda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KEDA autoscaling
   
 
     
@@ -1323,6 +1400,28 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#assert-on-the-queue-directly" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Assert on the queue directly
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#an-isolated-queue-for-one-test" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        An isolated queue for one test
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1559,10 +1658,24 @@ than across queues. List every queue you use in the backend's <code>QUEUES</code
 </code></pre></div>
 <p>Nothing extra to run: the workers you already have dispatch the ticks. Details
 in <a href="../recurring-tasks/">Recurring tasks</a>.</p>
-<p>Task rows are not deleted for you. Run <code>ox_prune</code> on your own schedule, from
-cron, a systemd timer, or a django-ox schedule:</p>
-<div class="highlight"><pre><span></span><code>python manage.py ox_prune --older-than 7d
+<p>Task rows are not deleted for you. Run <code>ox_prune --older-than 7d</code> from cron
+or a systemd timer, or schedule the <code>django_ox.maintenance.prune</code> task,
+which runs <code>ox_prune</code> for you and returns its counts:</p>
+<div class="highlight"><pre><span></span><code><span class="s2">"OPTIONS"</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">"SCHEDULES"</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">"ox-prune"</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s2">"task"</span><span class="p">:</span> <span class="s2">"django_ox.maintenance.prune"</span><span class="p">,</span>
+            <span class="s2">"cron"</span><span class="p">:</span> <span class="s2">"0 3 * * *"</span><span class="p">,</span>
+            <span class="s2">"kwargs"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"older_than"</span><span class="p">:</span> <span class="s2">"7d"</span><span class="p">},</span>
+        <span class="p">},</span>
+    <span class="p">},</span>
+<span class="p">}</span>
 </code></pre></div>
+<p>The task runs on the <code>default</code> queue when <code>TASKS["default"]</code> accepts that
+name, and otherwise on the first queue in its <code>QUEUES</code>. Add <code>"queue_name"</code>
+to the entry to put it on a queue your workers' <code>--queues</code> serve. Its
+<code>include_failed</code> and <code>dry_run</code> keywords must be <code>True</code> or <code>False</code>. See
+<a href="../production/#pruning-on-a-timer">Pruning on a timer</a>.</p>
 <h2 id="make-a-task-safe-to-run-twice">Make a task safe to run twice</h2>
 <p>The one habit to build. Execution is at-least-once, so a task retries both
 when it raises and when its worker dies mid-run. Assume every task can run
@@ -1619,7 +1732,7 @@ Test timeout enforcement and worker infrastructure against a real worker.</p>
 <p><code>queues=None</code> uses the worker's queues. An empty list does the same. Empty backend <code>QUEUES</code> means every queue. An explicit list restricts claiming to those queues.</p>
 <p>Each attempt uses the configured worker's claim and execution methods on the caller's thread and database connection. It runs due <code>READY</code> rows that pass the worker's claim filters. Future <code>run_after</code> values, pending retry delays and other statuses are left alone. Tasks enqueued by tasks or their emulated commit callbacks can run in the same call. Async task bodies can see the test's uncommitted rows. Worker outcome recording, backoff and lifecycle signals apply.</p>
 <p>The return value is a list of framework <code>TaskResult</code> objects in attempt order. Each object captures that attempt's recorded state. Retries produce separate results. Failures are recorded without raising by default. With <code>raise_failures=True</code>, the same exception is raised after recording and attempt callbacks, including for retryable failures. Later tasks are left unclaimed. A retried attempt's result is <code>READY</code> (a retry is pending), and reading its <code>return_value</code> raises, following the framework's rule for unfinished results.</p>
-<p>By default, it claims until no task is claimable. <code>max_tasks=N</code> limits attempts, including retries, and returns quietly when the limit is reached. Zero makes no claim. Use a nonnegative integer, excluding booleans. It runs at most 1,000 attempts without an explicit limit. It raises <code>RuntimeError</code> if due <code>READY</code> work remains then, even if that work is gated or rate-limited. Attempt limits do not bound elapsed time.</p>
+<p>By default, it claims until no task is claimable. <code>max_tasks=N</code> limits attempts, including retries, and returns quietly when the limit is reached. Zero makes no claim. Use a nonnegative integer, excluding booleans. It runs at most 1,000 attempts without an explicit limit. It raises <code>RuntimeError</code> if due <code>READY</code> work remains then, even if that work is gated, rate-limited or concurrency-limited. Attempt limits do not bound elapsed time.</p>
 <p>Call it from synchronous test code. Django's own async <code>TestCase</code> methods can use <code>sync_to_async</code>. Outside an atomic block on the worker's database, <code>run_tasks()</code> raises <code>RuntimeError</code> before claiming anything if another thread's connection holds a <code>TestCase</code> transaction on the same database alias. This guards against draining with tasks hidden in another thread's test transaction or committed outside it, where they can outlive the test. For event loops not wrapped by <code>async_to_sync</code>, including pytest-asyncio and anyio, use <code>TransactionTestCase</code> or <code>django_db(transaction=True)</code> instead of a <code>TestCase</code> transaction. Transactions on other database aliases do not trigger this check. Do not call it from tasks, their callbacks or signal receivers. Nested drains are refused. Broken caller transactions are refused before any claim.</p>
 <h3 id="enqueue-roll-back-and-advance-time">Enqueue, roll back and advance time</h3>
 <p>These examples use Django 6.x imports. On Django 5.2, import <code>task</code> from <code>django_tasks</code> instead. Keep the task function at module scope so the worker can import it.</p>
@@ -1691,13 +1804,95 @@ Test timeout enforcement and worker infrastructure against a real worker.</p>
 </ul>
 <p>Use a real worker to test timeout enforcement and worker infrastructure. <code>run_tasks()</code> runs no poll loop, thread pool, lease renewal, timeout watchdog, reaper, schedule dispatcher or process recycling. It does not dispatch reconcilers. Enqueue scheduled tasks and reconcilers explicitly if the test needs their work.</p>
 <p>Timeouts are inert. <code>deadline()</code> and <code>remaining()</code> return <code>None</code>. A configured timeout produces <code>run_tasks_timeout_inert</code> once per task path per call. A hanging body or callback hangs the test.</p>
+<h3 id="assert-on-the-queue-directly">Assert on the queue directly</h3>
+<p><code>django_ox.testing.assert_task_count()</code> is public and provisional. It
+reads the <code>OxTask</code> table itself, so it works whether a task is still
+queued or has already run and left its row behind. It matches by backend
+alias, queue and task path, and compares <code>args</code> and <code>kwargs</code> with the
+stored JSON values:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django_ox.testing</span><span class="w"> </span><span class="kn">import</span> <span class="n">assert_task_count</span>
+
+<span class="n">send_welcome_email</span><span class="o">.</span><span class="n">enqueue</span><span class="p">(</span><span class="n">user</span><span class="o">.</span><span class="n">pk</span><span class="p">)</span>
+<span class="n">assert_task_count</span><span class="p">(</span>
+    <span class="n">path</span><span class="o">=</span><span class="s2">"myapp.tasks.send_welcome_email"</span><span class="p">,</span> <span class="n">queue</span><span class="o">=</span><span class="s2">"default"</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">[</span><span class="n">user</span><span class="o">.</span><span class="n">pk</span><span class="p">],</span> <span class="n">count</span><span class="o">=</span><span class="mi">1</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>A rolled-back enqueue is not counted, since the row behind it never
+existed. <code>args</code> and <code>kwargs</code> are compared with the JSON values stored on
+the row, using Python equality. Leaving out <code>args</code> means no positional
+arguments, not any arguments, and <code>kwargs</code> works the same way. A tuple
+in <code>args</code> matches a stored list, and <code>True</code> equals <code>1</code>, so <code>args=[True]</code>
+matches a stored <code>[1]</code>. A value JSON does not represent directly is
+rejected with <code>TypeError</code>: a raw <code>datetime</code>, <code>UUID</code> or <code>Decimal</code>, and
+also <code>bytes</code> or a <code>range</code>, which <code>enqueue()</code> accepts and stores as a
+string and a list. Supply that value's own stored JSON representation
+instead.</p>
+<h3 id="an-isolated-queue-for-one-test">An isolated queue for one test</h3>
+<p><code>run_tasks()</code> claims whatever its backend's worker would, which includes
+rows other tests, fixtures or <code>setUpTestData</code> left behind on a shared
+queue. To run only a task under test, reserve a queue nothing else writes
+to, and check it is still empty before draining it. This is a documented
+recipe, not a shipped fixture or pytest plugin:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">pytest</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django.db</span><span class="w"> </span><span class="kn">import</span> <span class="n">router</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django_ox.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">OxTask</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">django_ox.testing</span><span class="w"> </span><span class="kn">import</span> <span class="n">run_tasks</span>
+
+<span class="c1"># Must appear in this backend's own QUEUES list (a sibling of OPTIONS,</span>
+<span class="c1"># not inside it): TASKS["default"]["QUEUES"].</span>
+<span class="n">ISOLATED_QUEUE</span> <span class="o">=</span> <span class="s2">"isolated-recipe"</span>
+
+
+<span class="nd">@pytest</span><span class="o">.</span><span class="n">fixture</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">isolated_run_tasks</span><span class="p">():</span>
+    <span class="c1"># Checked once, here, before the test body enqueues anything: a row</span>
+    <span class="c1"># from setUpTestData or an earlier fixture is caught before it is ever</span>
+    <span class="c1"># claimed. The returned `run` does not repeat the check, since by then</span>
+    <span class="c1"># the only row it is meant to find is the one the test just enqueued.</span>
+    <span class="c1"># Read where enqueue() writes, which a replica router's reads are not.</span>
+    <span class="n">rows</span> <span class="o">=</span> <span class="n">OxTask</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">using</span><span class="p">(</span><span class="n">router</span><span class="o">.</span><span class="n">db_for_write</span><span class="p">(</span><span class="n">OxTask</span><span class="p">))</span>
+    <span class="k">if</span> <span class="n">rows</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">backend_name</span><span class="o">=</span><span class="s2">"default"</span><span class="p">,</span> <span class="n">queue_name</span><span class="o">=</span><span class="n">ISOLATED_QUEUE</span><span class="p">)</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">"queue </span><span class="si">{</span><span class="n">ISOLATED_QUEUE</span><span class="si">!r}</span><span class="s2"> already holds rows; reserve a queue "</span>
+            <span class="s2">"no other test or fixture writes to"</span>
+        <span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">run_tasks</span><span class="p">(</span><span class="n">queues</span><span class="o">=</span><span class="p">[</span><span class="n">ISOLATED_QUEUE</span><span class="p">],</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">run</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">django.tasks</span><span class="w"> </span><span class="kn">import</span> <span class="n">task</span>  <span class="c1"># On Django 5.2: from django_tasks import task</span>
+
+
+<span class="nd">@task</span><span class="p">(</span><span class="n">queue_name</span><span class="o">=</span><span class="n">ISOLATED_QUEUE</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">convert_video</span><span class="p">(</span><span class="n">path</span><span class="p">):</span>
+    <span class="k">return</span> <span class="sa">f</span><span class="s2">"converted </span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">"</span>
+
+
+<span class="nd">@pytest</span><span class="o">.</span><span class="n">mark</span><span class="o">.</span><span class="n">django_db</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">test_convert_video</span><span class="p">(</span><span class="n">isolated_run_tasks</span><span class="p">):</span>
+    <span class="n">convert_video</span><span class="o">.</span><span class="n">enqueue</span><span class="p">(</span><span class="s2">"clip.mp4"</span><span class="p">)</span>
+    <span class="p">[</span><span class="n">result</span><span class="p">]</span> <span class="o">=</span> <span class="n">isolated_run_tasks</span><span class="p">()</span>
+    <span class="k">assert</span> <span class="n">result</span><span class="o">.</span><span class="n">return_value</span> <span class="o">==</span> <span class="s2">"converted clip.mp4"</span>
+</code></pre></div>
+<p>Fixture setup runs before the test body, so the emptiness check sees only
+what was there beforehand, never the task the test is about to enqueue.
+A queue that already holds work, including a row <code>setUpTestData</code> left
+there, fails fast with <code>ValueError</code> rather than draining someone else's
+task. Passing <code>queues=</code> to the wrapped <code>run_tasks()</code> call, not a model
+filter, is what keeps the drain from touching unrelated rows:
+<code>tests/test_testing_assertions.py</code> tests this recipe's isolation and
+failure behaviour directly.</p>
 <h2 id="optional-coordination-features">Optional coordination features</h2>
 <p><a href="../features/unique-tasks/">Unique tasks</a>, <a href="../features/batches/">batches</a>,
-<a href="../features/rate-limiting/">rate limiting</a> and
+<a href="../features/rate-limiting/">rate limiting</a>,
+<a href="../features/concurrency-limits/">concurrency limits</a> and
 <a href="../features/workflows/">workflows</a> are included in django-ox through the
 optional <code>oxpull</code> app. They require Django 6.0+.
 <code>OxpullBackend</code>, <code>OxpullWorker</code> and the documented unique-task, batch and
-rate-limit entry points are stable. Workflows are provisional.
+rate-limit entry points are stable. Workflows and concurrency limits are
+provisional.
 See the <a href="../features/">feature overview</a> for setup.</p>
 <p><code>django_ox.stats</code> and <code>manage.py ox_health</code> do not require the optional app.</p>
 
@@ -1789,10 +1984,10 @@ See the <a href="../features/">feature overview</a> for setup.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

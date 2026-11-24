@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../assets/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -574,6 +574,28 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#ox_retry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ox_retry
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ox_discard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ox_discard
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#oxpull-options" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -879,6 +901,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../features/concurrency-limits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrency limits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../features/workflows/" class="md-nav__link">
         
   
@@ -1084,6 +1134,33 @@
     
   
     Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../keda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KEDA autoscaling
   
 
     
@@ -1379,6 +1456,28 @@
     <span class="md-ellipsis">
       
         ox_health
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ox_retry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ox_retry
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ox_discard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ox_discard
       
     </span>
   </a>
@@ -1969,11 +2068,20 @@ not get those updates merely by accepting <code>heartbeat_file</code>.</p>
 <h2 id="ox_prune">ox_prune</h2>
 <p>Finished task rows stay in the table until pruned; the queue table doubles
 as the result store, and django-ox does not guess at your retention
-needs. Run <code>ox_prune</code> on your own schedule (cron or a systemd timer;
-there is an example unit on the <a href="../production/#pruning-on-a-timer">Production</a>
-page):</p>
+needs. Run <code>ox_prune</code> on your own schedule (cron, a systemd timer, or the
+<code>django_ox.maintenance.prune</code> task in <code>SCHEDULES</code>; the
+<a href="../production/#pruning-on-a-timer">Production</a> page shows the systemd unit
+and the schedule entry):</p>
 <div class="highlight"><pre><span></span><code>python manage.py ox_prune --older-than 7d
 </code></pre></div>
+<p>The <code>django_ox.maintenance.prune</code> task takes <code>older_than</code>,
+<code>include_failed</code>, <code>queue</code>, <code>dry_run</code> and <code>batch_size</code>, the keyword forms
+of the flags of the same name. <code>include_failed</code> and <code>dry_run</code> must be
+<code>True</code> or <code>False</code>; anything else raises <code>TypeError</code> before any row is
+deleted. The task runs on the <code>default</code> queue when <code>TASKS["default"]</code>
+accepts that name, and otherwise on the first queue in its <code>QUEUES</code>. A
+<code>queue_name</code> on the schedule entry overrides that, and a queue the
+schedule's backend does not accept is <code>django_ox.E002</code>.</p>
 <table>
 <thead>
 <tr>
@@ -2073,7 +2181,7 @@ With no flags it verifies only that the database answers.</p>
 <tr>
 <td><code>--format</code></td>
 <td><code>text</code></td>
-<td><code>json</code> prints one object on stdout instead of the <code>OK:</code> line, on success and failure. In database mode its fields are <code>ok</code>, <code>queue</code>, <code>backlog</code>, <code>oldest_age_seconds</code>, <code>last_claim_age_seconds</code> and <code>problems</code>. <code>queue</code> is <code>null</code> when no <code>--queue</code> is given. The figures are <code>null</code> when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. File mode uses the <a href="../monitoring/#file-mode-json">heartbeat JSON object</a>. The exit status is unchanged.</td>
+<td><code>json</code> prints one object on stdout instead of the <code>OK:</code> line, on success and failure. In database mode its fields are <code>ok</code>, <code>queue</code>, <code>backlog</code>, <code>oldest_age_seconds</code>, <code>last_claim_age_seconds</code>, <code>unknown_task_paths</code> and <code>problems</code>. <code>queue</code> is <code>null</code> when no <code>--queue</code> is given. <code>unknown_task_paths</code> is <code>null</code> unless <code>--task-paths</code> ran; then it lists each failing path as <code>{"task_path": ..., "rows": N, "error": "ModuleNotFoundError"}</code>. The figures are <code>null</code> when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. File mode uses the <a href="../monitoring/#file-mode-json">heartbeat JSON object</a>. The exit status is unchanged.</td>
 </tr>
 <tr>
 <td><code>--max-backlog</code></td>
@@ -2091,6 +2199,11 @@ With no flags it verifies only that the database answers.</p>
 <td>Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts <code>7d</code>, <code>24h</code>, <code>90m</code>, <code>45s</code>, or a plain number of seconds. Measures fleet claim activity, not per-worker liveness.</td>
 </tr>
 <tr>
+<td><code>--task-paths</code></td>
+<td>off</td>
+<td>Fail when a READY or WAITING row's <code>task_path</code> no longer imports to a django.tasks Task, the rule a worker applies before running it. Reports each failing path with its row count and exception class, and exits 1. RUNNING and finished rows are not checked. One grouped query, then one import per distinct path; importing runs the task modules' import side effects, as worker startup does. Under MySQL's case-insensitive collations, paths that differ only in letter case are grouped as one and checked under one spelling, so after a rename that changes only letter case, rows left under the old spelling can go unreported while rows under the new one are queued. The <code>OK:</code> line then ends with <code>task_paths=N</code>, the number of distinct paths checked. See <a href="../production/#renaming-a-task">renaming a task</a>.</td>
+</tr>
+<tr>
 <td><code>--database</code></td>
 <td>the alias <code>OxTask</code> writes to</td>
 <td>Database alias to check. The figures come from that alias, so the check reports the queue your workers are running.</td>
@@ -2098,7 +2211,7 @@ With no flags it verifies only that the database answers.</p>
 <tr>
 <td><code>--heartbeat-file PATH</code></td>
 <td>off</td>
-<td>Check the local file set written by <code>ox_worker --heartbeat-file PATH</code>, instead of the database. Reads metadata only, runs no system or migration checks, opens no database connection and constructs no task backend. Cannot be combined with <code>--database</code>, <code>--queue</code>, <code>--max-backlog</code>, <code>--max-age</code> or <code>--worker-timeout</code>.</td>
+<td>Check the local file set written by <code>ox_worker --heartbeat-file PATH</code>, instead of the database. Reads metadata only, runs no system or migration checks, opens no database connection and constructs no task backend. Cannot be combined with <code>--database</code>, <code>--queue</code>, <code>--max-backlog</code>, <code>--max-age</code>, <code>--worker-timeout</code> or <code>--task-paths</code>.</td>
 </tr>
 <tr>
 <td><code>--max-heartbeat-age SECONDS</code></td>
@@ -2160,10 +2273,75 @@ option rules.</p>
 </code></pre></div>
 <p>The message lists every conflicting flag given, comma-separated, in this
 order: <code>--database</code>, <code>--queue</code>, <code>--max-backlog</code>, <code>--max-age</code>,
-<code>--worker-timeout</code>.</p>
+<code>--worker-timeout</code>, <code>--task-paths</code>.</p>
 <p>Check semantics, probe examples, and guidance on which check fits which
 alert are on the
 <a href="../monitoring/#health-checks-ox_health">Monitoring</a> page.</p>
+<h2 id="ox_retry">ox_retry</h2>
+<p><code>ox_retry</code> is provisional, as <a href="../stability/#public-api">API stability</a>
+lists. It retries one or more failed or lost tasks by primary key:</p>
+<div class="highlight"><pre><span></span><code>python manage.py ox_retry 550e8400-e29b-41d4-a716-446655440000
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--queue</code></td>
+<td>all queues</td>
+<td>Restrict retry to tasks on this queue. Tasks on other queues are skipped.</td>
+</tr>
+<tr>
+<td><code>--dry-run</code></td>
+<td>off</td>
+<td>Report how many tasks are eligible without retrying any.</td>
+</tr>
+<tr>
+<td><code>--format</code></td>
+<td><code>text</code></td>
+<td>Output format. <code>json</code> prints execution counts (<code>changed</code>, <code>skipped</code>) or preview counts (<code>eligible</code>, <code>skipped</code>, <code>dry_run: true</code>) on stdout.</td>
+</tr>
+</tbody>
+</table>
+<p>Accepts one or more positional task IDs separated by whitespace. Execution delegates directly to <code>django_ox.actions.retry_many</code>, preserving attempts, advancing <code>lease_epoch</code>, and resetting task state to READY on the database alias <code>OxTask</code> writes to.</p>
+<p>A LOST task's last worker can still be alive somewhere. The higher lease number stops that worker writing anything over the retry. It does not stop the body that worker is running, so retrying such a task can run its body a second time. Make the body idempotent, as for any at-least-once task. See <a href="../monitoring/#retrying-and-discarding">Retrying and discarding</a>.</p>
+<h2 id="ox_discard">ox_discard</h2>
+<p><code>ox_discard</code> is provisional, as <a href="../stability/#public-api">API stability</a>
+lists. It discards one or more tasks without running them:</p>
+<div class="highlight"><pre><span></span><code>python manage.py ox_discard 550e8400-e29b-41d4-a716-446655440000
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--queue</code></td>
+<td>all queues</td>
+<td>Restrict discard to tasks on this queue. Tasks on other queues are skipped.</td>
+</tr>
+<tr>
+<td><code>--dry-run</code></td>
+<td>off</td>
+<td>Report how many tasks are eligible without discarding any.</td>
+</tr>
+<tr>
+<td><code>--format</code></td>
+<td><code>text</code></td>
+<td>Output format. <code>json</code> prints execution counts (<code>changed</code>, <code>skipped</code>) or preview counts (<code>eligible</code>, <code>skipped</code>, <code>dry_run: true</code>) on stdout.</td>
+</tr>
+</tbody>
+</table>
+<p>Accepts one or more positional task IDs separated by whitespace. Execution delegates directly to <code>django_ox.actions.discard_many</code>, closing READY, WAITING, FAILED, or LOST tasks without sending task signals.</p>
 <h2 id="oxpull-options"><code>oxpull</code> options</h2>
 <p>The optional <code>oxpull</code> app requires Django 6.0+. Add it to <code>INSTALLED_APPS</code>, run migrations, and use <code>oxpull.backend.OxpullBackend</code> for each alias that needs its features.</p>
 <p>These settings belong in the alias's <code>OPTIONS</code>:</p>
@@ -2189,7 +2367,12 @@ alert are on the
 <tr>
 <td><code>RATE_REFRESH_INTERVAL</code></td>
 <td><code>0.25</code></td>
-<td>Seconds between a worker's refresh reads of the rate-limit window rows. Accepts a finite, non-negative <code>int</code> or <code>float</code>, but not a boolean.</td>
+<td>Seconds between a worker's refresh reads of the rate-limit window rows and its concurrency-limit counts. Accepts a finite, non-negative <code>int</code> or <code>float</code>, but not a boolean.</td>
+</tr>
+<tr>
+<td><code>CONCURRENCY_LIMITS</code></td>
+<td><code>{}</code></td>
+<td>A dictionary of named concurrency limits. Each caps how many covered tasks are RUNNING at once. The name is a settings key and is never stored. See the validation rules below. This option is provisional.</td>
 </tr>
 <tr>
 <td><code>WORKFLOWS</code></td>
@@ -2207,14 +2390,23 @@ alert are on the
 <li><code>queues</code> is a list of queue names accepted by the backend.</li>
 <li>At least one of <code>tasks</code> and <code>queues</code> is required.</li>
 </ul>
-<p>Rate limits and workflows require <code>OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"</code>. Rate limits also require <code>RATE_LIMITS</code>; workflows also require <code>WORKFLOWS = True</code>.</p>
+<p>A <code>CONCURRENCY_LIMITS</code> name must be non-empty. It is a settings key and is never stored, so two names that differ only by case are two limits, and there is no length cap.</p>
+<p>Each limit's value is a dictionary containing only <code>max</code>, <code>tasks</code> and <code>queues</code>:</p>
+<ul>
+<li><code>max</code> is a whole number of RUNNING tasks, at least 0. A boolean or a float is not accepted.</li>
+<li><code>tasks</code> is a list of dotted task-path strings.</li>
+<li><code>queues</code> is a list of queue names accepted by the backend.</li>
+<li>At least one of <code>tasks</code> and <code>queues</code> is required.</li>
+</ul>
+<p><code>OxpullWorker</code> refuses a malformed <code>CONCURRENCY_LIMITS</code> when it is constructed, so one stops <code>ox_worker --skip-checks</code> as well. A <code>tasks</code> entry that is not a task (<code>oxpull.E010</code>) and limits on an alias whose worker is not <code>OxpullWorker</code> (<code>oxpull.E011</code>) are caught only by the system checks: under <code>--skip-checks</code> the first starts a worker whose limit covers nothing under that path, and the second starts a worker that applies no limit.</p>
+<p>Rate limits, concurrency limits and workflows require <code>OPTIONS["WORKER_CLASS"] = "oxpull.worker.OxpullWorker"</code>. Rate limits also require <code>RATE_LIMITS</code>; concurrency limits also require <code>CONCURRENCY_LIMITS</code>; workflows also require <code>WORKFLOWS = True</code>.</p>
 <p>Batches and workflows need their respective reconciler schedules. Each reconciler must have a working scheduling path and an accepted queue. Creating a batch without its reconciler schedule is refused; creating or sealing a workflow without its reconciler schedule is also refused.</p>
 <p>The <code>django_ox</code> and <code>oxpull</code> tables must share one database. A split router raises <code>ImproperlyConfigured</code> when the backend is constructed.</p>
 <p>See <a href="../features/">Optional features</a> for feature-specific setup.</p>
 <h2 id="system-checks">System checks</h2>
 <p><code>manage.py check</code> validates the setup:</p>
 <h3 id="oxpull-checks"><code>oxpull</code> checks</h3>
-<p>The optional app provides these 16 checks:</p>
+<p>The optional app provides these 19 checks:</p>
 <ul>
 <li><strong><code>oxpull.E001</code></strong>: <code>oxpull</code> is not in <code>INSTALLED_APPS</code>. Add the app and run migrations.</li>
 <li><strong><code>oxpull.E002</code></strong>: A configured unique-task entry cannot be imported or is not a <code>Task</code>. Correct the dotted task path.</li>
@@ -2225,6 +2417,8 @@ alert are on the
 <li><strong><code>oxpull.E007</code></strong>: <code>WORKFLOWS</code> is not a boolean, or workflows are enabled without a resolving worker class that applies the workflow gate. Use <code>True</code> or <code>False</code> and configure <code>oxpull.worker.OxpullWorker</code> when enabling workflows.</li>
 <li><strong><code>oxpull.E008</code></strong>: A reconciler is exposed through <code>SCHEDULABLE_TASKS</code>, but no backend reading schedule rows accepts its queue and no <code>SCHEDULES</code> entry names it. Add a <code>SCHEDULES</code> entry for the reconciler, or read schedule rows on a django-ox backend whose <code>QUEUES</code> include its queue.</li>
 <li><strong><code>oxpull.E009</code></strong>: On MySQL, the relevant table collations do not match. Correct the collation mismatch reported by the database check.</li>
+<li><strong><code>oxpull.E010</code></strong>: <code>CONCURRENCY_LIMITS</code> is malformed, or a configured concurrency-limit task entry is not a <code>Task</code>. Correct the option or task path.</li>
+<li><strong><code>oxpull.E011</code></strong>: Concurrency limits are configured, but the alias's worker is not <code>oxpull.worker.OxpullWorker</code> or a subclass, or <code>WORKER_CLASS</code> is not a worker. Without that worker every limit would be ignored silently. Configure <code>oxpull.worker.OxpullWorker</code>.</li>
 <li><strong><code>oxpull.W001</code></strong>: A scheduled task is also unique. It can coalesce with a pending manual enqueue, and the tick may record against that task. Remove <code>@unique</code> or the <code>UNIQUE_TASKS</code> entry from the scheduled task if that behavior is not intended. Schedules already deduplicate once per tick.</li>
 <li><strong><code>oxpull.W002</code></strong>: The batch reconciler has no configured schedule. Configure its schedule before creating batches.</li>
 <li><strong><code>oxpull.W003</code></strong>: Workflows are enabled without a workflow reconciler schedule. Configure the schedule; <code>workflows.create()</code> and <code>Workflow.seal()</code> refuse until one exists.</li>
@@ -2232,6 +2426,7 @@ alert are on the
 <li><strong><code>oxpull.W005</code></strong>: Backends configure different periods under the same limit name. Align their definitions.</li>
 <li><strong><code>oxpull.W006</code></strong>: Rate-limit names differ only by case or accents. Use names that remain distinct under the database's comparison rules.</li>
 <li><strong><code>oxpull.W007</code></strong>: WAITING workflow nodes exist, but no backend in <code>TASKS</code> declares <code>OPTIONS["WORKFLOWS"]</code>. Restore the workflow configuration or follow the documented shutdown procedure.</li>
+<li><strong><code>oxpull.W008</code></strong>: Concurrency limits on two backends cover the same task path or the same queue and are not declared alike: the <code>max</code> differs, or the <code>tasks</code> or <code>queues</code> do. Reported once for the installation. Each backend's workers count the rows their own limit covers and stop at their own <code>max</code>. With the same coverage they allow up to the larger <code>max</code>; with coverage that differs, the rows one limit covers can reach the sum of both. Declare the limit with the same <code>max</code>, <code>tasks</code> and <code>queues</code> on both backends, or only on the backend whose queues carry those tasks.</li>
 </ul>
 <h3 id="django_ox-checks">django_ox checks</h3>
 <ul>
@@ -2353,10 +2548,23 @@ the replica. If your project has such a field, have your router
 answer the write alias for django-ox's models. django-ox reads its own
 rows there anyway, so nothing else moves.</p>
 <p><strong><code>ox_worker --database</code>.</strong> The flag is not checked against the router. A
-worker pointed at another alias works on that one alone, while the admin,
-<code>stats</code> and <code>ox_health</code> without the flag read the router's alias.
-<code>django_ox.E008</code> constrains routers, not this flag. Leave it unset unless
-you mean it.</p>
+worker pointed at another alias takes its tasks from that alias, while
+the admin, <code>stats</code> and <code>ox_health</code> without the flag read the router's
+alias. Schedule dispatch uses two aliases. The worker records each tick
+on its own alias, and the task is enqueued on the alias the router sends
+django-ox's writes to. When the two are one alias, tick and task commit
+in one transaction. When the worker's alias is a different database, the
+task commits and its tick does not. The worker then enqueues every due
+settings schedule again on each dispatch pass, about once a second at
+the default polling interval, and the task body runs each time. Run such
+a worker under settings that give its backend no <code>SCHEDULES</code>, and keep
+stored schedules off its database, or have the router, in that worker's
+process, send django-ox's writes to the worker's alias. On PostgreSQL
+and MySQL, a worker on a second alias for the router's own database
+fires settings schedules once per tick, with the task and its tick
+committed separately. Stored schedules fail to dispatch there.
+<code>django_ox.E008</code> constrains routers, not this flag. Leave it unset
+unless you mean it.</p>
 
 
 
@@ -2446,10 +2654,10 @@ you mean it.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

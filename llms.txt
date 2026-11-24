@@ -10,13 +10,19 @@
 > tables. Your Django database handles the queue. BSD 3-Clause.
 > django-ox 1.9.0 and later include unique tasks, batches, rate limiting and
 > provisional workflows through the optional `oxpull` app, on Django 6.0+.
+> django-ox 1.10.0 adds provisional concurrency limits to that app.
 > Package name on PyPI: django-ox. Main app label: django_ox.
 > Optional app label: oxpull.
 
-**Current release: django-ox 1.9.1, uploaded to PyPI on 2026-10-17.**
+**Current release: django-ox 1.10.0, uploaded to PyPI on 2026-11-24.**
 
 **New capabilities and upgrade guidance**
 
+- django-ox 1.10.0 adds `ox_health --task-paths`, the stable task
+  `django_ox.maintenance.prune` for pruning from `OPTIONS["SCHEDULES"]`, and
+  four provisional surfaces: the `ox_retry` and `ox_discard` commands,
+  `django_ox.testing.assert_task_count()`, and concurrency limits in the
+  optional `oxpull` app.
 - django-ox 1.9.1 logs a startup warning when a PostgreSQL worker runs with
   `CONN_MAX_AGE = 0` and no connection pool. It also retries an outcome
   write when the database refuses the connection. No database migration is
@@ -250,6 +256,8 @@
   `--max-backlog`, `--max-age` and `--worker-timeout` thresholds are for fleet
   alerting, not per-container liveness. Last-claim age can fail on an idle
   queue and pass for a stopped worker while another worker claims.
+  `ox_health --task-paths` fails when a READY or WAITING row's task path no
+  longer imports to a Task. Run it after `migrate` and before rolling workers.
 - For local loop-liveness, enable `ox_worker --heartbeat-file PATH` and run
   `ox_health --heartbeat-file PATH --processes N`, with the worker's process
   count. `--max-heartbeat-age` defaults to 60 seconds and must be finite and
@@ -298,11 +306,25 @@
   deletes SUCCESSFUL and DISCARDED rows past the cutoff; FAILED and LOST rows
   are kept unless `--include-failed` is given. READY, RUNNING and WAITING rows
   are never deleted.
+- `django_ox.maintenance.prune` is a stable task that runs `ox_prune` and
+  returns its counts. Schedule it in `OPTIONS["SCHEDULES"]`. Its keywords
+  `older_than`, `include_failed`, `queue`, `dry_run` and `batch_size` map to
+  the flags of the same name. `include_failed` and `dry_run` must be `True` or
+  `False`; anything else raises `TypeError` before any row is deleted. It runs
+  on the `default` queue when `TASKS["default"]` accepts that name. Otherwise
+  it runs on the first queue of a `QUEUES` list or tuple, and on the first
+  name in sorted order for any other `QUEUES` value, such as a set;
+  `queue_name` on the schedule entry overrides that. It prunes the alias
+  `OxTask` writes to; prune any other alias with `ox_prune --database` from
+  cron.
 - `django_ox.actions.retry(result_id)` puts a FAILED or LOST task back to
   READY for one more attempt; `django_ox.actions.discard(result_id)` closes a
   READY, WAITING, FAILED or LOST task without running it. Both return a bool,
   and neither touches a RUNNING task. With `django.contrib.admin` installed the
   task table is registered in the admin with the same two actions.
+  `python manage.py ox_retry TASK_ID...` and `ox_discard TASK_ID...` do the
+  same from the command line, with `--queue`, `--dry-run` and `--format json`.
+  Both commands are provisional.
 - `OxTask.Status.WAITING` is used by workflows in the optional `oxpull`
   app. Workers never claim a waiting task, `ox_prune` never deletes it,
   and `retry` skips it. It reads as READY through `django.tasks`.
@@ -317,7 +339,10 @@
   sends reads to a replica, django-ox reads its own rows on the alias it
   writes them to. `ox_worker`, `ox_prune` and `ox_health` take `--database` to
   name the alias django-ox works on, defaulting to the alias the router sends
-  `OxTask` writes to; it is not checked against the router, and nothing warns.
+  `OxTask` writes to; it is not checked against the router. A worker started
+  with it for a different database enqueues every due settings schedule again
+  on each dispatch pass: give that worker no schedules, or have the router
+  send django-ox's writes to its alias in its process.
   `ox_health --heartbeat-file` checks local files instead and refuses
   `--database`.
   `ox_import_beat_schedules` spells the flag the same way and means something
@@ -338,17 +363,21 @@
   between calls for delayed retries. No timeouts, lease renewal, schedules
   or reconcilers run automatically. Use `TransactionTestCase` to test
   worker autocommit behaviour and a real worker for infrastructure.
-- Unique tasks, batches, rate limiting and workflows are included in
-  django-ox through the optional `oxpull` app and require Django 6.0+.
-  `OxpullBackend`, `OxpullWorker` and the documented unique-task, batch
-  and rate-limit entry points are stable. Workflows are provisional.
+  `django_ox.testing.assert_task_count()`, also public and provisional,
+  asserts how many `OxTask` rows match a backend alias, queue and task path,
+  and compares `args` and `kwargs` with the stored JSON values.
+- Unique tasks, batches, rate limiting, concurrency limits and workflows
+  are included in django-ox through the optional `oxpull` app and require
+  Django 6.0+. `OxpullBackend`, `OxpullWorker` and the documented
+  unique-task, batch and rate-limit entry points are stable. Workflows
+  and concurrency limits are provisional.
   Setup: https://oxpull.com/django-ox/features/
   `create_schedules` creates stored schedules. It, `django_ox.stats` and
   `ox_health` do not require the optional app.
 
 **Compatibility**
 
-django-ox 1.9.1 supports Python 3.12-3.14 and Django 5.2 LTS through 6.1.
+django-ox 1.10.0 supports Python 3.12-3.14 and Django 5.2 LTS through 6.1.
 For Django 5.2, install the backport extra.
 PostgreSQL, MySQL 8 and SQLite are in CI.
 
@@ -373,13 +402,15 @@ Use Context7 library id `/oxpull/django-ox` to look up the documentation.
 - [Choosing a backend](https://oxpull.com/django-ox/choosing/): sourced backend comparisons and when not to use django-ox.
 - [Production](https://oxpull.com/django-ox/production/): supervision, containers, shutdown, scaling, leases, databases and pruning.
 - [Monitoring](https://oxpull.com/django-ox/monitoring/): stats, health probes, Prometheus metrics, log events, retry, discard and admin.
+- [KEDA autoscaling](https://oxpull.com/django-ox/keda/): runnable example that scales workers from zero on django_ox_ready_tasks: trigger queries, fallback on monitoring failure, graceful scale-down, killed-worker recovery and network policies.
 - [Benchmarks](https://oxpull.com/django-ox/benchmarks/): throughput and latency measurements with their methods.
 - [API stability](https://oxpull.com/django-ox/stability/): public API, versioning, deprecation policy and supported versions.
-- [Changelog](https://oxpull.com/django-ox/changelog/): django-ox 1.9.1 changes and earlier releases.
+- [Changelog](https://oxpull.com/django-ox/changelog/): django-ox 1.10.0 changes and earlier releases.
 - [Features](https://oxpull.com/django-ox/features/): optional `oxpull` app setup, Django 6.0+ requirements and API stability.
 - [Unique tasks](https://oxpull.com/django-ox/features/unique-tasks/): deduplicate pending work by key and understand when another enqueue creates a task.
 - [Batches](https://oxpull.com/django-ox/features/batches/): group tasks, track progress and run a callback when the batch settles.
 - [Rate limiting](https://oxpull.com/django-ox/features/rate-limiting/): shared limits on task starts, worker configuration and the distinction from concurrency limits.
+- [Concurrency limits](https://oxpull.com/django-ox/features/concurrency-limits/): provisional caps on how many covered tasks are RUNNING at once, the bound across claimers, worker configuration and the distinction from rate limits.
 - [Workflows](https://oxpull.com/django-ox/features/workflows/): provisional dependency DAGs, worker configuration and workflow execution.
 - [For AI assistants](https://oxpull.com/django-ox/agents/): exact setup and verification steps, upgrade guidance and operational facts.
 
@@ -388,6 +419,7 @@ Use Context7 library id `/oxpull/django-ox` to look up the documentation.
 - [Full documentation in one file](https://oxpull.com/django-ox/llms-full.txt): all documentation pages.
 - [Source code](https://github.com/oxpull/django-ox): project repository.
 - [Source changelog](https://github.com/oxpull/django-ox/blob/main/CHANGELOG.md): release history.
+- [1.10.0 release notes](https://github.com/oxpull/django-ox/releases/tag/v1.10.0): release details.
 - [1.9.1 release notes](https://github.com/oxpull/django-ox/releases/tag/v1.9.1): release details.
 - [1.9.0 release notes](https://github.com/oxpull/django-ox/releases/tag/v1.9.0): release details.
 - [Blog: Your customer paid. Then the worker died.](https://oxpull.com/blog/your-customer-paid-then-the-worker-died/): what a dead background worker costs a Django business, and how leases recover the task.

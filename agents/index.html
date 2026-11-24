@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../assets/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -599,6 +599,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../features/concurrency-limits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrency limits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../features/workflows/" class="md-nav__link">
         
   
@@ -804,6 +832,33 @@
     
   
     Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../keda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KEDA autoscaling
   
 
     
@@ -1489,6 +1544,21 @@ and <a href="https://github.com/oxpull/django-ox/security/advisories/GHSA-27v7-5
   GHSA-gq8r-4ccg-vxcr, affecting 1.2.0 through 1.7.0.</li>
 <li><code>ox_prune --older-than 7d</code> deletes finished rows; FAILED rows stay unless
   <code>--include-failed</code>. READY, WAITING and RUNNING rows are never deleted.</li>
+<li><code>django_ox.maintenance.prune</code> is a stable task that runs <code>ox_prune</code> with
+  <code>--format json</code> and returns its counts. Its keywords <code>older_than</code>,
+  <code>include_failed</code>, <code>queue</code>, <code>dry_run</code> and <code>batch_size</code> map to the flags of
+  the same name. <code>include_failed</code> and <code>dry_run</code> must be <code>True</code> or <code>False</code>;
+  anything else raises <code>TypeError</code> before any row is deleted. Schedule it
+  in <code>OPTIONS["SCHEDULES"]</code>. It runs on the <code>default</code> queue when
+  <code>TASKS["default"]</code> accepts that name. Otherwise it runs on the first
+  queue of a <code>QUEUES</code> list or tuple, and on the first name in sorted order
+  for any other <code>QUEUES</code> value, such as a set. Set <code>queue_name</code> on the
+  schedule entry to put it on a queue the workers' <code>--queues</code> serve; a
+  queue the schedule's backend does not accept is <code>django_ox.E002</code>. It
+  prunes the alias <code>OxTask</code> writes to; prune any other alias with
+  <code>ox_prune --database</code> from cron. Give no schedules to a worker started
+  with <code>--database</code> for a different database: it enqueues every due
+  settings schedule again on each dispatch pass.</li>
 <li>For per-container loop-liveness, pair <code>ox_worker --heartbeat-file PATH</code>
   with <code>ox_health --heartbeat-file PATH --processes N</code>, matching the
   worker's process count. Use an absolute path in an existing, writable
@@ -1525,12 +1595,16 @@ and <a href="https://github.com/oxpull/django-ox/security/advisories/GHSA-27v7-5
 <li><code>path("ox/", include("django_ox.urls"))</code> mounts <code>GET /ox/metrics</code>, the
   queue stats as Prometheus gauges. It has no authentication of its own;
   wrap it with <code>login_required</code> or restrict it by network.</li>
-<li>Run <code>migrate</code> before rolling workers. Do not run it from the worker.</li>
+<li>Run <code>migrate</code> before rolling workers. Do not run it from the worker.
+  Then run <code>ox_health --task-paths</code> before the workers roll. It fails when
+  a READY or WAITING row's task path no longer imports to a Task.</li>
 <li><code>django_ox.actions.retry(result_id)</code> requeues a FAILED or LOST task for
   one more attempt. <code>django_ox.actions.discard(result_id)</code> closes a READY,
   WAITING, FAILED or LOST task without running it. Neither touches a RUNNING task.
   With <code>django.contrib.admin</code> installed, the task table appears in the admin
-  with the same two actions.</li>
+  with the same two actions. The provisional commands <code>ox_retry TASK_ID...</code>
+  and <code>ox_discard TASK_ID...</code> do the same from the command line, with
+  <code>--queue</code>, <code>--dry-run</code> and <code>--format json</code>.</li>
 <li><code>OxTask.Status.WAITING</code> is used by workflows in the optional <code>oxpull</code>
   app. Workers never claim a waiting task, <code>ox_prune</code> never deletes it,
   and <code>retry</code> skips it. It reads as READY through <code>django.tasks</code>.
@@ -1556,12 +1630,16 @@ and <a href="https://github.com/oxpull/django-ox/security/advisories/GHSA-27v7-5
   No timeouts, lease renewal, schedules or reconcilers run automatically.
   Test timeout enforcement and worker infrastructure against a real
   worker. See <a href="../patterns/#run-queued-tasks-in-tests">Run queued tasks in tests</a>
-  for transaction and callback differences.</li>
-<li><a href="../features/">Unique tasks, batches, rate limiting and workflows</a>
+  for transaction and callback differences.
+  <code>django_ox.testing.assert_task_count()</code>, also public and provisional,
+  asserts how many <code>OxTask</code> rows match a backend alias, queue and task
+  path, and compares <code>args</code> and <code>kwargs</code> with the stored JSON values. See
+  <a href="../patterns/#assert-on-the-queue-directly">Assert on the queue directly</a>.</li>
+<li><a href="../features/">Unique tasks, batches, rate limiting, concurrency limits and workflows</a>
   are included in django-ox through the optional <code>oxpull</code> app and require
   Django 6.0+. <code>OxpullBackend</code>, <code>OxpullWorker</code> and the documented
   unique-task, batch and rate-limit entry points are stable.
-  Workflows are provisional.</li>
+  Workflows and concurrency limits are provisional.</li>
 <li><code>create_schedules</code> creates stored schedules. It, <code>django_ox.stats</code> and
   <code>ox_health</code> do not require the optional app.</li>
 </ul>
@@ -1596,7 +1674,7 @@ With <code>DEBUG = True</code>, Django's own <code>Task id=... state=RUNNING</co
 <p><code>python manage.py ox_health --worker-timeout 60</code> now exits 0 and reports a
 recent <code>last_claim_age</code>. Stop the worker with Ctrl-C; it drains and exits 0.</p>
 <h2 id="compatibility">Compatibility</h2>
-<p>django-ox 1.9.1 supports Django 5.2 LTS through the <code>django-tasks</code> backport and Django 6.0 / 6.1 through core <code>django.tasks</code>. It requires Python 3.12+. CI covers Python 3.12-3.14, with PostgreSQL, MySQL 8 and SQLite.</p>
+<p>django-ox 1.10.0 supports Django 5.2 LTS through the <code>django-tasks</code> backport and Django 6.0 / 6.1 through core <code>django.tasks</code>. It requires Python 3.12+. CI covers Python 3.12-3.14, with PostgreSQL, MySQL 8 and SQLite.</p>
 <p>The optional <code>oxpull</code> app is included in the distribution and requires Django 6.0+. Projects that do not enable it can continue using django-ox on Django 5.2.</p>
 <p>For existing <code>oxpull</code> deployments, follow <a href="../migrating/#earlier-oxpull-installs">Earlier <code>oxpull</code> installs</a>.</p>
 <p>Machine-readable copies: <a href="../llms.txt">llms.txt</a> contains facts and links;
@@ -1604,7 +1682,8 @@ recent <code>last_claim_age</code>. Stop the worker with Ctrl-C; it drains and e
 Use Context7 library id <code>/oxpull/django-ox</code> to look up the documentation.</p>
 <h2 id="links">Links</h2>
 <ul>
-<li><a href="../changelog/">Changelog</a>: django-ox 1.9.1 and earlier releases.</li>
+<li><a href="../changelog/">Changelog</a>: django-ox 1.10.0 and earlier releases.</li>
+<li><a href="https://github.com/oxpull/django-ox/releases/tag/v1.10.0">1.10.0 release notes</a>.</li>
 <li><a href="https://github.com/oxpull/django-ox/releases/tag/v1.9.1">1.9.1 release notes</a>.</li>
 <li><a href="https://github.com/oxpull/django-ox/releases/tag/v1.9.0">1.9.0 release notes</a>.</li>
 <li><a href="../stored-schedules/">Schedules in the database</a>:
@@ -1708,10 +1787,10 @@ Use Context7 library id <code>/oxpull/django-ox</code> to look up the documentat
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>

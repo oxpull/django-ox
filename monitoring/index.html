@@ -16,14 +16,14 @@
         <link rel="prev" href="../production/">
       
       
-        <link rel="next" href="../benchmarks/">
+        <link rel="next" href="../keda/">
       
       
         
       
       
       <link rel="icon" href="../assets/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -579,6 +579,34 @@
     
   
     Rate limiting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/concurrency-limits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrency limits
   
 
     
@@ -1176,6 +1204,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../keda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    KEDA autoscaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../benchmarks/" class="md-nav__link">
         
   
@@ -1751,7 +1806,7 @@ one-line reason on stderr.</p>
 <tr>
 <td><code>--format</code></td>
 <td><code>text</code></td>
-<td><code>json</code> prints one object on stdout instead of the <code>OK:</code> line, on success and failure. In database mode its fields are <code>ok</code>, <code>queue</code>, <code>backlog</code>, <code>oldest_age_seconds</code>, <code>last_claim_age_seconds</code> and <code>problems</code>. <code>queue</code> is <code>null</code> when no <code>--queue</code> is given. The figures are <code>null</code> when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. File mode uses the <a href="#file-mode-json">heartbeat JSON object</a>. The exit status is unchanged.</td>
+<td><code>json</code> prints one object on stdout instead of the <code>OK:</code> line, on success and failure. In database mode its fields are <code>ok</code>, <code>queue</code>, <code>backlog</code>, <code>oldest_age_seconds</code>, <code>last_claim_age_seconds</code>, <code>unknown_task_paths</code> and <code>problems</code>. <code>queue</code> is <code>null</code> when no <code>--queue</code> is given. <code>unknown_task_paths</code> is <code>null</code> unless <code>--task-paths</code> ran; then it lists each failing path as <code>{"task_path": ..., "rows": N, "error": "ModuleNotFoundError"}</code>. The figures are <code>null</code> when there is nothing to measure or the check could not run, as with an unreachable database or an invalid threshold. File mode uses the <a href="#file-mode-json">heartbeat JSON object</a>. The exit status is unchanged.</td>
 </tr>
 <tr>
 <td><code>--max-backlog</code></td>
@@ -1767,6 +1822,11 @@ one-line reason on stderr.</p>
 <td><code>--worker-timeout</code></td>
 <td>off</td>
 <td>Fail when no worker has claimed a task within this long, or no claim was ever recorded. Accepts <code>7d</code>, <code>24h</code>, <code>90m</code>, <code>45s</code>, or a plain number of seconds. This measures queue-wide claim activity, not one worker's liveness.</td>
+</tr>
+<tr>
+<td><code>--task-paths</code></td>
+<td>off</td>
+<td>Fail when a READY or WAITING row's <code>task_path</code> no longer imports to a django.tasks Task, the rule a worker applies before running it. Reports each failing path with its row count and exception class, and exits 1. RUNNING and finished rows are not checked. One grouped query, then one import per distinct path; importing runs the task modules' import side effects, as worker startup does. Under MySQL's case-insensitive collations, paths that differ only in letter case are grouped as one and checked under one spelling, so after a rename that changes only letter case, rows left under the old spelling can go unreported while rows under the new one are queued. The <code>OK:</code> line then ends with <code>task_paths=N</code>, the number of distinct paths checked. See <a href="../production/#renaming-a-task">renaming a task</a>.</td>
 </tr>
 <tr>
 <td><code>--database</code></td>
@@ -1791,8 +1851,8 @@ one-line reason on stderr.</p>
 </tbody>
 </table>
 <p>File mode cannot be combined with <code>--database</code>, <code>--queue</code>, <code>--max-backlog</code>,
-<code>--max-age</code> or <code>--worker-timeout</code>. Run dependency and queue checks as separate
-commands.</p>
+<code>--max-age</code>, <code>--worker-timeout</code> or <code>--task-paths</code>. Run dependency and queue
+checks as separate commands.</p>
 <p>On success, database mode prints the measured values, which is useful in
 cron mail:</p>
 <div class="highlight"><pre><span></span><code>OK: backlog=3 oldest_age=12s last_claim_age=2s
@@ -2374,7 +2434,7 @@ The message text is not part of the contract. The keys are.</p>
 <code>batch_complete_serialization_retry</code>, <code>workflow_complete_serialization_retry</code>,
 <code>workflow_seal_serialization_retry</code> and <code>workflow_reconcile_conflict_retry</code>,
 it is the transaction attempt number instead.</p>
-<p>The optional app emits 31 distinct log events. Non-workflow events are stable; every <code>workflow_*</code> event is provisional.</p>
+<p>The optional app emits 33 distinct log events. Every <code>workflow_*</code> and <code>concurrency_limit_*</code> event is provisional; the other events are stable.</p>
 <p>An <code>attempt</code> value on <code>batch_add_deadlock_retry</code>, <code>batch_add_serialization_retry</code>, <code>workflow_add_deadlock_retry</code> or <code>workflow_add_serialization_retry</code> is a transaction attempt number, not a task execution attempt.</p>
 <p>A stopped reconciler sweep is not a completed sweep. Check <code>visited_count</code>, <code>unvisited_count</code> and <code>remaining_seconds</code>. If every tick stops before visiting all sealed objects, give the reconciler's queue a longer <code>TASK_TIMEOUTS</code> entry.</p>
 <table>
@@ -2415,6 +2475,16 @@ it is the transaction attempt number instead.</p>
 <td><code>batch_reconcile_stopped</code></td>
 <td>WARNING</td>
 <td>A reconciler tick under a task timeout stopped before visiting every sealed batch. A later tick visits the rest. If every tick stops, give the reconciler's queue a longer <code>TASK_TIMEOUTS</code> entry. Keys: <code>visited_count</code>, <code>unvisited_count</code>, <code>remaining_seconds</code></td>
+</tr>
+<tr>
+<td><code>concurrency_limit_blocked</code></td>
+<td>DEBUG</td>
+<td>A concurrency limit's count reached its <code>max</code> on this worker's refresh, so the tasks and queues it covers are left out of this worker's claims. Logged on the transition only, and on a worker's first count for every limit already at its <code>max</code>. Keys: <code>limit</code>, <code>running</code>, <code>max</code>, <code>worker_id</code></td>
+</tr>
+<tr>
+<td><code>concurrency_limit_unblocked</code></td>
+<td>DEBUG</td>
+<td>A blocked concurrency limit's count fell below its <code>max</code> on this worker's refresh, so the tasks and queues it covers are claimable again. Logged on the transition only. Keys: <code>limit</code>, <code>running</code>, <code>max</code>, <code>worker_id</code></td>
 </tr>
 <tr>
 <td><code>rate_limit_closed</code></td>
@@ -2933,8 +3003,8 @@ A failed connect while recording a stuck attempt logs
 </tr>
 <tr>
 <td><code>limit</code></td>
-<td><code>rate_limit_closed</code>, <code>rate_limit_reopened</code>, <code>rate_limit_row_adopted</code>, <code>rate_limit_uncounted</code></td>
-<td>The configured rate-limit name.</td>
+<td><code>rate_limit_closed</code>, <code>rate_limit_reopened</code>, <code>rate_limit_row_adopted</code>, <code>rate_limit_uncounted</code>, <code>concurrency_limit_blocked</code>, <code>concurrency_limit_unblocked</code></td>
+<td>The configured limit name: a rate limit on the <code>rate_limit_*</code> events, a concurrency limit on the <code>concurrency_limit_*</code> events.</td>
 </tr>
 <tr>
 <td><code>failures</code></td>
@@ -2945,6 +3015,16 @@ A failed connect while recording a stuck attempt logs
 <td><code>stored_as</code></td>
 <td><code>rate_limit_row_adopted</code></td>
 <td>The name stored on the window row that the database collation treats as equal to the configured limit name.</td>
+</tr>
+<tr>
+<td><code>running</code></td>
+<td><code>concurrency_limit_blocked</code>, <code>concurrency_limit_unblocked</code></td>
+<td>The number of covered RUNNING task rows the refresh counted. A <code>max: 0</code> limit is never counted, so its <code>concurrency_limit_blocked</code> event reports 0, whatever is RUNNING.</td>
+</tr>
+<tr>
+<td><code>max</code></td>
+<td><code>concurrency_limit_blocked</code>, <code>concurrency_limit_unblocked</code></td>
+<td>The limit's configured <code>max</code>.</td>
 </tr>
 <tr>
 <td><code>row_count</code></td>
@@ -3584,6 +3664,13 @@ writes to one of those rows waits for it.</p>
 with no transaction open starts again from its first row. It stops after
 three attempts in all. Called inside a transaction of your own, it doesn't.
 The error reaches you, and your transaction has to start over.</p>
+<p><code>ox_retry TASK_ID...</code> and <code>ox_discard TASK_ID...</code> run <code>retry_many()</code> and
+<code>discard_many()</code> from the command line on the ids given. <code>--queue</code> skips
+ids on any other queue, <code>--dry-run</code> reports what would move and writes
+nothing, and <code>--format json</code> prints the counts as one object. Both
+commands are provisional, as <a href="../stability/#public-api">API stability</a>
+lists. The flags are on the <a href="../configuration/#ox_retry">Configuration</a>
+page.</p>
 <p>The actions write the table directly and send no <code>django.tasks</code> signal: a
 discard finishes the result without <code>task_finished</code>, and a retry requeues
 it without <code>task_enqueued</code>.</p>
@@ -3683,13 +3770,13 @@ also resolve to <code>other</code>.</p>
         
         
           
-          <a href="../benchmarks/" class="md-footer__link md-footer__link--next" aria-label="Next: Benchmarks">
+          <a href="../keda/" class="md-footer__link md-footer__link--next" aria-label="Next: KEDA autoscaling">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Benchmarks
+                KEDA autoscaling
               </div>
             </div>
             <div class="md-footer__button md-icon">
@@ -3726,10 +3813,10 @@ also resolve to <code>other</code>.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.footer"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>
